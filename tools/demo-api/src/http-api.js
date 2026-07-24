@@ -1,5 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { extname } from "node:path";
 import {
   acceptOffer,
   buildBootstrap,
@@ -9,12 +10,16 @@ import {
   createAppointment,
   createDepositPayment,
   createDocumentMetadata,
+  createUploadedDocument,
+  confirmDocumentExtraction,
   createHelpRequest,
+  findDocumentForDownload,
   fixtureSummary,
   getHelpTopics,
   idempotentMutation,
   ingestActivities,
   listMessages,
+  listDocuments,
   listRequirements,
   markMessageRead,
   patchProfile,
@@ -29,6 +34,7 @@ import {
   unauthorized,
 } from "./errors.js";
 import { JsonStateStore } from "./store.js";
+import { createOpenRouterGatewayFromEnv } from "./openrouter.js";
 import {
   exactKeys,
   objectBody,
@@ -37,6 +43,8 @@ import {
 
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const maximumBodyBytes = 262_144;
+const maximumUploadBytes = 10_485_760;
+const maximumMultipartBytes = maximumUploadBytes + 65_536;
 
 export async function createDemoApi(options = {}) {
   const store =
@@ -48,6 +56,13 @@ export async function createDemoApi(options = {}) {
   await store.initialize();
   const clock = options.clock ?? (() => new Date());
   const logger = options.logger === undefined ? console : options.logger;
+  const ai =
+    options.ai ??
+    createOpenRouterGatewayFromEnv({
+      apiKey: options.openRouterApiKey,
+      model: options.openRouterModel,
+      fetch: options.fetch,
+    });
   const allowedOrigins = new Set(
     options.allowedOrigins ?? [
       "http://localhost:3000",
@@ -74,13 +89,18 @@ export async function createDemoApi(options = {}) {
         request,
         store,
         clock,
+        ai,
       });
       if (result.headers) {
         for (const [name, value] of Object.entries(result.headers)) {
           response.setHeader(name, value);
         }
       }
-      sendJson(response, result.status ?? 200, result.body);
+      if (result.bytes) {
+        sendBytes(response, result.status ?? 200, result.bytes, result.headers);
+      } else {
+        sendJson(response, result.status ?? 200, result.body);
+      }
     } catch (error) {
       sendError(response, error, requestId);
     } finally {
@@ -102,7 +122,7 @@ export async function createDemoApi(options = {}) {
   return { server, store };
 }
 
-async function route({ request, store, clock }) {
+async function route({ request, store, clock, ai }) {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -260,14 +280,7 @@ async function route({ request, store, clock }) {
   }
 
   if (method === "GET" && path === "/v1/student/documents") {
-    const items = store
-      .snapshot()
-      .documents.toSorted(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) ||
-          left.id.localeCompare(right.id),
-      );
-    return { body: { items, total: items.length } };
+    return { body: listDocuments(store.snapshot()) };
   }
   if (method === "POST" && path === "/v1/student/documents") {
     const body = await readJson(request);
@@ -279,6 +292,97 @@ async function route({ request, store, clock }) {
       mutate: (draft) => createDocumentMetadata(draft, body, clock()),
     });
     return { ...result, status: 201 };
+  }
+  if (method === "POST" && path === "/v1/student/documents/upload") {
+    const upload = await readDocumentUpload(request);
+    const digest = createHash("sha256").update(upload.bytes).digest("hex");
+    const result = await materialWrite({
+      request,
+      store,
+      operation: "document.upload",
+      body: {
+        fileName: upload.fileName,
+        mimeType: upload.mimeType,
+        sizeBytes: upload.bytes.length,
+        category: upload.category,
+        sha256: digest,
+      },
+      mutate: async (draft) => {
+        const id = randomUUID();
+        const storageKey = `${id}${safeExtension(upload.fileName, upload.mimeType)}`;
+        await store.writeUpload(storageKey, upload.bytes);
+        let extraction;
+        try {
+          extraction = await ai.extractStudentDocument({
+            fileName: upload.fileName,
+            mimeType: upload.mimeType,
+            bytes: upload.bytes,
+          });
+        } catch (error) {
+          extraction = failedExtraction(error, upload.fileName, clock());
+        }
+        return createUploadedDocument(
+          draft,
+          {
+            id,
+            fileName: upload.fileName,
+            mimeType: upload.mimeType,
+            sizeBytes: upload.bytes.length,
+            category: upload.category,
+            sha256: digest,
+            storageKey,
+            extraction,
+          },
+          clock(),
+        );
+      },
+    });
+    return { ...result, status: 201 };
+  }
+  const documentContentMatch = path.match(
+    /^\/v1\/student\/documents\/([^/]+)\/content$/,
+  );
+  if (method === "GET" && documentContentMatch) {
+    const document = findDocumentForDownload(
+      store.snapshot(),
+      decodeURIComponent(documentContentMatch[1]),
+    );
+    return {
+      bytes: await store.readUpload(document.storageKey),
+      headers: {
+        "content-type": document.mimeType,
+        "content-disposition": `inline; filename="${safeDownloadName(document.fileName)}"`,
+      },
+    };
+  }
+  const confirmExtractionMatch = path.match(
+    /^\/v1\/student\/documents\/([^/]+)\/confirm-extraction$/,
+  );
+  if (method === "POST" && confirmExtractionMatch) {
+    const body = await readJson(request);
+    const documentId = decodeURIComponent(confirmExtractionMatch[1]);
+    return materialWrite({
+      request,
+      store,
+      operation: `document.extraction.confirm:${documentId}`,
+      body,
+      mutate: (draft) =>
+        confirmDocumentExtraction(draft, documentId, body, clock()),
+    });
+  }
+
+  if (method === "POST" && path === "/v1/student/assistant/messages") {
+    const body = await readJson(request);
+    validateEdwardInput(body);
+    const state = store.snapshot();
+    return {
+      body: await ai.askEdward({
+        message: body.message,
+        pageContext: body.pageContext,
+        history: body.history,
+        studentContext: buildAssistantContext(state),
+      }),
+    };
   }
 
   if (method === "GET" && path === "/v1/student/appointments") {
@@ -378,28 +482,8 @@ async function materialWrite({
 }
 
 async function readJson(request) {
-  const contentLength = Number(request.headers["content-length"] ?? 0);
-  if (contentLength > maximumBodyBytes) {
-    throw new HttpError(
-      413,
-      "REQUEST_TOO_LARGE",
-      `Request bodies are limited to ${maximumBodyBytes} bytes`,
-    );
-  }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of request) {
-    size += chunk.length;
-    if (size > maximumBodyBytes) {
-      throw new HttpError(
-        413,
-        "REQUEST_TOO_LARGE",
-        `Request bodies are limited to ${maximumBodyBytes} bytes`,
-      );
-    }
-    chunks.push(chunk);
-  }
-  if (size === 0) return {};
+  const bytes = await readBody(request, maximumBodyBytes);
+  if (bytes.length === 0) return {};
   const contentType = request.headers["content-type"] ?? "";
   if (!String(contentType).toLowerCase().startsWith("application/json")) {
     throw new HttpError(
@@ -409,10 +493,104 @@ async function readJson(request) {
     );
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(bytes.toString("utf8"));
   } catch {
     throw badRequest("INVALID_JSON", "The request body is not valid JSON");
   }
+}
+
+async function readDocumentUpload(request) {
+  const contentType = String(request.headers["content-type"] ?? "");
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
+    throw new HttpError(
+      415,
+      "MULTIPART_REQUIRED",
+      "Content-Type must be multipart/form-data",
+    );
+  }
+  const bytes = await readBody(request, maximumMultipartBytes);
+  const webRequest = new Request("http://localhost/v1/student/documents/upload", {
+    method: "POST",
+    headers: { "content-type": contentType },
+    body: bytes,
+  });
+  const form = await webRequest.formData().catch(() => null);
+  if (!form) {
+    throw badRequest("INVALID_MULTIPART", "The upload form could not be read");
+  }
+  const file = form.get("file");
+  const category = form.get("category");
+  if (!(file instanceof File)) {
+    throw badRequest("FILE_REQUIRED", "Choose a document file to upload");
+  }
+  if (!["application/pdf", "image/jpeg", "image/png"].includes(file.type)) {
+    throw new HttpError(
+      415,
+      "UNSUPPORTED_FILE_TYPE",
+      "Use a PDF, JPEG, or PNG document",
+    );
+  }
+  if (file.size < 1 || file.size > maximumUploadBytes) {
+    throw new HttpError(
+      413,
+      "DOCUMENT_TOO_LARGE",
+      "Documents must be no larger than 10 MB",
+    );
+  }
+  const fileBytes = Buffer.from(await file.arrayBuffer());
+  if (!matchesDeclaredFileType(fileBytes, file.type)) {
+    throw new HttpError(
+      415,
+      "FILE_SIGNATURE_MISMATCH",
+      "The file contents do not match the selected PDF, JPEG, or PNG type",
+    );
+  }
+  if (
+    typeof category !== "string" ||
+    ![
+      "identity",
+      "residency",
+      "transcript",
+      "financial_aid",
+      "health",
+      "consent",
+      "other",
+    ].includes(category)
+  ) {
+    throw badRequest("INVALID_DOCUMENT_CATEGORY", "Choose a valid category");
+  }
+  const fileName = safeDownloadName(file.name);
+  return {
+    fileName,
+    mimeType: file.type,
+    category,
+    bytes: fileBytes,
+  };
+}
+
+async function readBody(request, maximumBytes) {
+  const contentLength = Number(request.headers["content-length"] ?? 0);
+  if (contentLength > maximumBytes) {
+    throw new HttpError(
+      413,
+      "REQUEST_TOO_LARGE",
+      `Request bodies are limited to ${maximumBytes} bytes`,
+    );
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maximumBytes) {
+      throw new HttpError(
+        413,
+        "REQUEST_TOO_LARGE",
+        `Request bodies are limited to ${maximumBytes} bytes`,
+      );
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function requireDemoSession(request) {
@@ -480,6 +658,15 @@ function sendJson(response, status, body) {
   response.end(`${JSON.stringify(body)}\n`);
 }
 
+function sendBytes(response, status, bytes, headers = {}) {
+  response.statusCode = status;
+  for (const [name, value] of Object.entries(headers)) {
+    response.setHeader(name, value);
+  }
+  response.setHeader("content-length", bytes.length);
+  response.end(bytes);
+}
+
 function sendError(response, error, requestId) {
   const known = error instanceof HttpError;
   const status = known ? error.status : 500;
@@ -503,4 +690,132 @@ function createRequestId(candidate) {
   return typeof candidate === "string" && requestIdPattern.test(candidate)
     ? candidate
     : randomUUID();
+}
+
+function validateEdwardInput(input) {
+  const body = objectBody(input);
+  exactKeys(body, ["message", "pageContext", "history"]);
+  if (
+    typeof body.message !== "string" ||
+    body.message.trim().length < 1 ||
+    body.message.length > 2_000
+  ) {
+    throw badRequest("INVALID_MESSAGE", "message must contain 1-2000 characters");
+  }
+  if (
+    typeof body.pageContext !== "string" ||
+    body.pageContext.length > 120
+  ) {
+    throw badRequest(
+      "INVALID_PAGE_CONTEXT",
+      "pageContext must be a string up to 120 characters",
+    );
+  }
+  if (
+    body.history !== undefined &&
+    (!Array.isArray(body.history) ||
+      body.history.length > 8 ||
+      body.history.some(
+        (entry) =>
+          !entry ||
+          !["user", "assistant"].includes(entry.role) ||
+          typeof entry.content !== "string" ||
+          entry.content.length > 1_200,
+      ))
+  ) {
+    throw badRequest(
+      "INVALID_HISTORY",
+      "history must contain up to 8 short user or assistant messages",
+    );
+  }
+}
+
+function buildAssistantContext(state) {
+  return {
+    preferredName: state.profile.preferredName,
+    programName: state.offer.programName,
+    termName: state.offer.termName,
+    onboardingStatus: state.onboarding.status,
+    enrollmentCompletion: buildDashboard(state).journey.completionPercent,
+    nextAction: buildDashboard(state).journey.nextAction,
+    unreadMessages: state.messages.filter((message) => message.readAt === null)
+      .length,
+    documentStatuses: state.documents.map((document) => ({
+      category: document.category,
+      status: document.status,
+    })),
+  };
+}
+
+function safeExtension(fileName, mimeType) {
+  const extension = extname(fileName).toLowerCase();
+  const allowed = {
+    "application/pdf": ".pdf",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+  };
+  return extension === ".jpeg" && mimeType === "image/jpeg"
+    ? ".jpg"
+    : extension === allowed[mimeType]
+      ? extension
+      : allowed[mimeType];
+}
+
+function safeDownloadName(fileName) {
+  const name = String(fileName ?? "")
+    .replaceAll("\\", "_")
+    .replaceAll("/", "_")
+    .replace(/[\u0000-\u001f\u007f"]/g, "")
+    .trim()
+    .slice(0, 255);
+  if (!name) {
+    throw badRequest("INVALID_FILE_NAME", "The document needs a file name");
+  }
+  return name;
+}
+
+function matchesDeclaredFileType(bytes, mimeType) {
+  if (mimeType === "application/pdf") {
+    return bytes.length >= 5 && bytes.subarray(0, 5).toString("ascii") === "%PDF-";
+  }
+  if (mimeType === "image/jpeg") {
+    return (
+      bytes.length >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff
+    );
+  }
+  if (mimeType === "image/png") {
+    return (
+      bytes.length >= 8 &&
+      bytes.subarray(0, 8).equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      )
+    );
+  }
+  return false;
+}
+
+function failedExtraction(error, fileName, now) {
+  return {
+    status: "failed",
+    documentType: fileName.toLowerCase().includes("transcript")
+      ? "transcript"
+      : "other",
+    summary:
+      "The file was stored, but structured extraction could not be completed.",
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    warnings: [
+      "The parsing provider could not complete this attempt. The original file is still available.",
+    ],
+    model: null,
+    provider: "local",
+    processedAt: now.toISOString(),
+    verifiedAt: null,
+  };
 }

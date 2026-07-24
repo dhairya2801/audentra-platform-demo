@@ -520,6 +520,9 @@ export function createDocumentMetadata(draft, input, now) {
     "identity",
     "residency",
     "transcript",
+    "financial_aid",
+    "health",
+    "consent",
     "other",
   ]);
   const document = {
@@ -529,9 +532,155 @@ export function createDocumentMetadata(draft, input, now) {
     sizeBytes,
     category,
     status: "placeholder",
+    sha256: null,
+    storageKey: null,
+    extraction: null,
     createdAt: now.toISOString(),
   };
   draft.documents.push(document);
+  return documentResponse(document);
+}
+
+export function createUploadedDocument(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "id",
+    "fileName",
+    "mimeType",
+    "sizeBytes",
+    "category",
+    "sha256",
+    "storageKey",
+    "extraction",
+  ]);
+  const id = uuidValue(body.id, "id");
+  const fileName = requiredString(body.fileName, "fileName", {
+    min: 1,
+    max: 255,
+  });
+  if (
+    fileName.includes("/") ||
+    fileName.includes("\\") ||
+    /[\u0000-\u001f]/.test(fileName)
+  ) {
+    throw badRequest("INVALID_FILE_NAME", "fileName must be a plain file name");
+  }
+  const mimeType = enumValue(body.mimeType, "mimeType", [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+  ]);
+  const sizeBytes = integerValue(
+    body.sizeBytes,
+    "sizeBytes",
+    1,
+    10_485_760,
+  );
+  const category = enumValue(body.category, "category", [
+    "identity",
+    "residency",
+    "transcript",
+    "financial_aid",
+    "health",
+    "consent",
+    "other",
+  ]);
+  const sha256 = requiredString(body.sha256, "sha256", { min: 64, max: 64 });
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw badRequest("INVALID_FIELD", "sha256 must be a lowercase SHA-256 hash");
+  }
+  const storageKey = requiredString(body.storageKey, "storageKey", {
+    min: 39,
+    max: 42,
+  });
+  if (!/^[0-9a-f-]{36}\.[a-z0-9]{2,5}$/i.test(storageKey)) {
+    throw badRequest("INVALID_FIELD", "storageKey is invalid");
+  }
+  const extraction = validateExtraction(body.extraction);
+  const document = {
+    id,
+    fileName,
+    mimeType,
+    sizeBytes,
+    category,
+    status:
+      extraction.status === "completed" ? "needs_review" : "uploaded",
+    sha256,
+    storageKey,
+    extraction,
+    createdAt: now.toISOString(),
+  };
+  draft.documents.push(document);
+  updateDocumentRequirement(draft, document);
+  draft.portalProjectionVersion += 1;
+  return documentResponse(document);
+}
+
+export function confirmDocumentExtraction(draft, documentId, input, now) {
+  uuidValue(documentId, "documentId");
+  const body = objectBody(input);
+  exactKeys(body, ["acceptedFieldKeys"]);
+  if (
+    !Array.isArray(body.acceptedFieldKeys) ||
+    body.acceptedFieldKeys.length > 24 ||
+    body.acceptedFieldKeys.some((key) => typeof key !== "string")
+  ) {
+    throw badRequest(
+      "INVALID_FIELD",
+      "acceptedFieldKeys must be an array of up to 24 strings",
+    );
+  }
+  const document = draft.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document) {
+    throw notFound("STUDENT_DOCUMENT_NOT_FOUND", "The document was not found");
+  }
+  if (!document.extraction || document.extraction.status !== "completed") {
+    throw conflict(
+      "DOCUMENT_EXTRACTION_NOT_READY",
+      "Document extraction is not ready for review",
+    );
+  }
+  const availableKeys = new Set(
+    document.extraction.fields.map((field) => field.key),
+  );
+  const accepted = [...new Set(body.acceptedFieldKeys)];
+  if (accepted.some((key) => !availableKeys.has(key))) {
+    throw badRequest(
+      "UNKNOWN_EXTRACTED_FIELD",
+      "One or more extracted fields do not belong to this document",
+    );
+  }
+  document.extraction.acceptedFieldKeys = accepted;
+  document.extraction.verifiedAt = now.toISOString();
+  document.status = "under_review";
+  draft.portalProjectionVersion += 1;
+  return documentResponse(document);
+}
+
+export function listDocuments(state) {
+  const items = state.documents
+    .toSorted(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        left.id.localeCompare(right.id),
+    )
+    .map(documentResponse);
+  return { items, total: items.length };
+}
+
+export function findDocumentForDownload(state, documentId) {
+  uuidValue(documentId, "documentId");
+  const document = state.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document || !document.storageKey) {
+    throw notFound(
+      "STUDENT_DOCUMENT_CONTENT_NOT_FOUND",
+      "The uploaded document content was not found",
+    );
+  }
   return structuredClone(document);
 }
 
@@ -665,6 +814,119 @@ export function ingestActivities(draft, input, now) {
     draft.activities = draft.activities.slice(-1_000);
   }
   return { accepted, duplicates };
+}
+
+function validateExtraction(value) {
+  const extraction = objectBody(value);
+  const status = enumValue(extraction.status, "extraction.status", [
+    "pending_configuration",
+    "processing",
+    "completed",
+    "failed",
+  ]);
+  const documentType = enumValue(
+    extraction.documentType,
+    "extraction.documentType",
+    [
+      "transcript",
+      "identity",
+      "financial_aid",
+      "ferpa",
+      "immunization",
+      "residency",
+      "other",
+    ],
+  );
+  const fields = Array.isArray(extraction.fields)
+    ? extraction.fields.slice(0, 24).map((candidate, index) => {
+        const field = objectBody(candidate);
+        return {
+          key: requiredString(field.key, `fields[${index}].key`, {
+            min: 1,
+            max: 80,
+          }),
+          label: requiredString(field.label, `fields[${index}].label`, {
+            min: 1,
+            max: 120,
+          }),
+          value: requiredString(field.value, `fields[${index}].value`, {
+            min: 0,
+            max: 500,
+          }),
+          confidence:
+            typeof field.confidence === "number" &&
+            field.confidence >= 0 &&
+            field.confidence <= 1
+              ? field.confidence
+              : 0,
+        };
+      })
+    : [];
+  return {
+    status,
+    documentType,
+    summary: requiredString(extraction.summary, "extraction.summary", {
+      min: 1,
+      max: 800,
+    }),
+    studentName: nullableBoundedText(extraction.studentName, 160),
+    institutionName: nullableBoundedText(extraction.institutionName, 200),
+    issueDate: nullableBoundedText(extraction.issueDate, 80),
+    academicTerm: nullableBoundedText(extraction.academicTerm, 120),
+    fields,
+    warnings: Array.isArray(extraction.warnings)
+      ? extraction.warnings
+          .slice(0, 12)
+          .map((warning, index) =>
+            requiredString(warning, `warnings[${index}]`, {
+              min: 1,
+              max: 400,
+            }),
+          )
+      : [],
+    model: nullableBoundedText(extraction.model, 160),
+    provider: enumValue(extraction.provider, "extraction.provider", [
+      "openrouter",
+      "local",
+    ]),
+    processedAt: nullableBoundedText(extraction.processedAt, 80),
+    verifiedAt: null,
+  };
+}
+
+function nullableBoundedText(value, maximum) {
+  if (value === null || value === undefined) return null;
+  return requiredString(value, "extraction field", {
+    min: 1,
+    max: maximum,
+  });
+}
+
+function documentResponse(document) {
+  const {
+    storageKey: _storageKey,
+    sha256,
+    extraction,
+    ...publicDocument
+  } = structuredClone(document);
+  return {
+    ...publicDocument,
+    ...(sha256 ? { sha256 } : {}),
+    ...(document.storageKey
+      ? { contentUrl: `/v1/student/documents/${document.id}/content` }
+      : {}),
+    ...(extraction ? { extraction } : {}),
+  };
+}
+
+function updateDocumentRequirement(draft, document) {
+  if (document.category !== "identity") return;
+  const requirement = draft.requirements.find(
+    (candidate) => candidate.code === "identity_document",
+  );
+  if (!requirement) return;
+  requirement.status = "under_review";
+  requirement.progressPercent = 80;
 }
 
 function validateActivity(input) {

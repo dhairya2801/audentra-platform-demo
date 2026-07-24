@@ -1,4 +1,4 @@
-export const FIXTURE_VERSION = "vv-demo-v2";
+export const FIXTURE_VERSION = "vv-demo-v3";
 export const ONBOARDING_STEPS = Object.freeze([
   "offer",
   "about_you",
@@ -31,7 +31,7 @@ const seedTimestamp = "2026-07-24T00:00:00.000Z";
 
 export function createSeedState() {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     fixture: {
       version: FIXTURE_VERSION,
       seededAt: seedTimestamp,

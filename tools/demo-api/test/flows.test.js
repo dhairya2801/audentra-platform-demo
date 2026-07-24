@@ -19,7 +19,7 @@ afterEach(async () => {
   );
 });
 
-async function startPreview() {
+async function startPreview(options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "vv-demo-api-"));
   const dataFile = join(directory, "state.json");
   const store = new JsonStateStore(dataFile, fixedClock);
@@ -27,6 +27,7 @@ async function startPreview() {
     store,
     clock: fixedClock,
     logger: null,
+    ...options,
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   servers.push(server);
@@ -499,5 +500,165 @@ describe("contract-compatible development preview API", () => {
     assert.equal(restored.snapshot().onboarding.currentStep, "offer");
     assert.equal(restored.snapshot().onboarding.version, 1);
     assert.equal(restored.snapshot().activities.length, 1);
+  });
+
+  it("stores uploaded content, exposes reviewed extraction, and keeps raw storage private", async () => {
+    const ai = {
+      async extractStudentDocument() {
+        return {
+          status: "completed",
+          documentType: "transcript",
+          summary: "An official transcript with a student name and term.",
+          studentName: "Maya Chen",
+          institutionName: "Aster University",
+          issueDate: "2026-07-20",
+          academicTerm: "Fall 2026",
+          fields: [
+            {
+              key: "student_name",
+              label: "Student name",
+              value: "Maya Chen",
+              confidence: 0.99,
+            },
+            {
+              key: "academic_term",
+              label: "Academic term",
+              value: "Fall 2026",
+              confidence: 0.94,
+            },
+          ],
+          warnings: [],
+          model: "test/document-parser",
+          provider: "openrouter",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
+      },
+      async askEdward() {
+        return {
+          message: "Open Documents to review your extracted fields.",
+          provider: "openrouter",
+          model: "test/edward",
+          usage: {
+            promptTokens: 80,
+            completionTokens: 12,
+            totalTokens: 92,
+          },
+          suggestedActions: [
+            { label: "Open documents", href: "/documents" },
+          ],
+        };
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    const fileBytes = Buffer.from("%PDF-1.7\nAster transcript fixture\n%%EOF\n");
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob([fileBytes], { type: "application/pdf" }),
+      "aster-transcript.pdf",
+    );
+    form.set("category", "transcript");
+
+    const uploadedResponse = await fetch(
+      `${baseUrl}/v1/student/documents/upload`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session",
+          "idempotency-key": "document-upload-0001",
+        },
+        body: form,
+      },
+    );
+    const uploaded = await uploadedResponse.json();
+    assert.equal(uploadedResponse.status, 201);
+    assert.equal(uploaded.status, "needs_review");
+    assert.equal(uploaded.fileName, "aster-transcript.pdf");
+    assert.equal(uploaded.extraction.status, "completed");
+    assert.equal(uploaded.extraction.fields.length, 2);
+    assert.match(uploaded.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(
+      uploaded.contentUrl,
+      `/v1/student/documents/${uploaded.id}/content`,
+    );
+    assert.equal("storageKey" in uploaded, false);
+
+    const contentResponse = await fetch(
+      `${baseUrl}${uploaded.contentUrl}`,
+      { headers: { cookie: "vv_demo_session=demo-session" } },
+    );
+    assert.equal(contentResponse.status, 200);
+    assert.equal(
+      contentResponse.headers.get("content-type"),
+      "application/pdf",
+    );
+    assert.deepEqual(
+      Buffer.from(await contentResponse.arrayBuffer()),
+      fileBytes,
+    );
+
+    const confirmed = await api(
+      baseUrl,
+      `/v1/student/documents/${uploaded.id}/confirm-extraction`,
+      {
+        method: "POST",
+        body: { acceptedFieldKeys: ["student_name"] },
+        idempotencyKey: "document-confirm-0001",
+      },
+    );
+    assert.equal(confirmed.response.status, 200);
+    assert.equal(confirmed.payload.status, "under_review");
+    assert.deepEqual(confirmed.payload.extraction.acceptedFieldKeys, [
+      "student_name",
+    ]);
+    assert.equal(
+      confirmed.payload.extraction.verifiedAt,
+      fixedClock().toISOString(),
+    );
+
+    const listed = await api(baseUrl, "/v1/student/documents");
+    assert.equal(listed.payload.total, 1);
+    assert.equal("storageKey" in listed.payload.items[0], false);
+
+    const assistant = await api(
+      baseUrl,
+      "/v1/student/assistant/messages",
+      {
+        method: "POST",
+        body: {
+          message: "Where is my transcript?",
+          pageContext: "/documents",
+          history: [],
+        },
+      },
+    );
+    assert.equal(assistant.response.status, 200);
+    assert.equal(assistant.payload.provider, "openrouter");
+    assert.equal(assistant.payload.usage.totalTokens, 92);
+  });
+
+  it("rejects a file whose declared type does not match its signature", async () => {
+    const { baseUrl } = await startPreview();
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob(["not really a PDF"], { type: "application/pdf" }),
+      "misleading.pdf",
+    );
+    form.set("category", "other");
+
+    const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
+      method: "POST",
+      headers: {
+        cookie: "vv_demo_session=demo-session",
+        "idempotency-key": "document-invalid-signature-0001",
+      },
+      body: form,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 415);
+    assert.equal(payload.error.code, "FILE_SIGNATURE_MISMATCH");
   });
 });

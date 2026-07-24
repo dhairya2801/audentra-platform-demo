@@ -12,9 +12,18 @@ export class JsonStateStore {
   #state = null;
   #queue = Promise.resolve();
 
-  constructor(filePath = defaultDataFile, clock = () => new Date()) {
+  constructor(
+    filePath = defaultDataFile,
+    clock = () => new Date(),
+    uploadDirectory,
+  ) {
     this.filePath = resolve(filePath);
     this.clock = clock;
+    this.uploadDirectory = resolve(
+      uploadDirectory ??
+        process.env.DOCUMENT_UPLOAD_DIR ??
+        `${dirname(this.filePath)}/uploads`,
+    );
   }
 
   async initialize() {
@@ -44,6 +53,22 @@ export class JsonStateStore {
     await this.#write(state);
     this.#state = state;
     return this.snapshot();
+  }
+
+  async writeUpload(storageKey, bytes) {
+    validateStorageKey(storageKey);
+    await mkdir(this.uploadDirectory, { recursive: true });
+    const filePath = resolve(this.uploadDirectory, storageKey);
+    assertInsideDirectory(filePath, this.uploadDirectory);
+    await writeFile(filePath, bytes, { mode: 0o600 });
+    return filePath;
+  }
+
+  async readUpload(storageKey) {
+    validateStorageKey(storageKey);
+    const filePath = resolve(this.uploadDirectory, storageKey);
+    assertInsideDirectory(filePath, this.uploadDirectory);
+    return readFile(filePath);
   }
 
   async transact(mutator) {
@@ -82,11 +107,26 @@ export class JsonStateStore {
   }
 }
 
+function validateStorageKey(storageKey) {
+  if (
+    typeof storageKey !== "string" ||
+    !/^[0-9a-f-]{36}\.[a-z0-9]{2,5}$/i.test(storageKey)
+  ) {
+    throw new Error("Invalid document storage key");
+  }
+}
+
+function assertInsideDirectory(filePath, directory) {
+  if (!filePath.startsWith(`${directory}/`)) {
+    throw new Error("Document storage path escaped its upload directory");
+  }
+}
+
 function validatePersistedState(value) {
   if (
     value === null ||
     typeof value !== "object" ||
-    value.schemaVersion !== 2 ||
+    value.schemaVersion !== 3 ||
     value.fixture?.version !== FIXTURE_VERSION
   ) {
     throw new Error(

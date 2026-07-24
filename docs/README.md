@@ -36,6 +36,7 @@ security, ownership, or deployment pressure justifies it.
 8. [Security, privacy, and authorization](./08-security-privacy-and-authorization.md)
 9. [Deployment, testing, and implementation roadmap](./09-deployment-testing-and-roadmap.md)
 10. [Student portal functional acceptance](./10-student-portal-acceptance.md)
+11. [Agentic runtime: Edward and document extraction](./11-agentic-runtime.md)
 
 ## Non-negotiable engineering principles
 

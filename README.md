@@ -14,8 +14,11 @@ preserving clear service boundaries for a later Kubernetes migration.
   optimistic versions, resume behavior, and completion gating
 - Responsive dashboard plus enrollment, requirement detail, documents,
   messages, appointments, payments, profile, and help pages
-- Working profile saves, message read state, appointment scheduling, document
-  metadata creation, simulated deposits, and idempotent offer acceptance
+- Working profile saves, message read state, appointment scheduling, original
+  document uploads with reviewable structured extraction, simulated deposits,
+  and idempotent offer acceptance
+- Edward AI with a bounded student context, OpenRouter integration, usage
+  reporting, safe navigation actions, and a useful no-key guided mode
 - Loading, empty, validation, failure, retry, confirmation, and success states
 - NestJS/Fastify API with validation, correlation IDs, typed errors, and CORS
 - PostgreSQL schema, deterministic seed, migrations, audit log, idempotency
@@ -55,12 +58,29 @@ Open <http://localhost:3000>, choose **Continue with demo student**, and the
 fictional student begins at onboarding. Protected routes require the HTTP-only
 demo session cookie. After onboarding is completed, `/` and `/onboarding` both
 route returning visits to `/dashboard`. Profile changes, read messages,
-appointments, payments, and document metadata persist in the ignored
-`tools/demo-api/.data/state.json` fixture.
+appointments, payments, documents, and reviewed extraction results persist in
+the ignored `tools/demo-api/.data/` directory.
 
 Use `npm run demo:reset` while the server is stopped to restore the deterministic
-first-visit scenario. This preview records document metadata and simulated
-payment results only; do not enter real student, document, or payment data.
+first-visit scenario. This remains a development fixture; do not enter real
+student, document, or payment data.
+
+### Enable Edward and document extraction
+
+The portal works without an LLM key: Edward uses a deterministic navigation
+guide and uploaded originals remain available with extraction marked as waiting
+for configuration. To enable the real agentic paths:
+
+```bash
+cp .env.example .env
+```
+
+Set `OPENROUTER_API_KEY` in `.env`, optionally choose
+`OPENROUTER_MODEL`, and restart `npm run dev:portal`. The launcher reads the
+root `.env`; the key stays server-side and is never included in the web bundle.
+PDF/JPEG/PNG uploads are capped at 10 MB. PDF parsing uses OpenRouter's
+file-parser plugin and strict JSON-schema output. Extracted fields must be
+selected by the student before they enter the review state.
 
 ## Run the complete local stack
 
@@ -111,7 +131,9 @@ seed, and builds every package.
 
 Start with [the documentation index](docs/README.md), then read the
 [system architecture](docs/01-system-architecture.md) and
-[student feature flows](docs/03-student-portal-feature-flows.md).
+[student feature flows](docs/03-student-portal-feature-flows.md). The
+[agentic runtime guide](docs/11-agentic-runtime.md) covers Edward, document
+extraction, cost controls, and the path from the local adapter to production.
 
 The placeholder demo identity is intentionally isolated behind configuration.
 Replacing it with Keycloak JWT verification does not require changing domain

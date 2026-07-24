@@ -190,7 +190,45 @@ export type StudentDocumentCategory =
   | "identity"
   | "residency"
   | "transcript"
+  | "financial_aid"
+  | "health"
+  | "consent"
   | "other";
+
+export interface ExtractedDocumentField {
+  key: string;
+  label: string;
+  value: string;
+  confidence: number;
+}
+
+export interface StudentDocumentExtraction {
+  status:
+    | "pending_configuration"
+    | "processing"
+    | "completed"
+    | "failed";
+  documentType:
+    | "transcript"
+    | "identity"
+    | "financial_aid"
+    | "ferpa"
+    | "immunization"
+    | "residency"
+    | "other";
+  summary: string;
+  studentName: string | null;
+  institutionName: string | null;
+  issueDate: string | null;
+  academicTerm: string | null;
+  fields: ExtractedDocumentField[];
+  warnings: string[];
+  model: string | null;
+  provider: "openrouter" | "local";
+  processedAt: string | null;
+  verifiedAt: string | null;
+  acceptedFieldKeys?: string[];
+}
 
 export interface StudentDocument {
   id: string;
@@ -198,7 +236,17 @@ export interface StudentDocument {
   mimeType: "application/pdf" | "image/jpeg" | "image/png";
   sizeBytes: number;
   category: StudentDocumentCategory;
-  status: "placeholder" | "uploaded" | "under_review" | "accepted" | "rejected";
+  status:
+    | "placeholder"
+    | "uploaded"
+    | "processing"
+    | "needs_review"
+    | "under_review"
+    | "accepted"
+    | "rejected";
+  sha256?: string;
+  contentUrl?: string;
+  extraction?: StudentDocumentExtraction;
   createdAt: string;
 }
 
@@ -212,6 +260,36 @@ export interface CreateStudentDocumentInput {
   mimeType: StudentDocument["mimeType"];
   sizeBytes: number;
   category: StudentDocumentCategory;
+}
+
+export interface ConfirmStudentDocumentExtractionInput {
+  acceptedFieldKeys: string[];
+}
+
+export interface EdwardChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AskEdwardInput {
+  message: string;
+  pageContext: string;
+  history?: EdwardChatMessage[];
+}
+
+export interface AskEdwardResponse {
+  message: string;
+  provider: "openrouter" | "guided";
+  model: string | null;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  } | null;
+  suggestedActions: {
+    label: string;
+    href: string;
+  }[];
 }
 
 export type StudentAppointmentType =
