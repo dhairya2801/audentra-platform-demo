@@ -1,0 +1,38 @@
+{
+  "name": "vv-enrollment-platform",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:web": "npm --workspace @vv/web run dev",
+    "dev:api": "npm --workspace @vv/api run dev",
+    "dev:worker": "npm --workspace @vv/worker run dev",
+    "dev:portal": "node tools/run-student-portal.mjs",
+    "demo:reset": "npm --prefix tools/demo-api run reset",
+    "test:demo-api": "npm --prefix tools/demo-api test",
+    "db:migrate": "npm --workspace @vv/api run db:migrate",
+    "db:seed": "npm --workspace @vv/api run db:seed"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.22",
+      "sharp": "0.35.3"
+    },
+    "postcss": "8.5.22",
+    "sharp": "0.35.3"
+  },
+  "dependencies": {
+    "postcss": "8.5.22",
+    "sharp": "0.35.3"
+  }
+}

@@ -1,0 +1,265 @@
+name: vv-enrollment
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vv_enrollment}
+      POSTGRES_USER: ${POSTGRES_USER:-vv}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vv_local_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - vv-local
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-vv_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-vv_minio_password}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-f",
+          "http://127.0.0.1:9000/minio/health/live",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - vv-local
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >
+        mc alias set local http://minio:9000
+        "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}";
+        mc anonymous set none "local/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-vv_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-vv_minio_password}
+      MINIO_BUCKET: ${MINIO_BUCKET:-vv-documents}
+    networks:
+      - vv-local
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2.5
+    restart: unless-stopped
+    command: start-dev --import-realm --health-enabled=true
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin_local_password}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/vv_keycloak
+      KC_DB_USERNAME: ${POSTGRES_USER:-vv}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-vv_local_password}
+      KC_HTTP_PORT: 8080
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "${KEYCLOAK_PORT:-8080}:8080"
+      - "${KEYCLOAK_HEALTH_PORT:-9002}:9000"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - vv-local
+
+  mailpit:
+    image: axllent/mailpit:v1.25.1
+    restart: unless-stopped
+    environment:
+      MP_DATABASE: /data/mailpit.db
+      MP_MAX_MESSAGES: 5000
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+    volumes:
+      - mailpit-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/mailpit",
+          "readyz",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - vv-local
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+    restart: "no"
+    command:
+      [
+        "sh",
+        "-ec",
+        "npm --workspace @vv/api run db:migrate && npm --workspace @vv/api run db:seed",
+      ]
+    environment: &api-environment
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
+      API_PORT: 4000
+      WEB_ORIGIN: http://localhost:${WEB_PORT:-3000}
+      AUTH_MODE: demo
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:-vv-documents}
+      OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-vv_minio}
+      OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-vv_minio_password}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      OIDC_ISSUER_URL: http://keycloak:8080/realms/vv-local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vv-local
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/docker/api.Dockerfile
+    restart: unless-stopped
+    environment: *api-environment
+    ports:
+      - "${API_PORT:-4000}:4000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - vv-local
+
+  worker:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
+      WORKER_ID: compose-worker
+      WORKER_HEALTH_PORT: 3002
+      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-1000}
+      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${WORKER_HEALTH_PORT:-3002}:3002"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3002/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    stop_grace_period: 30s
+    networks:
+      - vv-local
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/docker/web.Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      API_BASE_URL: http://api:4000
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:${API_PORT:-4000}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    networks:
+      - vv-local
+
+volumes:
+  postgres-data:
+  minio-data:
+  mailpit-data:
+
+networks:
+  vv-local:
+    driver: bridge

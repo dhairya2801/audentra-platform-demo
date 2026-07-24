@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.next
+**/.vinext
+**/.wrangler
+**/coverage
+**/.git
+*.log
+*.pdf
+.env
+.env.*
+!.env.example

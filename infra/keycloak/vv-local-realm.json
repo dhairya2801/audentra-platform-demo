@@ -1,0 +1,67 @@
+{
+  "realm": "vv-local",
+  "enabled": true,
+  "displayName": "VV Local Development",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "vv-web",
+      "name": "VV enrollment web",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    },
+    {
+      "clientId": "vv-api",
+      "name": "VV enrollment API",
+      "enabled": true,
+      "bearerOnly": true
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "student"
+      },
+      {
+        "name": "staff"
+      },
+      {
+        "name": "leader"
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "student@vv.local",
+      "email": "student@vv.local",
+      "firstName": "Demo",
+      "lastName": "Student",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "student_local_password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "student"
+      ]
+    }
+  ]
+}

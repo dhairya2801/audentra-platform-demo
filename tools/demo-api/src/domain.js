@@ -1,0 +1,967 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  badRequest,
+  conflict,
+  notFound,
+} from "./errors.js";
+import {
+  createJourney,
+  createRequirements,
+  ids,
+  ONBOARDING_STEPS,
+} from "./seed.js";
+import {
+  booleanValue,
+  enumValue,
+  exactKeys,
+  integerValue,
+  isoTimestamp,
+  objectBody,
+  optionalString,
+  requiredString,
+  uuidValue,
+} from "./validation.js";
+
+const terminalRequirementStatuses = new Set([
+  "completed",
+  "waived",
+  "not_applicable",
+]);
+const appointmentTypes = [
+  "admissions_counseling",
+  "enrollment_support",
+  "financial_aid",
+];
+const helpArticles = [
+  {
+    id: ids.helpGettingStarted,
+    category: "getting_started",
+    question: "Where should I begin?",
+    answer:
+      "Start with the next action on your dashboard and complete onboarding when prompted.",
+  },
+  {
+    id: ids.helpDocuments,
+    category: "documents",
+    question: "Which document formats are accepted?",
+    answer:
+      "The preview accepts PDF, JPEG, and PNG metadata up to 10 MB per document.",
+  },
+  {
+    id: ids.helpPayments,
+    category: "payments",
+    question: "How does the demo deposit work?",
+    answer:
+      "The dummy processor records a successful deposit without charging a payment method.",
+  },
+];
+
+const activityPropertyAllowlists = {
+  "ui.portal_session_started.v1": new Set(["entry_point"]),
+  "ui.dashboard_viewed.v1": new Set([
+    "projection_version",
+    "journey_status",
+  ]),
+  "ui.admission_offer_viewed.v1": new Set([
+    "offer_id",
+    "offer_status",
+  ]),
+  "ui.admission_decision_started.v1": new Set([
+    "offer_id",
+    "decision",
+    "entry_point",
+  ]),
+  "ui.enrollment_started.v1": new Set(["journey_id", "entry_point"]),
+  "ui.enrollment_step_viewed.v1": new Set([
+    "step_code",
+    "entry_point",
+  ]),
+  "ui.help_opened.v1": new Set(["context", "surface", "topic_code"]),
+};
+const prohibitedActivityProperty =
+  /(password|token|secret|email|phone|address|government|payment|card|ssn)/i;
+
+export function buildDashboard(state, clock = () => new Date()) {
+  const requirements = state.requirements.map(requirementSummary);
+  const completionPercent =
+    requirements.length === 0
+      ? 0
+      : Math.round(
+          requirements.reduce(
+            (total, requirement) => total + requirement.progressPercent,
+            0,
+          ) / requirements.length,
+        );
+  const nextRequirement =
+    requirements.find((requirement) =>
+      ["rejected", "ready", "in_progress"].includes(requirement.status),
+    ) ??
+    requirements.find(
+      (requirement) => !terminalRequirementStatuses.has(requirement.status),
+    );
+
+  return {
+    student: {
+      id: state.profile.studentId,
+      preferredName: state.profile.preferredName,
+      fullName: `${state.profile.firstName} ${state.profile.lastName}`,
+      classYear: state.profile.classYear,
+    },
+    offer: {
+      id: state.offer.id,
+      programName: state.offer.programName,
+      termName: state.offer.termName,
+      campusName: state.offer.campusName,
+      responseDeadline: state.offer.responseDeadline,
+      depositAmountCents: state.offer.depositAmountCents,
+      status: state.offer.status,
+    },
+    journey: {
+      id: state.journey?.id ?? null,
+      status: state.journey?.status ?? "not_started",
+      completionPercent,
+      nextAction:
+        state.journey && nextRequirement
+          ? {
+              code: nextRequirement.code,
+              label: nextRequirement.title,
+              href: `/enrollment?requirement=${encodeURIComponent(nextRequirement.code)}`,
+            }
+          : state.journey
+            ? {
+                code: "review_enrollment",
+                label: "Review your enrollment",
+                href: "/enrollment",
+              }
+            : {
+                code: "accept_offer",
+                label: "Review and accept your offer",
+                href: "/offer",
+              },
+      requirements,
+    },
+    unreadMessageCount: state.messages.filter(
+      (message) => message.readAt === null,
+    ).length,
+    projectionVersion: state.portalProjectionVersion,
+    generatedAt: clock().toISOString(),
+  };
+}
+
+export function buildOnboarding(state) {
+  return {
+    studentId: state.profile.studentId,
+    status: state.onboarding.status,
+    currentStep: state.onboarding.currentStep,
+    completedSteps: [...state.onboarding.completedSteps],
+    data: structuredClone(state.onboarding.data),
+    version: state.onboarding.version,
+    completedAt: state.onboarding.completedAt,
+    updatedAt: state.onboarding.updatedAt,
+  };
+}
+
+export function buildBootstrap(state, clock) {
+  const onboardingRequired = state.onboarding.status !== "completed";
+  return {
+    authenticated: true,
+    student: {
+      id: state.profile.studentId,
+      preferredName: state.profile.preferredName,
+      fullName: `${state.profile.firstName} ${state.profile.lastName}`,
+    },
+    onboarding: {
+      required: onboardingRequired,
+      status: state.onboarding.status,
+      currentStep: state.onboarding.currentStep,
+      version: state.onboarding.version,
+    },
+    initialRoute: onboardingRequired ? "/onboarding" : "/dashboard",
+    generatedAt: clock().toISOString(),
+  };
+}
+
+export async function idempotentMutation({
+  store,
+  operation,
+  key,
+  body,
+  mutate,
+}) {
+  const fingerprint = createHash("sha256")
+    .update(canonicalJson({ operation, body }))
+    .digest("hex");
+  return store.transact(async (draft, transaction) => {
+    const recordKey = `${operation}:${key}`;
+    const previous = draft.idempotency[recordKey];
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        throw conflict(
+          "IDEMPOTENCY_KEY_REUSED",
+          "This idempotency key was already used for a different request",
+        );
+      }
+      transaction.skipWrite();
+      return {
+        response: structuredClone(previous.response),
+        replayed: true,
+      };
+    }
+    const response = await mutate(draft);
+    draft.idempotency[recordKey] = {
+      fingerprint,
+      response: structuredClone(response),
+      recordedAt: draft.fixture.updatedAt,
+    };
+    return { response, replayed: false };
+  });
+}
+
+export function acceptOffer(draft, offerId, now) {
+  uuidValue(offerId, "offerId");
+  if (offerId !== draft.offer.id) {
+    throw notFound(
+      "ADMISSION_OFFER_NOT_FOUND",
+      "The admission offer was not found",
+    );
+  }
+  if (draft.offer.status === "accepted") {
+    return acceptOfferResponse(draft);
+  }
+  if (draft.offer.status !== "offered") {
+    throw conflict(
+      "ADMISSION_OFFER_NOT_ACTIVE",
+      "Only an active admission offer can be accepted",
+    );
+  }
+
+  const acceptedAt = now.toISOString();
+  draft.offer.status = "accepted";
+  draft.offer.acceptedAt = acceptedAt;
+  draft.offer.version += 1;
+  draft.journey = createJourney(acceptedAt);
+  draft.requirements = createRequirements(acceptedAt);
+  draft.portalProjectionVersion += 1;
+  return acceptOfferResponse(draft);
+}
+
+function acceptOfferResponse(state) {
+  return {
+    offerId: state.offer.id,
+    offerStatus: "accepted",
+    journeyId: state.journey.id,
+    journeyStatus: state.journey.status,
+    projectionVersion: state.portalProjectionVersion,
+    acceptedAt: state.offer.acceptedAt,
+  };
+}
+
+export function updateOnboarding(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["expectedVersion", "currentStep", "data"]);
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const currentStep = enumValue(
+    body.currentStep,
+    "currentStep",
+    ONBOARDING_STEPS,
+  );
+  if (draft.onboarding.status === "completed") {
+    throw conflict(
+      "ONBOARDING_ALREADY_COMPLETED",
+      "Completed onboarding cannot be changed",
+    );
+  }
+  if (draft.onboarding.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "Onboarding changed in another session",
+    );
+  }
+  if (draft.onboarding.currentStep !== currentStep) {
+    throw conflict(
+      "ONBOARDING_STEP_OUT_OF_ORDER",
+      `The next required onboarding step is ${draft.onboarding.currentStep}`,
+    );
+  }
+  validateCompletedStepSequence(draft);
+  const suppliedData = validateOnboardingData(body.data);
+  const mergedData = {
+    ...draft.onboarding.data,
+    ...suppliedData,
+  };
+  validateOnboardingStep(draft, currentStep, mergedData);
+
+  draft.onboarding.data = mergedData;
+  draft.onboarding.completedSteps.push(currentStep);
+  const currentIndex = ONBOARDING_STEPS.indexOf(currentStep);
+  draft.onboarding.currentStep =
+    ONBOARDING_STEPS[currentIndex + 1] ?? currentStep;
+  draft.onboarding.status = "in_progress";
+  draft.onboarding.version += 1;
+  draft.onboarding.updatedAt = now.toISOString();
+  return buildOnboarding(draft);
+}
+
+export function completeOnboarding(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["expectedVersion"]);
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (draft.onboarding.status === "completed") {
+    return buildOnboarding(draft);
+  }
+  if (draft.onboarding.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "Onboarding changed in another session",
+    );
+  }
+  if (
+    draft.onboarding.completedSteps.length !== ONBOARDING_STEPS.length ||
+    draft.onboarding.completedSteps.some(
+      (step, index) => step !== ONBOARDING_STEPS[index],
+    )
+  ) {
+    throw conflict(
+      "ONBOARDING_INCOMPLETE",
+      "Every onboarding step must be completed in order",
+    );
+  }
+  draft.onboarding.status = "completed";
+  draft.onboarding.completedAt = now.toISOString();
+  draft.onboarding.version += 1;
+  draft.onboarding.updatedAt = now.toISOString();
+  return buildOnboarding(draft);
+}
+
+export function patchProfile(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "preferredName",
+    "pronouns",
+    "mobilePhone",
+    "communicationPreference",
+  ]);
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (draft.profile.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "The profile changed in another session",
+    );
+  }
+  const fields = [
+    "preferredName",
+    "pronouns",
+    "mobilePhone",
+    "communicationPreference",
+  ];
+  if (!fields.some((field) => Object.hasOwn(body, field))) {
+    throw badRequest(
+      "PROFILE_UPDATE_EMPTY",
+      "At least one profile field must be supplied",
+    );
+  }
+  const preferredName = optionalString(
+    body.preferredName,
+    "preferredName",
+    { min: 1, max: 120 },
+  );
+  const pronouns =
+    body.pronouns === undefined
+      ? undefined
+      : body.pronouns === null
+        ? null
+        : typeof body.pronouns === "string" &&
+            body.pronouns.length <= 80
+          ? body.pronouns
+          : (() => {
+              throw badRequest(
+                "INVALID_FIELD",
+                "pronouns must be a string or null",
+              );
+            })();
+  const mobilePhone =
+    body.mobilePhone === undefined
+      ? undefined
+      : body.mobilePhone === null
+        ? null
+        : requiredString(body.mobilePhone, "mobilePhone", {
+            min: 7,
+            max: 32,
+          });
+  if (
+    typeof mobilePhone === "string" &&
+    !/^\+?[0-9 ()-]{7,32}$/.test(mobilePhone)
+  ) {
+    throw badRequest("INVALID_FIELD", "mobilePhone has an invalid format");
+  }
+  const communicationPreference =
+    body.communicationPreference === undefined
+      ? undefined
+      : enumValue(
+          body.communicationPreference,
+          "communicationPreference",
+          ["email", "sms"],
+        );
+
+  if (preferredName !== undefined) draft.profile.preferredName = preferredName;
+  if (pronouns !== undefined) draft.profile.pronouns = pronouns;
+  if (mobilePhone !== undefined) draft.profile.mobilePhone = mobilePhone;
+  if (communicationPreference !== undefined) {
+    draft.profile.communicationPreference = communicationPreference;
+  }
+  draft.profile.version += 1;
+  draft.profile.updatedAt = now.toISOString();
+  draft.portalProjectionVersion += 1;
+  return profileResponse(draft);
+}
+
+export function profileResponse(state) {
+  return {
+    studentId: state.profile.studentId,
+    preferredName: state.profile.preferredName,
+    pronouns: state.profile.pronouns,
+    mobilePhone: state.profile.mobilePhone,
+    communicationPreference: state.profile.communicationPreference,
+    version: state.profile.version,
+    updatedAt: state.profile.updatedAt,
+  };
+}
+
+export function listRequirements(state) {
+  const items = state.requirements.map(requirementDetailResponse);
+  return {
+    items,
+    total: items.length,
+  };
+}
+
+export function requirementDetail(state, identifier) {
+  const decoded = decodeURIComponent(identifier);
+  uuidValue(decoded, "requirementId");
+  const requirement = state.requirements.find(
+    (candidate) => candidate.id === decoded,
+  );
+  if (!requirement) {
+    throw notFound(
+      "STUDENT_REQUIREMENT_NOT_FOUND",
+      "The enrollment requirement was not found",
+    );
+  }
+  return requirementDetailResponse(requirement);
+}
+
+export function listMessages(state) {
+  return {
+    unreadCount: state.messages.filter((message) => message.readAt === null)
+      .length,
+    items: state.messages
+      .map((message) => structuredClone(message))
+      .sort((left, right) => right.sentAt.localeCompare(left.sentAt)),
+  };
+}
+
+export function markMessageRead(draft, messageId, now, transaction) {
+  uuidValue(messageId, "messageId");
+  const message = draft.messages.find((candidate) => candidate.id === messageId);
+  if (!message) {
+    throw notFound("STUDENT_MESSAGE_NOT_FOUND", "The message was not found");
+  }
+  if (message.readAt !== null) {
+    transaction?.skipWrite();
+    return structuredClone(message);
+  }
+  message.readAt = now.toISOString();
+  draft.portalProjectionVersion += 1;
+  return structuredClone(message);
+}
+
+export function createDocumentMetadata(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["fileName", "mimeType", "sizeBytes", "category"]);
+  const fileName = requiredString(body.fileName, "fileName", {
+    min: 1,
+    max: 255,
+  });
+  if (
+    fileName.includes("/") ||
+    fileName.includes("\\") ||
+    /[\u0000-\u001f]/.test(fileName)
+  ) {
+    throw badRequest("INVALID_FILE_NAME", "fileName must be a plain file name");
+  }
+  const mimeType = enumValue(body.mimeType, "mimeType", [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+  ]);
+  const sizeBytes = integerValue(
+    body.sizeBytes,
+    "sizeBytes",
+    1,
+    10_485_760,
+  );
+  const category = enumValue(body.category, "category", [
+    "identity",
+    "residency",
+    "transcript",
+    "other",
+  ]);
+  const document = {
+    id: randomUUID(),
+    fileName,
+    mimeType,
+    sizeBytes,
+    category,
+    status: "placeholder",
+    createdAt: now.toISOString(),
+  };
+  draft.documents.push(document);
+  return structuredClone(document);
+}
+
+export function createAppointment(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["type", "startsAt", "notes"]);
+  const type = enumValue(body.type, "type", appointmentTypes);
+  const startsAt = isoTimestamp(body.startsAt, "startsAt");
+  if (new Date(startsAt).getTime() <= now.getTime()) {
+    throw badRequest(
+      "APPOINTMENT_MUST_BE_FUTURE",
+      "Appointment time must be in the future",
+    );
+  }
+  const notes =
+    body.notes === undefined
+      ? null
+      : optionalString(body.notes, "notes", { min: 0, max: 500 }) ?? null;
+  const appointment = {
+    id: randomUUID(),
+    type,
+    startsAt,
+    notes,
+    status: "scheduled",
+    createdAt: now.toISOString(),
+  };
+  draft.appointments.push(appointment);
+  return structuredClone(appointment);
+}
+
+export function createDepositPayment(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["offerId"]);
+  const offerId = uuidValue(body.offerId, "offerId");
+  if (offerId !== draft.offer.id || draft.offer.status !== "accepted") {
+    throw conflict(
+      "ACCEPTED_OFFER_REQUIRED",
+      "An accepted admission offer is required before paying a deposit",
+    );
+  }
+  const existing = draft.payments.find(
+    (payment) =>
+      payment.type === "enrollment_deposit" &&
+      payment.offerId === offerId &&
+      payment.status === "succeeded",
+  );
+  if (existing) return structuredClone(existing);
+
+  const id = randomUUID();
+  const payment = {
+    id,
+    offerId,
+    type: "enrollment_deposit",
+    amountCents: draft.offer.depositAmountCents,
+    status: "succeeded",
+    processor: "dummy",
+    processorReference: `dummy_${id.replaceAll("-", "")}`,
+    createdAt: now.toISOString(),
+  };
+  draft.payments.push(payment);
+  const requirement = draft.requirements.find(
+    (candidate) => candidate.code === "enrollment_deposit",
+  );
+  if (requirement) {
+    requirement.status = "completed";
+    requirement.progressPercent = 100;
+  }
+  updateJourneyStatus(draft);
+  draft.portalProjectionVersion += 1;
+  return structuredClone(payment);
+}
+
+export function getHelpTopics() {
+  return {
+    articles: structuredClone(helpArticles),
+    support: {
+      email: "enrollment-support@vv.example",
+      phone: "+1 555 010 2027",
+      hours: "Monday-Friday, 09:00-17:00",
+    },
+  };
+}
+
+export function createHelpRequest(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["topicCode", "message"]);
+  const topicCode = enumValue(body.topicCode, "topicCode", [
+    "getting_started",
+    "documents",
+    "payments",
+    "support",
+  ]);
+  const message = requiredString(body.message, "message", {
+    min: 1,
+    max: 500,
+  });
+  const request = {
+    id: randomUUID(),
+    topicCode,
+    message,
+    status: "received",
+    createdAt: now.toISOString(),
+  };
+  draft.helpRequests.push(request);
+  return structuredClone(request);
+}
+
+export function ingestActivities(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["events"]);
+  if (!Array.isArray(body.events) || body.events.length < 1 || body.events.length > 100) {
+    throw badRequest("INVALID_ACTIVITY_BATCH", "events must contain 1-100 items");
+  }
+  let accepted = 0;
+  let duplicates = 0;
+  const knownIds = new Set(draft.activities.map((event) => event.eventId));
+  for (const candidate of body.events) {
+    const event = validateActivity(candidate);
+    if (knownIds.has(event.eventId)) {
+      duplicates += 1;
+      continue;
+    }
+    knownIds.add(event.eventId);
+    draft.activities.push({
+      ...event,
+      receivedAt: now.toISOString(),
+    });
+    accepted += 1;
+  }
+  if (draft.activities.length > 1_000) {
+    draft.activities = draft.activities.slice(-1_000);
+  }
+  return { accepted, duplicates };
+}
+
+function validateActivity(input) {
+  const event = objectBody(input);
+  exactKeys(event, [
+    "eventId",
+    "eventName",
+    "occurredAt",
+    "sessionId",
+    "pageInstanceId",
+    "correlationId",
+    "properties",
+  ]);
+  const eventId = uuidValue(event.eventId, "eventId");
+  const eventName = enumValue(
+    event.eventName,
+    "eventName",
+    Object.keys(activityPropertyAllowlists),
+  );
+  const occurredAt = isoTimestamp(event.occurredAt, "occurredAt");
+  const sessionId = safeTrackingId(event.sessionId, "sessionId");
+  const pageInstanceId = safeTrackingId(
+    event.pageInstanceId,
+    "pageInstanceId",
+  );
+  const correlationId =
+    event.correlationId === undefined
+      ? undefined
+      : safeTrackingId(event.correlationId, "correlationId");
+  const properties = objectBody(event.properties);
+  const allowlist = activityPropertyAllowlists[eventName];
+  for (const [key, value] of Object.entries(properties)) {
+    if (prohibitedActivityProperty.test(key) || !allowlist.has(key)) {
+      throw badRequest(
+        "INVALID_ACTIVITY_PROPERTY",
+        `Property "${key}" is not allowed for ${eventName}`,
+      );
+    }
+    if (
+      value !== null &&
+      !["string", "number", "boolean"].includes(typeof value)
+    ) {
+      throw badRequest(
+        "INVALID_ACTIVITY_PROPERTY",
+        `Property "${key}" must be a primitive value`,
+      );
+    }
+  }
+  return {
+    eventId,
+    eventName,
+    occurredAt,
+    sessionId,
+    pageInstanceId,
+    ...(correlationId ? { correlationId } : {}),
+    properties: structuredClone(properties),
+  };
+}
+
+function safeTrackingId(value, name) {
+  const text = requiredString(value, name, { min: 8, max: 128 });
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(text)) {
+    throw badRequest("INVALID_FIELD", `${name} contains unsafe characters`);
+  }
+  return text;
+}
+
+function requirementSummary(requirement) {
+  return {
+    id: requirement.id,
+    code: requirement.code,
+    title: requirement.title,
+    description: requirement.description,
+    status: requirement.status,
+    blocking: requirement.blocking,
+    dueAt: requirement.dueAt,
+    progressPercent: requirement.progressPercent,
+  };
+}
+
+function requirementDetailResponse(requirement) {
+  return {
+    ...requirementSummary(requirement),
+    journeyId: requirement.journeyId ?? ids.journey,
+    submissionType: requirement.submissionType,
+    responsibleOffice: requirement.responsibleOffice,
+    dependencyCodes: [...requirement.dependsOnCodes],
+  };
+}
+
+function updateJourneyStatus(state) {
+  if (!state.journey) return;
+  const allComplete =
+    state.requirements.length > 0 &&
+    state.requirements.every((requirement) =>
+      terminalRequirementStatuses.has(requirement.status),
+    );
+  state.journey.status = allComplete ? "ready_for_review" : "in_progress";
+  state.journey.version += 1;
+}
+
+function validateCompletedStepSequence(state) {
+  const currentIndex = ONBOARDING_STEPS.indexOf(
+    state.onboarding.currentStep,
+  );
+  const expected = ONBOARDING_STEPS.slice(0, currentIndex);
+  if (
+    state.onboarding.completedSteps.length !== expected.length ||
+    state.onboarding.completedSteps.some(
+      (step, index) => step !== expected[index],
+    )
+  ) {
+    throw new Error("Stored onboarding sequence is inconsistent");
+  }
+}
+
+function validateOnboardingData(input) {
+  const data = objectBody(input);
+  const fields = [
+    "legalNameConfirmed",
+    "contactInformationConfirmed",
+    "communicationPreference",
+    "residencyStatus",
+    "supportNeeds",
+    "homeAddressConfirmed",
+    "housingPreference",
+    "campusInterests",
+    "emergencyContactConfirmed",
+    "recordsConfirmed",
+    "familyPermissionsReviewed",
+    "signatureConfirmed",
+    "depositAcknowledged",
+  ];
+  exactKeys(data, fields);
+  const result = {};
+  for (const field of [
+    "legalNameConfirmed",
+    "contactInformationConfirmed",
+    "homeAddressConfirmed",
+    "emergencyContactConfirmed",
+    "recordsConfirmed",
+    "familyPermissionsReviewed",
+    "signatureConfirmed",
+    "depositAcknowledged",
+  ]) {
+    if (data[field] !== undefined) {
+      result[field] = booleanValue(data[field], field);
+    }
+  }
+  if (data.communicationPreference !== undefined) {
+    result.communicationPreference = enumValue(
+      data.communicationPreference,
+      "communicationPreference",
+      ["email", "sms"],
+    );
+  }
+  if (data.residencyStatus !== undefined) {
+    result.residencyStatus = enumValue(
+      data.residencyStatus,
+      "residencyStatus",
+      ["domestic", "international"],
+    );
+  }
+  if (data.housingPreference !== undefined) {
+    result.housingPreference = enumValue(
+      data.housingPreference,
+      "housingPreference",
+      ["on_campus", "off_campus", "undecided"],
+    );
+  }
+  for (const field of ["supportNeeds", "campusInterests"]) {
+    if (data[field] === undefined) continue;
+    if (!Array.isArray(data[field])) {
+      throw badRequest("INVALID_FIELD", `${field} must be an array`);
+    }
+    result[field] = data[field].map((value, index) =>
+      requiredString(value, `${field}[${index}]`, { min: 1, max: 80 }),
+    );
+  }
+  return result;
+}
+
+function validateOnboardingStep(state, step, data) {
+  const invalid = (message) => {
+    throw badRequest("ONBOARDING_STEP_INVALID", message);
+  };
+  if (step === "offer") {
+    if (state.offer.status !== "accepted") {
+      throw conflict(
+        "ACCEPTED_OFFER_REQUIRED",
+        "Accept the admission offer before completing this step",
+      );
+    }
+    return;
+  }
+  if (step === "about_you") {
+    if (
+      data.legalNameConfirmed !== true ||
+      data.contactInformationConfirmed !== true ||
+      data.homeAddressConfirmed !== true ||
+      !data.communicationPreference ||
+      !data.residencyStatus
+    ) {
+      invalid(
+        "Confirm legal name, contact information, home address, communication preference, and residency status",
+      );
+    }
+    return;
+  }
+  if (step === "housing") {
+    if (!data.housingPreference) invalid("Choose a housing preference");
+    return;
+  }
+  if (step === "campus_life") {
+    if (!data.campusInterests?.length) {
+      invalid("Choose at least one campus interest");
+    }
+    return;
+  }
+  if (step === "emergency_contacts") {
+    if (data.emergencyContactConfirmed !== true) {
+      invalid("Confirm the emergency contact information");
+    }
+    return;
+  }
+  if (step === "other_records") {
+    if (data.recordsConfirmed !== true) {
+      invalid("Confirm the identity, health, and accessibility records");
+    }
+    return;
+  }
+  if (step === "family_permissions") {
+    if (data.familyPermissionsReviewed !== true) {
+      invalid("Review the family and FERPA permissions");
+    }
+    return;
+  }
+  if (step === "review_and_sign") {
+    if (data.signatureConfirmed !== true) {
+      invalid("Confirm the enrollment review and signature");
+    }
+    return;
+  }
+  if (step === "deposit") {
+    if (data.depositAcknowledged !== true) {
+      invalid("Acknowledge the completed enrollment deposit");
+    }
+    if (
+      !state.payments.some(
+        (payment) =>
+          payment.type === "enrollment_deposit" &&
+          payment.status === "succeeded",
+      )
+    ) {
+      throw conflict(
+        "DEPOSIT_REQUIRED",
+        "Complete the enrollment deposit before saving this step",
+      );
+    }
+    return;
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function fixtureSummary(state) {
+  return {
+    fixtureVersion: state.fixture.version,
+    schemaVersion: state.schemaVersion,
+    revision: state.fixture.revision,
+    seededAt: state.fixture.seededAt,
+    updatedAt: state.fixture.updatedAt,
+    offerStatus: state.offer.status,
+    journeyStatus: state.journey?.status ?? "not_started",
+    projectionVersion: state.portalProjectionVersion,
+    counts: {
+      requirements: state.requirements.length,
+      unreadMessages: state.messages.filter((message) => message.readAt === null)
+        .length,
+      documents: state.documents.length,
+      appointments: state.appointments.length,
+      payments: state.payments.length,
+      helpRequests: state.helpRequests.length,
+      activities: state.activities.length,
+      idempotencyRecords: Object.keys(state.idempotency).length,
+    },
+    demoStudentId: ids.student,
+  };
+}

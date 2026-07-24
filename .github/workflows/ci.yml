@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: vv_enrollment
+          POSTGRES_USER: vv
+          POSTGRES_PASSWORD: vv_ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vv -d vv_enrollment"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://vv:vv_ci_password@localhost:5432/vv_enrollment
+      API_PORT: 4000
+      WEB_ORIGIN: http://localhost:3000
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:4000
+      DEMO_TENANT_ID: 00000000-0000-7000-8000-000000000001
+      DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            packages/contracts/package-lock.json
+            apps/api/package-lock.json
+            apps/worker/package-lock.json
+            apps/web/package-lock.json
+
+      - name: Install contracts
+        run: npm --prefix packages/contracts ci --workspaces=false
+
+      - name: Install API
+        run: npm --prefix apps/api ci --workspaces=false
+
+      - name: Install worker
+        run: npm --prefix apps/worker ci --workspaces=false
+
+      - name: Install web
+        run: npm --prefix apps/web ci --workspaces=false
+
+      - name: Audit production dependencies
+        run: |
+          npm --prefix packages/contracts audit --omit=dev --workspaces=false
+          npm --prefix apps/api audit --omit=dev --workspaces=false
+          npm --prefix apps/worker audit --omit=dev --workspaces=false
+          npm --prefix apps/web audit --omit=dev --workspaces=false
+
+      - name: Apply database migrations
+        run: npm --prefix apps/api run db:migrate
+
+      - name: Seed deterministic scenario
+        run: npm --prefix apps/api run db:seed
+
+      - name: Typecheck contracts
+        run: npm --prefix packages/contracts run typecheck
+
+      - name: Typecheck and test API
+        run: |
+          npm --prefix apps/api run typecheck
+          npm --prefix apps/api test
+
+      - name: Typecheck and test worker
+        run: |
+          npm --prefix apps/worker run typecheck
+          npm --prefix apps/worker test
+
+      - name: Validate web
+        run: |
+          npm --prefix apps/web run typecheck
+          npm --prefix apps/web run lint
+          npm --prefix apps/web test
+
+      - name: Validate stateful preview API
+        run: npm --prefix tools/demo-api test
+
+      - name: Build API and worker
+        run: |
+          npm --prefix apps/api run build
+          npm --prefix apps/worker run build

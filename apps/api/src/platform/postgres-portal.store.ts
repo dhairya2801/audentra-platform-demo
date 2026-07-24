@@ -1,0 +1,1324 @@
+import { createHash, randomUUID } from "node:crypto";
+import type {
+  CompleteStudentOnboardingInput,
+  CreateDepositPaymentInput,
+  CreateStudentAppointmentInput,
+  CreateStudentDocumentInput,
+  OnboardingStep,
+  StudentAppointment,
+  StudentAppointmentList,
+  StudentBootstrap,
+  StudentDocument,
+  StudentDocumentList,
+  StudentHelp,
+  StudentMessage,
+  StudentMessageList,
+  StudentOnboarding,
+  StudentOnboardingData,
+  StudentPayment,
+  StudentPaymentList,
+  StudentProfile,
+  StudentRequirementDetail,
+  StudentRequirementList,
+  UpdateStudentOnboardingInput,
+  UpdateStudentProfileInput,
+} from "@vv/contracts";
+import { sql } from "drizzle-orm";
+import type { AuthContext } from "../auth/auth-context";
+import {
+  ApiError,
+  BadRequestError,
+  ConflictError,
+  NotFoundError,
+} from "../common/api-error";
+import { DatabaseService } from "../database/database.service";
+import {
+  ONBOARDING_STEPS,
+  validateOnboardingStepData,
+} from "../portal/onboarding-policy";
+
+type Transaction = Parameters<
+  Parameters<DatabaseService["db"]["transaction"]>[0]
+>[0];
+type RowResult<T> = { rows: T[] };
+
+function rows<T>(result: unknown): T[] {
+  return (result as RowResult<T>).rows;
+}
+
+interface OnboardingRow {
+  student_id: string;
+  status: StudentOnboarding["status"];
+  current_step: OnboardingStep;
+  completed_steps: OnboardingStep[];
+  payload: StudentOnboardingData;
+  version: number;
+  completed_at: Date | null;
+  updated_at: Date;
+}
+
+interface RequirementRow {
+  id: string;
+  journey_id: string;
+  code: string;
+  title: string;
+  description: string;
+  status: StudentRequirementDetail["status"];
+  blocking: number;
+  due_at: Date | null;
+  progress_percent: number;
+  submission_type: StudentRequirementDetail["submissionType"];
+  responsible_office: string;
+  depends_on_codes: string[];
+}
+
+interface MessageRow {
+  id: string;
+  subject: string;
+  body: string;
+  sender_name: string;
+  sent_at: Date;
+  read_at: Date | null;
+}
+
+interface DocumentRow {
+  id: string;
+  file_name: string;
+  mime_type: StudentDocument["mimeType"];
+  size_bytes: number;
+  category: StudentDocument["category"];
+  status: StudentDocument["status"];
+  created_at: Date;
+}
+
+interface AppointmentRow {
+  id: string;
+  type: StudentAppointment["type"];
+  starts_at: Date;
+  notes: string | null;
+  status: StudentAppointment["status"];
+  created_at: Date;
+}
+
+interface PaymentRow {
+  id: string;
+  offer_id: string;
+  amount_cents: number;
+  status: StudentPayment["status"];
+  processor_reference: string;
+  created_at: Date;
+}
+
+interface ProfileRow {
+  student_id: string;
+  preferred_name: string;
+  pronouns: string | null;
+  mobile_phone: string | null;
+  communication_preference: StudentProfile["communicationPreference"];
+  version: number;
+  updated_at: Date;
+}
+
+interface IdempotencyRow<T> {
+  request_hash: string;
+  response_body: T;
+}
+
+function mapOnboarding(row: OnboardingRow): StudentOnboarding {
+  return {
+    studentId: row.student_id,
+    status: row.status,
+    currentStep: row.current_step,
+    completedSteps: row.completed_steps,
+    data: row.payload,
+    version: row.version,
+    completedAt: row.completed_at?.toISOString() ?? null,
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+function mapRequirement(row: RequirementRow): StudentRequirementDetail {
+  return {
+    id: row.id,
+    journeyId: row.journey_id,
+    code: row.code,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    blocking: row.blocking === 1,
+    dueAt: row.due_at?.toISOString() ?? null,
+    progressPercent: row.progress_percent,
+    submissionType: row.submission_type,
+    responsibleOffice: row.responsible_office,
+    dependencyCodes: row.depends_on_codes,
+  };
+}
+
+function mapMessage(row: MessageRow): StudentMessage {
+  return {
+    id: row.id,
+    subject: row.subject,
+    body: row.body,
+    senderName: row.sender_name,
+    sentAt: row.sent_at.toISOString(),
+    readAt: row.read_at?.toISOString() ?? null,
+  };
+}
+
+function mapDocument(row: DocumentRow): StudentDocument {
+  return {
+    id: row.id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    sizeBytes: row.size_bytes,
+    category: row.category,
+    status: row.status,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function mapAppointment(row: AppointmentRow): StudentAppointment {
+  return {
+    id: row.id,
+    type: row.type,
+    startsAt: row.starts_at.toISOString(),
+    notes: row.notes,
+    status: row.status,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function mapPayment(row: PaymentRow): StudentPayment {
+  return {
+    id: row.id,
+    offerId: row.offer_id,
+    type: "enrollment_deposit",
+    amountCents: row.amount_cents,
+    status: row.status,
+    processor: "dummy",
+    processorReference: row.processor_reference,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function mapProfile(row: ProfileRow): StudentProfile {
+  return {
+    studentId: row.student_id,
+    preferredName: row.preferred_name,
+    pronouns: row.pronouns,
+    mobilePhone: row.mobile_phone,
+    communicationPreference: row.communication_preference,
+    version: row.version,
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+export class PostgresPortalStore {
+  constructor(protected readonly database: DatabaseService) {}
+
+  async getStudentBootstrap(auth: AuthContext): Promise<StudentBootstrap> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        s.id AS student_id,
+        COALESCE(sp.preferred_name, p.preferred_name, p.first_name)
+          AS preferred_name,
+        p.first_name || ' ' || p.last_name AS full_name,
+        so.status,
+        so.current_step,
+        so.version
+      FROM student s
+      JOIN person p ON p.id = s.person_id AND p.tenant_id = s.tenant_id
+      JOIN student_onboarding so
+        ON so.student_id = s.id AND so.tenant_id = s.tenant_id
+      LEFT JOIN student_profile sp
+        ON sp.student_id = s.id AND sp.tenant_id = s.tenant_id
+      WHERE s.tenant_id = ${auth.tenantId}
+        AND s.id = ${auth.studentId}
+    `);
+    const row = rows<{
+      student_id: string;
+      preferred_name: string;
+      full_name: string;
+      status: StudentOnboarding["status"];
+      current_step: OnboardingStep;
+      version: number;
+    }>(result)[0];
+    if (!row) {
+      throw new NotFoundError(
+        "STUDENT_NOT_FOUND",
+        "The authenticated student was not found",
+      );
+    }
+    const required = row.status !== "completed";
+    return {
+      authenticated: true,
+      student: {
+        id: row.student_id,
+        preferredName: row.preferred_name,
+        fullName: row.full_name,
+      },
+      onboarding: {
+        required,
+        status: row.status,
+        currentStep: row.current_step,
+        version: row.version,
+      },
+      initialRoute: required ? "/onboarding" : "/dashboard",
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async getStudentOnboarding(auth: AuthContext): Promise<StudentOnboarding> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        student_id,
+        status,
+        current_step,
+        completed_steps,
+        payload,
+        version,
+        completed_at,
+        updated_at
+      FROM student_onboarding
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+    `);
+    const row = rows<OnboardingRow>(result)[0];
+    if (!row) {
+      throw new NotFoundError(
+        "STUDENT_ONBOARDING_NOT_FOUND",
+        "Student onboarding was not found",
+      );
+    }
+    return mapOnboarding(row);
+  }
+
+  async updateStudentOnboarding(input: {
+    auth: AuthContext;
+    update: UpdateStudentOnboardingInput;
+    requestId: string;
+  }): Promise<StudentOnboarding> {
+    return this.database.db.transaction(async (transaction) => {
+      const currentResult = await transaction.execute(sql`
+        SELECT
+          student_id,
+          status,
+          current_step,
+          completed_steps,
+          payload,
+          version,
+          completed_at,
+          updated_at
+        FROM student_onboarding
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+        FOR UPDATE
+      `);
+      const current = rows<OnboardingRow>(currentResult)[0];
+      if (!current) {
+        throw new NotFoundError(
+          "STUDENT_ONBOARDING_NOT_FOUND",
+          "Student onboarding was not found",
+        );
+      }
+      if (current.status === "completed") {
+        throw new ConflictError(
+          "ONBOARDING_ALREADY_COMPLETED",
+          "Completed onboarding cannot be changed",
+        );
+      }
+      if (current.version !== input.update.expectedVersion) {
+        throw new ConflictError(
+          "VERSION_CONFLICT",
+          "Onboarding changed in another session",
+        );
+      }
+      if (current.current_step !== input.update.currentStep) {
+        throw new ConflictError(
+          "ONBOARDING_STEP_OUT_OF_ORDER",
+          `The next required onboarding step is ${current.current_step}`,
+        );
+      }
+      const stepIndex = ONBOARDING_STEPS.indexOf(current.current_step);
+      const expectedPriorSteps = ONBOARDING_STEPS.slice(0, stepIndex);
+      if (
+        current.completed_steps.length !== expectedPriorSteps.length ||
+        current.completed_steps.some(
+          (step, index) => step !== expectedPriorSteps[index],
+        )
+      ) {
+        throw new ApiError(
+          500,
+          "ONBOARDING_STATE_INVALID",
+          "The stored onboarding sequence is inconsistent",
+        );
+      }
+      const mergedData = { ...current.payload, ...input.update.data };
+      await this.validateOnboardingStep(
+        transaction,
+        input.auth,
+        current.current_step,
+        mergedData,
+      );
+      const completedSteps = [...current.completed_steps, current.current_step];
+      const nextStep =
+        ONBOARDING_STEPS[stepIndex + 1] ?? ONBOARDING_STEPS[stepIndex];
+      if (!nextStep) {
+        throw new ApiError(
+          500,
+          "ONBOARDING_CONFIGURATION_INVALID",
+          "The onboarding sequence is empty",
+        );
+      }
+      const now = new Date();
+      const updateResult = await transaction.execute(sql`
+        UPDATE student_onboarding
+        SET status = 'in_progress',
+            current_step = ${nextStep},
+            completed_steps = ${completedSteps},
+            payload = ${JSON.stringify(mergedData)}::jsonb,
+            version = version + 1,
+            updated_at = ${now}
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+        RETURNING
+          student_id,
+          status,
+          current_step,
+          completed_steps,
+          payload,
+          version,
+          completed_at,
+          updated_at
+      `);
+      const updated = rows<OnboardingRow>(updateResult)[0];
+      if (!updated) {
+        throw new ApiError(
+          500,
+          "ONBOARDING_UPDATE_FAILED",
+          "Onboarding could not be saved",
+        );
+      }
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "student_onboarding.step_completed",
+        resourceType: "student_onboarding",
+        resourceId: input.auth.studentId,
+        requestId: input.requestId,
+        metadata: { step: current.current_step, version: updated.version },
+      });
+      return mapOnboarding(updated);
+    });
+  }
+
+  async completeStudentOnboarding(input: {
+    auth: AuthContext;
+    update: CompleteStudentOnboardingInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentOnboarding> {
+    return this.runIdempotent(
+      input,
+      "student_onboarding.complete",
+      input.update,
+      200,
+      async (transaction) => {
+        const result = await transaction.execute(sql`
+          SELECT
+            student_id,
+            status,
+            current_step,
+            completed_steps,
+            payload,
+            version,
+            completed_at,
+            updated_at
+          FROM student_onboarding
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+          FOR UPDATE
+        `);
+        const current = rows<OnboardingRow>(result)[0];
+        if (!current) {
+          throw new NotFoundError(
+            "STUDENT_ONBOARDING_NOT_FOUND",
+            "Student onboarding was not found",
+          );
+        }
+        if (current.status === "completed") return mapOnboarding(current);
+        if (current.version !== input.update.expectedVersion) {
+          throw new ConflictError(
+            "VERSION_CONFLICT",
+            "Onboarding changed in another session",
+          );
+        }
+        if (
+          current.completed_steps.length !== ONBOARDING_STEPS.length ||
+          current.completed_steps.some(
+            (step, index) => step !== ONBOARDING_STEPS[index],
+          )
+        ) {
+          throw new ConflictError(
+            "ONBOARDING_INCOMPLETE",
+            "Every onboarding step must be completed in order",
+          );
+        }
+        const now = new Date();
+        const updateResult = await transaction.execute(sql`
+          UPDATE student_onboarding
+          SET status = 'completed',
+              completed_at = ${now},
+              version = version + 1,
+              updated_at = ${now}
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+          RETURNING
+            student_id,
+            status,
+            current_step,
+            completed_steps,
+            payload,
+            version,
+            completed_at,
+            updated_at
+        `);
+        const updated = rows<OnboardingRow>(updateResult)[0];
+        if (!updated) {
+          throw new ApiError(
+            500,
+            "ONBOARDING_COMPLETION_FAILED",
+            "Onboarding could not be completed",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "student_onboarding.completed",
+          resourceType: "student_onboarding",
+          resourceId: input.auth.studentId,
+          requestId: input.requestId,
+          metadata: { version: updated.version },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "student.onboarding_completed.v1",
+          aggregateType: "student_onboarding",
+          aggregateId: input.auth.studentId,
+          aggregateVersion: updated.version,
+          requestId: input.requestId,
+          data: { studentId: input.auth.studentId },
+        });
+        return mapOnboarding(updated);
+      },
+    );
+  }
+
+  async getStudentRequirements(
+    auth: AuthContext,
+  ): Promise<StudentRequirementList> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        sr.id,
+        sr.journey_id,
+        rdv.code,
+        rdv.title,
+        rdv.description,
+        sr.status,
+        rdv.blocking,
+        sr.due_at,
+        sr.progress_percent,
+        rdv.submission_type,
+        rdv.responsible_office,
+        rdv.depends_on_codes
+      FROM student_requirement sr
+      JOIN enrollment_journey j
+        ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
+      JOIN requirement_definition_version rdv
+        ON rdv.id = sr.requirement_definition_version_id
+       AND rdv.tenant_id = sr.tenant_id
+      WHERE sr.tenant_id = ${auth.tenantId}
+        AND j.student_id = ${auth.studentId}
+      ORDER BY rdv.display_order, sr.created_at
+    `);
+    const items = rows<RequirementRow>(result).map(mapRequirement);
+    return { items, total: items.length };
+  }
+
+  async getStudentRequirement(
+    auth: AuthContext,
+    requirementId: string,
+  ): Promise<StudentRequirementDetail> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        sr.id,
+        sr.journey_id,
+        rdv.code,
+        rdv.title,
+        rdv.description,
+        sr.status,
+        rdv.blocking,
+        sr.due_at,
+        sr.progress_percent,
+        rdv.submission_type,
+        rdv.responsible_office,
+        rdv.depends_on_codes
+      FROM student_requirement sr
+      JOIN enrollment_journey j
+        ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
+      JOIN requirement_definition_version rdv
+        ON rdv.id = sr.requirement_definition_version_id
+       AND rdv.tenant_id = sr.tenant_id
+      WHERE sr.tenant_id = ${auth.tenantId}
+        AND j.student_id = ${auth.studentId}
+        AND sr.id = ${requirementId}
+    `);
+    const requirement = rows<RequirementRow>(result)[0];
+    if (!requirement) {
+      throw new NotFoundError(
+        "STUDENT_REQUIREMENT_NOT_FOUND",
+        "The requirement was not found",
+      );
+    }
+    return mapRequirement(requirement);
+  }
+
+  async getStudentMessages(auth: AuthContext): Promise<StudentMessageList> {
+    const result = await this.database.db.execute(sql`
+      SELECT id, subject, body, sender_name, sent_at, read_at
+      FROM student_message
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      ORDER BY sent_at DESC, id
+    `);
+    const items = rows<MessageRow>(result).map(mapMessage);
+    return {
+      items,
+      unreadCount: items.filter((message) => message.readAt === null).length,
+    };
+  }
+
+  async markStudentMessageRead(input: {
+    auth: AuthContext;
+    messageId: string;
+    requestId: string;
+  }): Promise<StudentMessage> {
+    return this.database.db.transaction(async (transaction) => {
+      const result = await transaction.execute(sql`
+        SELECT id, subject, body, sender_name, sent_at, read_at
+        FROM student_message
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.messageId}
+        FOR UPDATE
+      `);
+      const current = rows<MessageRow>(result)[0];
+      if (!current) {
+        throw new NotFoundError(
+          "STUDENT_MESSAGE_NOT_FOUND",
+          "The message was not found",
+        );
+      }
+      if (current.read_at) return mapMessage(current);
+      const updateResult = await transaction.execute(sql`
+        UPDATE student_message
+        SET read_at = NOW()
+        WHERE id = ${input.messageId}
+        RETURNING id, subject, body, sender_name, sent_at, read_at
+      `);
+      const updated = rows<MessageRow>(updateResult)[0];
+      if (!updated) {
+        throw new ApiError(
+          500,
+          "MESSAGE_UPDATE_FAILED",
+          "The message could not be marked as read",
+        );
+      }
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "student_message.read",
+        resourceType: "student_message",
+        resourceId: input.messageId,
+        requestId: input.requestId,
+        metadata: {},
+      });
+      return mapMessage(updated);
+    });
+  }
+
+  async getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        id, file_name, mime_type, size_bytes, category, status, created_at
+      FROM document_record
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      ORDER BY created_at DESC, id
+    `);
+    const items = rows<DocumentRow>(result).map(mapDocument);
+    return { items, total: items.length };
+  }
+
+  async createStudentDocument(input: {
+    auth: AuthContext;
+    document: CreateStudentDocumentInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    return this.runIdempotent(
+      input,
+      "student_document.create",
+      input.document,
+      201,
+      async (transaction) => {
+        const id = randomUUID();
+        const result = await transaction.execute(sql`
+          INSERT INTO document_record (
+            id,
+            tenant_id,
+            student_id,
+            file_name,
+            mime_type,
+            size_bytes,
+            category,
+            status,
+            storage_provider
+          )
+          SELECT
+            ${id},
+            s.tenant_id,
+            s.id,
+            ${input.document.fileName},
+            ${input.document.mimeType},
+            ${input.document.sizeBytes},
+            ${input.document.category},
+            'placeholder',
+            'local_placeholder'
+          FROM student s
+          WHERE s.tenant_id = ${input.auth.tenantId}
+            AND s.id = ${input.auth.studentId}
+          RETURNING
+            id, file_name, mime_type, size_bytes, category, status, created_at
+        `);
+        const created = rows<DocumentRow>(result)[0];
+        if (!created) {
+          throw new NotFoundError(
+            "STUDENT_NOT_FOUND",
+            "The authenticated student was not found",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "document.placeholder_created",
+          resourceType: "document_record",
+          resourceId: id,
+          requestId: input.requestId,
+          metadata: {
+            category: input.document.category,
+            mimeType: input.document.mimeType,
+            sizeBytes: input.document.sizeBytes,
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "document.placeholder_created.v1",
+          aggregateType: "document_record",
+          aggregateId: id,
+          aggregateVersion: 1,
+          requestId: input.requestId,
+          data: {
+            studentId: input.auth.studentId,
+            category: input.document.category,
+          },
+        });
+        return mapDocument(created);
+      },
+    );
+  }
+
+  async getStudentAppointments(
+    auth: AuthContext,
+  ): Promise<StudentAppointmentList> {
+    const result = await this.database.db.execute(sql`
+      SELECT id, type, starts_at, notes, status, created_at
+      FROM student_appointment
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      ORDER BY starts_at, id
+    `);
+    const items = rows<AppointmentRow>(result).map(mapAppointment);
+    return { items, total: items.length };
+  }
+
+  async createStudentAppointment(input: {
+    auth: AuthContext;
+    appointment: CreateStudentAppointmentInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentAppointment> {
+    const startsAt = new Date(input.appointment.startsAt);
+    if (startsAt.getTime() <= Date.now()) {
+      throw new BadRequestError(
+        "APPOINTMENT_MUST_BE_FUTURE",
+        "Appointment time must be in the future",
+      );
+    }
+    return this.runIdempotent(
+      input,
+      "student_appointment.create",
+      input.appointment,
+      201,
+      async (transaction) => {
+        const id = randomUUID();
+        const result = await transaction.execute(sql`
+          INSERT INTO student_appointment (
+            id, tenant_id, student_id, type, starts_at, notes, status
+          )
+          SELECT
+            ${id},
+            s.tenant_id,
+            s.id,
+            ${input.appointment.type},
+            ${startsAt},
+            ${input.appointment.notes ?? null},
+            'scheduled'
+          FROM student s
+          WHERE s.tenant_id = ${input.auth.tenantId}
+            AND s.id = ${input.auth.studentId}
+          RETURNING id, type, starts_at, notes, status, created_at
+        `);
+        const created = rows<AppointmentRow>(result)[0];
+        if (!created) {
+          throw new NotFoundError(
+            "STUDENT_NOT_FOUND",
+            "The authenticated student was not found",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "student_appointment.scheduled",
+          resourceType: "student_appointment",
+          resourceId: id,
+          requestId: input.requestId,
+          metadata: { type: input.appointment.type },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "student.appointment_scheduled.v1",
+          aggregateType: "student_appointment",
+          aggregateId: id,
+          aggregateVersion: 1,
+          requestId: input.requestId,
+          data: { studentId: input.auth.studentId, startsAt: startsAt.toISOString() },
+        });
+        return mapAppointment(created);
+      },
+    );
+  }
+
+  async getStudentPayments(auth: AuthContext): Promise<StudentPaymentList> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        id, offer_id, amount_cents, status, processor_reference, created_at
+      FROM payment_transaction
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      ORDER BY created_at DESC, id
+    `);
+    const items = rows<PaymentRow>(result).map(mapPayment);
+    return { items, total: items.length };
+  }
+
+  async createDepositPayment(input: {
+    auth: AuthContext;
+    payment: CreateDepositPaymentInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentPayment> {
+    return this.runIdempotent(
+      input,
+      "student_payment.deposit",
+      input.payment,
+      200,
+      async (transaction) => {
+        const offerResult = await transaction.execute(sql`
+          SELECT deposit_amount_cents
+          FROM admission_offer
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND id = ${input.payment.offerId}
+            AND status = 'accepted'
+          FOR UPDATE
+        `);
+        const offer = rows<{ deposit_amount_cents: number }>(offerResult)[0];
+        if (!offer) {
+          throw new ConflictError(
+            "ACCEPTED_OFFER_REQUIRED",
+            "An accepted admission offer is required before paying a deposit",
+          );
+        }
+        const existingResult = await transaction.execute(sql`
+          SELECT
+            id, offer_id, amount_cents, status, processor_reference, created_at
+          FROM payment_transaction
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND offer_id = ${input.payment.offerId}
+            AND type = 'enrollment_deposit'
+            AND status = 'succeeded'
+        `);
+        const existing = rows<PaymentRow>(existingResult)[0];
+        if (existing) return mapPayment(existing);
+        const id = randomUUID();
+        const processorReference = `dummy_${id.replaceAll("-", "")}`;
+        const result = await transaction.execute(sql`
+          INSERT INTO payment_transaction (
+            id,
+            tenant_id,
+            student_id,
+            offer_id,
+            type,
+            amount_cents,
+            status,
+            processor,
+            processor_reference
+          )
+          VALUES (
+            ${id},
+            ${input.auth.tenantId},
+            ${input.auth.studentId},
+            ${input.payment.offerId},
+            'enrollment_deposit',
+            ${offer.deposit_amount_cents},
+            'succeeded',
+            'dummy',
+            ${processorReference}
+          )
+          RETURNING
+            id, offer_id, amount_cents, status, processor_reference, created_at
+        `);
+        const created = rows<PaymentRow>(result)[0];
+        if (!created) {
+          throw new ApiError(
+            500,
+            "PAYMENT_CREATE_FAILED",
+            "The deposit could not be recorded",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "payment.deposit_succeeded",
+          resourceType: "payment_transaction",
+          resourceId: id,
+          requestId: input.requestId,
+          metadata: {
+            offerId: input.payment.offerId,
+            amountCents: offer.deposit_amount_cents,
+            processor: "dummy",
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "payment.deposit_succeeded.v1",
+          aggregateType: "payment_transaction",
+          aggregateId: id,
+          aggregateVersion: 1,
+          requestId: input.requestId,
+          data: {
+            studentId: input.auth.studentId,
+            offerId: input.payment.offerId,
+            amountCents: offer.deposit_amount_cents,
+          },
+        });
+        return mapPayment(created);
+      },
+    );
+  }
+
+  async getStudentProfile(auth: AuthContext): Promise<StudentProfile> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        student_id,
+        preferred_name,
+        pronouns,
+        mobile_phone,
+        communication_preference,
+        version,
+        updated_at
+      FROM student_profile
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+    `);
+    const profile = rows<ProfileRow>(result)[0];
+    if (!profile) {
+      throw new NotFoundError(
+        "STUDENT_PROFILE_NOT_FOUND",
+        "The student profile was not found",
+      );
+    }
+    return mapProfile(profile);
+  }
+
+  async updateStudentProfile(input: {
+    auth: AuthContext;
+    update: UpdateStudentProfileInput;
+    requestId: string;
+  }): Promise<StudentProfile> {
+    const fields = [
+      "preferredName",
+      "pronouns",
+      "mobilePhone",
+      "communicationPreference",
+    ] as const;
+    const changedFields = fields.filter((field) =>
+      Object.prototype.hasOwnProperty.call(input.update, field),
+    );
+    if (changedFields.length === 0) {
+      throw new BadRequestError(
+        "PROFILE_UPDATE_EMPTY",
+        "At least one profile field must be supplied",
+      );
+    }
+    return this.database.db.transaction(async (transaction) => {
+      const hasPreferredName = changedFields.includes("preferredName");
+      const hasPronouns = changedFields.includes("pronouns");
+      const hasMobilePhone = changedFields.includes("mobilePhone");
+      const hasPreference = changedFields.includes("communicationPreference");
+      const now = new Date();
+      const result = await transaction.execute(sql`
+        UPDATE student_profile
+        SET preferred_name = CASE
+              WHEN ${hasPreferredName} THEN ${input.update.preferredName ?? ""}
+              ELSE preferred_name
+            END,
+            pronouns = CASE
+              WHEN ${hasPronouns} THEN ${input.update.pronouns ?? null}
+              ELSE pronouns
+            END,
+            mobile_phone = CASE
+              WHEN ${hasMobilePhone} THEN ${input.update.mobilePhone ?? null}
+              ELSE mobile_phone
+            END,
+            communication_preference = CASE
+              WHEN ${hasPreference}
+                THEN ${input.update.communicationPreference ?? "email"}
+              ELSE communication_preference
+            END,
+            version = version + 1,
+            updated_at = ${now}
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND version = ${input.update.expectedVersion}
+        RETURNING
+          student_id,
+          preferred_name,
+          pronouns,
+          mobile_phone,
+          communication_preference,
+          version,
+          updated_at
+      `);
+      const updated = rows<ProfileRow>(result)[0];
+      if (!updated) {
+        const current = await transaction.execute(sql`
+          SELECT version
+          FROM student_profile
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+        `);
+        if (rows<{ version: number }>(current).length === 0) {
+          throw new NotFoundError(
+            "STUDENT_PROFILE_NOT_FOUND",
+            "The student profile was not found",
+          );
+        }
+        throw new ConflictError(
+          "VERSION_CONFLICT",
+          "The profile changed in another session",
+        );
+      }
+      if (hasPreferredName) {
+        await transaction.execute(sql`
+          UPDATE person p
+          SET preferred_name = ${updated.preferred_name},
+              updated_at = ${now}
+          FROM student s
+          WHERE s.person_id = p.id
+            AND s.tenant_id = p.tenant_id
+            AND s.tenant_id = ${input.auth.tenantId}
+            AND s.id = ${input.auth.studentId}
+        `);
+      }
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "student_profile.updated",
+        resourceType: "student_profile",
+        resourceId: input.auth.studentId,
+        requestId: input.requestId,
+        metadata: { changedFields, version: updated.version },
+      });
+      await this.insertOutbox(transaction, {
+        auth: input.auth,
+        eventName: "student.profile_updated.v1",
+        aggregateType: "student_profile",
+        aggregateId: input.auth.studentId,
+        aggregateVersion: updated.version,
+        requestId: input.requestId,
+        data: {
+          studentId: input.auth.studentId,
+          changedFields,
+        },
+      });
+      return mapProfile(updated);
+    });
+  }
+
+  async getStudentHelp(auth: AuthContext): Promise<StudentHelp> {
+    const result = await this.database.db.execute(sql`
+      SELECT id, category, question, answer
+      FROM help_article
+      WHERE tenant_id = ${auth.tenantId}
+        AND active = true
+      ORDER BY sort_order, id
+    `);
+    return {
+      articles: rows<{
+        id: string;
+        category: StudentHelp["articles"][number]["category"];
+        question: string;
+        answer: string;
+      }>(result),
+      support: {
+        email: "enrollment-support@vv.example",
+        phone: "+1 555 010 2027",
+        hours: "Monday-Friday, 09:00-17:00",
+      },
+    };
+  }
+
+  private async runIdempotent<T>(
+    input: {
+      auth: AuthContext;
+      idempotencyKey: string;
+      requestId: string;
+    },
+    operation: string,
+    requestPayload: unknown,
+    responseStatus: number,
+    handler: (transaction: Transaction) => Promise<T>,
+  ): Promise<T> {
+    const requestHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          tenantId: input.auth.tenantId,
+          studentId: input.auth.studentId,
+          requestPayload,
+        }),
+      )
+      .digest("hex");
+    const lockKey = [
+      input.auth.tenantId,
+      input.auth.actorId,
+      operation,
+      input.idempotencyKey,
+    ].join(":");
+    return this.database.db.transaction(async (transaction) => {
+      await transaction.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
+      );
+      const existingResult = await transaction.execute(sql`
+        SELECT request_hash, response_body
+        FROM idempotency_record
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND actor_id = ${input.auth.actorId}
+          AND operation = ${operation}
+          AND idempotency_key = ${input.idempotencyKey}
+      `);
+      const existing = rows<IdempotencyRow<T>>(existingResult)[0];
+      if (existing) {
+        if (existing.request_hash !== requestHash) {
+          throw new ConflictError(
+            "IDEMPOTENCY_KEY_REUSED",
+            "This idempotency key was already used for a different request",
+          );
+        }
+        return existing.response_body;
+      }
+      const response = await handler(transaction);
+      await transaction.execute(sql`
+        INSERT INTO idempotency_record (
+          tenant_id,
+          actor_id,
+          operation,
+          idempotency_key,
+          request_hash,
+          response_status,
+          response_body,
+          created_at,
+          expires_at
+        )
+        VALUES (
+          ${input.auth.tenantId},
+          ${input.auth.actorId},
+          ${operation},
+          ${input.idempotencyKey},
+          ${requestHash},
+          ${responseStatus},
+          ${JSON.stringify(response)}::jsonb,
+          NOW(),
+          NOW() + INTERVAL '24 hours'
+        )
+      `);
+      return response;
+    });
+  }
+
+  private async validateOnboardingStep(
+    transaction: Transaction,
+    auth: AuthContext,
+    step: OnboardingStep,
+    data: StudentOnboardingData,
+  ): Promise<void> {
+    validateOnboardingStepData(step, data);
+    switch (step) {
+      case "offer": {
+        const result = await transaction.execute(sql`
+          SELECT 1
+          FROM admission_offer
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+            AND status = 'accepted'
+          LIMIT 1
+        `);
+        if (rows(result).length === 0) {
+          throw new ConflictError(
+            "ACCEPTED_OFFER_REQUIRED",
+            "Accept the admission offer before completing this step",
+          );
+        }
+        return;
+      }
+      case "deposit": {
+        const result = await transaction.execute(sql`
+          SELECT 1
+          FROM payment_transaction
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+            AND type = 'enrollment_deposit'
+            AND status = 'succeeded'
+          LIMIT 1
+        `);
+        if (rows(result).length === 0) {
+          throw new ConflictError(
+            "DEPOSIT_REQUIRED",
+            "Complete the enrollment deposit before saving this step",
+          );
+        }
+        return;
+      }
+      default:
+        return;
+    }
+  }
+
+  private async insertAudit(
+    transaction: Transaction,
+    input: {
+      auth: AuthContext;
+      action: string;
+      resourceType: string;
+      resourceId: string;
+      requestId: string;
+      metadata: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    await transaction.execute(sql`
+      INSERT INTO audit_event (
+        id,
+        tenant_id,
+        actor_type,
+        actor_id,
+        student_id,
+        action,
+        resource_type,
+        resource_id,
+        authorization_basis,
+        request_id,
+        correlation_id,
+        metadata
+      )
+      VALUES (
+        ${randomUUID()},
+        ${input.auth.tenantId},
+        ${input.auth.actorType},
+        ${input.auth.actorId},
+        ${input.auth.studentId},
+        ${input.action},
+        ${input.resourceType},
+        ${input.resourceId},
+        'student_self_service',
+        ${input.requestId},
+        ${input.requestId},
+        ${JSON.stringify(input.metadata)}::jsonb
+      )
+    `);
+  }
+
+  private async insertOutbox(
+    transaction: Transaction,
+    input: {
+      auth: AuthContext;
+      eventName: string;
+      aggregateType: string;
+      aggregateId: string;
+      aggregateVersion: number;
+      requestId: string;
+      data: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    const eventId = randomUUID();
+    const occurredAt = new Date();
+    const causationId = randomUUID();
+    const payload = {
+      eventId,
+      eventName: input.eventName,
+      occurredAt: occurredAt.toISOString(),
+      tenantId: input.auth.tenantId,
+      aggregateType: input.aggregateType,
+      aggregateId: input.aggregateId,
+      aggregateVersion: input.aggregateVersion,
+      actor: { type: input.auth.actorType, id: input.auth.actorId },
+      correlationId: input.requestId,
+      causationId,
+      data: input.data,
+    };
+    await transaction.execute(sql`
+      INSERT INTO outbox_event (
+        id,
+        tenant_id,
+        event_name,
+        aggregate_type,
+        aggregate_id,
+        aggregate_version,
+        occurred_at,
+        actor_type,
+        actor_id,
+        correlation_id,
+        causation_id,
+        payload
+      )
+      VALUES (
+        ${eventId},
+        ${input.auth.tenantId},
+        ${input.eventName},
+        ${input.aggregateType},
+        ${input.aggregateId},
+        ${input.aggregateVersion},
+        ${occurredAt},
+        ${input.auth.actorType},
+        ${input.auth.actorId},
+        ${input.requestId},
+        ${causationId},
+        ${JSON.stringify(payload)}::jsonb
+      )
+    `);
+  }
+}
