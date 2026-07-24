@@ -2,6 +2,7 @@ import type {
   AcceptOfferResponse,
   ActivityEventInput,
   CompleteStudentOnboardingInput,
+  ConfirmStudentDocumentExtractionInput,
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
@@ -10,6 +11,7 @@ import type {
   StudentBootstrap,
   StudentDashboard,
   StudentDocument,
+  StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
   StudentMessage,
@@ -73,6 +75,46 @@ export interface PlatformStore {
   createStudentDocument(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument>;
+  reserveStudentDocumentUpload(input: {
+    auth: AuthContext;
+    document: CreateStudentDocumentInput & { sha256: string };
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument>;
+  claimStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<boolean>;
+  releaseStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+  }): Promise<void>;
+  completeStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    extraction: StudentDocumentExtraction;
+    requestId: string;
+  }): Promise<StudentDocument>;
+  getStudentDocument(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<StudentDocument>;
+  getStudentDocumentContentReference(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<{
+    storageKey: string;
+    fileName: string;
+    mimeType: StudentDocument["mimeType"];
+  }>;
+  confirmStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    confirmation: ConfirmStudentDocumentExtractionInput;
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentDocument>;

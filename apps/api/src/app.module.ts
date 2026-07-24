@@ -1,11 +1,22 @@
 import { DynamicModule, Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ActivityController } from "./activity/activity.controller";
+import { StudentAgentService } from "./agentic/student-agent.service";
+import {
+  OpenRouterStudentAiGateway,
+  STUDENT_AI_GATEWAY,
+  type StudentAiGateway,
+} from "./agentic/student-ai.gateway";
 import { AuthContextGuard } from "./auth/auth-context.guard";
 import { DemoIdentityResolver } from "./auth/demo-identity.resolver";
 import { IDENTITY_RESOLVER } from "./auth/identity-resolver";
 import { APP_CONFIG, type AppConfig } from "./config/app-config";
 import { DatabaseService } from "./database/database.service";
+import {
+  DOCUMENT_STORAGE,
+  S3DocumentStorage,
+  type DocumentStorage,
+} from "./documents/document-storage";
 import { HealthController } from "./health/health.controller";
 import { OffersController } from "./offers/offers.controller";
 import { PortalController } from "./portal/portal.controller";
@@ -21,6 +32,10 @@ export class AppModule {
   static register(
     config: AppConfig,
     platformStoreOverride?: PlatformStore,
+    agenticOverrides?: {
+      documentStorage?: DocumentStorage;
+      studentAiGateway?: StudentAiGateway;
+    },
   ): DynamicModule {
     const platformProviders = platformStoreOverride
       ? [
@@ -58,6 +73,25 @@ export class AppModule {
           provide: APP_GUARD,
           useClass: AuthContextGuard,
         },
+        StudentAgentService,
+        agenticOverrides?.documentStorage
+          ? {
+              provide: DOCUMENT_STORAGE,
+              useValue: agenticOverrides.documentStorage,
+            }
+          : {
+              provide: DOCUMENT_STORAGE,
+              useFactory: () => new S3DocumentStorage(config),
+            },
+        agenticOverrides?.studentAiGateway
+          ? {
+              provide: STUDENT_AI_GATEWAY,
+              useValue: agenticOverrides.studentAiGateway,
+            }
+          : {
+              provide: STUDENT_AI_GATEWAY,
+              useFactory: () => new OpenRouterStudentAiGateway(config),
+            },
         ...platformProviders,
       ],
     };

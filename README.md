@@ -82,6 +82,11 @@ PDF/JPEG/PNG uploads are capped at 10 MB. PDF parsing uses OpenRouter's
 file-parser plugin and strict JSON-schema output. Extracted fields must be
 selected by the student before they enter the review state.
 
+The complete Compose stack exposes the same routes through the Nest API. It
+stores document metadata and review state in PostgreSQL, stores originals in
+MinIO through the S3 API, and atomically claims extraction work so an
+idempotent upload replay does not spend LLM tokens twice.
+
 ## Run the complete local stack
 
 Requirements: Docker Desktop with Compose, Node.js 22.13 or newer, and npm.

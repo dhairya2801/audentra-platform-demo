@@ -498,6 +498,9 @@ export const documentRecord = pgTable(
     category: varchar("category", { length: 40 }).notNull(),
     status: varchar("status", { length: 40 }).notNull(),
     storageProvider: varchar("storage_provider", { length: 40 }).notNull(),
+    storageKey: varchar("storage_key", { length: 512 }),
+    sha256: varchar("sha256", { length: 64 }),
+    extraction: jsonb("extraction").$type<Record<string, unknown>>(),
     ...timestamps,
   },
   (table) => [

@@ -7,6 +7,7 @@ import {
 } from "@nestjs/platform-fastify";
 import { LogController } from "fastify";
 import { AppModule } from "./app.module";
+import type { StudentAiGateway } from "./agentic/student-ai.gateway";
 import { AllExceptionsFilter } from "./common/all-exceptions.filter";
 import { RequestContextInterceptor } from "./common/request-context.interceptor";
 import {
@@ -15,10 +16,14 @@ import {
   type AppConfig,
 } from "./config/app-config";
 import type { PlatformStore } from "./platform/platform-store";
+import type { DocumentStorage } from "./documents/document-storage";
+import multipart from "@fastify/multipart";
 
 export interface CreateApiApplicationOptions {
   config?: AppConfig;
   platformStoreOverride?: PlatformStore;
+  documentStorageOverride?: DocumentStorage;
+  studentAiGatewayOverride?: StudentAiGateway;
   logger?: boolean;
 }
 
@@ -39,13 +44,33 @@ export async function createApiApplication(
       disableRequestLogging: config.environment === "test",
     }),
   });
+  const agenticOverrides = {
+    ...(options.documentStorageOverride
+      ? { documentStorage: options.documentStorageOverride }
+      : {}),
+    ...(options.studentAiGatewayOverride
+      ? { studentAiGateway: options.studentAiGatewayOverride }
+      : {}),
+  };
   const app = await NestFactory.create<NestFastifyApplication>(
-    AppModule.register(config, options.platformStoreOverride),
+    AppModule.register(
+      config,
+      options.platformStoreOverride,
+      agenticOverrides,
+    ),
     adapter,
     options.logger === false
       ? { bufferLogs: false, logger: false }
       : { bufferLogs: false },
   );
+  await app.register(multipart, {
+    limits: {
+      fileSize: 10_485_760,
+      files: 1,
+      fields: 1,
+      parts: 2,
+    },
+  });
 
   app.enableCors({
     origin: config.webOrigins,

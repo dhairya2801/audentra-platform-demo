@@ -3,6 +3,7 @@ import type {
   AcceptOfferResponse,
   ActivityEventInput,
   CompleteStudentOnboardingInput,
+  ConfirmStudentDocumentExtractionInput,
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
@@ -12,6 +13,7 @@ import type {
   StudentBootstrap,
   StudentDashboard,
   StudentDocument,
+  StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
   StudentMessage,
@@ -50,6 +52,7 @@ export class InMemoryPlatformStore implements PlatformStore {
   private readonly activityEventIds = new Set<string>();
   private acceptedResponse: AcceptOfferResponse | undefined;
   private readonly portalIdempotency = new Map<string, unknown>();
+  private readonly documentStorageKeys = new Map<string, string>();
   private onboarding: StudentOnboarding = {
     studentId: DEMO_IDS.studentId,
     status: "in_progress",
@@ -465,6 +468,178 @@ export class InMemoryPlatformStore implements PlatformStore {
     this.documents.unshift(document);
     this.portalIdempotency.set(key, structuredClone(document));
     return structuredClone(document);
+  }
+
+  async reserveStudentDocumentUpload(input: {
+    auth: AuthContext;
+    document: CreateStudentDocumentInput & { sha256: string };
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    this.authorize(input.auth);
+    const key = `document-upload:${input.idempotencyKey}`;
+    const replay = this.portalIdempotency.get(key) as
+      | StudentDocument
+      | undefined;
+    if (replay) return structuredClone(replay);
+    const id = randomUUID();
+    const extension =
+      input.document.mimeType === "application/pdf"
+        ? ".pdf"
+        : input.document.mimeType === "image/jpeg"
+          ? ".jpg"
+          : ".png";
+    const storageKey = `${input.auth.tenantId}/${input.auth.studentId}/${id}${extension}`;
+    const document: StudentDocument = {
+      id,
+      fileName: input.document.fileName,
+      mimeType: input.document.mimeType,
+      sizeBytes: input.document.sizeBytes,
+      category: input.document.category,
+      status: "uploaded",
+      sha256: input.document.sha256,
+      contentUrl: `/v1/student/documents/${id}/content`,
+      createdAt: "2026-07-24T12:00:00.000Z",
+    };
+    this.documents.unshift(document);
+    this.documentStorageKeys.set(id, storageKey);
+    this.portalIdempotency.set(key, structuredClone(document));
+    return structuredClone(document);
+  }
+
+  async claimStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<boolean> {
+    this.authorize(input.auth);
+    const document = this.documents.find(
+      (candidate) => candidate.id === input.documentId,
+    );
+    if (!document || document.status !== "uploaded" || document.extraction) {
+      return false;
+    }
+    document.status = "processing";
+    return true;
+  }
+
+  async releaseStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+  }): Promise<void> {
+    this.authorize(input.auth);
+    const document = this.documents.find(
+      (candidate) => candidate.id === input.documentId,
+    );
+    if (!document || document.status !== "processing") {
+      throw new ConflictError(
+        "DOCUMENT_PROCESSING_STATE_CHANGED",
+        "The document processing state changed before the upload could be retried",
+      );
+    }
+    document.status = "uploaded";
+    delete document.extraction;
+  }
+
+  async completeStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    extraction: StudentDocumentExtraction;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    this.authorize(input.auth);
+    const document = this.documents.find(
+      (candidate) => candidate.id === input.documentId,
+    );
+    if (!document || document.status !== "processing") {
+      throw new ConflictError(
+        "DOCUMENT_PROCESSING_STATE_CHANGED",
+        "The document processing state changed before completion",
+      );
+    }
+    document.extraction = structuredClone(input.extraction);
+    document.status =
+      input.extraction.status === "completed" ? "needs_review" : "uploaded";
+    return structuredClone(document);
+  }
+
+  async getStudentDocument(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<StudentDocument> {
+    this.authorize(input.auth);
+    const document = this.documents.find(
+      (candidate) => candidate.id === input.documentId,
+    );
+    if (!document) {
+      throw new NotFoundError(
+        "STUDENT_DOCUMENT_NOT_FOUND",
+        "The document was not found",
+      );
+    }
+    return structuredClone(document);
+  }
+
+  async getStudentDocumentContentReference(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<{
+    storageKey: string;
+    fileName: string;
+    mimeType: StudentDocument["mimeType"];
+  }> {
+    const document = await this.getStudentDocument(input);
+    const storageKey = this.documentStorageKeys.get(input.documentId);
+    if (!storageKey) {
+      throw new NotFoundError(
+        "STUDENT_DOCUMENT_CONTENT_NOT_FOUND",
+        "The uploaded document content was not found",
+      );
+    }
+    return {
+      storageKey,
+      fileName: document.fileName,
+      mimeType: document.mimeType,
+    };
+  }
+
+  async confirmStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    confirmation: ConfirmStudentDocumentExtractionInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    const document = await this.getStudentDocument(input);
+    if (!document.extraction || document.extraction.status !== "completed") {
+      throw new ConflictError(
+        "DOCUMENT_EXTRACTION_NOT_READY",
+        "Document extraction is not ready for review",
+      );
+    }
+    const available = new Set(
+      document.extraction.fields.map((field) => field.key),
+    );
+    if (
+      input.confirmation.acceptedFieldKeys.some((key) => !available.has(key))
+    ) {
+      throw new BadRequestError(
+        "UNKNOWN_EXTRACTED_FIELD",
+        "One or more extracted fields do not belong to this document",
+      );
+    }
+    const stored = this.documents.find(
+      (candidate) => candidate.id === input.documentId,
+    )!;
+    stored.extraction = {
+      ...document.extraction,
+      acceptedFieldKeys: [
+        ...new Set(input.confirmation.acceptedFieldKeys),
+      ],
+      verifiedAt: "2026-07-24T12:00:00.000Z",
+    };
+    stored.status = "under_review";
+    return structuredClone(stored);
   }
 
   async getStudentAppointments(

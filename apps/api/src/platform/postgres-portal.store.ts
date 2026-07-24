@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   CompleteStudentOnboardingInput,
+  ConfirmStudentDocumentExtractionInput,
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
@@ -9,6 +10,7 @@ import type {
   StudentAppointmentList,
   StudentBootstrap,
   StudentDocument,
+  StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
   StudentMessage,
@@ -88,6 +90,9 @@ interface DocumentRow {
   size_bytes: number;
   category: StudentDocument["category"];
   status: StudentDocument["status"];
+  storage_key: string | null;
+  sha256: string | null;
+  extraction: StudentDocumentExtraction | null;
   created_at: Date;
 }
 
@@ -173,6 +178,11 @@ function mapDocument(row: DocumentRow): StudentDocument {
     sizeBytes: row.size_bytes,
     category: row.category,
     status: row.status,
+    ...(row.storage_key
+      ? { contentUrl: `/v1/student/documents/${row.id}/content` }
+      : {}),
+    ...(row.sha256 ? { sha256: row.sha256 } : {}),
+    ...(row.extraction ? { extraction: row.extraction } : {}),
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -647,7 +657,8 @@ export class PostgresPortalStore {
   async getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList> {
     const result = await this.database.db.execute(sql`
       SELECT
-        id, file_name, mime_type, size_bytes, category, status, created_at
+        id, file_name, mime_type, size_bytes, category, status,
+        storage_key, sha256, extraction, created_at
       FROM document_record
       WHERE tenant_id = ${auth.tenantId}
         AND student_id = ${auth.studentId}
@@ -696,7 +707,8 @@ export class PostgresPortalStore {
           WHERE s.tenant_id = ${input.auth.tenantId}
             AND s.id = ${input.auth.studentId}
           RETURNING
-            id, file_name, mime_type, size_bytes, category, status, created_at
+            id, file_name, mime_type, size_bytes, category, status,
+            storage_key, sha256, extraction, created_at
         `);
         const created = rows<DocumentRow>(result)[0];
         if (!created) {
@@ -730,6 +742,378 @@ export class PostgresPortalStore {
           },
         });
         return mapDocument(created);
+      },
+    );
+  }
+
+  async reserveStudentDocumentUpload(input: {
+    auth: AuthContext;
+    document: CreateStudentDocumentInput & { sha256: string };
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    return this.runIdempotent(
+      input,
+      "student_document.upload.reserve",
+      input.document,
+      201,
+      async (transaction) => {
+        const id = randomUUID();
+        const storageKey = [
+          input.auth.tenantId,
+          input.auth.studentId,
+          `${id}${documentExtension(input.document.mimeType)}`,
+        ].join("/");
+        const result = await transaction.execute(sql`
+          INSERT INTO document_record (
+            id,
+            tenant_id,
+            student_id,
+            file_name,
+            mime_type,
+            size_bytes,
+            category,
+            status,
+            storage_provider,
+            storage_key,
+            sha256
+          )
+          SELECT
+            ${id},
+            s.tenant_id,
+            s.id,
+            ${input.document.fileName},
+            ${input.document.mimeType},
+            ${input.document.sizeBytes},
+            ${input.document.category},
+            'uploaded',
+            's3',
+            ${storageKey},
+            ${input.document.sha256}
+          FROM student s
+          WHERE s.tenant_id = ${input.auth.tenantId}
+            AND s.id = ${input.auth.studentId}
+          RETURNING
+            id, file_name, mime_type, size_bytes, category, status,
+            storage_key, sha256, extraction, created_at
+        `);
+        const created = rows<DocumentRow>(result)[0];
+        if (!created) {
+          throw new NotFoundError(
+            "STUDENT_NOT_FOUND",
+            "The authenticated student was not found",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "document.upload_reserved",
+          resourceType: "document_record",
+          resourceId: id,
+          requestId: input.requestId,
+          metadata: {
+            category: input.document.category,
+            mimeType: input.document.mimeType,
+            sizeBytes: input.document.sizeBytes,
+            sha256: input.document.sha256,
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "document.upload_reserved.v1",
+          aggregateType: "document_record",
+          aggregateId: id,
+          aggregateVersion: 1,
+          requestId: input.requestId,
+          data: {
+            studentId: input.auth.studentId,
+            category: input.document.category,
+          },
+        });
+        return mapDocument(created);
+      },
+    );
+  }
+
+  async claimStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<boolean> {
+    const result = await this.database.db.execute(sql`
+      UPDATE document_record
+      SET status = 'processing', updated_at = NOW()
+      WHERE tenant_id = ${input.auth.tenantId}
+        AND student_id = ${input.auth.studentId}
+        AND id = ${input.documentId}
+        AND status = 'uploaded'
+        AND extraction IS NULL
+      RETURNING id
+    `);
+    return rows(result).length === 1;
+  }
+
+  async releaseStudentDocumentProcessing(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+  }): Promise<void> {
+    await this.database.db.transaction(async (transaction) => {
+      const result = await transaction.execute(sql`
+        UPDATE document_record
+        SET status = 'uploaded', extraction = NULL, updated_at = NOW()
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+          AND status = 'processing'
+        RETURNING id
+      `);
+      if (rows(result).length !== 1) {
+        throw new ConflictError(
+          "DOCUMENT_PROCESSING_STATE_CHANGED",
+          "The document processing state changed before the upload could be retried",
+        );
+      }
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "document.storage_failed",
+        resourceType: "document_record",
+        resourceId: input.documentId,
+        requestId: input.requestId,
+        metadata: { retryable: true },
+      });
+      await this.insertOutbox(transaction, {
+        auth: input.auth,
+        eventName: "document.storage_failed.v1",
+        aggregateType: "document_record",
+        aggregateId: input.documentId,
+        aggregateVersion: 2,
+        requestId: input.requestId,
+        data: {
+          studentId: input.auth.studentId,
+          retryable: true,
+        },
+      });
+    });
+  }
+
+  async completeStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    extraction: StudentDocumentExtraction;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    return this.database.db.transaction(async (transaction) => {
+      const status =
+        input.extraction.status === "completed" ? "needs_review" : "uploaded";
+      const result = await transaction.execute(sql`
+        UPDATE document_record
+        SET
+          status = ${status},
+          extraction = ${JSON.stringify(input.extraction)}::jsonb,
+          updated_at = NOW()
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+          AND status = 'processing'
+        RETURNING
+          id, file_name, mime_type, size_bytes, category, status,
+          storage_key, sha256, extraction, created_at
+      `);
+      const updated = rows<DocumentRow>(result)[0];
+      if (!updated) {
+        throw new ConflictError(
+          "DOCUMENT_PROCESSING_STATE_CHANGED",
+          "The document processing state changed before completion",
+        );
+      }
+      if (updated.category === "identity") {
+        await transaction.execute(sql`
+          UPDATE student_requirement sr
+          SET
+            status = 'under_review',
+            progress_percent = 80,
+            version = sr.version + 1,
+            updated_at = NOW()
+          FROM
+            requirement_definition_version rdv,
+            enrollment_journey j
+          WHERE sr.tenant_id = ${input.auth.tenantId}
+            AND sr.requirement_definition_version_id = rdv.id
+            AND sr.journey_id = j.id
+            AND j.student_id = ${input.auth.studentId}
+            AND rdv.code = 'identity_document'
+        `);
+      }
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "document.extraction_completed",
+        resourceType: "document_record",
+        resourceId: input.documentId,
+        requestId: input.requestId,
+        metadata: {
+          status: input.extraction.status,
+          provider: input.extraction.provider,
+          model: input.extraction.model,
+          extractedFieldCount: input.extraction.fields.length,
+        },
+      });
+      await this.insertOutbox(transaction, {
+        auth: input.auth,
+        eventName: "document.extraction_completed.v1",
+        aggregateType: "document_record",
+        aggregateId: input.documentId,
+        aggregateVersion: 2,
+        requestId: input.requestId,
+        data: {
+          studentId: input.auth.studentId,
+          category: updated.category,
+          extractionStatus: input.extraction.status,
+        },
+      });
+      return mapDocument(updated);
+    });
+  }
+
+  async getStudentDocument(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<StudentDocument> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        id, file_name, mime_type, size_bytes, category, status,
+        storage_key, sha256, extraction, created_at
+      FROM document_record
+      WHERE tenant_id = ${input.auth.tenantId}
+        AND student_id = ${input.auth.studentId}
+        AND id = ${input.documentId}
+      LIMIT 1
+    `);
+    const document = rows<DocumentRow>(result)[0];
+    if (!document) {
+      throw new NotFoundError(
+        "STUDENT_DOCUMENT_NOT_FOUND",
+        "The document was not found",
+      );
+    }
+    return mapDocument(document);
+  }
+
+  async getStudentDocumentContentReference(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<{
+    storageKey: string;
+    fileName: string;
+    mimeType: StudentDocument["mimeType"];
+  }> {
+    const result = await this.database.db.execute(sql`
+      SELECT storage_key, file_name, mime_type
+      FROM document_record
+      WHERE tenant_id = ${input.auth.tenantId}
+        AND student_id = ${input.auth.studentId}
+        AND id = ${input.documentId}
+        AND storage_key IS NOT NULL
+      LIMIT 1
+    `);
+    const reference = rows<{
+      storage_key: string;
+      file_name: string;
+      mime_type: StudentDocument["mimeType"];
+    }>(result)[0];
+    if (!reference) {
+      throw new NotFoundError(
+        "STUDENT_DOCUMENT_CONTENT_NOT_FOUND",
+        "The uploaded document content was not found",
+      );
+    }
+    return {
+      storageKey: reference.storage_key,
+      fileName: reference.file_name,
+      mimeType: reference.mime_type,
+    };
+  }
+
+  async confirmStudentDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    confirmation: ConfirmStudentDocumentExtractionInput;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    return this.runIdempotent(
+      input,
+      `student_document.extraction.confirm:${input.documentId}`,
+      input.confirmation,
+      200,
+      async (transaction) => {
+        const currentResult = await transaction.execute(sql`
+          SELECT
+            id, file_name, mime_type, size_bytes, category, status,
+            storage_key, sha256, extraction, created_at
+          FROM document_record
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND id = ${input.documentId}
+          FOR UPDATE
+        `);
+        const current = rows<DocumentRow>(currentResult)[0];
+        if (!current) {
+          throw new NotFoundError(
+            "STUDENT_DOCUMENT_NOT_FOUND",
+            "The document was not found",
+          );
+        }
+        if (!current.extraction || current.extraction.status !== "completed") {
+          throw new ConflictError(
+            "DOCUMENT_EXTRACTION_NOT_READY",
+            "Document extraction is not ready for review",
+          );
+        }
+        const availableKeys = new Set(
+          current.extraction.fields.map((field) => field.key),
+        );
+        const acceptedFieldKeys = [
+          ...new Set(input.confirmation.acceptedFieldKeys),
+        ];
+        if (acceptedFieldKeys.some((key) => !availableKeys.has(key))) {
+          throw new BadRequestError(
+            "UNKNOWN_EXTRACTED_FIELD",
+            "One or more extracted fields do not belong to this document",
+          );
+        }
+        const extraction: StudentDocumentExtraction = {
+          ...current.extraction,
+          acceptedFieldKeys,
+          verifiedAt: new Date().toISOString(),
+        };
+        const updatedResult = await transaction.execute(sql`
+          UPDATE document_record
+          SET
+            status = 'under_review',
+            extraction = ${JSON.stringify(extraction)}::jsonb,
+            updated_at = NOW()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND id = ${input.documentId}
+          RETURNING
+            id, file_name, mime_type, size_bytes, category, status,
+            storage_key, sha256, extraction, created_at
+        `);
+        const updated = rows<DocumentRow>(updatedResult)[0];
+        if (!updated) {
+          throw new ConflictError(
+            "DOCUMENT_PROCESSING_STATE_CHANGED",
+            "The document review state changed before confirmation",
+          );
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "document.extraction_confirmed",
+          resourceType: "document_record",
+          resourceId: input.documentId,
+          requestId: input.requestId,
+          metadata: { acceptedFieldKeys },
+        });
+        return mapDocument(updated);
       },
     );
   }
@@ -1321,4 +1705,12 @@ export class PostgresPortalStore {
       )
     `);
   }
+}
+
+function documentExtension(
+  mimeType: StudentDocument["mimeType"],
+): ".pdf" | ".jpg" | ".png" {
+  if (mimeType === "application/pdf") return ".pdf";
+  if (mimeType === "image/jpeg") return ".jpg";
+  return ".png";
 }

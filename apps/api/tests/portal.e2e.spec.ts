@@ -1,6 +1,8 @@
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import type {
+  AskEdwardResponse,
   OnboardingStep,
+  StudentDocumentExtraction,
   StudentOnboarding,
 } from "@vv/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -9,6 +11,8 @@ import {
   DEMO_IDS,
   type AppConfig,
 } from "../src/config/app-config";
+import type { StudentAiGateway } from "../src/agentic/student-ai.gateway";
+import type { DocumentStorage } from "../src/documents/document-storage";
 import { InMemoryPlatformStore } from "./support/in-memory-platform.store";
 
 const config: AppConfig = {
@@ -26,11 +30,72 @@ const config: AppConfig = {
 
 describe("functional student portal API", () => {
   let app: NestFastifyApplication;
+  const storedObjects = new Map<string, Buffer>();
+  let extractionCalls = 0;
+  let storageFailuresRemaining = 0;
+  const documentStorage: DocumentStorage = {
+    async put(input) {
+      if (storageFailuresRemaining > 0) {
+        storageFailuresRemaining -= 1;
+        throw new Error("Simulated object storage outage");
+      }
+      storedObjects.set(input.key, Buffer.from(input.body));
+    },
+    async get(key) {
+      const value = storedObjects.get(key);
+      if (!value) throw new Error("Missing test object");
+      return Buffer.from(value);
+    },
+  };
+  const studentAiGateway: StudentAiGateway = {
+    async extractStudentDocument(): Promise<StudentDocumentExtraction> {
+      extractionCalls += 1;
+      return {
+        status: "completed",
+        documentType: "ferpa",
+        summary: "A student records release authorization.",
+        studentName: "Alex Morgan",
+        institutionName: "Aster University",
+        issueDate: null,
+        academicTerm: null,
+        fields: [
+          {
+            key: "student_name",
+            label: "Student name",
+            value: "Alex Morgan",
+            confidence: 0.98,
+          },
+        ],
+        warnings: [],
+        model: "test/document-model",
+        provider: "openrouter",
+        processedAt: "2026-07-24T12:00:00.000Z",
+        verifiedAt: null,
+      };
+    },
+    async askEdward(): Promise<AskEdwardResponse> {
+      return {
+        message: "Open Documents to review your upload.",
+        provider: "openrouter",
+        model: "test/edward",
+        usage: {
+          promptTokens: 50,
+          completionTokens: 8,
+          totalTokens: 58,
+        },
+        suggestedActions: [
+          { label: "Open documents", href: "/documents" },
+        ],
+      };
+    },
+  };
 
   beforeAll(async () => {
     app = await createApiApplication({
       config,
       platformStoreOverride: new InMemoryPlatformStore(),
+      documentStorageOverride: documentStorage,
+      studentAiGatewayOverride: studentAiGateway,
       logger: false,
     });
   });
@@ -334,6 +399,138 @@ describe("functional student portal API", () => {
     expect(replay.json()).toEqual(first.json());
     expect(invalid.statusCode).toBe(400);
     expect(list.json()).toMatchObject({ total: 2 });
+  });
+
+  it("uploads, parses, downloads, and confirms a real document idempotently", async () => {
+    const boundary = "vv-test-boundary";
+    const fileBytes = Buffer.from("%PDF-1.7\nAster FERPA test\n%%EOF\n");
+    const payload = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="category"\r\n\r\nconsent\r\n`,
+      ),
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="release.pdf"\r\nContent-Type: application/pdf\r\n\r\n`,
+      ),
+      fileBytes,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const request = {
+      method: "POST" as const,
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+        "idempotency-key": "portal.document.upload.0001",
+      },
+      payload,
+    };
+    const uploaded = await app.inject(request);
+    const replay = await app.inject(request);
+
+    expect(uploaded.statusCode).toBe(201);
+    expect(replay.statusCode).toBe(201);
+    expect(replay.json()).toEqual(uploaded.json());
+    expect(uploaded.json()).toMatchObject({
+      fileName: "release.pdf",
+      category: "consent",
+      status: "needs_review",
+      extraction: {
+        status: "completed",
+        documentType: "ferpa",
+      },
+    });
+    expect(uploaded.json().sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(extractionCalls).toBe(1);
+
+    const content = await app.inject({
+      method: "GET",
+      url: uploaded.json().contentUrl,
+    });
+    expect(content.statusCode).toBe(200);
+    expect(content.headers["content-type"]).toMatch(/^application\/pdf/);
+    expect(content.rawPayload).toEqual(fileBytes);
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: `/v1/student/documents/${uploaded.json().id}/confirm-extraction`,
+      headers: { "idempotency-key": "portal.document.confirm.0001" },
+      payload: { acceptedFieldKeys: ["student_name"] },
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json()).toMatchObject({
+      status: "under_review",
+      extraction: {
+        acceptedFieldKeys: ["student_name"],
+      },
+    });
+  });
+
+  it("releases the processing claim when storage fails so the same upload can retry safely", async () => {
+    const boundary = "vv-storage-retry-boundary";
+    const payload = Buffer.from(
+      [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="category"',
+        "",
+        "transcript",
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="file"; filename="retry.pdf"',
+        "Content-Type: application/pdf",
+        "",
+        "%PDF-1.7",
+        "retryable upload",
+        "%%EOF",
+        `--${boundary}--`,
+        "",
+      ].join("\r\n"),
+    );
+    const request = {
+      method: "POST" as const,
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${boundary}`,
+        "idempotency-key": "portal.document.upload.retry.0001",
+      },
+      payload,
+    };
+    const previousExtractionCalls = extractionCalls;
+    storageFailuresRemaining = 1;
+
+    const failed = await app.inject(request);
+    const retried = await app.inject(request);
+
+    expect(failed.statusCode).toBe(503);
+    expect(failed.json()).toMatchObject({
+      error: { code: "DOCUMENT_STORAGE_UNAVAILABLE" },
+    });
+    expect(retried.statusCode).toBe(201);
+    expect(retried.json()).toMatchObject({
+      fileName: "retry.pdf",
+      status: "needs_review",
+      extraction: { status: "completed" },
+    });
+    expect(extractionCalls).toBe(previousExtractionCalls + 1);
+  });
+
+  it("serves Edward through the same bounded AI adapter", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/student/assistant/messages",
+      payload: {
+        message: "Where is my document?",
+        pageContext: "/dashboard",
+        history: [],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      provider: "openrouter",
+      model: "test/edward",
+      usage: { totalTokens: 58 },
+      suggestedActions: [
+        { label: "Open documents", href: "/documents" },
+      ],
+    });
   });
 
   it("schedules appointments idempotently and rejects past times", async () => {

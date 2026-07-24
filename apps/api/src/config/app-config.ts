@@ -40,6 +40,20 @@ export interface AppConfig {
     studentId: string;
     actorId: string;
   };
+  openRouter?: {
+    apiKey: string;
+    model: string;
+    appUrl: string;
+    appName: string;
+  };
+  objectStorage?: {
+    endpoint: string;
+    region: string;
+    bucket: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    forcePathStyle: boolean;
+  };
 }
 
 function parsePort(value: string | undefined): number {
@@ -94,6 +108,27 @@ export function loadAppConfig(
       tenantId: environment.DEMO_TENANT_ID ?? DEMO_IDS.tenantId,
       studentId: environment.DEMO_STUDENT_ID ?? DEMO_IDS.studentId,
       actorId: environment.DEMO_ACTOR_ID ?? DEMO_IDS.personId,
+    },
+    openRouter: {
+      apiKey: environment.OPENROUTER_API_KEY?.trim() ?? "",
+      model: environment.OPENROUTER_MODEL?.trim() || "openai/gpt-4o-mini",
+      appUrl:
+        environment.OPENROUTER_APP_URL?.trim() || "http://localhost:3000",
+      appName:
+        environment.OPENROUTER_APP_NAME?.trim() || "Aster Student Portal",
+    },
+    objectStorage: {
+      endpoint:
+        environment.OBJECT_STORAGE_ENDPOINT?.trim() || "http://localhost:9000",
+      region: environment.OBJECT_STORAGE_REGION?.trim() || "us-east-1",
+      bucket: environment.OBJECT_STORAGE_BUCKET?.trim() || "vv-documents",
+      accessKeyId:
+        environment.OBJECT_STORAGE_ACCESS_KEY?.trim() || "vv_minio",
+      secretAccessKey:
+        environment.OBJECT_STORAGE_SECRET_KEY?.trim() ||
+        "vv_minio_password",
+      forcePathStyle:
+        environment.OBJECT_STORAGE_FORCE_PATH_STYLE?.trim() !== "false",
     },
   };
 }

@@ -12,7 +12,11 @@ describe("initial PostgreSQL migration", () => {
       resolve(__dirname, "../migrations/0001_student_portal_core.sql"),
       "utf8",
     );
-    const migration = `${initialMigration}\n${portalMigration}`;
+    const agenticDocumentMigration = await readFile(
+      resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
+      "utf8",
+    );
+    const migration = `${initialMigration}\n${portalMigration}\n${agenticDocumentMigration}`;
     const requiredTables = [
       "tenant",
       "person",
@@ -40,6 +44,21 @@ describe("initial PostgreSQL migration", () => {
         new RegExp(`CREATE TABLE ${table} \\(`, "i"),
       );
     }
+  });
+
+  it("persists opaque document content references and reviewable extraction data", async () => {
+    const migration = await readFile(
+      resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
+      "utf8",
+    );
+
+    expect(migration).toContain("storage_key varchar(512)");
+    expect(migration).toContain("sha256 char(64)");
+    expect(migration).toContain("extraction jsonb");
+    expect(migration).toContain("'processing'");
+    expect(migration).toContain("'needs_review'");
+    expect(migration).toContain("'under_review'");
+    expect(migration).toContain("document_record_storage_key_idx");
   });
 
   it("preserves the authoritative nine-step onboarding sequence", async () => {

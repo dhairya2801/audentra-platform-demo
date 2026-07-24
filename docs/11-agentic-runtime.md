@@ -14,7 +14,7 @@ Student browser
   +-- uploads PDF/JPEG/PNG                  |
            |                               |
            v                               v
-     Preview API                    bounded context builder
+     Portal API                     bounded context builder
            |                               |
            +-- stores original             |
            +-- calculates SHA-256           |
@@ -31,10 +31,11 @@ Student browser
            +-- record moves to staff review
 ```
 
-The current local adapter persists metadata in
+The no-Docker preview adapter persists metadata in
 `tools/demo-api/.data/state.json` and originals in
-`tools/demo-api/.data/uploads`. Both are ignored by Git. The domain and HTTP
-contracts keep those details out of the browser response.
+`tools/demo-api/.data/uploads`; both are ignored by Git. The complete Compose
+stack uses PostgreSQL for metadata and MinIO through the S3 API for originals.
+Both adapters implement the same browser-facing contract.
 
 ## Edward
 
@@ -62,36 +63,40 @@ Controls:
 The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
 
 1. validates the multipart request and file category;
-2. stores the original under an opaque server-generated key;
-3. calculates a SHA-256 digest;
-4. sends the file to the configured OpenRouter model;
-5. requires a strict structured-output schema;
-6. normalizes field counts and lengths;
-7. redacts values shaped like SSNs or payment-card numbers;
-8. returns a `needs_review` document rather than updating the profile; and
-9. records only the fields explicitly accepted by the student for staff review.
+2. calculates a SHA-256 digest and reserves an idempotent document row;
+3. atomically claims parsing so replays do not spend LLM tokens twice;
+4. stores the original under an opaque server-generated object key;
+5. sends the file to the configured OpenRouter model;
+6. requires a strict structured-output schema;
+7. normalizes field counts and lengths;
+8. redacts values shaped like SSNs or payment-card numbers;
+9. returns a `needs_review` document rather than updating the profile; and
+10. records only the fields explicitly accepted by the student for staff
+    review.
 
 Failures do not destroy the upload. The original remains available and the
 document carries a retryable extraction status and warning.
 
 ## Production migration
 
-The local flow is deliberately synchronous so the current portal is immediately
-functional. The production adapter should keep the API contracts but move the
-heavy step behind the transactional outbox:
+The current preview and full-stack flows are deliberately synchronous so the
+portal is immediately functional and returns the review result in one request.
+The PostgreSQL implementation already writes audit and outbox records, uses an
+atomic processing claim, and stores originals in S3-compatible object storage.
+At higher volume, keep the API contract and move the heavy step behind the
+transactional outbox:
 
 ```text
 upload API -> object storage -> document row + outbox event -> worker
   -> malware scan -> text/OCR parse -> LLM extraction -> review projection
 ```
 
-Replace:
+The remaining production substitutions are:
 
-- JSON state with PostgreSQL repositories;
-- the local upload directory with S3-compatible object storage;
-- synchronous parsing with a queue/outbox worker;
-- the demo cookie with institutional OIDC;
-- console metrics with OpenTelemetry and cost dashboards.
+- synchronous parsing to a queue/outbox worker;
+- the demo identity adapter to institutional OIDC;
+- development MinIO to managed S3-compatible storage;
+- console metrics to OpenTelemetry and cost dashboards.
 
 The Kubernetes deployment then scales web/API pods separately from extraction
 workers. Worker concurrency, per-student rate limits, model allowlists, document
@@ -106,6 +111,10 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 OPENROUTER_APP_URL=http://localhost:3000
 OPENROUTER_APP_NAME=Aster Student Portal
 DOCUMENT_UPLOAD_DIR=./tools/demo-api/.data/uploads
+OBJECT_STORAGE_ENDPOINT=http://localhost:9000
+OBJECT_STORAGE_BUCKET=vv-documents
+OBJECT_STORAGE_ACCESS_KEY=vv_minio
+OBJECT_STORAGE_SECRET_KEY=vv_minio_password
 ```
 
 The default model is only a configurable starting point. Production should pin

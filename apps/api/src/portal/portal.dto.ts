@@ -1,6 +1,7 @@
 import { Type } from "class-transformer";
 import {
   IsArray,
+  ArrayMaxSize,
   IsBoolean,
   IsIn,
   IsInt,
@@ -16,7 +17,9 @@ import {
   ValidateNested,
 } from "class-validator";
 import type {
+  AskEdwardInput,
   CompleteStudentOnboardingInput,
+  ConfirmStudentDocumentExtractionInput,
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
@@ -125,6 +128,9 @@ const documentCategories: StudentDocumentCategory[] = [
   "identity",
   "residency",
   "transcript",
+  "financial_aid",
+  "health",
+  "consent",
   "other",
 ];
 
@@ -146,6 +152,42 @@ export class CreateStudentDocumentDto
 
   @IsIn(documentCategories)
   category!: StudentDocumentCategory;
+}
+
+export class ConfirmStudentDocumentExtractionDto
+  implements ConfirmStudentDocumentExtractionInput
+{
+  @IsArray()
+  @ArrayMaxSize(24)
+  @IsString({ each: true })
+  @Length(1, 80, { each: true })
+  acceptedFieldKeys!: string[];
+}
+
+class EdwardChatMessageDto {
+  @IsIn(["user", "assistant"])
+  role!: "user" | "assistant";
+
+  @IsString()
+  @Length(1, 1_200)
+  content!: string;
+}
+
+export class AskEdwardDto implements AskEdwardInput {
+  @IsString()
+  @Length(1, 2_000)
+  message!: string;
+
+  @IsString()
+  @MaxLength(120)
+  pageContext!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @ValidateNested({ each: true })
+  @Type(() => EdwardChatMessageDto)
+  history?: EdwardChatMessageDto[];
 }
 
 const appointmentTypes: StudentAppointmentType[] = [
