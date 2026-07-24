@@ -4,8 +4,11 @@ import { extname } from "node:path";
 import {
   acceptOffer,
   buildBootstrap,
+  buildCampusLife,
   buildDashboard,
   buildOnboarding,
+  buildStudentAcademics,
+  buildStudentFinancials,
   completeOnboarding,
   createAppointment,
   createDepositPayment,
@@ -20,11 +23,13 @@ import {
   ingestActivities,
   listMessages,
   listDocuments,
+  listCatalogCourses,
   listRequirements,
   markMessageRead,
   patchProfile,
   profileResponse,
   requirementDetail,
+  selectFinancialPaymentPlan,
   updateOnboarding,
 } from "./domain.js";
 import {
@@ -191,6 +196,36 @@ async function route({ request, store, clock, ai }) {
   }
   if (method === "GET" && path === "/v1/student/dashboard") {
     return { body: buildDashboard(store.snapshot(), clock) };
+  }
+  if (method === "GET" && path === "/v1/student/academics") {
+    return { body: buildStudentAcademics(store.snapshot(), clock) };
+  }
+  if (method === "GET" && path === "/v1/catalog/courses") {
+    return {
+      body: listCatalogCourses(
+        store.snapshot(),
+        url.searchParams.get("query") ?? "",
+      ),
+    };
+  }
+  if (method === "GET" && path === "/v1/student/financials") {
+    return { body: buildStudentFinancials(store.snapshot(), clock) };
+  }
+  if (
+    method === "POST" &&
+    path === "/v1/student/financials/payment-plan"
+  ) {
+    const body = await readJson(request);
+    return materialWrite({
+      request,
+      store,
+      operation: "financial.payment_plan.select",
+      body,
+      mutate: (draft) => selectFinancialPaymentPlan(draft, body),
+    });
+  }
+  if (method === "GET" && path === "/v1/student/campus-life") {
+    return { body: buildCampusLife(store.snapshot(), clock) };
   }
   if (method === "GET" && path === "/v1/student/onboarding") {
     return { body: buildOnboarding(store.snapshot()) };
@@ -731,6 +766,8 @@ function validateEdwardInput(input) {
 }
 
 function buildAssistantContext(state) {
+  const academics = buildStudentAcademics(state);
+  const financials = buildStudentFinancials(state);
   return {
     preferredName: state.profile.preferredName,
     programName: state.offer.programName,
@@ -744,6 +781,30 @@ function buildAssistantContext(state) {
       category: document.category,
       status: document.status,
     })),
+    offerId: state.offer.id,
+    depositAmountCents: state.offer.depositAmountCents,
+    depositPaid: state.payments.some(
+      (payment) =>
+        payment.type === "enrollment_deposit" &&
+        payment.status === "succeeded",
+    ),
+    academicSummary: {
+      selectedProgram: academics.selectedProgram.name,
+      suggestedExemptions: academics.exemptionRecommendations.map(
+        (recommendation) => recommendation.targetCourseCode,
+      ),
+      eligibleCourses: academics.plan
+        .filter((item) => item.status === "eligible")
+        .map((item) => item.course.code),
+    },
+    financialSummary: {
+      remainingBalanceCents: financials.remainingBalanceCents,
+      acceptedAidCents: financials.acceptedAidCents,
+      actionRequiredDocuments: financials.requiredDocuments
+        .filter((document) => document.status === "action_required")
+        .map((document) => document.code),
+      sapStatus: financials.sap.status,
+    },
   };
 }
 

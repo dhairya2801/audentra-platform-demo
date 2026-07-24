@@ -18,6 +18,9 @@ export interface EdwardStudentContext {
   nextAction: unknown;
   unreadMessages: number;
   documentStatuses: Array<{ category: string; status: string }>;
+  offerId: string;
+  depositAmountCents: number;
+  depositPaid: boolean;
 }
 
 export interface StudentAiGateway {
@@ -67,6 +70,32 @@ const documentSchema = {
         required: ["key", "label", "value", "confidence"],
       },
     },
+    courses: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          sourceCode: { type: ["string", "null"] },
+          title: { type: "string" },
+          credits: { type: ["number", "null"], minimum: 0, maximum: 20 },
+          grade: { type: ["string", "null"] },
+          score: { type: ["string", "null"] },
+          term: { type: ["string", "null"] },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+        required: [
+          "sourceCode",
+          "title",
+          "credits",
+          "grade",
+          "score",
+          "term",
+          "confidence",
+        ],
+      },
+    },
     warnings: {
       type: "array",
       maxItems: 12,
@@ -81,6 +110,7 @@ const documentSchema = {
     "issueDate",
     "academicTerm",
     "fields",
+    "courses",
     "warnings",
   ],
 } as const;
@@ -121,7 +151,9 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
   async askEdward(
     input: AskEdwardInput & { studentContext: EdwardStudentContext },
   ): Promise<AskEdwardResponse> {
-    if (!this.apiKey) return guidedEdwardResponse(input.message);
+    if (!this.apiKey) {
+      return guidedEdwardResponse(input.message, input.studentContext);
+    }
     const history = (input.history ?? []).slice(-6).map((message) => ({
       role: message.role,
       content: message.content.slice(0, 1_200),
@@ -154,6 +186,8 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
       model: payload.model ?? this.model,
       usage: normalizeUsage(payload.usage),
       suggestedActions: suggestedActionsFor(input.message),
+      toolsUsed: toolsFor(input.message),
+      widgets: widgetsFor(input.message, input.studentContext),
     };
   }
 
@@ -290,6 +324,28 @@ function normalizeExtraction(
       ),
     };
   });
+  const rawCourses = Array.isArray(value.courses) ? value.courses : [];
+  const courses = rawCourses.slice(0, 80).map((candidate) => {
+    const course =
+      candidate && typeof candidate === "object"
+        ? (candidate as Record<string, unknown>)
+        : {};
+    return {
+      sourceCode: nullableText(course.sourceCode, 80),
+      title: safeText(course.title, "Untitled course", 180),
+      credits:
+        typeof course.credits === "number"
+          ? Math.max(0, Math.min(20, course.credits))
+          : null,
+      grade: nullableText(course.grade, 32),
+      score: nullableText(course.score, 32),
+      term: nullableText(course.term, 80),
+      confidence: Math.max(
+        0,
+        Math.min(1, Number(course.confidence ?? 0)),
+      ),
+    };
+  });
   return {
     status: "completed",
     documentType: documentTypes.has(
@@ -307,6 +363,7 @@ function normalizeExtraction(
     issueDate: nullableText(value.issueDate, 80),
     academicTerm: nullableText(value.academicTerm, 120),
     fields,
+    courses,
     warnings: (Array.isArray(value.warnings) ? value.warnings : [])
       .slice(0, 12)
       .map((warning) => safeText(warning, "", 400))
@@ -329,6 +386,7 @@ function pendingExtraction(fileName: string): StudentDocumentExtraction {
     issueDate: null,
     academicTerm: null,
     fields: [],
+    courses: [],
     warnings: [
       "Agentic parsing is waiting for an OpenRouter API key.",
       "No extracted value will update the student profile without review.",
@@ -340,7 +398,10 @@ function pendingExtraction(fileName: string): StudentDocumentExtraction {
   };
 }
 
-function guidedEdwardResponse(message: string): AskEdwardResponse {
+function guidedEdwardResponse(
+  message: string,
+  context: EdwardStudentContext,
+): AskEdwardResponse {
   const text = message.toLowerCase();
   const response = /document|upload|transcript|fafsa|ferpa/.test(text)
     ? "Open Documents to upload a PDF, JPEG, or PNG. Aster stores the original file and prepares structured fields for your review. Nothing extracted is treated as verified until you approve it."
@@ -359,7 +420,77 @@ function guidedEdwardResponse(message: string): AskEdwardResponse {
     model: null,
     usage: null,
     suggestedActions: suggestedActionsFor(message),
+    toolsUsed: toolsFor(message),
+    widgets: widgetsFor(message, context),
   };
+}
+
+function toolsFor(message: string): string[] {
+  const text = message.toLowerCase();
+  const tools: string[] = [];
+  if (/class|course|prereq|major|credit|exempt|transcript/.test(text)) {
+    tools.push("get_student_academics", "search_course_catalog");
+  }
+  if (/financial|aid|fafsa|loan|balance|tuition|deposit|pay/.test(text)) {
+    tools.push("get_student_financials");
+  }
+  if (/enroll|task|deadline|next|deposit/.test(text)) {
+    tools.push("get_enrollment_status");
+  }
+  if (/event|club|campus|social/.test(text)) {
+    tools.push("get_campus_life");
+  }
+  return [...new Set(tools)].slice(0, 4);
+}
+
+function widgetsFor(
+  message: string,
+  context: EdwardStudentContext,
+): AskEdwardResponse["widgets"] {
+  const text = message.toLowerCase();
+  if (/(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/.test(text)) {
+    return [
+      {
+        type: "deposit_payment",
+        id: "edward-deposit-payment",
+        title: "Enrollment deposit",
+        description: context.depositPaid
+          ? "Your enrollment deposit is recorded as paid."
+          : "Complete the simulated enrollment deposit securely here.",
+        offerId: context.offerId,
+        amountCents: context.depositAmountCents,
+        status: context.depositPaid ? "completed" : "ready",
+      },
+    ];
+  }
+  if (/upload|transcript|fafsa|verification/.test(text)) {
+    return [
+      {
+        type: "document_upload",
+        id: "edward-document-upload",
+        title: "Upload a document",
+        description:
+          "Add a PDF, JPEG, or PNG and review extracted fields before they reach your student record.",
+        category: text.includes("transcript") ? "transcript" : "financial_aid",
+        href: "/documents",
+      },
+    ];
+  }
+  if (/appointment|advisor|counselor|human/.test(text)) {
+    return [
+      {
+        type: "appointment",
+        id: "edward-advisor-appointment",
+        title: "Meet with a student advisor",
+        description: "Choose a time with the team best suited to your question.",
+        appointmentType: /financial|aid|fafsa|loan/.test(text)
+          ? "financial_aid"
+          : "enrollment_support",
+        href: "/appointments",
+      },
+    ];
+  }
+  return [];
 }
 
 function suggestedActionsFor(message: string) {

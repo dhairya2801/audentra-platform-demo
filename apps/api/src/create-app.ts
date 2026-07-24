@@ -18,6 +18,7 @@ import {
 import type { PlatformStore } from "./platform/platform-store";
 import type { DocumentStorage } from "./documents/document-storage";
 import multipart from "@fastify/multipart";
+import { initializeTelemetry } from "./observability/telemetry";
 
 export interface CreateApiApplicationOptions {
   config?: AppConfig;
@@ -31,10 +32,13 @@ export async function createApiApplication(
   options: CreateApiApplicationOptions = {},
 ): Promise<NestFastifyApplication> {
   const config = options.config ?? loadAppConfig();
+  initializeTelemetry();
   const adapter = new FastifyAdapter({
     logger: options.logger ?? config.environment !== "test",
     genReqId: (request: IncomingMessage) => {
-      const candidate = request.headers["x-request-id"];
+      const candidate =
+        request.headers["x-correlation-id"] ??
+        request.headers["x-request-id"];
       return createRequestId(
         typeof candidate === "string" ? candidate : undefined,
       );
@@ -80,11 +84,12 @@ export async function createApiApplication(
       "Content-Type",
       "Idempotency-Key",
       "X-Request-Id",
+      "X-Correlation-Id",
       "X-Demo-Tenant-Id",
       "X-Demo-Student-Id",
       "X-Demo-Actor-Id",
     ],
-    exposedHeaders: ["X-Request-Id"],
+    exposedHeaders: ["X-Request-Id", "X-Correlation-Id", "X-Trace-Id"],
     maxAge: 600,
   });
   app.useGlobalPipes(

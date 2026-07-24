@@ -126,7 +126,7 @@ function validatePersistedState(value) {
   if (
     value === null ||
     typeof value !== "object" ||
-    value.schemaVersion !== 3 ||
+    value.schemaVersion !== 4 ||
     value.fixture?.version !== FIXTURE_VERSION
   ) {
     throw new Error(

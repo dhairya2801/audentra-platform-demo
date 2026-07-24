@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
+  AcademicProgram,
+  CampusLifeFeed,
+  CatalogCourse,
   CompleteStudentOnboardingInput,
   ConfirmStudentDocumentExtractionInput,
   CreateDepositPaymentInput,
@@ -7,12 +10,14 @@ import type {
   CreateStudentDocumentInput,
   OnboardingStep,
   StudentAppointment,
+  StudentAcademics,
   StudentAppointmentList,
   StudentBootstrap,
   StudentDocument,
   StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
+  StudentFinancials,
   StudentMessage,
   StudentMessageList,
   StudentOnboarding,
@@ -38,6 +43,7 @@ import {
   ONBOARDING_STEPS,
   validateOnboardingStepData,
 } from "../portal/onboarding-policy";
+import { getRuntimeLineage } from "../observability/runtime-lineage";
 
 type Transaction = Parameters<
   Parameters<DatabaseService["db"]["transaction"]>[0]
@@ -128,6 +134,15 @@ interface IdempotencyRow<T> {
   request_hash: string;
   response_body: T;
 }
+
+const requirementCodeByDocumentCategory: Partial<
+  Record<StudentDocument["category"], string>
+> = {
+  identity: "identity_document",
+  transcript: "official_transcript",
+  financial_aid: "financial_aid_verification",
+  health: "immunization_record",
+};
 
 function mapOnboarding(row: OnboardingRow): StudentOnboarding {
   return {
@@ -925,7 +940,9 @@ export class PostgresPortalStore {
           "The document processing state changed before completion",
         );
       }
-      if (updated.category === "identity") {
+      const requirementCode =
+        requirementCodeByDocumentCategory[updated.category];
+      if (requirementCode) {
         await transaction.execute(sql`
           UPDATE student_requirement sr
           SET
@@ -940,7 +957,19 @@ export class PostgresPortalStore {
             AND sr.requirement_definition_version_id = rdv.id
             AND sr.journey_id = j.id
             AND j.student_id = ${input.auth.studentId}
-            AND rdv.code = 'identity_document'
+            AND rdv.code = ${requirementCode}
+        `);
+      }
+      if (updated.category === "financial_aid") {
+        await transaction.execute(sql`
+          UPDATE financial_document_requirement
+          SET status = 'under_review',
+              document_id = ${updated.id},
+              version = version + 1,
+              updated_at = NOW()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND code = 'verification_worksheet'
         `);
       }
       await this.insertAudit(transaction, {
@@ -1104,6 +1133,117 @@ export class PostgresPortalStore {
             "DOCUMENT_PROCESSING_STATE_CHANGED",
             "The document review state changed before confirmation",
           );
+        }
+        if (
+          extraction.documentType === "transcript" &&
+          extraction.courses?.length
+        ) {
+          for (const course of extraction.courses) {
+            const sourceLabel =
+              `${course.sourceCode ?? ""} ${course.title}`.toLowerCase();
+            const sourceType = sourceLabel.includes("ap ")
+              ? "ap"
+              : sourceLabel.includes("ib ")
+                ? "ib"
+                : "transcript";
+            await transaction.execute(sql`
+              INSERT INTO student_transcript_credit (
+                id,
+                tenant_id,
+                student_id,
+                source_document_id,
+                source_type,
+                source_code,
+                title,
+                grade_or_score,
+                credits,
+                institution_name,
+                evidence,
+                reviewed_at
+              )
+              SELECT
+                ${randomUUID()},
+                ${input.auth.tenantId},
+                ${input.auth.studentId},
+                ${input.documentId},
+                ${sourceType},
+                ${course.sourceCode},
+                ${course.title},
+                ${course.score ?? course.grade},
+                ${course.credits},
+                ${extraction.institutionName},
+                ${JSON.stringify({
+                  term: course.term,
+                  confidence: course.confidence,
+                })}::jsonb,
+                NOW()
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM student_transcript_credit stc
+                WHERE stc.tenant_id = ${input.auth.tenantId}
+                  AND stc.student_id = ${input.auth.studentId}
+                  AND stc.source_document_id = ${input.documentId}
+                  AND COALESCE(stc.source_code, '') = COALESCE(${course.sourceCode}, '')
+                  AND stc.title = ${course.title}
+              )
+            `);
+          }
+          await transaction.execute(sql`
+            INSERT INTO course_exemption_recommendation (
+              id,
+              tenant_id,
+              student_id,
+              program_id,
+              catalog_version_id,
+              transcript_credit_id,
+              target_course_id,
+              equivalency_rule_id,
+              status,
+              confidence,
+              rationale
+            )
+            SELECT
+              md5(stc.id::text || rule.id::text)::uuid,
+              stc.tenant_id,
+              stc.student_id,
+              ao.program_id,
+              rule.catalog_version_id,
+              stc.id,
+              rule.target_course_id,
+              rule.id,
+              'suggested',
+              rule.confidence,
+              stc.source_code || ' score ' || stc.grade_or_score ||
+                ' meets stored rule ' || rule.code || '.'
+            FROM student_transcript_credit stc
+            JOIN admission_offer ao
+              ON ao.tenant_id = stc.tenant_id
+             AND ao.student_id = stc.student_id
+            JOIN course_equivalency_rule rule
+              ON rule.tenant_id = stc.tenant_id
+             AND rule.active = true
+             AND lower(rule.source_code) = lower(stc.source_code)
+            WHERE stc.tenant_id = ${input.auth.tenantId}
+              AND stc.student_id = ${input.auth.studentId}
+              AND stc.source_document_id = ${input.documentId}
+              AND NULLIF(
+                regexp_replace(stc.grade_or_score, '[^0-9.]', '', 'g'),
+                ''
+              )::numeric >= rule.minimum_score
+            ON CONFLICT DO NOTHING
+          `);
+          await this.insertOutbox(transaction, {
+            auth: input.auth,
+            eventName: "student.transcript_credits_imported.v1",
+            aggregateType: "document_record",
+            aggregateId: input.documentId,
+            aggregateVersion: 3,
+            requestId: input.requestId,
+            data: {
+              studentId: input.auth.studentId,
+              courseCount: extraction.courses.length,
+            },
+          });
         }
         await this.insertAudit(transaction, {
           auth: input.auth,
@@ -1287,6 +1427,11 @@ export class PostgresPortalStore {
             "The deposit could not be recorded",
           );
         }
+        await this.completeRequirementAndRefreshDependencies(
+          transaction,
+          input.auth,
+          "enrollment_deposit",
+        );
         await this.insertAudit(transaction, {
           auth: input.auth,
           action: "payment.deposit_succeeded",
@@ -1339,6 +1484,617 @@ export class PostgresPortalStore {
       );
     }
     return mapProfile(profile);
+  }
+
+  async getStudentAcademics(auth: AuthContext): Promise<StudentAcademics> {
+    const programResult = await this.database.db.execute(sql`
+      SELECT
+        p.id,
+        p.code,
+        p.name,
+        p.degree,
+        p.total_credits,
+        p.description,
+        ccv.id AS catalog_id,
+        ccv.code AS catalog_code
+      FROM admission_offer ao
+      JOIN program p
+        ON p.id = ao.program_id
+       AND p.tenant_id = ao.tenant_id
+      JOIN course_catalog_version ccv
+        ON ccv.tenant_id = ao.tenant_id
+       AND ccv.status = 'active'
+      WHERE ao.tenant_id = ${auth.tenantId}
+        AND ao.student_id = ${auth.studentId}
+      ORDER BY ao.created_at DESC, ccv.effective_from DESC
+      LIMIT 1
+    `);
+    const selected = rows<{
+      id: string;
+      code: string;
+      name: string;
+      degree: string;
+      total_credits: number;
+      description: string;
+      catalog_id: string;
+      catalog_code: string;
+    }>(programResult)[0];
+    if (!selected) {
+      throw new NotFoundError(
+        "STUDENT_ACADEMICS_NOT_FOUND",
+        "No academic plan is available for this student",
+      );
+    }
+    const availableResult = await this.database.db.execute(sql`
+      SELECT id, code, name, degree, total_credits, description
+      FROM program
+      WHERE tenant_id = ${auth.tenantId}
+      ORDER BY name
+    `);
+    const availablePrograms = rows<{
+      id: string;
+      code: string;
+      name: string;
+      degree: string;
+      total_credits: number;
+      description: string;
+    }>(availableResult).map(mapProgram);
+    const courseResult = await this.database.db.execute(sql`
+      SELECT
+        cc.id,
+        cc.code,
+        cc.title,
+        cc.description,
+        cc.credits,
+        cc.level,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'courseCode', prerequisite.code,
+              'minimumGrade', cp.minimum_grade
+            )
+          ) FILTER (WHERE prerequisite.id IS NOT NULL),
+          '[]'::json
+        ) AS prerequisites
+      FROM catalog_course cc
+      LEFT JOIN course_prerequisite cp
+        ON cp.course_id = cc.id
+       AND cp.tenant_id = cc.tenant_id
+       AND cp.catalog_version_id = cc.catalog_version_id
+      LEFT JOIN catalog_course prerequisite
+        ON prerequisite.id = cp.prerequisite_course_id
+      WHERE cc.tenant_id = ${auth.tenantId}
+        AND cc.catalog_version_id = ${selected.catalog_id}
+        AND cc.active = true
+      GROUP BY cc.id
+      ORDER BY cc.code
+    `);
+    const courses = rows<{
+      id: string;
+      code: string;
+      title: string;
+      description: string;
+      credits: string | number;
+      level: number;
+      prerequisites: CatalogCourse["prerequisites"];
+    }>(courseResult).map(mapCatalogCourse);
+    const courseById = new Map(courses.map((course) => [course.id, course]));
+    const requirementResult = await this.database.db.execute(sql`
+      SELECT course_id, category, recommended_term
+      FROM program_requirement
+      WHERE tenant_id = ${auth.tenantId}
+        AND program_id = ${selected.id}
+        AND catalog_version_id = ${selected.catalog_id}
+        AND required = true
+      ORDER BY recommended_term, id
+    `);
+    const creditResult = await this.database.db.execute(sql`
+      SELECT
+        id,
+        source_type,
+        source_code,
+        title,
+        grade_or_score,
+        credits,
+        institution_name,
+        source_document_id
+      FROM student_transcript_credit
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      ORDER BY created_at, id
+    `);
+    const transcriptCredits = rows<{
+      id: string;
+      source_type: StudentAcademics["transcriptCredits"][number]["sourceType"];
+      source_code: string | null;
+      title: string;
+      grade_or_score: string | null;
+      credits: string | number | null;
+      institution_name: string | null;
+      source_document_id: string | null;
+    }>(creditResult).map((credit) => ({
+      id: credit.id,
+      sourceType: credit.source_type,
+      sourceCode: credit.source_code,
+      title: credit.title,
+      gradeOrScore: credit.grade_or_score,
+      credits: credit.credits === null ? null : Number(credit.credits),
+      institutionName: credit.institution_name,
+      sourceDocumentId: credit.source_document_id,
+    }));
+    const recommendationResult = await this.database.db.execute(sql`
+      SELECT
+        cer.id,
+        cer.transcript_credit_id,
+        target.code AS target_course_code,
+        target.title AS target_course_title,
+        rule.code AS rule_code,
+        cer.rationale,
+        cer.confidence,
+        cer.status
+      FROM course_exemption_recommendation cer
+      JOIN catalog_course target ON target.id = cer.target_course_id
+      JOIN course_equivalency_rule rule ON rule.id = cer.equivalency_rule_id
+      WHERE cer.tenant_id = ${auth.tenantId}
+        AND cer.student_id = ${auth.studentId}
+        AND cer.program_id = ${selected.id}
+        AND cer.status <> 'superseded'
+      ORDER BY target.code, cer.created_at
+    `);
+    const exemptionRecommendations = rows<{
+      id: string;
+      transcript_credit_id: string;
+      target_course_code: string;
+      target_course_title: string;
+      rule_code: string;
+      rationale: string;
+      confidence: string | number;
+      status: StudentAcademics["exemptionRecommendations"][number]["status"];
+    }>(recommendationResult).map((recommendation) => ({
+      id: recommendation.id,
+      transcriptCreditId: recommendation.transcript_credit_id,
+      targetCourseCode: recommendation.target_course_code,
+      targetCourseTitle: recommendation.target_course_title,
+      ruleCode: recommendation.rule_code,
+      rationale: recommendation.rationale,
+      confidence: Number(recommendation.confidence),
+      status: recommendation.status,
+      requiresStaffReview: true,
+    }));
+    const recommendationByCode = new Map(
+      exemptionRecommendations.map((recommendation) => [
+        recommendation.targetCourseCode,
+        recommendation,
+      ]),
+    );
+    const approvedCodes = new Set(
+      exemptionRecommendations
+        .filter((recommendation) => recommendation.status === "approved")
+        .map((recommendation) => recommendation.targetCourseCode),
+    );
+    const plan = rows<{
+      course_id: string;
+      category: StudentAcademics["plan"][number]["category"];
+      recommended_term: number;
+    }>(requirementResult)
+      .map((requirement) => {
+        const course = courseById.get(requirement.course_id);
+        if (!course) return null;
+        const recommendation = recommendationByCode.get(course.code);
+        const missingPrerequisiteCodes = course.prerequisites
+          .map((prerequisite) => prerequisite.courseCode)
+          .filter((code) => !approvedCodes.has(code));
+        return {
+          course,
+          category: requirement.category,
+          recommendedTerm: requirement.recommended_term,
+          status:
+            recommendation?.status === "approved"
+              ? ("exempted" as const)
+              : recommendation
+                ? ("exemption_suggested" as const)
+                : missingPrerequisiteCodes.length
+                  ? ("blocked" as const)
+                  : ("eligible" as const),
+          satisfiedPrerequisiteCodes: course.prerequisites
+            .map((prerequisite) => prerequisite.courseCode)
+            .filter((code) => approvedCodes.has(code)),
+          missingPrerequisiteCodes,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    const exemptedCredits = plan
+      .filter((item) => item.status === "exempted")
+      .reduce((total, item) => total + item.course.credits, 0);
+    return {
+      selectedProgram: mapProgram(selected),
+      availablePrograms,
+      transcriptCredits,
+      exemptionRecommendations,
+      plan,
+      progress: {
+        completedCredits: 0,
+        exemptedCredits,
+        requiredCredits: selected.total_credits,
+        percent: Math.round((exemptedCredits / selected.total_credits) * 100),
+      },
+      catalogVersion: selected.catalog_code,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async searchCatalogCourses(
+    auth: AuthContext,
+    query: string,
+  ): Promise<{ items: CatalogCourse[]; total: number; catalogVersion: string }> {
+    const normalized = query.trim().slice(0, 120);
+    const pattern = `%${normalized}%`;
+    const result = await this.database.db.execute(sql`
+      SELECT
+        cc.id,
+        cc.code,
+        cc.title,
+        cc.description,
+        cc.credits,
+        cc.level,
+        ccv.code AS catalog_code,
+        COALESCE(
+          json_agg(
+            json_build_object(
+              'courseCode', prerequisite.code,
+              'minimumGrade', cp.minimum_grade
+            )
+          ) FILTER (WHERE prerequisite.id IS NOT NULL),
+          '[]'::json
+        ) AS prerequisites
+      FROM catalog_course cc
+      JOIN course_catalog_version ccv
+        ON ccv.id = cc.catalog_version_id
+       AND ccv.tenant_id = cc.tenant_id
+       AND ccv.status = 'active'
+      LEFT JOIN course_prerequisite cp ON cp.course_id = cc.id
+      LEFT JOIN catalog_course prerequisite
+        ON prerequisite.id = cp.prerequisite_course_id
+      WHERE cc.tenant_id = ${auth.tenantId}
+        AND cc.active = true
+        AND (
+          ${normalized} = ''
+          OR cc.code ILIKE ${pattern}
+          OR cc.title ILIKE ${pattern}
+          OR cc.description ILIKE ${pattern}
+        )
+      GROUP BY cc.id, ccv.code
+      ORDER BY cc.code
+      LIMIT 60
+    `);
+    const courseRows = rows<{
+      id: string;
+      code: string;
+      title: string;
+      description: string;
+      credits: string | number;
+      level: number;
+      catalog_code: string;
+      prerequisites: CatalogCourse["prerequisites"];
+    }>(result);
+    return {
+      items: courseRows.map(mapCatalogCourse),
+      total: courseRows.length,
+      catalogVersion: courseRows[0]?.catalog_code ?? "unavailable",
+    };
+  }
+
+  async getStudentFinancials(auth: AuthContext): Promise<StudentFinancials> {
+    const summaryResult = await this.database.db.execute(sql`
+      SELECT
+        sfs.academic_year,
+        sfs.cost_of_attendance_cents,
+        sfs.external_payments_cents,
+        COALESCE((
+          SELECT SUM(pt.amount_cents)
+          FROM payment_transaction pt
+          WHERE pt.tenant_id = sfs.tenant_id
+            AND pt.student_id = sfs.student_id
+            AND pt.status = 'succeeded'
+        ), 0) AS portal_payments_cents
+      FROM student_financial_summary sfs
+      WHERE sfs.tenant_id = ${auth.tenantId}
+        AND sfs.student_id = ${auth.studentId}
+      ORDER BY sfs.academic_year DESC
+      LIMIT 1
+    `);
+    const summary = rows<{
+      academic_year: string;
+      cost_of_attendance_cents: number;
+      external_payments_cents: number;
+      portal_payments_cents: string | number;
+    }>(summaryResult)[0];
+    if (!summary) {
+      throw new NotFoundError(
+        "STUDENT_FINANCIALS_NOT_FOUND",
+        "No financial record is available for this student",
+      );
+    }
+    const [awardResult, documentResult, planResult, sapResult] =
+      await Promise.all([
+        this.database.db.execute(sql`
+          SELECT
+            id, source, name, type, offered_amount_cents,
+            accepted_amount_cents, status, requires_action
+          FROM student_financial_award
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+            AND academic_year = ${summary.academic_year}
+          ORDER BY type, name
+        `),
+        this.database.db.execute(sql`
+          SELECT id, code, title, description, status, due_at
+          FROM financial_document_requirement
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+          ORDER BY due_at NULLS LAST, code
+        `),
+        this.database.db.execute(sql`
+          SELECT
+            id, name, installment_count, enrollment_fee_cents, status
+          FROM student_payment_plan
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+            AND academic_year = ${summary.academic_year}
+            AND status <> 'cancelled'
+          ORDER BY installment_count
+        `),
+        this.database.db.execute(sql`
+          SELECT
+            status,
+            cumulative_gpa,
+            minimum_gpa,
+            completion_rate_percent,
+            minimum_completion_rate_percent,
+            attempted_credits,
+            maximum_attempted_credits
+          FROM student_sap_status
+          WHERE tenant_id = ${auth.tenantId}
+            AND student_id = ${auth.studentId}
+            AND academic_year = ${summary.academic_year}
+        `),
+      ]);
+    const awards = rows<{
+      id: string;
+      source: StudentFinancials["awards"][number]["source"];
+      name: string;
+      type: StudentFinancials["awards"][number]["type"];
+      offered_amount_cents: number;
+      accepted_amount_cents: number;
+      status: StudentFinancials["awards"][number]["status"];
+      requires_action: boolean;
+    }>(awardResult).map((award) => ({
+      id: award.id,
+      source: award.source,
+      name: award.name,
+      type: award.type,
+      offeredAmountCents: award.offered_amount_cents,
+      acceptedAmountCents: award.accepted_amount_cents,
+      status: award.status,
+      requiresAction: award.requires_action,
+    }));
+    const acceptedAidCents = awards.reduce(
+      (total, award) => total + award.acceptedAmountCents,
+      0,
+    );
+    const pendingAidCents = awards.reduce(
+      (total, award) =>
+        total +
+        (["offered", "pending"].includes(award.status)
+          ? award.offeredAmountCents
+          : 0),
+      0,
+    );
+    const paymentsCents =
+      summary.external_payments_cents + Number(summary.portal_payments_cents);
+    const remainingBalanceCents = Math.max(
+      0,
+      summary.cost_of_attendance_cents - acceptedAidCents - paymentsCents,
+    );
+    const sap = rows<{
+      status: StudentFinancials["sap"]["status"];
+      cumulative_gpa: string | number;
+      minimum_gpa: string | number;
+      completion_rate_percent: string | number;
+      minimum_completion_rate_percent: string | number;
+      attempted_credits: string | number;
+      maximum_attempted_credits: string | number;
+    }>(sapResult)[0];
+    if (!sap) {
+      throw new NotFoundError(
+        "STUDENT_SAP_NOT_FOUND",
+        "No satisfactory academic progress record is available",
+      );
+    }
+    return {
+      academicYear: summary.academic_year.replace("-", "–"),
+      costOfAttendanceCents: summary.cost_of_attendance_cents,
+      acceptedAidCents,
+      pendingAidCents,
+      paymentsCents,
+      remainingBalanceCents,
+      awards,
+      requiredDocuments: rows<{
+        id: string;
+        code: string;
+        title: string;
+        description: string;
+        status: StudentFinancials["requiredDocuments"][number]["status"];
+        due_at: Date | null;
+      }>(documentResult).map((document) => ({
+        id: document.id,
+        code: document.code,
+        title: document.title,
+        description: document.description,
+        status: document.status,
+        dueAt: document.due_at?.toISOString() ?? null,
+        href: document.code === "award_acceptance" ? "/financials" : "/documents",
+      })),
+      paymentPlans: rows<{
+        id: string;
+        name: string;
+        installment_count: number;
+        enrollment_fee_cents: number;
+        status: "available" | "enrolled";
+      }>(planResult).map((plan) => ({
+        id: plan.id,
+        name: plan.name,
+        installmentCount: plan.installment_count,
+        installmentAmountCents: Math.ceil(
+          remainingBalanceCents / plan.installment_count,
+        ),
+        enrollmentFeeCents: plan.enrollment_fee_cents,
+        status: plan.status,
+      })),
+      sap: {
+        status: sap.status,
+        cumulativeGpa: Number(sap.cumulative_gpa),
+        minimumGpa: Number(sap.minimum_gpa),
+        completionRatePercent: Number(sap.completion_rate_percent),
+        minimumCompletionRatePercent: Number(
+          sap.minimum_completion_rate_percent,
+        ),
+        attemptedCredits: Number(sap.attempted_credits),
+        maximumAttemptedCredits: Number(sap.maximum_attempted_credits),
+      },
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  async selectFinancialPaymentPlan(input: {
+    auth: AuthContext;
+    planId: string;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<{ planId: string; status: "enrolled" }> {
+    return this.runIdempotent(
+      input,
+      "student_financial.payment_plan.select",
+      { planId: input.planId },
+      200,
+      async (transaction) => {
+        const found = await transaction.execute(sql`
+          SELECT id, academic_year
+          FROM student_payment_plan
+          WHERE id = ${input.planId}
+            AND tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND status <> 'cancelled'
+          FOR UPDATE
+        `);
+        const plan = rows<{ id: string; academic_year: string }>(found)[0];
+        if (!plan) {
+          throw new NotFoundError(
+            "PAYMENT_PLAN_NOT_FOUND",
+            "The selected payment plan was not found",
+          );
+        }
+        await transaction.execute(sql`
+          UPDATE student_payment_plan
+          SET status = CASE WHEN id = ${plan.id} THEN 'enrolled' ELSE 'available' END,
+              enrolled_at = CASE WHEN id = ${plan.id} THEN NOW() ELSE NULL END,
+              version = version + 1,
+              updated_at = NOW()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND academic_year = ${plan.academic_year}
+            AND status <> 'cancelled'
+        `);
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "student_financial.payment_plan_selected",
+          resourceType: "student_payment_plan",
+          resourceId: plan.id,
+          requestId: input.requestId,
+          metadata: { academicYear: plan.academic_year },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "student_financial.payment_plan_selected.v1",
+          aggregateType: "student_payment_plan",
+          aggregateId: plan.id,
+          aggregateVersion: 1,
+          requestId: input.requestId,
+          data: { studentId: input.auth.studentId },
+        });
+        return { planId: plan.id, status: "enrolled" as const };
+      },
+    );
+  }
+
+  async getCampusLife(auth: AuthContext): Promise<CampusLifeFeed> {
+    const [eventResult, clubResult] = await Promise.all([
+      this.database.db.execute(sql`
+        SELECT
+          id, title, description, starts_at, ends_at, location,
+          category, featured, accent
+        FROM campus_event
+        WHERE tenant_id = ${auth.tenantId}
+          AND active = true
+        ORDER BY featured DESC, starts_at, id
+        LIMIT 30
+      `),
+      this.database.db.execute(sql`
+        SELECT
+          id, name, category, description, contact_name, contact_role,
+          contact_channel, latest_update, next_activity
+        FROM student_club
+        WHERE tenant_id = ${auth.tenantId}
+          AND active = true
+        ORDER BY name
+        LIMIT 100
+      `),
+    ]);
+    return {
+      events: rows<{
+        id: string;
+        title: string;
+        description: string;
+        starts_at: Date;
+        ends_at: Date;
+        location: string;
+        category: CampusLifeFeed["events"][number]["category"];
+        featured: boolean;
+        accent: CampusLifeFeed["events"][number]["accent"];
+      }>(eventResult).map((event) => ({
+        id: event.id,
+        title: event.title,
+        description: event.description,
+        startsAt: event.starts_at.toISOString(),
+        endsAt: event.ends_at.toISOString(),
+        location: event.location,
+        category: event.category,
+        featured: event.featured,
+        accent: event.accent,
+      })),
+      clubs: rows<{
+        id: string;
+        name: string;
+        category: string;
+        description: string;
+        contact_name: string;
+        contact_role: string;
+        contact_channel: string;
+        latest_update: string;
+        next_activity: string | null;
+      }>(clubResult).map((club) => ({
+        id: club.id,
+        name: club.name,
+        category: club.category,
+        description: club.description,
+        contactName: club.contact_name,
+        contactRole: club.contact_role,
+        contactChannel: club.contact_channel,
+        latestUpdate: club.latest_update,
+        nextActivity: club.next_activity,
+      })),
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   async updateStudentProfile(input: {
@@ -1431,6 +2187,11 @@ export class PostgresPortalStore {
             AND s.id = ${input.auth.studentId}
         `);
       }
+      await this.completeRequirementAndRefreshDependencies(
+        transaction,
+        input.auth,
+        "profile_verification",
+      );
       await this.insertAudit(transaction, {
         auth: input.auth,
         action: "student_profile.updated",
@@ -1614,6 +2375,10 @@ export class PostgresPortalStore {
       metadata: Record<string, unknown>;
     },
   ): Promise<void> {
+    const lineage = getRuntimeLineage({
+      correlationId: input.requestId,
+      auditAction: input.action,
+    });
     await transaction.execute(sql`
       INSERT INTO audit_event (
         id,
@@ -1641,8 +2406,71 @@ export class PostgresPortalStore {
         'student_self_service',
         ${input.requestId},
         ${input.requestId},
-        ${JSON.stringify(input.metadata)}::jsonb
+        ${JSON.stringify({ ...input.metadata, lineage })}::jsonb
       )
+    `);
+  }
+
+  private async completeRequirementAndRefreshDependencies(
+    transaction: Transaction,
+    auth: AuthContext,
+    requirementCode: string,
+  ): Promise<void> {
+    await transaction.execute(sql`
+      UPDATE student_requirement sr
+      SET status = 'completed',
+          progress_percent = 100,
+          version = sr.version + 1,
+          updated_at = NOW()
+      FROM requirement_definition_version rdv, enrollment_journey j
+      WHERE sr.tenant_id = ${auth.tenantId}
+        AND sr.journey_id = j.id
+        AND j.student_id = ${auth.studentId}
+        AND sr.requirement_definition_version_id = rdv.id
+        AND rdv.code = ${requirementCode}
+        AND sr.status NOT IN ('completed', 'waived', 'not_applicable')
+    `);
+    await transaction.execute(sql`
+      UPDATE student_requirement candidate
+      SET status = 'ready',
+          version = candidate.version + 1,
+          updated_at = NOW()
+      FROM requirement_definition_version candidate_definition,
+           enrollment_journey candidate_journey
+      WHERE candidate.tenant_id = ${auth.tenantId}
+        AND candidate.journey_id = candidate_journey.id
+        AND candidate_journey.student_id = ${auth.studentId}
+        AND candidate.requirement_definition_version_id =
+            candidate_definition.id
+        AND candidate.status = 'blocked'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM unnest(candidate_definition.depends_on_codes) dependency(code)
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM student_requirement dependency_requirement
+            JOIN requirement_definition_version dependency_definition
+              ON dependency_definition.id =
+                 dependency_requirement.requirement_definition_version_id
+             AND dependency_definition.tenant_id =
+                 dependency_requirement.tenant_id
+            WHERE dependency_requirement.tenant_id = ${auth.tenantId}
+              AND dependency_requirement.journey_id = candidate.journey_id
+              AND dependency_definition.code = dependency.code
+              AND dependency_requirement.status IN (
+                'completed',
+                'waived',
+                'not_applicable'
+              )
+          )
+        )
+    `);
+    await transaction.execute(sql`
+      UPDATE student_portal_projection
+      SET projection_version = projection_version + 1,
+          generated_at = NOW()
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
     `);
   }
 
@@ -1661,6 +2489,10 @@ export class PostgresPortalStore {
     const eventId = randomUUID();
     const occurredAt = new Date();
     const causationId = randomUUID();
+    const lineage = getRuntimeLineage({
+      correlationId: input.requestId,
+      eventName: input.eventName,
+    });
     const payload = {
       eventId,
       eventName: input.eventName,
@@ -1672,6 +2504,7 @@ export class PostgresPortalStore {
       actor: { type: input.auth.actorType, id: input.auth.actorId },
       correlationId: input.requestId,
       causationId,
+      lineage,
       data: input.data,
     };
     await transaction.execute(sql`
@@ -1713,4 +2546,42 @@ function documentExtension(
   if (mimeType === "application/pdf") return ".pdf";
   if (mimeType === "image/jpeg") return ".jpg";
   return ".png";
+}
+
+function mapProgram(row: {
+  id: string;
+  code: string;
+  name: string;
+  degree: string;
+  total_credits: number;
+  description: string;
+}): AcademicProgram {
+  return {
+    id: row.id,
+    code: row.code,
+    name: row.name,
+    degree: row.degree,
+    totalCredits: row.total_credits,
+    description: row.description,
+  };
+}
+
+function mapCatalogCourse(row: {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  credits: string | number;
+  level: number;
+  prerequisites: CatalogCourse["prerequisites"];
+}): CatalogCourse {
+  return {
+    id: row.id,
+    code: row.code,
+    title: row.title,
+    description: row.description,
+    credits: Number(row.credits),
+    level: row.level,
+    prerequisites: Array.isArray(row.prerequisites) ? row.prerequisites : [],
+  };
 }

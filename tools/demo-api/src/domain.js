@@ -76,6 +76,39 @@ const activityPropertyAllowlists = {
     "step_code",
     "entry_point",
   ]),
+  "ui.portal_section_viewed.v1": new Set(["section", "entry_point"]),
+  "ui.enrollment_task_viewed.v1": new Set([
+    "task_code",
+    "task_status",
+    "entry_point",
+  ]),
+  "ui.enrollment_task_abandoned.v1": new Set([
+    "task_code",
+    "task_status",
+    "duration_bucket",
+    "last_interaction",
+  ]),
+  "ui.financial_aid_viewed.v1": new Set(["surface", "aid_status"]),
+  "ui.course_catalog_searched.v1": new Set([
+    "query_length_bucket",
+    "result_count",
+  ]),
+  "ui.course_viewed.v1": new Set(["course_code", "surface"]),
+  "ui.exemption_reviewed.v1": new Set([
+    "rule_code",
+    "recommendation_status",
+  ]),
+  "ui.campus_event_viewed.v1": new Set(["event_id", "surface"]),
+  "ui.club_viewed.v1": new Set(["club_id", "surface"]),
+  "ui.edward_tool_invoked.v1": new Set(["tool_name", "page_context"]),
+  "ui.edward_action_widget_viewed.v1": new Set([
+    "widget_type",
+    "page_context",
+  ]),
+  "ui.edward_action_completed.v1": new Set([
+    "widget_type",
+    "outcome",
+  ]),
   "ui.help_opened.v1": new Set(["context", "surface", "topic_code"]),
 };
 const prohibitedActivityProperty =
@@ -177,6 +210,167 @@ export function buildBootstrap(state, clock) {
       version: state.onboarding.version,
     },
     initialRoute: onboardingRequired ? "/onboarding" : "/dashboard",
+    generatedAt: clock().toISOString(),
+  };
+}
+
+export function buildStudentAcademics(state, clock = () => new Date()) {
+  const selectedProgram =
+    state.academicCatalog.programs.find(
+      (program) => program.code === state.academics.selectedProgramCode,
+    ) ?? state.academicCatalog.programs[0];
+  const courseByCode = new Map(
+    state.academicCatalog.courses.map((course) => [course.code, course]),
+  );
+  const recommendations = buildExemptionRecommendations(state);
+  const approvedOrSuggested = new Map(
+    recommendations
+      .filter((recommendation) =>
+        ["suggested", "needs_review", "approved"].includes(
+          recommendation.status,
+        ),
+      )
+      .map((recommendation) => [
+        recommendation.targetCourseCode,
+        recommendation,
+      ]),
+  );
+  const completedCourseCodes = new Set(
+    recommendations
+      .filter((recommendation) => recommendation.status === "approved")
+      .map((recommendation) => recommendation.targetCourseCode),
+  );
+  const plan = selectedProgram.requirements
+    .map(([courseCode, category, recommendedTerm]) => {
+      const course = courseByCode.get(courseCode);
+      if (!course) return null;
+      const exemption = approvedOrSuggested.get(courseCode);
+      const satisfiedPrerequisiteCodes = course.prerequisites
+        .map((item) => item.courseCode)
+        .filter((code) => completedCourseCodes.has(code));
+      const missingPrerequisiteCodes = course.prerequisites
+        .map((item) => item.courseCode)
+        .filter((code) => !completedCourseCodes.has(code));
+      let status = missingPrerequisiteCodes.length > 0 ? "blocked" : "eligible";
+      if (exemption?.status === "approved") status = "exempted";
+      else if (exemption) status = "exemption_suggested";
+      return {
+        course: structuredClone(course),
+        category,
+        recommendedTerm,
+        status,
+        satisfiedPrerequisiteCodes,
+        missingPrerequisiteCodes,
+      };
+    })
+    .filter(Boolean);
+  const exemptedCredits = plan
+    .filter((item) => item.status === "exempted")
+    .reduce((sum, item) => sum + item.course.credits, 0);
+
+  return {
+    selectedProgram: publicProgram(selectedProgram),
+    availablePrograms: state.academicCatalog.programs.map(publicProgram),
+    transcriptCredits: structuredClone(state.academics.transcriptCredits),
+    exemptionRecommendations: recommendations,
+    plan,
+    progress: {
+      completedCredits: 0,
+      exemptedCredits,
+      requiredCredits: selectedProgram.totalCredits,
+      percent: Math.round((exemptedCredits / selectedProgram.totalCredits) * 100),
+    },
+    catalogVersion: state.academicCatalog.version,
+    generatedAt: clock().toISOString(),
+  };
+}
+
+export function listCatalogCourses(state, query = "") {
+  const normalized = query.trim().toLowerCase().slice(0, 120);
+  const items = state.academicCatalog.courses
+    .filter((course) => {
+      if (!normalized) return true;
+      return `${course.code} ${course.title} ${course.description}`
+        .toLowerCase()
+        .includes(normalized);
+    })
+    .map((course) => structuredClone(course));
+  return {
+    items,
+    total: items.length,
+    catalogVersion: state.academicCatalog.version,
+  };
+}
+
+export function buildStudentFinancials(state, clock = () => new Date()) {
+  const acceptedAidCents = state.financials.awards.reduce(
+    (sum, award) => sum + award.acceptedAmountCents,
+    0,
+  );
+  const pendingAidCents = state.financials.awards.reduce(
+    (sum, award) =>
+      sum +
+      (["offered", "pending"].includes(award.status)
+        ? award.offeredAmountCents
+        : 0),
+    0,
+  );
+  const depositPaymentsCents = state.payments
+    .filter((payment) => payment.status === "succeeded")
+    .reduce((sum, payment) => sum + payment.amountCents, 0);
+  const paymentsCents = state.financials.paymentsCents + depositPaymentsCents;
+  const remainingBalanceCents = Math.max(
+    0,
+    state.financials.costOfAttendanceCents - acceptedAidCents - paymentsCents,
+  );
+  return {
+    academicYear: state.financials.academicYear,
+    costOfAttendanceCents: state.financials.costOfAttendanceCents,
+    acceptedAidCents,
+    pendingAidCents,
+    paymentsCents,
+    remainingBalanceCents,
+    awards: structuredClone(state.financials.awards),
+    requiredDocuments: structuredClone(state.financials.requiredDocuments),
+    paymentPlans: state.financials.paymentPlans.map((plan) => ({
+      ...structuredClone(plan),
+      installmentAmountCents: Math.ceil(
+        remainingBalanceCents / plan.installmentCount,
+      ),
+    })),
+    sap: structuredClone(state.financials.sap),
+    generatedAt: clock().toISOString(),
+  };
+}
+
+export function selectFinancialPaymentPlan(draft, input) {
+  const body = objectBody(input);
+  exactKeys(body, ["planId"]);
+  const planId = uuidValue(body.planId, "planId");
+  const selected = draft.financials.paymentPlans.find(
+    (plan) => plan.id === planId,
+  );
+  if (!selected) {
+    throw notFound(
+      "PAYMENT_PLAN_NOT_FOUND",
+      "The selected payment plan was not found",
+    );
+  }
+  for (const plan of draft.financials.paymentPlans) {
+    plan.status = plan.id === planId ? "enrolled" : "available";
+  }
+  draft.portalProjectionVersion += 1;
+  return { planId, status: "enrolled" };
+}
+
+export function buildCampusLife(state, clock = () => new Date()) {
+  return {
+    events: structuredClone(state.campusLife.events).sort((left, right) =>
+      left.startsAt.localeCompare(right.startsAt),
+    ),
+    clubs: structuredClone(state.campusLife.clubs).sort((left, right) =>
+      left.name.localeCompare(right.name),
+    ),
     generatedAt: clock().toISOString(),
   };
 }
@@ -427,6 +621,7 @@ export function patchProfile(draft, input, now) {
   }
   draft.profile.version += 1;
   draft.profile.updatedAt = now.toISOString();
+  completeRequirementAndRefreshDependencies(draft, "profile_verification");
   draft.portalProjectionVersion += 1;
   return profileResponse(draft);
 }
@@ -655,6 +850,12 @@ export function confirmDocumentExtraction(draft, documentId, input, now) {
   document.extraction.acceptedFieldKeys = accepted;
   document.extraction.verifiedAt = now.toISOString();
   document.status = "under_review";
+  if (
+    document.extraction.documentType === "transcript" &&
+    Array.isArray(document.extraction.courses)
+  ) {
+    ingestTranscriptCourses(draft, document, now);
+  }
   draft.portalProjectionVersion += 1;
   return documentResponse(document);
 }
@@ -741,14 +942,19 @@ export function createDepositPayment(draft, input, now) {
     createdAt: now.toISOString(),
   };
   draft.payments.push(payment);
+  const financialDocument = draft.financials.requiredDocuments.find(
+    (document) => document.code === "deposit",
+  );
+  if (financialDocument) financialDocument.status = "verified";
   const requirement = draft.requirements.find(
     (candidate) => candidate.code === "enrollment_deposit",
   );
   if (requirement) {
-    requirement.status = "completed";
-    requirement.progressPercent = 100;
+    completeRequirementAndRefreshDependencies(
+      draft,
+      "enrollment_deposit",
+    );
   }
-  updateJourneyStatus(draft);
   draft.portalProjectionVersion += 1;
   return structuredClone(payment);
 }
@@ -862,6 +1068,34 @@ function validateExtraction(value) {
         };
       })
     : [];
+  const courses = Array.isArray(extraction.courses)
+    ? extraction.courses.slice(0, 80).map((candidate, index) => {
+        const course = objectBody(candidate);
+        return {
+          sourceCode: nullableBoundedText(course.sourceCode, 80),
+          title: requiredString(
+            course.title,
+            `courses[${index}].title`,
+            { min: 1, max: 180 },
+          ),
+          credits:
+            typeof course.credits === "number" &&
+            course.credits >= 0 &&
+            course.credits <= 20
+              ? course.credits
+              : null,
+          grade: nullableBoundedText(course.grade, 32),
+          score: nullableBoundedText(course.score, 32),
+          term: nullableBoundedText(course.term, 80),
+          confidence:
+            typeof course.confidence === "number" &&
+            course.confidence >= 0 &&
+            course.confidence <= 1
+              ? course.confidence
+              : 0,
+        };
+      })
+    : [];
   return {
     status,
     documentType,
@@ -874,6 +1108,7 @@ function validateExtraction(value) {
     issueDate: nullableBoundedText(extraction.issueDate, 80),
     academicTerm: nullableBoundedText(extraction.academicTerm, 120),
     fields,
+    courses,
     warnings: Array.isArray(extraction.warnings)
       ? extraction.warnings
           .slice(0, 12)
@@ -892,6 +1127,95 @@ function validateExtraction(value) {
     processedAt: nullableBoundedText(extraction.processedAt, 80),
     verifiedAt: null,
   };
+}
+
+function publicProgram(program) {
+  return {
+    id: program.id,
+    code: program.code,
+    name: program.name,
+    degree: program.degree,
+    totalCredits: program.totalCredits,
+    description: program.description,
+  };
+}
+
+function buildExemptionRecommendations(state) {
+  const existingByRuleAndCredit = new Map(
+    state.academics.exemptionRecommendations.map((recommendation) => [
+      `${recommendation.ruleCode}:${recommendation.transcriptCreditId}`,
+      recommendation,
+    ]),
+  );
+  const courseByCode = new Map(
+    state.academicCatalog.courses.map((course) => [course.code, course]),
+  );
+  const recommendations = [];
+  for (const credit of state.academics.transcriptCredits) {
+    for (const rule of state.academicCatalog.equivalencyRules) {
+      const sourceMatches =
+        credit.sourceCode?.trim().toLowerCase() ===
+        rule.sourceCode.trim().toLowerCase();
+      const score = Number.parseFloat(credit.gradeOrScore ?? "");
+      if (
+        !sourceMatches ||
+        !Number.isFinite(score) ||
+        score < rule.minimumScore
+      ) {
+        continue;
+      }
+      const target = courseByCode.get(rule.targetCourseCode);
+      if (!target) continue;
+      const existing = existingByRuleAndCredit.get(
+        `${rule.code}:${credit.id}`,
+      );
+      recommendations.push({
+        id: existing?.id ?? `recommendation:${rule.code}:${credit.id}`,
+        transcriptCreditId: credit.id,
+        targetCourseCode: target.code,
+        targetCourseTitle: target.title,
+        ruleCode: rule.code,
+        rationale: `${credit.sourceCode} score ${credit.gradeOrScore} meets the stored minimum score of ${rule.minimumScore}.`,
+        confidence: rule.confidence,
+        status: existing?.status ?? "suggested",
+        requiresStaffReview: true,
+      });
+    }
+  }
+  return recommendations;
+}
+
+function ingestTranscriptCourses(draft, document, now) {
+  const existingKeys = new Set(
+    draft.academics.transcriptCredits.map(
+      (credit) =>
+        `${credit.sourceCode ?? ""}:${credit.title}:${credit.sourceDocumentId ?? ""}`.toLowerCase(),
+    ),
+  );
+  for (const course of document.extraction.courses) {
+    const key =
+      `${course.sourceCode ?? ""}:${course.title}:${document.id}`.toLowerCase();
+    if (existingKeys.has(key)) continue;
+    const sourceLabel = `${course.sourceCode ?? ""} ${course.title}`.toLowerCase();
+    draft.academics.transcriptCredits.push({
+      id: randomUUID(),
+      sourceType: sourceLabel.includes("ap ")
+        ? "ap"
+        : sourceLabel.includes("ib ")
+          ? "ib"
+          : "transcript",
+      sourceCode: course.sourceCode,
+      title: course.title,
+      gradeOrScore: course.score ?? course.grade,
+      credits: course.credits,
+      institutionName: document.extraction.institutionName,
+      sourceDocumentId: document.id,
+      importedAt: now.toISOString(),
+    });
+    existingKeys.add(key);
+  }
+  draft.academics.exemptionRecommendations =
+    buildExemptionRecommendations(draft);
 }
 
 function nullableBoundedText(value, maximum) {
@@ -920,13 +1244,25 @@ function documentResponse(document) {
 }
 
 function updateDocumentRequirement(draft, document) {
-  if (document.category !== "identity") return;
+  const requirementCode = {
+    identity: "identity_document",
+    transcript: "official_transcript",
+    financial_aid: "financial_aid_verification",
+    health: "immunization_record",
+  }[document.category];
+  if (!requirementCode) return;
   const requirement = draft.requirements.find(
-    (candidate) => candidate.code === "identity_document",
+    (candidate) => candidate.code === requirementCode,
   );
   if (!requirement) return;
   requirement.status = "under_review";
   requirement.progressPercent = 80;
+  if (document.category === "financial_aid") {
+    const financialDocument = draft.financials.requiredDocuments.find(
+      (item) => item.code === "verification_worksheet",
+    );
+    if (financialDocument) financialDocument.status = "under_review";
+  }
 }
 
 function validateActivity(input) {
@@ -1026,6 +1362,33 @@ function updateJourneyStatus(state) {
     );
   state.journey.status = allComplete ? "ready_for_review" : "in_progress";
   state.journey.version += 1;
+}
+
+function completeRequirementAndRefreshDependencies(state, code) {
+  const requirement = state.requirements.find(
+    (candidate) => candidate.code === code,
+  );
+  if (!requirement) return;
+  requirement.status = "completed";
+  requirement.progressPercent = 100;
+  const terminalCodes = new Set(
+    state.requirements
+      .filter((candidate) =>
+        terminalRequirementStatuses.has(candidate.status),
+      )
+      .map((candidate) => candidate.code),
+  );
+  for (const candidate of state.requirements) {
+    if (
+      candidate.status === "blocked" &&
+      candidate.dependsOnCodes.every((dependency) =>
+        terminalCodes.has(dependency),
+      )
+    ) {
+      candidate.status = "ready";
+    }
+  }
+  updateJourneyStatus(state);
 }
 
 function validateCompletedStepSequence(state) {

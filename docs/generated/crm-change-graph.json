@@ -1,0 +1,1007 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "generated-from-versioned-registry",
+  "warning": "This graph declares intended CRM semantics. CodeGraphContext adds static call-graph evidence. Neither is runtime lineage; correlate OpenTelemetry spans with audit_event and outbox_event records.",
+  "owners": [
+    {
+      "field": "admission.offer.status",
+      "owner": "admissions",
+      "description": "Authoritative admission-offer decision state.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "enrollment.journey.status",
+      "owner": "enrollment",
+      "description": "Lifecycle state of the student's enrollment journey.",
+      "classification": "internal"
+    },
+    {
+      "field": "enrollment.requirement.status",
+      "owner": "enrollment",
+      "description": "Server-confirmed status for an enrollment requirement.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "student.onboarding.status",
+      "owner": "onboarding",
+      "description": "Whether first-time onboarding is required or complete.",
+      "classification": "internal"
+    },
+    {
+      "field": "student.onboarding.currentStep",
+      "owner": "onboarding",
+      "description": "Next server-authorized onboarding step.",
+      "classification": "internal"
+    },
+    {
+      "field": "student.onboarding.payload",
+      "owner": "onboarding",
+      "description": "Versioned first-time student onboarding answers.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "document.status",
+      "owner": "documents",
+      "description": "Upload, storage, extraction, and review state.",
+      "classification": "internal"
+    },
+    {
+      "field": "document.extraction",
+      "owner": "documents",
+      "description": "Untrusted structured extraction pending student or staff confirmation.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "academics.transcriptCredits",
+      "owner": "academics",
+      "description": "Confirmed normalized transcript coursework and exam credit.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "academics.exemptionRecommendations",
+      "owner": "academics",
+      "description": "Versioned evidence-based equivalency recommendations.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "financial.deposit.status",
+      "owner": "financials",
+      "description": "Authoritative enrollment-deposit payment result.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "financial.requiredDocument.status",
+      "owner": "financials",
+      "description": "Verification state for a student financial-aid requirement.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "financial.paymentPlan.status",
+      "owner": "financials",
+      "description": "Student payment-plan enrollment state.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "financial.remainingBalanceCents",
+      "owner": "financials",
+      "description": "Derived remaining balance from charges, accepted aid, and payments.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "student.profile",
+      "owner": "student-profile",
+      "description": "Student-editable profile and communication preferences.",
+      "classification": "sensitive"
+    }
+  ],
+  "effects": [
+    {
+      "id": "admissions.acceptOffer",
+      "version": 1,
+      "owner": "admissions",
+      "kind": "command",
+      "handler": "PostgresPlatformStore.acceptAdmissionOffer",
+      "description": "Accepts an eligible offer and creates the enrollment journey atomically.",
+      "reads": [
+        "admission.offer.status"
+      ],
+      "writes": [
+        "admission.offer.status",
+        "enrollment.journey.status",
+        "enrollment.requirement.status"
+      ],
+      "emits": [
+        "admission.offer_accepted.v1",
+        "enrollment.journey_created.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "onboarding.saveStep",
+      "version": 1,
+      "owner": "onboarding",
+      "kind": "command",
+      "handler": "PostgresPortalStore.updateStudentOnboarding",
+      "description": "Validates and saves exactly the next authorized onboarding step.",
+      "reads": [
+        "student.onboarding.status",
+        "student.onboarding.currentStep",
+        "student.onboarding.payload"
+      ],
+      "writes": [
+        "student.onboarding.currentStep",
+        "student.onboarding.payload"
+      ],
+      "emits": [],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "expectedVersion",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "single_database",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "onboarding.complete",
+      "version": 1,
+      "owner": "onboarding",
+      "kind": "command",
+      "handler": "PostgresPortalStore.completeStudentOnboarding",
+      "description": "Locks the onboarding record and makes dashboard the future home route.",
+      "reads": [
+        "student.onboarding.currentStep",
+        "student.onboarding.payload",
+        "financial.deposit.status"
+      ],
+      "writes": [
+        "student.onboarding.status"
+      ],
+      "emits": [
+        "student.onboarding_completed.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.reserveUpload",
+      "version": 1,
+      "owner": "documents",
+      "kind": "command",
+      "handler": "PostgresPortalStore.reserveStudentDocumentUpload",
+      "description": "Reserves a content-addressed upload before object storage transfer.",
+      "reads": [],
+      "writes": [
+        "document.status"
+      ],
+      "emits": [
+        "document.upload_reserved.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key + sha256",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.completeExtraction",
+      "version": 1,
+      "owner": "documents",
+      "kind": "command",
+      "handler": "PostgresPortalStore.completeStudentDocumentExtraction",
+      "description": "Stores model extraction as untrusted reviewable data.",
+      "reads": [
+        "document.status"
+      ],
+      "writes": [
+        "document.status",
+        "document.extraction",
+        "enrollment.requirement.status",
+        "financial.requiredDocument.status"
+      ],
+      "emits": [
+        "document.extraction_completed.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "documentId + extractionAttempt",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "academics.confirmTranscriptExtraction",
+      "version": 1,
+      "owner": "academics",
+      "kind": "command",
+      "handler": "PostgresPortalStore.confirmStudentDocumentExtraction",
+      "description": "Confirms transcript data and applies deterministic, versioned equivalency rules.",
+      "reads": [
+        "document.extraction"
+      ],
+      "writes": [
+        "document.status",
+        "academics.transcriptCredits",
+        "academics.exemptionRecommendations",
+        "enrollment.requirement.status"
+      ],
+      "emits": [
+        "student.transcript_credits_imported.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "serializable"
+      }
+    },
+    {
+      "id": "enrollment.applyDocumentExtraction",
+      "version": 1,
+      "owner": "enrollment",
+      "kind": "event_handler",
+      "handler": "EnrollmentProjectionHandler.onDocumentExtractionCompleted",
+      "description": "Projects a reviewed document into the matching enrollment requirement.",
+      "reads": [
+        "document.status"
+      ],
+      "writes": [
+        "enrollment.requirement.status"
+      ],
+      "emits": [],
+      "consumes": [
+        "document.extraction_completed.v1"
+      ],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "eventId",
+        "scope": "event"
+      },
+      "transaction": {
+        "boundary": "single_database",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "financials.recordDeposit",
+      "version": 1,
+      "owner": "financials",
+      "kind": "command",
+      "handler": "PostgresPortalStore.createDepositPayment",
+      "description": "Records the processor result once and emits the payment fact.",
+      "reads": [
+        "admission.offer.status",
+        "financial.deposit.status"
+      ],
+      "writes": [
+        "financial.deposit.status",
+        "enrollment.requirement.status",
+        "financial.remainingBalanceCents"
+      ],
+      "emits": [
+        "payment.deposit_succeeded.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "serializable"
+      }
+    },
+    {
+      "id": "financials.selectPaymentPlan",
+      "version": 1,
+      "owner": "financials",
+      "kind": "command",
+      "handler": "PostgresPortalStore.selectFinancialPaymentPlan",
+      "description": "Selects one eligible plan and refreshes the financial projection.",
+      "reads": [
+        "financial.remainingBalanceCents",
+        "financial.paymentPlan.status"
+      ],
+      "writes": [
+        "financial.paymentPlan.status"
+      ],
+      "emits": [
+        "student_financial.payment_plan_selected.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "serializable"
+      }
+    },
+    {
+      "id": "studentProfile.update",
+      "version": 1,
+      "owner": "student-profile",
+      "kind": "command",
+      "handler": "PostgresPortalStore.updateStudentProfile",
+      "description": "Updates the student-owned profile under optimistic concurrency.",
+      "reads": [
+        "student.profile"
+      ],
+      "writes": [
+        "student.profile",
+        "enrollment.requirement.status"
+      ],
+      "emits": [
+        "student.profile_updated.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "expectedVersion",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "effect:academics.confirmTranscriptExtraction",
+      "type": "effect",
+      "label": "academics.confirmTranscriptExtraction",
+      "owner": "academics"
+    },
+    {
+      "id": "effect:admissions.acceptOffer",
+      "type": "effect",
+      "label": "admissions.acceptOffer",
+      "owner": "admissions"
+    },
+    {
+      "id": "effect:documents.completeExtraction",
+      "type": "effect",
+      "label": "documents.completeExtraction",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.reserveUpload",
+      "type": "effect",
+      "label": "documents.reserveUpload",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:enrollment.applyDocumentExtraction",
+      "type": "effect",
+      "label": "enrollment.applyDocumentExtraction",
+      "owner": "enrollment"
+    },
+    {
+      "id": "effect:financials.recordDeposit",
+      "type": "effect",
+      "label": "financials.recordDeposit",
+      "owner": "financials"
+    },
+    {
+      "id": "effect:financials.selectPaymentPlan",
+      "type": "effect",
+      "label": "financials.selectPaymentPlan",
+      "owner": "financials"
+    },
+    {
+      "id": "effect:onboarding.complete",
+      "type": "effect",
+      "label": "onboarding.complete",
+      "owner": "onboarding"
+    },
+    {
+      "id": "effect:onboarding.saveStep",
+      "type": "effect",
+      "label": "onboarding.saveStep",
+      "owner": "onboarding"
+    },
+    {
+      "id": "effect:studentProfile.update",
+      "type": "effect",
+      "label": "studentProfile.update",
+      "owner": "student-profile"
+    },
+    {
+      "id": "event:admission.offer_accepted.v1",
+      "type": "event",
+      "label": "admission.offer_accepted.v1"
+    },
+    {
+      "id": "event:document.extraction_completed.v1",
+      "type": "event",
+      "label": "document.extraction_completed.v1"
+    },
+    {
+      "id": "event:document.upload_reserved.v1",
+      "type": "event",
+      "label": "document.upload_reserved.v1"
+    },
+    {
+      "id": "event:enrollment.journey_created.v1",
+      "type": "event",
+      "label": "enrollment.journey_created.v1"
+    },
+    {
+      "id": "event:payment.deposit_succeeded.v1",
+      "type": "event",
+      "label": "payment.deposit_succeeded.v1"
+    },
+    {
+      "id": "event:student_financial.payment_plan_selected.v1",
+      "type": "event",
+      "label": "student_financial.payment_plan_selected.v1"
+    },
+    {
+      "id": "event:student.onboarding_completed.v1",
+      "type": "event",
+      "label": "student.onboarding_completed.v1"
+    },
+    {
+      "id": "event:student.profile_updated.v1",
+      "type": "event",
+      "label": "student.profile_updated.v1"
+    },
+    {
+      "id": "event:student.transcript_credits_imported.v1",
+      "type": "event",
+      "label": "student.transcript_credits_imported.v1"
+    },
+    {
+      "id": "field:academics.exemptionRecommendations",
+      "type": "field",
+      "label": "academics.exemptionRecommendations",
+      "owner": "academics"
+    },
+    {
+      "id": "field:academics.transcriptCredits",
+      "type": "field",
+      "label": "academics.transcriptCredits",
+      "owner": "academics"
+    },
+    {
+      "id": "field:admission.offer.status",
+      "type": "field",
+      "label": "admission.offer.status",
+      "owner": "admissions"
+    },
+    {
+      "id": "field:document.extraction",
+      "type": "field",
+      "label": "document.extraction",
+      "owner": "documents"
+    },
+    {
+      "id": "field:document.status",
+      "type": "field",
+      "label": "document.status",
+      "owner": "documents"
+    },
+    {
+      "id": "field:enrollment.journey.status",
+      "type": "field",
+      "label": "enrollment.journey.status",
+      "owner": "enrollment"
+    },
+    {
+      "id": "field:enrollment.requirement.status",
+      "type": "field",
+      "label": "enrollment.requirement.status",
+      "owner": "enrollment"
+    },
+    {
+      "id": "field:financial.deposit.status",
+      "type": "field",
+      "label": "financial.deposit.status",
+      "owner": "financials"
+    },
+    {
+      "id": "field:financial.paymentPlan.status",
+      "type": "field",
+      "label": "financial.paymentPlan.status",
+      "owner": "financials"
+    },
+    {
+      "id": "field:financial.remainingBalanceCents",
+      "type": "field",
+      "label": "financial.remainingBalanceCents",
+      "owner": "financials"
+    },
+    {
+      "id": "field:financial.requiredDocument.status",
+      "type": "field",
+      "label": "financial.requiredDocument.status",
+      "owner": "financials"
+    },
+    {
+      "id": "field:student.onboarding.currentStep",
+      "type": "field",
+      "label": "student.onboarding.currentStep",
+      "owner": "onboarding"
+    },
+    {
+      "id": "field:student.onboarding.payload",
+      "type": "field",
+      "label": "student.onboarding.payload",
+      "owner": "onboarding"
+    },
+    {
+      "id": "field:student.onboarding.status",
+      "type": "field",
+      "label": "student.onboarding.status",
+      "owner": "onboarding"
+    },
+    {
+      "id": "field:student.profile",
+      "type": "field",
+      "label": "student.profile",
+      "owner": "student-profile"
+    },
+    {
+      "id": "owner:academics",
+      "type": "owner",
+      "label": "academics",
+      "owner": "academics"
+    },
+    {
+      "id": "owner:admissions",
+      "type": "owner",
+      "label": "admissions",
+      "owner": "admissions"
+    },
+    {
+      "id": "owner:documents",
+      "type": "owner",
+      "label": "documents",
+      "owner": "documents"
+    },
+    {
+      "id": "owner:enrollment",
+      "type": "owner",
+      "label": "enrollment",
+      "owner": "enrollment"
+    },
+    {
+      "id": "owner:financials",
+      "type": "owner",
+      "label": "financials",
+      "owner": "financials"
+    },
+    {
+      "id": "owner:onboarding",
+      "type": "owner",
+      "label": "onboarding",
+      "owner": "onboarding"
+    },
+    {
+      "id": "owner:student-profile",
+      "type": "owner",
+      "label": "student-profile",
+      "owner": "student-profile"
+    }
+  ],
+  "edges": [
+    {
+      "from": "effect:academics.confirmTranscriptExtraction",
+      "to": "event:student.transcript_credits_imported.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:academics.confirmTranscriptExtraction",
+      "to": "field:academics.exemptionRecommendations",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:academics.confirmTranscriptExtraction",
+      "to": "field:academics.transcriptCredits",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:academics.confirmTranscriptExtraction",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:academics.confirmTranscriptExtraction",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:admissions.acceptOffer",
+      "to": "event:admission.offer_accepted.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:admissions.acceptOffer",
+      "to": "event:enrollment.journey_created.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:admissions.acceptOffer",
+      "to": "field:admission.offer.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:admissions.acceptOffer",
+      "to": "field:enrollment.journey.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:admissions.acceptOffer",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "event:document.extraction_completed.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:document.extraction",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:financial.requiredDocument.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.reserveUpload",
+      "to": "event:document.upload_reserved.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.reserveUpload",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:enrollment.applyDocumentExtraction",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:financials.recordDeposit",
+      "to": "event:payment.deposit_succeeded.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:financials.recordDeposit",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:financials.recordDeposit",
+      "to": "field:financial.deposit.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:financials.recordDeposit",
+      "to": "field:financial.remainingBalanceCents",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:financials.selectPaymentPlan",
+      "to": "event:student_financial.payment_plan_selected.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:financials.selectPaymentPlan",
+      "to": "field:financial.paymentPlan.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.complete",
+      "to": "event:student.onboarding_completed.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:onboarding.complete",
+      "to": "field:student.onboarding.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.saveStep",
+      "to": "field:student.onboarding.currentStep",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.saveStep",
+      "to": "field:student.onboarding.payload",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:studentProfile.update",
+      "to": "event:student.profile_updated.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:studentProfile.update",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:studentProfile.update",
+      "to": "field:student.profile",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "event:document.extraction_completed.v1",
+      "to": "effect:enrollment.applyDocumentExtraction",
+      "type": "consumes",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "field:admission.offer.status",
+      "to": "effect:admissions.acceptOffer",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:admission.offer.status",
+      "to": "effect:financials.recordDeposit",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.extraction",
+      "to": "effect:academics.confirmTranscriptExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.completeExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:enrollment.applyDocumentExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:financial.deposit.status",
+      "to": "effect:financials.recordDeposit",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:financial.deposit.status",
+      "to": "effect:onboarding.complete",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:financial.paymentPlan.status",
+      "to": "effect:financials.selectPaymentPlan",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:financial.remainingBalanceCents",
+      "to": "effect:financials.selectPaymentPlan",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.currentStep",
+      "to": "effect:onboarding.complete",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.currentStep",
+      "to": "effect:onboarding.saveStep",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.payload",
+      "to": "effect:onboarding.complete",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.payload",
+      "to": "effect:onboarding.saveStep",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.status",
+      "to": "effect:onboarding.saveStep",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.profile",
+      "to": "effect:studentProfile.update",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:academics",
+      "to": "field:academics.exemptionRecommendations",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:academics",
+      "to": "field:academics.transcriptCredits",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:admissions",
+      "to": "field:admission.offer.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
+      "to": "field:document.extraction",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
+      "to": "field:document.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:enrollment",
+      "to": "field:enrollment.journey.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:enrollment",
+      "to": "field:enrollment.requirement.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:financials",
+      "to": "field:financial.deposit.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:financials",
+      "to": "field:financial.paymentPlan.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:financials",
+      "to": "field:financial.remainingBalanceCents",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:financials",
+      "to": "field:financial.requiredDocument.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:onboarding",
+      "to": "field:student.onboarding.currentStep",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:onboarding",
+      "to": "field:student.onboarding.payload",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:onboarding",
+      "to": "field:student.onboarding.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:student-profile",
+      "to": "field:student.profile",
+      "type": "owns",
+      "runtimeEvidence": false
+    }
+  ]
+}

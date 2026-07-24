@@ -251,7 +251,7 @@ describe("contract-compatible development preview API", () => {
     assert.equal(completedBootstrap.payload.onboarding.required, false);
 
     const requirements = await api(baseUrl, "/v1/student/requirements");
-    assert.equal(requirements.payload.total, 3);
+    assert.equal(requirements.payload.total, 8);
     const identity = requirements.payload.items.find(
       (requirement) => requirement.code === "identity_document",
     );
@@ -359,6 +359,22 @@ describe("contract-compatible development preview API", () => {
     });
     assert.equal(updatedProfile.payload.version, 2);
     assert.equal(updatedProfile.payload.communicationPreference, "sms");
+    const requirementsAfterProfile = await api(
+      baseUrl,
+      "/v1/student/requirements",
+    );
+    assert.equal(
+      requirementsAfterProfile.payload.items.find(
+        (requirement) => requirement.code === "profile_verification",
+      ).status,
+      "completed",
+    );
+    assert.equal(
+      requirementsAfterProfile.payload.items.find(
+        (requirement) => requirement.code === "identity_document",
+      ).status,
+      "ready",
+    );
 
     const help = await api(baseUrl, "/v1/student/help");
     assert.ok(Array.isArray(help.payload.articles));

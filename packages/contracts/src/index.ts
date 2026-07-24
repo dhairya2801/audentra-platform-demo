@@ -72,6 +72,18 @@ export type ActivityEventName =
   | "ui.admission_decision_started.v1"
   | "ui.enrollment_started.v1"
   | "ui.enrollment_step_viewed.v1"
+  | "ui.portal_section_viewed.v1"
+  | "ui.enrollment_task_viewed.v1"
+  | "ui.enrollment_task_abandoned.v1"
+  | "ui.financial_aid_viewed.v1"
+  | "ui.course_catalog_searched.v1"
+  | "ui.course_viewed.v1"
+  | "ui.exemption_reviewed.v1"
+  | "ui.campus_event_viewed.v1"
+  | "ui.club_viewed.v1"
+  | "ui.edward_tool_invoked.v1"
+  | "ui.edward_action_widget_viewed.v1"
+  | "ui.edward_action_completed.v1"
   | "ui.help_opened.v1";
 
 export interface ActivityEventInput {
@@ -202,6 +214,16 @@ export interface ExtractedDocumentField {
   confidence: number;
 }
 
+export interface ExtractedTranscriptCourse {
+  sourceCode: string | null;
+  title: string;
+  credits: number | null;
+  grade: string | null;
+  score: string | null;
+  term: string | null;
+  confidence: number;
+}
+
 export interface StudentDocumentExtraction {
   status:
     | "pending_configuration"
@@ -222,6 +244,7 @@ export interface StudentDocumentExtraction {
   issueDate: string | null;
   academicTerm: string | null;
   fields: ExtractedDocumentField[];
+  courses?: ExtractedTranscriptCourse[];
   warnings: string[];
   model: string | null;
   provider: "openrouter" | "local";
@@ -277,6 +300,33 @@ export interface AskEdwardInput {
   history?: EdwardChatMessage[];
 }
 
+export type EdwardActionWidget =
+  | {
+      type: "deposit_payment";
+      id: string;
+      title: string;
+      description: string;
+      offerId: string;
+      amountCents: number;
+      status: "ready" | "completed";
+    }
+  | {
+      type: "document_upload";
+      id: string;
+      title: string;
+      description: string;
+      category: StudentDocumentCategory;
+      href: string;
+    }
+  | {
+      type: "appointment";
+      id: string;
+      title: string;
+      description: string;
+      appointmentType: StudentAppointmentType;
+      href: string;
+    };
+
 export interface AskEdwardResponse {
   message: string;
   provider: "openrouter" | "guided";
@@ -290,6 +340,167 @@ export interface AskEdwardResponse {
     label: string;
     href: string;
   }[];
+  toolsUsed: string[];
+  widgets: EdwardActionWidget[];
+}
+
+export interface CatalogCourse {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  credits: number;
+  level: number;
+  prerequisites: {
+    courseCode: string;
+    minimumGrade: string | null;
+  }[];
+}
+
+export interface AcademicProgram {
+  id: string;
+  code: string;
+  name: string;
+  degree: string;
+  totalCredits: number;
+  description: string;
+}
+
+export type AcademicPlanItemStatus =
+  | "required"
+  | "eligible"
+  | "blocked"
+  | "in_progress"
+  | "completed"
+  | "exemption_suggested"
+  | "exempted";
+
+export interface StudentAcademicPlanItem {
+  course: CatalogCourse;
+  category: "major_core" | "math_science" | "general_education" | "elective";
+  recommendedTerm: number;
+  status: AcademicPlanItemStatus;
+  satisfiedPrerequisiteCodes: string[];
+  missingPrerequisiteCodes: string[];
+}
+
+export interface TranscriptCredit {
+  id: string;
+  sourceType: "ap" | "ib" | "dual_enrollment" | "transfer" | "transcript";
+  sourceCode: string | null;
+  title: string;
+  gradeOrScore: string | null;
+  credits: number | null;
+  institutionName: string | null;
+  sourceDocumentId: string | null;
+}
+
+export interface CourseExemptionRecommendation {
+  id: string;
+  transcriptCreditId: string;
+  targetCourseCode: string;
+  targetCourseTitle: string;
+  ruleCode: string;
+  rationale: string;
+  confidence: number;
+  status: "suggested" | "needs_review" | "approved" | "denied";
+  requiresStaffReview: boolean;
+}
+
+export interface StudentAcademics {
+  selectedProgram: AcademicProgram;
+  availablePrograms: AcademicProgram[];
+  transcriptCredits: TranscriptCredit[];
+  exemptionRecommendations: CourseExemptionRecommendation[];
+  plan: StudentAcademicPlanItem[];
+  progress: {
+    completedCredits: number;
+    exemptedCredits: number;
+    requiredCredits: number;
+    percent: number;
+  };
+  catalogVersion: string;
+  generatedAt: string;
+}
+
+export interface FinancialDocumentRequirement {
+  id: string;
+  code: string;
+  title: string;
+  description: string;
+  status: "not_started" | "submitted" | "under_review" | "verified" | "action_required";
+  dueAt: string | null;
+  href: string;
+}
+
+export interface FinancialAward {
+  id: string;
+  source: "federal" | "state" | "institutional" | "private";
+  name: string;
+  type: "grant" | "scholarship" | "loan" | "work_study";
+  offeredAmountCents: number;
+  acceptedAmountCents: number;
+  status: "offered" | "accepted" | "declined" | "pending";
+  requiresAction: boolean;
+}
+
+export interface StudentFinancials {
+  academicYear: string;
+  costOfAttendanceCents: number;
+  acceptedAidCents: number;
+  pendingAidCents: number;
+  paymentsCents: number;
+  remainingBalanceCents: number;
+  awards: FinancialAward[];
+  requiredDocuments: FinancialDocumentRequirement[];
+  paymentPlans: {
+    id: string;
+    name: string;
+    installmentCount: number;
+    installmentAmountCents: number;
+    enrollmentFeeCents: number;
+    status: "available" | "enrolled";
+  }[];
+  sap: {
+    status: "meeting" | "warning" | "probation" | "not_meeting" | "appeal_pending";
+    cumulativeGpa: number;
+    minimumGpa: number;
+    completionRatePercent: number;
+    minimumCompletionRatePercent: number;
+    attemptedCredits: number;
+    maximumAttemptedCredits: number;
+  };
+  generatedAt: string;
+}
+
+export interface CampusEvent {
+  id: string;
+  title: string;
+  description: string;
+  startsAt: string;
+  endsAt: string;
+  location: string;
+  category: "academic" | "social" | "career" | "wellness" | "athletics";
+  featured: boolean;
+  accent: "gold" | "navy" | "blue" | "coral";
+}
+
+export interface StudentClub {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  contactName: string;
+  contactRole: string;
+  contactChannel: string;
+  latestUpdate: string;
+  nextActivity: string | null;
+}
+
+export interface CampusLifeFeed {
+  events: CampusEvent[];
+  clubs: StudentClub[];
+  generatedAt: string;
 }
 
 export type StudentAppointmentType =

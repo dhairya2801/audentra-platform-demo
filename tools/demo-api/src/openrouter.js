@@ -37,6 +37,32 @@ const documentSchema = {
         required: ["key", "label", "value", "confidence"],
       },
     },
+    courses: {
+      type: "array",
+      maxItems: 80,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          sourceCode: { type: ["string", "null"] },
+          title: { type: "string" },
+          credits: { type: ["number", "null"], minimum: 0, maximum: 20 },
+          grade: { type: ["string", "null"] },
+          score: { type: ["string", "null"] },
+          term: { type: ["string", "null"] },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+        },
+        required: [
+          "sourceCode",
+          "title",
+          "credits",
+          "grade",
+          "score",
+          "term",
+          "confidence",
+        ],
+      },
+    },
     warnings: {
       type: "array",
       maxItems: 12,
@@ -51,6 +77,7 @@ const documentSchema = {
     "issueDate",
     "academicTerm",
     "fields",
+    "courses",
     "warnings",
   ],
 };
@@ -70,7 +97,7 @@ export class OpenRouterGateway {
 
   async askEdward({ message, pageContext, history, studentContext }) {
     if (!this.configured) {
-      return guidedEdwardResponse(message);
+      return guidedEdwardResponse(message, studentContext);
     }
 
     const boundedHistory = Array.isArray(history)
@@ -88,6 +115,8 @@ export class OpenRouterGateway {
       nextAction: studentContext.nextAction,
       unreadMessages: studentContext.unreadMessages,
       documentStatuses: studentContext.documentStatuses,
+      academicSummary: studentContext.academicSummary,
+      financialSummary: studentContext.financialSummary,
       pageContext: String(pageContext || "unknown").slice(0, 120),
     };
 
@@ -120,6 +149,8 @@ export class OpenRouterGateway {
       model: payload.model ?? this.model,
       usage: normalizeUsage(payload.usage),
       suggestedActions: suggestedActionsFor(message),
+      toolsUsed: toolsFor(message),
+      widgets: widgetsFor(message, studentContext),
     };
   }
 
@@ -262,6 +293,23 @@ function normalizeExtraction(value, metadata) {
         confidence: Math.max(0, Math.min(1, Number(field?.confidence ?? 0))),
       }))
     : [];
+  const courses = Array.isArray(value?.courses)
+    ? value.courses.slice(0, 80).map((course) => ({
+        sourceCode: nullableText(course?.sourceCode, 80),
+        title: safeText(course?.title, "Untitled course", 180),
+        credits:
+          typeof course?.credits === "number"
+            ? Math.max(0, Math.min(20, course.credits))
+            : null,
+        grade: nullableText(course?.grade, 32),
+        score: nullableText(course?.score, 32),
+        term: nullableText(course?.term, 80),
+        confidence: Math.max(
+          0,
+          Math.min(1, Number(course?.confidence ?? 0)),
+        ),
+      }))
+    : [];
   return {
     status: "completed",
     documentType: documentTypes.has(value?.documentType)
@@ -277,6 +325,7 @@ function normalizeExtraction(value, metadata) {
     issueDate: nullableText(value?.issueDate, 80),
     academicTerm: nullableText(value?.academicTerm, 120),
     fields,
+    courses,
     warnings: Array.isArray(value?.warnings)
       ? value.warnings.slice(0, 12).map((warning) => safeText(warning, "", 400))
       : [],
@@ -298,6 +347,7 @@ function pendingExtraction(fileName) {
     issueDate: null,
     academicTerm: null,
     fields: [],
+    courses: [],
     warnings: [
       "Agentic parsing is waiting for an OpenRouter API key.",
       "No extracted value will update the student profile without review.",
@@ -320,7 +370,7 @@ function inferDocumentType(fileName) {
   return "other";
 }
 
-function guidedEdwardResponse(message) {
+function guidedEdwardResponse(message, studentContext = {}) {
   const text = String(message).toLowerCase();
   const response = text.match(/document|upload|transcript|fafsa|ferpa/)
     ? "Open Documents to upload a PDF, JPEG, or PNG. Aster stores the original file and prepares structured fields for your review. Nothing extracted is treated as verified until you approve it."
@@ -339,6 +389,8 @@ function guidedEdwardResponse(message) {
     model: null,
     usage: null,
     suggestedActions: suggestedActionsFor(message),
+    toolsUsed: toolsFor(message),
+    widgets: widgetsFor(message, studentContext),
   };
 }
 
@@ -360,6 +412,73 @@ function suggestedActionsFor(message) {
     { label: "View enrollment", href: "/enrollment" },
     { label: "Get support", href: "/help" },
   ];
+}
+
+function toolsFor(message) {
+  const text = String(message).toLowerCase();
+  const tools = [];
+  if (text.match(/class|course|prereq|major|credit|exempt|transcript/)) {
+    tools.push("get_student_academics", "search_course_catalog");
+  }
+  if (text.match(/financial|aid|fafsa|loan|balance|tuition|deposit|pay/)) {
+    tools.push("get_student_financials");
+  }
+  if (text.match(/enroll|task|deadline|next|deposit/)) {
+    tools.push("get_enrollment_status");
+  }
+  if (text.match(/event|club|campus|social/)) {
+    tools.push("get_campus_life");
+  }
+  return [...new Set(tools)].slice(0, 4);
+}
+
+function widgetsFor(message, studentContext) {
+  const text = String(message).toLowerCase();
+  if (text.match(/(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/)) {
+    return [
+      {
+        type: "deposit_payment",
+        id: "edward-deposit-payment",
+        title: "Enrollment deposit",
+        description: studentContext.depositPaid
+          ? "Your enrollment deposit is recorded as paid."
+          : "Complete the simulated $500 enrollment deposit securely here.",
+        offerId:
+          studentContext.offerId ??
+          "00000000-0000-7000-8000-000000000201",
+        amountCents: Number(studentContext.depositAmountCents ?? 50000),
+        status: studentContext.depositPaid ? "completed" : "ready",
+      },
+    ];
+  }
+  if (text.match(/upload|transcript|fafsa|verification/)) {
+    return [
+      {
+        type: "document_upload",
+        id: "edward-document-upload",
+        title: "Upload a document",
+        description:
+          "Add a PDF, JPEG, or PNG and review the extracted fields before anything reaches your student record.",
+        category: text.includes("transcript") ? "transcript" : "financial_aid",
+        href: "/documents",
+      },
+    ];
+  }
+  if (text.match(/appointment|advisor|counselor|human/)) {
+    return [
+      {
+        type: "appointment",
+        id: "edward-financial-appointment",
+        title: "Meet with a student advisor",
+        description: "Choose a time with the team best suited to your question.",
+        appointmentType: text.match(/financial|aid|fafsa|loan/)
+          ? "financial_aid"
+          : "enrollment_support",
+        href: "/appointments",
+      },
+    ];
+  }
+  return [];
 }
 
 function safeText(value, fallback, maximum) {

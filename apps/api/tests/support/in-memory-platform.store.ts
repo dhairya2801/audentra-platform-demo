@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type {
   AcceptOfferResponse,
+  CampusLifeFeed,
+  CatalogCourse,
   ActivityEventInput,
   CompleteStudentOnboardingInput,
   ConfirmStudentDocumentExtractionInput,
@@ -9,6 +11,7 @@ import type {
   CreateStudentDocumentInput,
   OnboardingStep,
   StudentAppointment,
+  StudentAcademics,
   StudentAppointmentList,
   StudentBootstrap,
   StudentDashboard,
@@ -16,6 +19,7 @@ import type {
   StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
+  StudentFinancials,
   StudentMessage,
   StudentMessageList,
   StudentOnboarding,
@@ -156,6 +160,107 @@ export class InMemoryPlatformStore implements PlatformStore {
   async getStudentDashboard(auth: AuthContext): Promise<StudentDashboard> {
     this.authorize(auth);
     return structuredClone(this.dashboard);
+  }
+
+  async getStudentAcademics(auth: AuthContext): Promise<StudentAcademics> {
+    this.authorize(auth);
+    const course: CatalogCourse = {
+      id: "10000000-0000-7000-8000-000000000201",
+      code: "CS 101",
+      title: "Programming Fundamentals",
+      description: "Problem solving and introductory software development.",
+      credits: 4,
+      level: 100,
+      prerequisites: [],
+    };
+    return {
+      selectedProgram: {
+        id: DEMO_IDS.programId,
+        code: "BS-CS",
+        name: "Computer Science",
+        degree: "Bachelor of Science",
+        totalCredits: 120,
+        description: "Computer science degree program.",
+      },
+      availablePrograms: [],
+      transcriptCredits: [],
+      exemptionRecommendations: [],
+      plan: [
+        {
+          course,
+          category: "major_core",
+          recommendedTerm: 1,
+          status: "eligible",
+          satisfiedPrerequisiteCodes: [],
+          missingPrerequisiteCodes: [],
+        },
+      ],
+      progress: {
+        completedCredits: 0,
+        exemptedCredits: 0,
+        requiredCredits: 120,
+        percent: 0,
+      },
+      catalogVersion: "2027-2028.v1",
+      generatedAt: "2026-07-24T00:00:00.000Z",
+    };
+  }
+
+  async searchCatalogCourses(
+    auth: AuthContext,
+    query: string,
+  ): Promise<{ items: CatalogCourse[]; total: number; catalogVersion: string }> {
+    const academics = await this.getStudentAcademics(auth);
+    const items = academics.plan
+      .map((item) => item.course)
+      .filter((course) =>
+        `${course.code} ${course.title}`.toLowerCase().includes(query.toLowerCase()),
+      );
+    return { items, total: items.length, catalogVersion: academics.catalogVersion };
+  }
+
+  async getStudentFinancials(auth: AuthContext): Promise<StudentFinancials> {
+    this.authorize(auth);
+    return {
+      academicYear: "2027–2028",
+      costOfAttendanceCents: 3_240_000,
+      acceptedAidCents: 1_539_500,
+      pendingAidCents: 350_000,
+      paymentsCents: 0,
+      remainingBalanceCents: 1_700_500,
+      awards: [],
+      requiredDocuments: [],
+      paymentPlans: [],
+      sap: {
+        status: "meeting",
+        cumulativeGpa: 3.42,
+        minimumGpa: 2,
+        completionRatePercent: 78,
+        minimumCompletionRatePercent: 67,
+        attemptedCredits: 28,
+        maximumAttemptedCredits: 180,
+      },
+      generatedAt: "2026-07-24T00:00:00.000Z",
+    };
+  }
+
+  async selectFinancialPaymentPlan(input: {
+    auth: AuthContext;
+    planId: string;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<{ planId: string; status: "enrolled" }> {
+    this.authorize(input.auth);
+    return { planId: input.planId, status: "enrolled" };
+  }
+
+  async getCampusLife(auth: AuthContext): Promise<CampusLifeFeed> {
+    this.authorize(auth);
+    return {
+      events: [],
+      clubs: [],
+      generatedAt: "2026-07-24T00:00:00.000Z",
+    };
   }
 
   async acceptAdmissionOffer(input: {

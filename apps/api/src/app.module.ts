@@ -26,6 +26,7 @@ import {
 } from "./platform/platform-store";
 import { PostgresPlatformStore } from "./platform/postgres-platform.store";
 import { StudentController } from "./student/student.controller";
+import { StudentDomainController } from "./student/student-domain.controller";
 
 @Module({})
 export class AppModule {
@@ -58,6 +59,7 @@ export class AppModule {
       controllers: [
         HealthController,
         StudentController,
+        StudentDomainController,
         OffersController,
         PortalController,
         ActivityController,

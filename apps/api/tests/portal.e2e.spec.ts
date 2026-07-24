@@ -86,6 +86,8 @@ describe("functional student portal API", () => {
         suggestedActions: [
           { label: "Open documents", href: "/documents" },
         ],
+        toolsUsed: ["get_enrollment_status"],
+        widgets: [],
       };
     },
   };

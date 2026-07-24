@@ -47,12 +47,16 @@ jobs:
           cache: npm
           cache-dependency-path: |
             packages/contracts/package-lock.json
+            packages/state-effects/package-lock.json
             apps/api/package-lock.json
             apps/worker/package-lock.json
             apps/web/package-lock.json
 
       - name: Install contracts
         run: npm --prefix packages/contracts ci --workspaces=false
+
+      - name: Install CRM State Effect Registry
+        run: npm --prefix packages/state-effects ci --workspaces=false
 
       - name: Install API
         run: npm --prefix apps/api ci --workspaces=false
@@ -78,6 +82,12 @@ jobs:
 
       - name: Typecheck contracts
         run: npm --prefix packages/contracts run typecheck
+
+      - name: Validate CRM Change Graph
+        run: |
+          npm --prefix packages/state-effects run typecheck
+          npm --prefix packages/state-effects test
+          npm --prefix packages/state-effects run generate:check
 
       - name: Typecheck and test API
         run: |

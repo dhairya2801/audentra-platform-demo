@@ -17,6 +17,11 @@
     "dev:portal": "node tools/run-student-portal.mjs",
     "demo:reset": "npm --prefix tools/demo-api run reset",
     "test:demo-api": "npm --prefix tools/demo-api test",
+    "crm:graph": "npm --workspace @vv/state-effects run generate",
+    "crm:graph:check": "npm --workspace @vv/state-effects run generate:check",
+    "cgc:index": "cgc --db kuzudb --path ./tmp/codegraphcontext index .",
+    "cgc:update": "cgc --db kuzudb --path ./tmp/codegraphcontext update .",
+    "cgc:report": "cgc --db kuzudb --path ./tmp/codegraphcontext report --output ./docs/generated/codegraphcontext-report.md",
     "db:migrate": "npm --workspace @vv/api run db:migrate",
     "db:seed": "npm --workspace @vv/api run db:seed"
   },

@@ -23,6 +23,7 @@ import type {
   PlatformStore,
 } from "./platform-store";
 import { PostgresPortalStore } from "./postgres-portal.store";
+import { getRuntimeLineage } from "../observability/runtime-lineage";
 
 type RowResult<T> = { rows: T[] };
 
@@ -108,6 +109,39 @@ const propertyAllowlists: Record<
   ]),
   "ui.enrollment_started.v1": new Set(["journey_id", "entry_point"]),
   "ui.enrollment_step_viewed.v1": new Set(["step_code", "entry_point"]),
+  "ui.portal_section_viewed.v1": new Set(["section", "entry_point"]),
+  "ui.enrollment_task_viewed.v1": new Set([
+    "task_code",
+    "task_status",
+    "entry_point",
+  ]),
+  "ui.enrollment_task_abandoned.v1": new Set([
+    "task_code",
+    "task_status",
+    "duration_bucket",
+    "last_interaction",
+  ]),
+  "ui.financial_aid_viewed.v1": new Set(["surface", "aid_status"]),
+  "ui.course_catalog_searched.v1": new Set([
+    "query_length_bucket",
+    "result_count",
+  ]),
+  "ui.course_viewed.v1": new Set(["course_code", "surface"]),
+  "ui.exemption_reviewed.v1": new Set([
+    "rule_code",
+    "recommendation_status",
+  ]),
+  "ui.campus_event_viewed.v1": new Set(["event_id", "surface"]),
+  "ui.club_viewed.v1": new Set(["club_id", "surface"]),
+  "ui.edward_tool_invoked.v1": new Set(["tool_name", "page_context"]),
+  "ui.edward_action_widget_viewed.v1": new Set([
+    "widget_type",
+    "page_context",
+  ]),
+  "ui.edward_action_completed.v1": new Set([
+    "widget_type",
+    "outcome",
+  ]),
   "ui.help_opened.v1": new Set(["context", "surface", "topic_code"]),
 };
 
@@ -555,6 +589,10 @@ export class PostgresPlatformStore
       }
 
       const auditId = randomUUID();
+      const auditLineage = getRuntimeLineage({
+        correlationId: input.requestId,
+        auditAction: "admission_offer.accepted",
+      });
       await transaction.execute(sql`
         INSERT INTO audit_event (
           id,
@@ -584,7 +622,10 @@ export class PostgresPlatformStore
           'student_self_service',
           ${input.requestId},
           ${input.requestId},
-          ${JSON.stringify({ changedFields: ["status", "accepted_at"] })}::jsonb,
+          ${JSON.stringify({
+            changedFields: ["status", "accepted_at"],
+            lineage: auditLineage,
+          })}::jsonb,
           ${acceptedAt},
           ${acceptedAt}
         )
@@ -754,6 +795,10 @@ export class PostgresPlatformStore
     },
   ): Promise<void> {
     const eventId = randomUUID();
+    const lineage = getRuntimeLineage({
+      correlationId: input.correlationId,
+      eventName: input.eventName,
+    });
     const envelope = {
       eventId,
       eventName: input.eventName,
@@ -768,6 +813,7 @@ export class PostgresPlatformStore
       },
       correlationId: input.correlationId,
       causationId: input.causationId,
+      lineage,
       data: input.data,
     };
     await transaction.execute(sql`

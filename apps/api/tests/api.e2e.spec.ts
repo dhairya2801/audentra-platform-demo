@@ -38,15 +38,24 @@ describe("API vertical slice", () => {
     await app.close();
   });
 
-  it("serves liveness without an identity and returns a request ID", async () => {
+  it("serves liveness with correlated request and OpenTelemetry IDs", async () => {
     const response = await app.inject({
       method: "GET",
       url: "/health",
-      headers: { "x-request-id": "request.health.0001" },
+      headers: {
+        "x-request-id": "request.health.ignored",
+        "x-correlation-id": "correlation.health.0001",
+      },
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.headers["x-request-id"]).toBe("request.health.0001");
+    expect(response.headers["x-request-id"]).toBe(
+      "correlation.health.0001",
+    );
+    expect(response.headers["x-correlation-id"]).toBe(
+      "correlation.health.0001",
+    );
+    expect(response.headers["x-trace-id"]).toMatch(/^[a-f0-9]{32}$/);
     expect(response.json()).toMatchObject({
       status: "ok",
       service: "vv-api",

@@ -164,6 +164,11 @@ export class ConfirmStudentDocumentExtractionDto
   acceptedFieldKeys!: string[];
 }
 
+export class SelectPaymentPlanDto {
+  @IsUUID()
+  planId!: string;
+}
+
 class EdwardChatMessageDto {
   @IsIn(["user", "assistant"])
   role!: "user" | "assistant";

@@ -305,6 +305,13 @@ export interface DomainEventEnvelope {
   actor: { type: string; id: string };
   correlationId: string;
   causationId: string;
+  lineage?: {
+    correlationId: string;
+    effectRegistryVersion: 1;
+    effectId?: string;
+    traceId?: string;
+    spanId?: string;
+  };
   data: Record<string, unknown>;
 }
 

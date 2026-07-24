@@ -6,6 +6,9 @@ import type {
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
+  CampusLifeFeed,
+  CatalogCourse,
+  StudentAcademics,
   StudentAppointment,
   StudentAppointmentList,
   StudentBootstrap,
@@ -14,6 +17,7 @@ import type {
   StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
+  StudentFinancials,
   StudentMessage,
   StudentMessageList,
   StudentOnboarding,
@@ -36,6 +40,19 @@ export interface ActivityIngestionResult {
 
 export interface PlatformStore {
   getStudentDashboard(auth: AuthContext): Promise<StudentDashboard>;
+  getStudentAcademics(auth: AuthContext): Promise<StudentAcademics>;
+  searchCatalogCourses(
+    auth: AuthContext,
+    query: string,
+  ): Promise<{ items: CatalogCourse[]; total: number; catalogVersion: string }>;
+  getStudentFinancials(auth: AuthContext): Promise<StudentFinancials>;
+  selectFinancialPaymentPlan(input: {
+    auth: AuthContext;
+    planId: string;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<{ planId: string; status: "enrolled" }>;
+  getCampusLife(auth: AuthContext): Promise<CampusLifeFeed>;
   acceptAdmissionOffer(input: {
     auth: AuthContext;
     offerId: string;

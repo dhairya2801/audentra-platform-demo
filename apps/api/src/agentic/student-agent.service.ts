@@ -157,11 +157,12 @@ export class StudentAgentService {
     auth: AuthContext;
     question: AskEdwardInput;
   }): Promise<AskEdwardResponse> {
-    const [dashboard, profile, documents, onboarding] = await Promise.all([
+    const [dashboard, profile, documents, onboarding, payments] = await Promise.all([
       this.store.getStudentDashboard(input.auth),
       this.store.getStudentProfile(input.auth),
       this.store.getStudentDocuments(input.auth),
       this.store.getStudentOnboarding(input.auth),
+      this.store.getStudentPayments(input.auth),
     ]);
     return this.ai.askEdward({
       ...input.question,
@@ -177,6 +178,13 @@ export class StudentAgentService {
           category: document.category,
           status: document.status,
         })),
+        offerId: dashboard.offer.id,
+        depositAmountCents: dashboard.offer.depositAmountCents,
+        depositPaid: payments.items.some(
+          (payment) =>
+            payment.type === "enrollment_deposit" &&
+            payment.status === "succeeded",
+        ),
       },
     });
   }
