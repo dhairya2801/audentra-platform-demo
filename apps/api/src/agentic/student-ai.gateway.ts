@@ -31,6 +31,7 @@ export interface StudentAiGateway {
     fileName: string;
     mimeType: "application/pdf" | "image/jpeg" | "image/png";
     bytes: Buffer;
+    expectedDocumentType?: StudentDocumentExtraction["documentType"];
   }): Promise<StudentDocumentExtraction>;
 }
 
@@ -195,8 +196,11 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
     fileName: string;
     mimeType: "application/pdf" | "image/jpeg" | "image/png";
     bytes: Buffer;
+    expectedDocumentType?: StudentDocumentExtraction["documentType"];
   }): Promise<StudentDocumentExtraction> {
-    if (!this.apiKey) return pendingExtraction(input.fileName);
+    if (!this.apiKey) {
+      return pendingExtraction(input.fileName, input.expectedDocumentType);
+    }
     const dataUrl = `data:${input.mimeType};base64,${input.bytes.toString("base64")}`;
     const filePart =
       input.mimeType === "application/pdf"
@@ -216,26 +220,30 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
         {
           role: "system",
           content:
-            "Extract structured facts from the student's uploaded document. Copy only values visible in the document. Never infer missing values. Omit secrets such as full SSNs, taxpayer IDs, passport numbers, account numbers, card details, signatures, and medical diagnoses. Use warnings for unreadable, ambiguous, or sensitive sections. Return JSON matching the provided schema.",
+            "Classify the document from its actual contents, then extract structured facts. Copy only values visible in the document. Never infer missing values. Omit secrets such as full SSNs, taxpayer IDs, passport numbers, account numbers, card details, signatures, and medical diagnoses. Use warnings for unreadable, ambiguous, sensitive, or context-mismatched documents. Return JSON matching the provided schema.",
         },
         {
           role: "user",
           content: [
             {
               type: "text",
-              text: `Parse ${input.fileName} into safe student-record metadata.`,
+              text: `Parse ${input.fileName} into safe student-record metadata.${input.expectedDocumentType ? ` It was uploaded for a ${input.expectedDocumentType} requirement; treat that only as context, classify from the contents, and warn if the document does not match.` : " Determine the document type from its contents; the student was not asked to classify it."}`,
             },
             filePart,
           ],
         },
       ],
-      ...(input.mimeType === "application/pdf"
-        ? {
-            plugins: [
-              { id: "file-parser", pdf: { engine: "cloudflare-ai" } },
-            ],
-          }
-        : {}),
+      plugins: [
+        ...(input.mimeType === "application/pdf"
+          ? [
+              {
+                id: "file-parser",
+                pdf: { engine: "cloudflare-ai" },
+              },
+            ]
+          : []),
+        { id: "response-healing" },
+      ],
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -375,10 +383,13 @@ function normalizeExtraction(
   };
 }
 
-function pendingExtraction(fileName: string): StudentDocumentExtraction {
+function pendingExtraction(
+  fileName: string,
+  expectedDocumentType?: StudentDocumentExtraction["documentType"],
+): StudentDocumentExtraction {
   return {
     status: "pending_configuration",
-    documentType: inferDocumentType(fileName),
+    documentType: expectedDocumentType ?? inferDocumentType(fileName),
     summary:
       "File stored securely. Add OPENROUTER_API_KEY to run structured extraction.",
     studentName: null,

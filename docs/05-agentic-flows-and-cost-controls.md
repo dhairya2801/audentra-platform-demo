@@ -270,7 +270,8 @@ multi-blocker cases or approved experiments.
 ## 11. Document classification flow
 
 ```text
-Upload passes malware scan
+Upload is linked to an optional enrollment requirement
+  -> requirement supplies expected type as context, never as the answer
   -> document-processing policy selects OCR/classifier if useful
   -> processor returns candidate:
        document type
@@ -278,6 +279,8 @@ Upload passes malware scan
        confidence
        quality issues
   -> deterministic validation checks format/range
+  -> mismatch between actual contents and expected requirement blocks
+     automatic requirement advancement
   -> low-confidence or consequential result goes to human review
   -> authorized verifier accepts/rejects
   -> verified decision updates requirement
@@ -477,4 +480,3 @@ An agent feature is not production-ready until:
 - model usage and outcome are measurable;
 - prompts/outputs follow retention policy;
 - the agent cannot mutate official state outside named application commands.
-

@@ -256,7 +256,9 @@ describe("contract-compatible development preview API", () => {
       (requirement) => requirement.code === "identity_document",
     );
     assert.equal(identity.journeyId, ids.journey);
+    assert.equal(identity.slug, "identity-document-upload");
     assert.equal(identity.submissionType, "document");
+    assert.equal(identity.documentCategory, "identity");
     assert.equal(identity.responsibleOffice, "Enrollment Documentation");
     assert.deepEqual(identity.dependencyCodes, ["profile_verification"]);
     const detail = await api(
@@ -264,6 +266,11 @@ describe("contract-compatible development preview API", () => {
       `/v1/student/requirements/${identity.id}`,
     );
     assert.deepEqual(detail.payload, identity);
+    const detailBySlug = await api(
+      baseUrl,
+      `/v1/student/requirements/${identity.slug}`,
+    );
+    assert.deepEqual(detailBySlug.payload, identity);
 
     const document = await api(baseUrl, "/v1/student/documents", {
       method: "POST",
@@ -519,8 +526,10 @@ describe("contract-compatible development preview API", () => {
   });
 
   it("stores uploaded content, exposes reviewed extraction, and keeps raw storage private", async () => {
+    const extractionInputs = [];
     const ai = {
-      async extractStudentDocument() {
+      async extractStudentDocument(input) {
+        extractionInputs.push(input);
         return {
           status: "completed",
           documentType: "transcript",
@@ -567,6 +576,11 @@ describe("contract-compatible development preview API", () => {
       },
     };
     const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "upload-flow-offer-0001",
+    });
     const fileBytes = Buffer.from("%PDF-1.7\nAster transcript fixture\n%%EOF\n");
     const form = new FormData();
     form.set(
@@ -574,7 +588,7 @@ describe("contract-compatible development preview API", () => {
       new Blob([fileBytes], { type: "application/pdf" }),
       "aster-transcript.pdf",
     );
-    form.set("category", "transcript");
+    form.set("requirementId", ids.transcriptRequirement);
 
     const uploadedResponse = await fetch(
       `${baseUrl}/v1/student/documents/upload`,
@@ -591,6 +605,8 @@ describe("contract-compatible development preview API", () => {
     assert.equal(uploadedResponse.status, 201);
     assert.equal(uploaded.status, "needs_review");
     assert.equal(uploaded.fileName, "aster-transcript.pdf");
+    assert.equal(uploaded.category, "transcript");
+    assert.equal(uploaded.requirementId, ids.transcriptRequirement);
     assert.equal(uploaded.extraction.status, "completed");
     assert.equal(uploaded.extraction.fields.length, 2);
     assert.match(uploaded.sha256, /^[0-9a-f]{64}$/);
@@ -599,6 +615,15 @@ describe("contract-compatible development preview API", () => {
       `/v1/student/documents/${uploaded.id}/content`,
     );
     assert.equal("storageKey" in uploaded, false);
+    assert.equal(extractionInputs[0].expectedDocumentType, "transcript");
+
+    const transcriptRequirement = await api(
+      baseUrl,
+      "/v1/student/requirements/transcript-upload",
+    );
+    assert.equal(transcriptRequirement.response.status, 200);
+    assert.equal(transcriptRequirement.payload.status, "under_review");
+    assert.equal(transcriptRequirement.payload.progressPercent, 80);
 
     const contentResponse = await fetch(
       `${baseUrl}${uploaded.contentUrl}`,
@@ -652,6 +677,123 @@ describe("contract-compatible development preview API", () => {
     assert.equal(assistant.response.status, 200);
     assert.equal(assistant.payload.provider, "openrouter");
     assert.equal(assistant.payload.usage.totalTokens, 92);
+  });
+
+  it("does not advance a transcript requirement when content classification disagrees", async () => {
+    const ai = {
+      async extractStudentDocument() {
+        return {
+          status: "completed",
+          documentType: "identity",
+          summary: "A government-issued identity document.",
+          studentName: "Maya Chen",
+          institutionName: null,
+          issueDate: "2026-07-20",
+          academicTerm: null,
+          fields: [],
+          courses: [],
+          warnings: [],
+          model: "test/document-parser",
+          provider: "openrouter",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "mismatch-flow-offer-0001",
+    });
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob(
+        [Buffer.from("%PDF-1.7\nIdentity document fixture\n%%EOF\n")],
+        { type: "application/pdf" },
+      ),
+      "mystery.pdf",
+    );
+    form.set("requirementId", ids.transcriptRequirement);
+
+    const response = await fetch(
+      `${baseUrl}/v1/student/documents/upload`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session",
+          "idempotency-key": "document-mismatch-0001",
+        },
+        body: form,
+      },
+    );
+    const uploaded = await response.json();
+    assert.equal(response.status, 201);
+    assert.equal(uploaded.extraction.documentType, "identity");
+    assert.match(
+      uploaded.extraction.warnings[0],
+      /requirement was not advanced automatically/i,
+    );
+
+    const requirement = await api(
+      baseUrl,
+      "/v1/student/requirements/transcript-upload",
+    );
+    assert.equal(requirement.payload.status, "blocked");
+    assert.equal(requirement.payload.progressPercent, 0);
+  });
+
+  it("does not advance a requirement when document extraction fails", async () => {
+    const ai = {
+      async extractStudentDocument() {
+        throw new Error("simulated parser outage");
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "failed-parse-offer-0001",
+    });
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob(
+        [Buffer.from("%PDF-1.7\nTranscript fixture\n%%EOF\n")],
+        { type: "application/pdf" },
+      ),
+      "official-transcript.pdf",
+    );
+    form.set("requirementId", ids.transcriptRequirement);
+
+    const response = await fetch(
+      `${baseUrl}/v1/student/documents/upload`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session",
+          "idempotency-key": "failed-parse-upload-0001",
+        },
+        body: form,
+      },
+    );
+    const uploaded = await response.json();
+    assert.equal(response.status, 201);
+    assert.equal(uploaded.extraction.status, "failed");
+
+    const requirement = await api(
+      baseUrl,
+      "/v1/student/requirements/transcript-upload",
+    );
+    assert.equal(requirement.payload.status, "blocked");
+    assert.equal(requirement.payload.progressPercent, 0);
   });
 
   it("rejects a file whose declared type does not match its signature", async () => {

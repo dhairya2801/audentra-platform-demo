@@ -226,19 +226,23 @@ not applicable, complete, or waived.
 ### Upload flow
 
 ```text
-Student chooses file
+Student opens a readable requirement route (for example transcript-upload)
+  -> requirement page embeds the upload component
+  -> requirement UUID stays internal and is sent as upload context
+  -> student chooses a file; no manual document-category field is shown
   -> browser validates safe size/type hints
-  -> CreateDocumentUpload command
-  -> API authorizes requirement + issues signed upload URL
-  -> browser uploads directly to object storage
-  -> browser calls CompleteDocumentUpload
-  -> API verifies object metadata
-  -> document status becomes uploaded
-  -> worker performs malware scan
-  -> worker performs optional OCR/classification
-  -> document status becomes needs_review or accepted
+  -> API authorizes the student and the referenced document requirement
+  -> original is stored under an opaque object key
+  -> parser classifies from file contents using requirement type only as context
+  -> strict schema extraction returns fields, courses, warnings, and confidence
+  -> if content classification disagrees with requirement context:
+       keep the requirement unchanged
+       store the document and mismatch warning for review
+  -> if classification matches:
+       document becomes needs_review
+       requirement becomes under_review
   -> designated verifier accepts or rejects
-  -> requirement is recalculated
+  -> confirmed transcript courses enter deterministic equivalency evaluation
 ```
 
 ### Failure flows
@@ -249,7 +253,7 @@ Student chooses file
 | File type rejected | Return safe validation code |
 | Malware detected | Quarantine; no further processing or download |
 | OCR uncertain | Route to human review |
-| Wrong document | Reject with structured reason and resubmission path |
+| Wrong document | Preserve original, add a structured mismatch warning, and do not advance the requirement |
 | Duplicate upload callback | Deduplicate by upload/object/provider ID |
 
 ### AI boundary
@@ -432,4 +436,3 @@ A feature is not complete until:
 - loading, empty, error, conflict, and retry states exist;
 - keyboard and screen-reader behavior is tested;
 - a mock adapter can be replaced without changing the UI or use case.
-

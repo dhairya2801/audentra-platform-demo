@@ -57,6 +57,12 @@ type MultipartRequest = FastifyRequest & {
   parts(): AsyncIterableIterator<Multipart>;
 };
 
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
+}
+
 @Controller("v1/student")
 export class PortalController {
   constructor(
@@ -114,7 +120,7 @@ export class PortalController {
   @Get("requirements/:id")
   requirement(
     @CurrentAuth() auth: AuthContext,
-    @Param("id", new ParseUUIDPipe()) id: string,
+    @Param("id") id: string,
   ): Promise<StudentRequirementDetail> {
     return this.store.getStudentRequirement(auth, id);
   }
@@ -181,6 +187,7 @@ export class PortalController {
         }
       | undefined;
     let category: string | undefined;
+    let requirementId: string | undefined;
     try {
       for await (const part of request.parts()) {
         if (part.type === "file") {
@@ -197,10 +204,12 @@ export class PortalController {
           };
         } else if (part.fieldname === "category") {
           category = String(part.value);
+        } else if (part.fieldname === "requirementId") {
+          requirementId = String(part.value);
         } else {
           throw new BadRequestError(
             "UNEXPECTED_UPLOAD_FIELD",
-            "Only file and category fields are accepted",
+            "Only file, category, and requirementId fields are accepted",
           );
         }
       }
@@ -231,16 +240,17 @@ export class PortalController {
         "Choose a document file to upload",
       );
     }
-    if (!category) {
+    if (requirementId && !isUuid(requirementId)) {
       throw new BadRequestError(
-        "DOCUMENT_CATEGORY_REQUIRED",
-        "Choose a document category",
+        "INVALID_REQUIREMENT_ID",
+        "The document requirement is invalid",
       );
     }
     return this.studentAgent.uploadDocument({
       auth,
       ...file,
-      category,
+      ...(category ? { category } : {}),
+      ...(requirementId ? { requirementId } : {}),
       idempotencyKey: requireIdempotencyKey(idempotencyKey),
       requestId: request.id,
     });

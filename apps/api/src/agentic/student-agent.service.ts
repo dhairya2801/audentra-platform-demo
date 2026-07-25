@@ -54,14 +54,17 @@ export class StudentAgentService {
     auth: AuthContext;
     fileName: string;
     mimeType: string;
-    category: string;
+    category?: string;
+    requirementId?: string;
     bytes: Buffer;
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentDocument> {
     const fileName = safeFileName(input.fileName);
     const mimeType = validateMimeType(input.mimeType);
-    const category = validateCategory(input.category);
+    const category = input.category
+      ? validateCategory(input.category)
+      : "other";
     validateFileBytes(input.bytes, mimeType);
     const sha256 = createHash("sha256").update(input.bytes).digest("hex");
     const reserved = await this.store.reserveStudentDocumentUpload({
@@ -73,6 +76,9 @@ export class StudentAgentService {
         category,
         sha256,
       },
+      ...(input.requirementId
+        ? { requirementId: input.requirementId }
+        : {}),
       idempotencyKey: input.idempotencyKey,
       requestId: input.requestId,
     });
@@ -111,11 +117,27 @@ export class StudentAgentService {
     }
     let extraction: StudentDocumentExtraction;
     try {
+      const expectedDocumentType =
+        category === "other" ? undefined : documentTypeForCategory(category);
       extraction = await this.ai.extractStudentDocument({
         fileName,
         mimeType,
         bytes: input.bytes,
+        ...(expectedDocumentType ? { expectedDocumentType } : {}),
       });
+      if (
+        expectedDocumentType &&
+        extraction.status === "completed" &&
+        extraction.documentType !== expectedDocumentType
+      ) {
+        extraction = {
+          ...extraction,
+          warnings: [
+            `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
+            ...extraction.warnings,
+          ].slice(0, 12),
+        };
+      }
     } catch {
       extraction = failedExtraction(fileName);
     }
@@ -225,6 +247,20 @@ function validateCategory(value: string): StudentDocumentCategory {
     );
   }
   return value as StudentDocumentCategory;
+}
+
+function documentTypeForCategory(
+  category: StudentDocumentCategory,
+): StudentDocumentExtraction["documentType"] {
+  return {
+    identity: "identity",
+    residency: "residency",
+    transcript: "transcript",
+    financial_aid: "financial_aid",
+    health: "immunization",
+    consent: "ferpa",
+    other: "other",
+  }[category] as StudentDocumentExtraction["documentType"];
 }
 
 function validateFileBytes(

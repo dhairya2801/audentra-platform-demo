@@ -340,9 +340,23 @@ async function route({ request, store, clock, ai }) {
         mimeType: upload.mimeType,
         sizeBytes: upload.bytes.length,
         category: upload.category,
+        requirementId: upload.requirementId,
         sha256: digest,
       },
       mutate: async (draft) => {
+        if (
+          upload.requirementId &&
+          !draft.requirements.some(
+            (requirement) =>
+              requirement.id === upload.requirementId &&
+              requirement.submissionType === "document",
+          )
+        ) {
+          throw badRequest(
+            "DOCUMENT_REQUIREMENT_NOT_FOUND",
+            "The document requirement was not found",
+          );
+        }
         const id = randomUUID();
         const storageKey = `${id}${safeExtension(upload.fileName, upload.mimeType)}`;
         await store.writeUpload(storageKey, upload.bytes);
@@ -352,7 +366,23 @@ async function route({ request, store, clock, ai }) {
             fileName: upload.fileName,
             mimeType: upload.mimeType,
             bytes: upload.bytes,
+            expectedDocumentType: documentTypeForCategory(upload.category),
           });
+          const expectedDocumentType = documentTypeForCategory(upload.category);
+          if (
+            upload.requirementId &&
+            expectedDocumentType &&
+            extraction.status === "completed" &&
+            extraction.documentType !== expectedDocumentType
+          ) {
+            extraction = {
+              ...extraction,
+              warnings: [
+                `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
+                ...extraction.warnings,
+              ].slice(0, 12),
+            };
+          }
         } catch (error) {
           extraction = failedExtraction(error, upload.fileName, clock());
         }
@@ -364,6 +394,7 @@ async function route({ request, store, clock, ai }) {
             mimeType: upload.mimeType,
             sizeBytes: upload.bytes.length,
             category: upload.category,
+            requirementId: upload.requirementId,
             sha256: digest,
             storageKey,
             extraction,
@@ -555,6 +586,7 @@ async function readDocumentUpload(request) {
   }
   const file = form.get("file");
   const category = form.get("category");
+  const requirementId = form.get("requirementId");
   if (!(file instanceof File)) {
     throw badRequest("FILE_REQUIRED", "Choose a document file to upload");
   }
@@ -581,7 +613,8 @@ async function readDocumentUpload(request) {
     );
   }
   if (
-    typeof category !== "string" ||
+    category !== null &&
+    (typeof category !== "string" ||
     ![
       "identity",
       "residency",
@@ -590,17 +623,61 @@ async function readDocumentUpload(request) {
       "health",
       "consent",
       "other",
-    ].includes(category)
+    ].includes(category))
   ) {
     throw badRequest("INVALID_DOCUMENT_CATEGORY", "Choose a valid category");
   }
+  if (
+    requirementId !== null &&
+    (typeof requirementId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        requirementId,
+      ))
+  ) {
+    throw badRequest("INVALID_REQUIREMENT_ID", "The document requirement is invalid");
+  }
   const fileName = safeDownloadName(file.name);
+  const requestedCategory =
+    typeof requirementId === "string"
+      ? categoryForRequirementId(requirementId)
+      : null;
+  if (typeof requirementId === "string" && !requestedCategory) {
+    throw badRequest(
+      "DOCUMENT_REQUIREMENT_NOT_FOUND",
+      "The document requirement was not found",
+    );
+  }
   return {
     fileName,
     mimeType: file.type,
-    category,
+    category:
+      requestedCategory ??
+      (typeof category === "string" ? category : "other"),
+    requirementId:
+      typeof requirementId === "string" ? requirementId : undefined,
     bytes: fileBytes,
   };
+}
+
+function categoryForRequirementId(requirementId) {
+  const categoryByRequirementId = {
+    "00000000-0000-7000-8000-000000000602": "identity",
+    "00000000-0000-7000-8000-000000000604": "transcript",
+    "00000000-0000-7000-8000-000000000605": "financial_aid",
+    "00000000-0000-7000-8000-000000000606": "health",
+  };
+  return categoryByRequirementId[requirementId] ?? null;
+}
+
+function documentTypeForCategory(category) {
+  return {
+    identity: "identity",
+    residency: "residency",
+    transcript: "transcript",
+    financial_aid: "financial_aid",
+    health: "immunization",
+    consent: "ferpa",
+  }[category];
 }
 
 async function readBody(request, maximumBytes) {

@@ -62,16 +62,20 @@ Controls:
 
 The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
 
-1. validates the multipart request and file category;
-2. calculates a SHA-256 digest and reserves an idempotent document row;
+1. validates the multipart request and optional requirement context;
+2. calculates a SHA-256 digest and reserves an idempotent document row linked
+   to that requirement;
 3. atomically claims parsing so replays do not spend LLM tokens twice;
 4. stores the original under an opaque server-generated object key;
-5. sends the file to the configured OpenRouter model;
-6. requires a strict structured-output schema;
+5. sends the file to the configured OpenRouter model, with the requirement type
+   as a non-authoritative hint;
+6. requires a strict structured-output schema and uses response healing for
+   malformed JSON;
 7. normalizes field counts and lengths;
 8. redacts values shaped like SSNs or payment-card numbers;
-9. returns a `needs_review` document rather than updating the profile; and
-10. records only the fields explicitly accepted by the student for staff
+9. classifies from content and refuses to advance a mismatched requirement;
+10. returns a `needs_review` document rather than updating the profile; and
+11. records only the fields explicitly accepted by the student for staff
     review.
 
 Failures do not destroy the upload. The original remains available and the

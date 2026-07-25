@@ -46,6 +46,18 @@
       "classification": "internal"
     },
     {
+      "field": "document.category",
+      "owner": "documents",
+      "description": "Content-classified document category, optionally initialized from requirement context.",
+      "classification": "internal"
+    },
+    {
+      "field": "document.requirementId",
+      "owner": "documents",
+      "description": "Enrollment requirement that supplied context for an upload.",
+      "classification": "internal"
+    },
+    {
       "field": "document.extraction",
       "owner": "documents",
       "description": "Untrusted structured extraction pending student or staff confirmation.",
@@ -192,9 +204,13 @@
       "kind": "command",
       "handler": "PostgresPortalStore.reserveStudentDocumentUpload",
       "description": "Reserves a content-addressed upload before object storage transfer.",
-      "reads": [],
+      "reads": [
+        "enrollment.requirement.status"
+      ],
       "writes": [
-        "document.status"
+        "document.status",
+        "document.category",
+        "document.requirementId"
       ],
       "emits": [
         "document.upload_reserved.v1"
@@ -219,10 +235,13 @@
       "handler": "PostgresPortalStore.completeStudentDocumentExtraction",
       "description": "Stores model extraction as untrusted reviewable data.",
       "reads": [
-        "document.status"
+        "document.status",
+        "document.category",
+        "document.requirementId"
       ],
       "writes": [
         "document.status",
+        "document.category",
         "document.extraction",
         "enrollment.requirement.status",
         "financial.requiredDocument.status"
@@ -516,9 +535,21 @@
       "owner": "admissions"
     },
     {
+      "id": "field:document.category",
+      "type": "field",
+      "label": "document.category",
+      "owner": "documents"
+    },
+    {
       "id": "field:document.extraction",
       "type": "field",
       "label": "document.extraction",
+      "owner": "documents"
+    },
+    {
+      "id": "field:document.requirementId",
+      "type": "field",
+      "label": "document.requirementId",
       "owner": "documents"
     },
     {
@@ -699,6 +730,12 @@
     },
     {
       "from": "effect:documents.completeExtraction",
+      "to": "field:document.category",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
       "to": "field:document.extraction",
       "type": "writes",
       "runtimeEvidence": false
@@ -726,6 +763,18 @@
       "to": "event:document.upload_reserved.v1",
       "type": "emits",
       "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.reserveUpload",
+      "to": "field:document.category",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.reserveUpload",
+      "to": "field:document.requirementId",
+      "type": "writes",
+      "runtimeEvidence": false
     },
     {
       "from": "effect:documents.reserveUpload",
@@ -836,8 +885,20 @@
       "runtimeEvidence": false
     },
     {
+      "from": "field:document.category",
+      "to": "effect:documents.completeExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
       "from": "field:document.extraction",
       "to": "effect:academics.confirmTranscriptExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.requirementId",
+      "to": "effect:documents.completeExtraction",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -850,6 +911,12 @@
     {
       "from": "field:document.status",
       "to": "effect:enrollment.applyDocumentExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:enrollment.requirement.status",
+      "to": "effect:documents.reserveUpload",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -933,7 +1000,19 @@
     },
     {
       "from": "owner:documents",
+      "to": "field:document.category",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
       "to": "field:document.extraction",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
+      "to": "field:document.requirementId",
       "type": "owns",
       "runtimeEvidence": false
     },

@@ -173,10 +173,50 @@ export interface StudentBootstrap {
 
 export interface StudentRequirementDetail
   extends StudentRequirementSummary {
+  slug: string;
   journeyId: string;
   submissionType: "form" | "document" | "payment" | "none";
+  documentCategory: StudentDocumentCategory | null;
   responsibleOffice: string;
   dependencyCodes: string[];
+}
+
+const requirementSlugByCode = {
+  profile_verification: "profile-verification",
+  identity_document: "identity-document-upload",
+  official_transcript: "transcript-upload",
+  financial_aid_verification: "financial-aid-verification",
+  immunization_record: "immunization-upload",
+  enrollment_deposit: "enrollment-deposit",
+} as const;
+
+const documentCategoryByRequirementCode: Partial<
+  Record<string, StudentDocumentCategory>
+> = {
+  identity_document: "identity",
+  official_transcript: "transcript",
+  financial_aid_verification: "financial_aid",
+  immunization_record: "health",
+};
+
+export function studentRequirementSlug(code: string): string {
+  return (
+    requirementSlugByCode[code as keyof typeof requirementSlugByCode] ??
+    code.toLowerCase().replaceAll("_", "-")
+  );
+}
+
+export function studentRequirementCodeFromSlug(slug: string): string {
+  const match = Object.entries(requirementSlugByCode).find(
+    ([, candidate]) => candidate === slug,
+  );
+  return match?.[0] ?? slug.toLowerCase().replaceAll("-", "_");
+}
+
+export function documentCategoryForRequirement(
+  code: string,
+): StudentDocumentCategory | null {
+  return documentCategoryByRequirementCode[code] ?? null;
 }
 
 export interface StudentRequirementList {
@@ -255,6 +295,7 @@ export interface StudentDocumentExtraction {
 
 export interface StudentDocument {
   id: string;
+  requirementId?: string;
   fileName: string;
   mimeType: "application/pdf" | "image/jpeg" | "image/png";
   sizeBytes: number;

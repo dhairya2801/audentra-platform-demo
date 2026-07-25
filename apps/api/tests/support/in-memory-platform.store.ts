@@ -1,35 +1,38 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AcceptOfferResponse,
-  CampusLifeFeed,
-  CatalogCourse,
-  ActivityEventInput,
-  CompleteStudentOnboardingInput,
-  ConfirmStudentDocumentExtractionInput,
-  CreateDepositPaymentInput,
-  CreateStudentAppointmentInput,
-  CreateStudentDocumentInput,
-  OnboardingStep,
-  StudentAppointment,
-  StudentAcademics,
-  StudentAppointmentList,
-  StudentBootstrap,
-  StudentDashboard,
-  StudentDocument,
-  StudentDocumentExtraction,
-  StudentDocumentList,
-  StudentHelp,
-  StudentFinancials,
-  StudentMessage,
-  StudentMessageList,
-  StudentOnboarding,
-  StudentPayment,
-  StudentPaymentList,
-  StudentProfile,
-  StudentRequirementDetail,
-  StudentRequirementList,
-  UpdateStudentOnboardingInput,
-  UpdateStudentProfileInput,
+import {
+  documentCategoryForRequirement,
+  studentRequirementCodeFromSlug,
+  studentRequirementSlug,
+  type AcceptOfferResponse,
+  type CampusLifeFeed,
+  type CatalogCourse,
+  type ActivityEventInput,
+  type CompleteStudentOnboardingInput,
+  type ConfirmStudentDocumentExtractionInput,
+  type CreateDepositPaymentInput,
+  type CreateStudentAppointmentInput,
+  type CreateStudentDocumentInput,
+  type OnboardingStep,
+  type StudentAppointment,
+  type StudentAcademics,
+  type StudentAppointmentList,
+  type StudentBootstrap,
+  type StudentDashboard,
+  type StudentDocument,
+  type StudentDocumentExtraction,
+  type StudentDocumentList,
+  type StudentHelp,
+  type StudentFinancials,
+  type StudentMessage,
+  type StudentMessageList,
+  type StudentOnboarding,
+  type StudentPayment,
+  type StudentPaymentList,
+  type StudentProfile,
+  type StudentRequirementDetail,
+  type StudentRequirementList,
+  type UpdateStudentOnboardingInput,
+  type UpdateStudentProfileInput,
 } from "@vv/contracts";
 import type { AuthContext } from "../../src/auth/auth-context";
 import {
@@ -318,6 +321,7 @@ export class InMemoryPlatformStore implements PlatformStore {
       this.requirements = [
         {
           id: randomUUID(),
+          slug: studentRequirementSlug("profile_verification"),
           journeyId,
           code: "profile_verification",
           title: "Verify your profile",
@@ -327,6 +331,7 @@ export class InMemoryPlatformStore implements PlatformStore {
           dueAt: "2026-07-31T12:00:00.000Z",
           progressPercent: 0,
           submissionType: "form",
+          documentCategory: null,
           responsibleOffice: "Enrollment Services",
           dependencyCodes: [],
         },
@@ -501,11 +506,13 @@ export class InMemoryPlatformStore implements PlatformStore {
 
   async getStudentRequirement(
     auth: AuthContext,
-    requirementId: string,
+    requirementIdentifier: string,
   ): Promise<StudentRequirementDetail> {
     this.authorize(auth);
     const requirement = this.requirements.find(
-      (item) => item.id === requirementId,
+      (item) =>
+        item.id === requirementIdentifier ||
+        item.code === studentRequirementCodeFromSlug(requirementIdentifier),
     );
     if (!requirement) {
       throw new NotFoundError(
@@ -578,6 +585,7 @@ export class InMemoryPlatformStore implements PlatformStore {
   async reserveStudentDocumentUpload(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput & { sha256: string };
+    requirementId?: string;
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentDocument> {
@@ -595,12 +603,29 @@ export class InMemoryPlatformStore implements PlatformStore {
           ? ".jpg"
           : ".png";
     const storageKey = `${input.auth.tenantId}/${input.auth.studentId}/${id}${extension}`;
+    const requirement = input.requirementId
+      ? this.requirements.find(
+          (candidate) =>
+            candidate.id === input.requirementId &&
+            candidate.submissionType === "document",
+        )
+      : undefined;
+    if (input.requirementId && !requirement) {
+      throw new NotFoundError(
+        "DOCUMENT_REQUIREMENT_NOT_FOUND",
+        "The document requirement was not found",
+      );
+    }
     const document: StudentDocument = {
       id,
+      ...(input.requirementId ? { requirementId: input.requirementId } : {}),
       fileName: input.document.fileName,
       mimeType: input.document.mimeType,
       sizeBytes: input.document.sizeBytes,
-      category: input.document.category,
+      category:
+        (requirement
+          ? documentCategoryForRequirement(requirement.code)
+          : null) ?? input.document.category,
       status: "uploaded",
       sha256: input.document.sha256,
       contentUrl: `/v1/student/documents/${id}/content`,

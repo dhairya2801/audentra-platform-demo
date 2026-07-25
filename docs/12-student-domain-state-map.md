@@ -34,7 +34,7 @@ synchronously for an immediate demo.
 |---|---|---|
 | Onboarding completed | `student_onboarding` | Future visits route to Dashboard; completion audit and CRM milestone |
 | Offer accepted | `admission_offer` | Enrollment journey and versioned requirement instances |
-| Document uploaded | `document_record` | Parser job, matching enrollment/financial requirement becomes under review |
+| Document uploaded | `document_record` | Original and requirement context stored; parser classifies actual content; only a matching enrollment/financial requirement becomes under review |
 | Extraction confirmed | Reviewed extraction on document | Transcript credits or safe student fields imported; audit and outbox |
 | Transcript credits imported | `student_transcript_credit` | Stored equivalency rules evaluated; exemption-review queue and academic projection rebuilt |
 | Exemption approved by staff | `course_exemption_recommendation` | Target course exempted; prerequisite graph and degree progress recomputed |

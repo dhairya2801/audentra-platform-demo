@@ -112,6 +112,7 @@ describe("OpenRouterGateway", () => {
     assert.equal(result.documentType, "ferpa");
     assert.equal(result.fields[1].value, "[sensitive value redacted]");
     assert.equal(requests[0].plugins[0].id, "file-parser");
+    assert.equal(requests[0].plugins[1].id, "response-healing");
     assert.equal(requests[0].response_format.type, "json_schema");
     assert.equal(requests[0].response_format.json_schema.strict, true);
     const filePart = requests[0].messages[1].content[1];

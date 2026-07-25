@@ -98,6 +98,7 @@ export interface PlatformStore {
   reserveStudentDocumentUpload(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput & { sha256: string };
+    requirementId?: string;
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentDocument>;

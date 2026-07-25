@@ -154,9 +154,14 @@ export class OpenRouterGateway {
     };
   }
 
-  async extractStudentDocument({ fileName, mimeType, bytes }) {
+  async extractStudentDocument({
+    fileName,
+    mimeType,
+    bytes,
+    expectedDocumentType,
+  }) {
     if (!this.configured) {
-      return pendingExtraction(fileName);
+      return pendingExtraction(fileName, expectedDocumentType);
     }
 
     const dataUrl = `data:${mimeType};base64,${bytes.toString("base64")}`;
@@ -181,29 +186,30 @@ export class OpenRouterGateway {
         {
           role: "system",
           content:
-            "Extract structured facts from the student's uploaded document. Copy only values visible in the document. Never infer or invent missing values. Omit secrets such as full SSNs, taxpayer IDs, passport numbers, account numbers, card details, signatures, and medical diagnoses. Use warnings for unreadable, ambiguous, or sensitive sections. Confidence is 0 to 1. Return JSON matching the provided schema.",
+            "Classify the document from its actual contents, then extract structured facts. Copy only values visible in the document. Never infer or invent missing values. Omit secrets such as full SSNs, taxpayer IDs, passport numbers, account numbers, card details, signatures, and medical diagnoses. Use warnings for unreadable, ambiguous, sensitive, or context-mismatched documents. Confidence is 0 to 1. Return JSON matching the provided schema.",
         },
         {
           role: "user",
           content: [
             {
               type: "text",
-              text: `Parse ${fileName} into safe student-record metadata. Do not include full government or financial identifiers.`,
+              text: `Parse ${fileName} into safe student-record metadata. Do not include full government or financial identifiers.${expectedDocumentType ? ` It was uploaded for a ${expectedDocumentType} requirement; treat that only as context, classify from the contents, and warn if it does not match.` : " Determine the document type from its contents; the student was not asked to classify it."}`,
             },
             filePart,
           ],
         },
       ],
-      ...(mimeType === "application/pdf"
-        ? {
-            plugins: [
+      plugins: [
+        ...(mimeType === "application/pdf"
+          ? [
               {
                 id: "file-parser",
                 pdf: { engine: "cloudflare-ai" },
               },
-            ],
-          }
-        : {}),
+            ]
+          : []),
+        { id: "response-healing" },
+      ],
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -336,10 +342,10 @@ function normalizeExtraction(value, metadata) {
   };
 }
 
-function pendingExtraction(fileName) {
+function pendingExtraction(fileName, expectedDocumentType) {
   return {
     status: "pending_configuration",
-    documentType: inferDocumentType(fileName),
+    documentType: expectedDocumentType ?? inferDocumentType(fileName),
     summary:
       "File stored securely. Add OPENROUTER_API_KEY to run structured extraction.",
     studentName: null,

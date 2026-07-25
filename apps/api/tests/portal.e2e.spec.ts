@@ -336,6 +336,10 @@ describe("functional student portal API", () => {
       method: "GET",
       url: `/v1/student/requirements/${requirementId}`,
     });
+    const detailBySlug = await app.inject({
+      method: "GET",
+      url: "/v1/student/requirements/profile-verification",
+    });
     const missing = await app.inject({
       method: "GET",
       url: "/v1/student/requirements/00000000-0000-7000-8000-000000009999",
@@ -346,8 +350,12 @@ describe("functional student portal API", () => {
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({
       code: "profile_verification",
+      slug: "profile-verification",
       submissionType: "form",
+      documentCategory: null,
     });
+    expect(detailBySlug.statusCode).toBe(200);
+    expect(detailBySlug.json()).toEqual(detail.json());
     expect(missing.statusCode).toBe(404);
   });
 

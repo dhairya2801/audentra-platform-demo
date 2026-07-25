@@ -648,9 +648,10 @@ export function listRequirements(state) {
 
 export function requirementDetail(state, identifier) {
   const decoded = decodeURIComponent(identifier);
-  uuidValue(decoded, "requirementId");
   const requirement = state.requirements.find(
-    (candidate) => candidate.id === decoded,
+    (candidate) =>
+      candidate.id === decoded ||
+      candidate.code === requirementCodeFromSlug(decoded),
   );
   if (!requirement) {
     throw notFound(
@@ -711,7 +712,7 @@ export function createDocumentMetadata(draft, input, now) {
     1,
     10_485_760,
   );
-  const category = enumValue(body.category, "category", [
+  const requestedCategory = enumValue(body.category, "category", [
     "identity",
     "residency",
     "transcript",
@@ -725,7 +726,7 @@ export function createDocumentMetadata(draft, input, now) {
     fileName,
     mimeType,
     sizeBytes,
-    category,
+    category: requestedCategory,
     status: "placeholder",
     sha256: null,
     storageKey: null,
@@ -744,6 +745,7 @@ export function createUploadedDocument(draft, input, now) {
     "mimeType",
     "sizeBytes",
     "category",
+    "requirementId",
     "sha256",
     "storageKey",
     "extraction",
@@ -771,7 +773,7 @@ export function createUploadedDocument(draft, input, now) {
     1,
     10_485_760,
   );
-  const category = enumValue(body.category, "category", [
+  const requestedCategory = enumValue(body.category, "category", [
     "identity",
     "residency",
     "transcript",
@@ -780,6 +782,10 @@ export function createUploadedDocument(draft, input, now) {
     "consent",
     "other",
   ]);
+  const requirementId =
+    body.requirementId === undefined
+      ? undefined
+      : uuidValue(body.requirementId, "requirementId");
   const sha256 = requiredString(body.sha256, "sha256", { min: 64, max: 64 });
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
     throw badRequest("INVALID_FIELD", "sha256 must be a lowercase SHA-256 hash");
@@ -792,8 +798,13 @@ export function createUploadedDocument(draft, input, now) {
     throw badRequest("INVALID_FIELD", "storageKey is invalid");
   }
   const extraction = validateExtraction(body.extraction);
+  const category =
+    requestedCategory === "other" && extraction.status === "completed"
+      ? documentCategoryForExtraction(extraction.documentType)
+      : requestedCategory;
   const document = {
     id,
+    ...(requirementId ? { requirementId } : {}),
     fileName,
     mimeType,
     sizeBytes,
@@ -809,6 +820,19 @@ export function createUploadedDocument(draft, input, now) {
   updateDocumentRequirement(draft, document);
   draft.portalProjectionVersion += 1;
   return documentResponse(document);
+}
+
+function documentCategoryForExtraction(documentType) {
+  return (
+    {
+      transcript: "transcript",
+      identity: "identity",
+      financial_aid: "financial_aid",
+      ferpa: "consent",
+      immunization: "health",
+      residency: "residency",
+    }[documentType] ?? "other"
+  );
 }
 
 export function confirmDocumentExtraction(draft, documentId, input, now) {
@@ -1244,6 +1268,14 @@ function documentResponse(document) {
 }
 
 function updateDocumentRequirement(draft, document) {
+  if (document.extraction?.status !== "completed") return;
+  if (
+    document.requirementId &&
+    documentCategoryForExtraction(document.extraction?.documentType) !==
+      document.category
+  ) {
+    return;
+  }
   const requirementCode = {
     identity: "identity_document",
     transcript: "official_transcript",
@@ -1346,11 +1378,52 @@ function requirementSummary(requirement) {
 function requirementDetailResponse(requirement) {
   return {
     ...requirementSummary(requirement),
+    slug: requirementSlug(requirement.code),
     journeyId: requirement.journeyId ?? ids.journey,
     submissionType: requirement.submissionType,
+    documentCategory: documentCategoryForRequirement(requirement.code),
     responsibleOffice: requirement.responsibleOffice,
     dependencyCodes: [...requirement.dependsOnCodes],
   };
+}
+
+function requirementSlug(code) {
+  return (
+    {
+      profile_verification: "profile-verification",
+      identity_document: "identity-document-upload",
+      official_transcript: "transcript-upload",
+      financial_aid_verification: "financial-aid-verification",
+      immunization_record: "immunization-upload",
+      enrollment_deposit: "enrollment-deposit",
+    }[code] ?? code.toLowerCase().replaceAll("_", "-")
+  );
+}
+
+function requirementCodeFromSlug(slug) {
+  const codes = [
+    "profile_verification",
+    "identity_document",
+    "official_transcript",
+    "financial_aid_verification",
+    "immunization_record",
+    "enrollment_deposit",
+  ];
+  return (
+    codes.find((code) => requirementSlug(code) === slug) ??
+    slug.toLowerCase().replaceAll("-", "_")
+  );
+}
+
+function documentCategoryForRequirement(code) {
+  return (
+    {
+      identity_document: "identity",
+      official_transcript: "transcript",
+      financial_aid_verification: "financial_aid",
+      immunization_record: "health",
+    }[code] ?? null
+  );
 }
 
 function updateJourneyStatus(state) {

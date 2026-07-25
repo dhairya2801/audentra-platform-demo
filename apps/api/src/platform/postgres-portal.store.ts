@@ -1,34 +1,37 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  AcademicProgram,
-  CampusLifeFeed,
-  CatalogCourse,
-  CompleteStudentOnboardingInput,
-  ConfirmStudentDocumentExtractionInput,
-  CreateDepositPaymentInput,
-  CreateStudentAppointmentInput,
-  CreateStudentDocumentInput,
-  OnboardingStep,
-  StudentAppointment,
-  StudentAcademics,
-  StudentAppointmentList,
-  StudentBootstrap,
-  StudentDocument,
-  StudentDocumentExtraction,
-  StudentDocumentList,
-  StudentHelp,
-  StudentFinancials,
-  StudentMessage,
-  StudentMessageList,
-  StudentOnboarding,
-  StudentOnboardingData,
-  StudentPayment,
-  StudentPaymentList,
-  StudentProfile,
-  StudentRequirementDetail,
-  StudentRequirementList,
-  UpdateStudentOnboardingInput,
-  UpdateStudentProfileInput,
+import {
+  documentCategoryForRequirement,
+  studentRequirementCodeFromSlug,
+  studentRequirementSlug,
+  type AcademicProgram,
+  type CampusLifeFeed,
+  type CatalogCourse,
+  type CompleteStudentOnboardingInput,
+  type ConfirmStudentDocumentExtractionInput,
+  type CreateDepositPaymentInput,
+  type CreateStudentAppointmentInput,
+  type CreateStudentDocumentInput,
+  type OnboardingStep,
+  type StudentAppointment,
+  type StudentAcademics,
+  type StudentAppointmentList,
+  type StudentBootstrap,
+  type StudentDocument,
+  type StudentDocumentExtraction,
+  type StudentDocumentList,
+  type StudentHelp,
+  type StudentFinancials,
+  type StudentMessage,
+  type StudentMessageList,
+  type StudentOnboarding,
+  type StudentOnboardingData,
+  type StudentPayment,
+  type StudentPaymentList,
+  type StudentProfile,
+  type StudentRequirementDetail,
+  type StudentRequirementList,
+  type UpdateStudentOnboardingInput,
+  type UpdateStudentProfileInput,
 } from "@vv/contracts";
 import { sql } from "drizzle-orm";
 import type { AuthContext } from "../auth/auth-context";
@@ -91,6 +94,7 @@ interface MessageRow {
 
 interface DocumentRow {
   id: string;
+  requirement_id: string | null;
   file_name: string;
   mime_type: StudentDocument["mimeType"];
   size_bytes: number;
@@ -160,6 +164,7 @@ function mapOnboarding(row: OnboardingRow): StudentOnboarding {
 function mapRequirement(row: RequirementRow): StudentRequirementDetail {
   return {
     id: row.id,
+    slug: studentRequirementSlug(row.code),
     journeyId: row.journey_id,
     code: row.code,
     title: row.title,
@@ -169,6 +174,7 @@ function mapRequirement(row: RequirementRow): StudentRequirementDetail {
     dueAt: row.due_at?.toISOString() ?? null,
     progressPercent: row.progress_percent,
     submissionType: row.submission_type,
+    documentCategory: documentCategoryForRequirement(row.code),
     responsibleOffice: row.responsible_office,
     dependencyCodes: row.depends_on_codes,
   };
@@ -188,6 +194,7 @@ function mapMessage(row: MessageRow): StudentMessage {
 function mapDocument(row: DocumentRow): StudentDocument {
   return {
     id: row.id,
+    ...(row.requirement_id ? { requirementId: row.requirement_id } : {}),
     fileName: row.file_name,
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
@@ -570,8 +577,11 @@ export class PostgresPortalStore {
 
   async getStudentRequirement(
     auth: AuthContext,
-    requirementId: string,
+    requirementIdentifier: string,
   ): Promise<StudentRequirementDetail> {
+    const requirementCode = studentRequirementCodeFromSlug(
+      requirementIdentifier,
+    );
     const result = await this.database.db.execute(sql`
       SELECT
         sr.id,
@@ -594,7 +604,10 @@ export class PostgresPortalStore {
        AND rdv.tenant_id = sr.tenant_id
       WHERE sr.tenant_id = ${auth.tenantId}
         AND j.student_id = ${auth.studentId}
-        AND sr.id = ${requirementId}
+        AND (
+          sr.id::text = ${requirementIdentifier}
+          OR rdv.code = ${requirementCode}
+        )
     `);
     const requirement = rows<RequirementRow>(result)[0];
     if (!requirement) {
@@ -672,7 +685,7 @@ export class PostgresPortalStore {
   async getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList> {
     const result = await this.database.db.execute(sql`
       SELECT
-        id, file_name, mime_type, size_bytes, category, status,
+        id, requirement_id, file_name, mime_type, size_bytes, category, status,
         storage_key, sha256, extraction, created_at
       FROM document_record
       WHERE tenant_id = ${auth.tenantId}
@@ -722,7 +735,7 @@ export class PostgresPortalStore {
           WHERE s.tenant_id = ${input.auth.tenantId}
             AND s.id = ${input.auth.studentId}
           RETURNING
-            id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, status,
             storage_key, sha256, extraction, created_at
         `);
         const created = rows<DocumentRow>(result)[0];
@@ -764,15 +777,42 @@ export class PostgresPortalStore {
   async reserveStudentDocumentUpload(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput & { sha256: string };
+    requirementId?: string;
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentDocument> {
     return this.runIdempotent(
       input,
       "student_document.upload.reserve",
-      input.document,
+      { document: input.document, requirementId: input.requirementId ?? null },
       201,
       async (transaction) => {
+        let category = input.document.category;
+        if (input.requirementId) {
+          const requirementResult = await transaction.execute(sql`
+            SELECT rdv.code
+            FROM student_requirement sr
+            JOIN enrollment_journey j
+              ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
+            JOIN requirement_definition_version rdv
+              ON rdv.id = sr.requirement_definition_version_id
+             AND rdv.tenant_id = sr.tenant_id
+            WHERE sr.tenant_id = ${input.auth.tenantId}
+              AND j.student_id = ${input.auth.studentId}
+              AND sr.id = ${input.requirementId}
+              AND rdv.submission_type = 'document'
+            LIMIT 1
+          `);
+          const requirement = rows<{ code: string }>(requirementResult)[0];
+          if (!requirement) {
+            throw new NotFoundError(
+              "DOCUMENT_REQUIREMENT_NOT_FOUND",
+              "The document requirement was not found",
+            );
+          }
+          category =
+            documentCategoryForRequirement(requirement.code) ?? category;
+        }
         const id = randomUUID();
         const storageKey = [
           input.auth.tenantId,
@@ -784,6 +824,7 @@ export class PostgresPortalStore {
             id,
             tenant_id,
             student_id,
+            requirement_id,
             file_name,
             mime_type,
             size_bytes,
@@ -797,10 +838,11 @@ export class PostgresPortalStore {
             ${id},
             s.tenant_id,
             s.id,
+            ${input.requirementId ?? null},
             ${input.document.fileName},
             ${input.document.mimeType},
             ${input.document.sizeBytes},
-            ${input.document.category},
+            ${category},
             'uploaded',
             's3',
             ${storageKey},
@@ -809,7 +851,7 @@ export class PostgresPortalStore {
           WHERE s.tenant_id = ${input.auth.tenantId}
             AND s.id = ${input.auth.studentId}
           RETURNING
-            id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, status,
             storage_key, sha256, extraction, created_at
         `);
         const created = rows<DocumentRow>(result)[0];
@@ -826,7 +868,8 @@ export class PostgresPortalStore {
           resourceId: id,
           requestId: input.requestId,
           metadata: {
-            category: input.document.category,
+            category,
+            requirementId: input.requirementId ?? null,
             mimeType: input.document.mimeType,
             sizeBytes: input.document.sizeBytes,
             sha256: input.document.sha256,
@@ -841,7 +884,8 @@ export class PostgresPortalStore {
           requestId: input.requestId,
           data: {
             studentId: input.auth.studentId,
-            category: input.document.category,
+            category,
+            requirementId: input.requirementId ?? null,
           },
         });
         return mapDocument(created);
@@ -919,10 +963,18 @@ export class PostgresPortalStore {
     return this.database.db.transaction(async (transaction) => {
       const status =
         input.extraction.status === "completed" ? "needs_review" : "uploaded";
+      const extractionCompleted = input.extraction.status === "completed";
+      const inferredCategory = extractionCompleted
+        ? documentCategoryForExtractionType(input.extraction.documentType)
+        : "other";
       const result = await transaction.execute(sql`
         UPDATE document_record
         SET
           status = ${status},
+          category = CASE
+            WHEN category = 'other' THEN ${inferredCategory}
+            ELSE category
+          END,
           extraction = ${JSON.stringify(input.extraction)}::jsonb,
           updated_at = NOW()
         WHERE tenant_id = ${input.auth.tenantId}
@@ -930,7 +982,7 @@ export class PostgresPortalStore {
           AND id = ${input.documentId}
           AND status = 'processing'
         RETURNING
-          id, file_name, mime_type, size_bytes, category, status,
+          id, requirement_id, file_name, mime_type, size_bytes, category, status,
           storage_key, sha256, extraction, created_at
       `);
       const updated = rows<DocumentRow>(result)[0];
@@ -942,25 +994,53 @@ export class PostgresPortalStore {
       }
       const requirementCode =
         requirementCodeByDocumentCategory[updated.category];
-      if (requirementCode) {
-        await transaction.execute(sql`
-          UPDATE student_requirement sr
-          SET
-            status = 'under_review',
-            progress_percent = 80,
-            version = sr.version + 1,
-            updated_at = NOW()
-          FROM
-            requirement_definition_version rdv,
-            enrollment_journey j
-          WHERE sr.tenant_id = ${input.auth.tenantId}
-            AND sr.requirement_definition_version_id = rdv.id
-            AND sr.journey_id = j.id
-            AND j.student_id = ${input.auth.studentId}
-            AND rdv.code = ${requirementCode}
-        `);
+      const classificationMatchesRequirement =
+        !updated.requirement_id ||
+        documentCategoryForExtractionType(input.extraction.documentType) ===
+          updated.category;
+      if (
+        requirementCode &&
+        extractionCompleted &&
+        classificationMatchesRequirement
+      ) {
+        if (updated.requirement_id) {
+          await transaction.execute(sql`
+            UPDATE student_requirement sr
+            SET
+              status = 'under_review',
+              progress_percent = 80,
+              version = sr.version + 1,
+              updated_at = NOW()
+            FROM enrollment_journey j
+            WHERE sr.tenant_id = ${input.auth.tenantId}
+              AND sr.journey_id = j.id
+              AND j.student_id = ${input.auth.studentId}
+              AND sr.id = ${updated.requirement_id}
+          `);
+        } else {
+          await transaction.execute(sql`
+            UPDATE student_requirement sr
+            SET
+              status = 'under_review',
+              progress_percent = 80,
+              version = sr.version + 1,
+              updated_at = NOW()
+            FROM
+              requirement_definition_version rdv,
+              enrollment_journey j
+            WHERE sr.tenant_id = ${input.auth.tenantId}
+              AND sr.requirement_definition_version_id = rdv.id
+              AND sr.journey_id = j.id
+              AND j.student_id = ${input.auth.studentId}
+              AND rdv.code = ${requirementCode}
+          `);
+        }
       }
-      if (updated.category === "financial_aid") {
+      if (
+        updated.category === "financial_aid" &&
+        extractionCompleted &&
+        classificationMatchesRequirement
+      ) {
         await transaction.execute(sql`
           UPDATE financial_document_requirement
           SET status = 'under_review',
@@ -1008,7 +1088,7 @@ export class PostgresPortalStore {
   }): Promise<StudentDocument> {
     const result = await this.database.db.execute(sql`
       SELECT
-        id, file_name, mime_type, size_bytes, category, status,
+        id, requirement_id, file_name, mime_type, size_bytes, category, status,
         storage_key, sha256, extraction, created_at
       FROM document_record
       WHERE tenant_id = ${input.auth.tenantId}
@@ -1076,7 +1156,7 @@ export class PostgresPortalStore {
       async (transaction) => {
         const currentResult = await transaction.execute(sql`
           SELECT
-            id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, status,
             storage_key, sha256, extraction, created_at
           FROM document_record
           WHERE tenant_id = ${input.auth.tenantId}
@@ -1124,7 +1204,7 @@ export class PostgresPortalStore {
             AND student_id = ${input.auth.studentId}
             AND id = ${input.documentId}
           RETURNING
-            id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, status,
             storage_key, sha256, extraction, created_at
         `);
         const updated = rows<DocumentRow>(updatedResult)[0];
@@ -2546,6 +2626,20 @@ function documentExtension(
   if (mimeType === "application/pdf") return ".pdf";
   if (mimeType === "image/jpeg") return ".jpg";
   return ".png";
+}
+
+function documentCategoryForExtractionType(
+  documentType: StudentDocumentExtraction["documentType"],
+): StudentDocument["category"] {
+  return {
+    transcript: "transcript",
+    identity: "identity",
+    financial_aid: "financial_aid",
+    ferpa: "consent",
+    immunization: "health",
+    residency: "residency",
+    other: "other",
+  }[documentType] as StudentDocument["category"];
 }
 
 function mapProgram(row: {
