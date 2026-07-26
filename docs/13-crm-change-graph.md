@@ -92,6 +92,23 @@ This is safe linkage metadata, not student content. A support or CRM
 investigation can start with any one of these IDs and reconcile the trace,
 append-only audit fact, and publishable domain event.
 
+## Example: document extraction retry
+
+`documents.retryExtraction` is a documents-owned command in the registry. It
+reads the stored document state, category, requirement context, and prior
+extraction; writes only the document processing state; emits
+`document.extraction_retry_started.v1`; and synchronously invokes
+`documents.completeExtraction` for the terminal extraction result. Its
+aggregate-scoped `Idempotency-Key` contract prevents duplicate retry clicks
+from creating another provider call after the document reaches a terminal
+state.
+
+At runtime, `document.extraction_retry_started` maps to that effect ID in the
+lineage mapper. The subsequent `document.extraction_completed` audit/outbox
+fact maps to `documents.completeExtraction`. Together, the correlation ID and
+trace establish the actual retry path; the generated graph only declares the
+permitted path.
+
 ## CodeGraphContext workflow
 
 The repository includes `.cgcignore` and uses a local KuzuDB graph under the

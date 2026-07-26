@@ -22,6 +22,7 @@ import {
   type StudentDocumentExtraction,
   type StudentDocumentList,
   type StudentHelp,
+  type StudentHousingPlan,
   type StudentFinancials,
   type StudentMessage,
   type StudentMessageList,
@@ -32,6 +33,7 @@ import {
   type StudentRequirementDetail,
   type StudentRequirementList,
   type UpdateStudentOnboardingInput,
+  type UpdateStudentHousingPlanInput,
   type UpdateStudentProfileInput,
 } from "@vv/contracts";
 import type { AuthContext } from "../../src/auth/auth-context";
@@ -43,6 +45,7 @@ import { BadRequestError } from "../../src/common/api-error";
 import { DEMO_IDS } from "../../src/config/app-config";
 import type {
   ActivityIngestionResult,
+  AiProviderResponseAttempt,
   PlatformStore,
 } from "../../src/platform/platform-store";
 import { validateActivityEventProperties } from "../../src/platform/postgres-platform.store";
@@ -52,6 +55,7 @@ import {
 } from "../../src/portal/onboarding-policy";
 
 export class InMemoryPlatformStore implements PlatformStore {
+  readonly aiProviderResponses: AiProviderResponseAttempt[] = [];
   private readonly idempotentResponses = new Map<
     string,
     { offerId: string; response: AcceptOfferResponse }
@@ -127,6 +131,12 @@ export class InMemoryPlatformStore implements PlatformStore {
     auditEvents: 0,
     outboxEvents: 0,
   };
+
+  async recordAiProviderResponse(
+    input: AiProviderResponseAttempt,
+  ): Promise<void> {
+    this.aiProviderResponses.push(structuredClone(input));
+  }
 
   private readonly dashboard: StudentDashboard = {
     student: {
@@ -400,6 +410,64 @@ export class InMemoryPlatformStore implements PlatformStore {
     return structuredClone(this.onboarding);
   }
 
+  async getStudentHousingPlan(auth: AuthContext): Promise<StudentHousingPlan> {
+    this.authorize(auth);
+    const preference = this.onboarding.data.housingPreference;
+    const residenceOption = this.onboarding.data.housingResidenceOption;
+    return {
+      preference:
+        preference === "on_campus" ||
+        preference === "off_campus" ||
+        preference === "undecided"
+          ? preference
+          : null,
+      residenceOption:
+        residenceOption === "aster_residence_hall" ||
+        residenceOption === "aster_apartments" ||
+        residenceOption === "student_village"
+          ? residenceOption
+          : null,
+      version: this.onboarding.version,
+      updatedAt: this.onboarding.updatedAt,
+    };
+  }
+
+  async updateStudentHousingPlan(input: {
+    auth: AuthContext;
+    update: UpdateStudentHousingPlanInput;
+    requestId: string;
+  }): Promise<StudentHousingPlan> {
+    this.authorize(input.auth);
+    if (input.update.expectedVersion !== this.onboarding.version) {
+      throw new ConflictError(
+        "VERSION_CONFLICT",
+        "Your housing plan changed in another session",
+      );
+    }
+    const residenceOption =
+      input.update.preference === "on_campus"
+        ? input.update.residenceOption ?? "aster_residence_hall"
+        : null;
+    this.onboarding = {
+      ...this.onboarding,
+      data: {
+        ...this.onboarding.data,
+        housingPreference: input.update.preference,
+        housingResidenceOption: residenceOption,
+      },
+      version: this.onboarding.version + 1,
+      updatedAt: "2026-07-24T12:00:00.000Z",
+    };
+    const requirement = this.requirements.find(
+      (candidate) => candidate.code === "housing_preference",
+    );
+    if (requirement) {
+      requirement.status = "completed";
+      requirement.progressPercent = 100;
+    }
+    return this.getStudentHousingPlan(input.auth);
+  }
+
   async updateStudentOnboarding(input: {
     auth: AuthContext;
     update: UpdateStudentOnboardingInput;
@@ -640,15 +708,58 @@ export class InMemoryPlatformStore implements PlatformStore {
   async claimStudentDocumentProcessing(input: {
     auth: AuthContext;
     documentId: string;
+    retry?: boolean;
+    requestId?: string;
+    retryIdempotencyKey?: string;
   }): Promise<boolean> {
     this.authorize(input.auth);
+    const retryRecordKey = input.retry
+      ? `document-extraction-retry:${input.documentId}:${input.retryIdempotencyKey ?? ""}`
+      : undefined;
+    if (input.retry && !input.retryIdempotencyKey) {
+      throw new BadRequestError(
+        "IDEMPOTENCY_KEY_REQUIRED",
+        "The Idempotency-Key header is required",
+      );
+    }
+    if (retryRecordKey && this.portalIdempotency.has(retryRecordKey)) {
+      return false;
+    }
     const document = this.documents.find(
       (candidate) => candidate.id === input.documentId,
     );
-    if (!document || document.status !== "uploaded" || document.extraction) {
+    const canClaim = input.retry
+      ? canRetryStoredExtraction(document?.extraction)
+      : !document?.extraction;
+    if (!document || document.status !== "uploaded" || !canClaim) {
       return false;
     }
     document.status = "processing";
+    document.extraction = {
+      status: "processing",
+      documentType: "other",
+      summary:
+        "The original file is safely stored. Edward is preparing a reviewable record.",
+      studentName: null,
+      institutionName: null,
+      issueDate: null,
+      academicTerm: null,
+      fields: [],
+      courses: [],
+      warnings: [],
+      model: null,
+      provider: "local",
+      processedAt: null,
+      verifiedAt: null,
+    };
+    if (retryRecordKey) {
+      this.portalIdempotency.set(retryRecordKey, {
+        documentId: input.documentId,
+        status: "processing",
+      });
+    }
+    this.effects.auditEvents += 1;
+    this.effects.outboxEvents += 1;
     return true;
   }
 
@@ -676,6 +787,7 @@ export class InMemoryPlatformStore implements PlatformStore {
     documentId: string;
     extraction: StudentDocumentExtraction;
     requestId: string;
+    retryIdempotencyKey?: string;
   }): Promise<StudentDocument> {
     this.authorize(input.auth);
     const document = this.documents.find(
@@ -690,7 +802,14 @@ export class InMemoryPlatformStore implements PlatformStore {
     document.extraction = structuredClone(input.extraction);
     document.status =
       input.extraction.status === "completed" ? "needs_review" : "uploaded";
-    return structuredClone(document);
+    const response = structuredClone(document);
+    if (input.retryIdempotencyKey) {
+      this.portalIdempotency.set(
+        `document-extraction-retry:${input.documentId}:${input.retryIdempotencyKey}`,
+        response,
+      );
+    }
+    return response;
   }
 
   async getStudentDocument(input: {
@@ -918,4 +1037,13 @@ export class InMemoryPlatformStore implements PlatformStore {
       );
     }
   }
+}
+
+function canRetryStoredExtraction(
+  extraction: StudentDocumentExtraction | undefined,
+): boolean {
+  return (
+    extraction?.status === "pending_configuration" ||
+    (extraction?.status === "failed" && extraction.retryable !== false)
+  );
 }

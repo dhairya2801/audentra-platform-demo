@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 export interface WorkerConfig {
   databaseUrl: string;
+  apiInternalUrl: string;
+  documentWorkerToken: string;
   workerId: string;
   consumerName: string;
   batchSize: number;
@@ -53,6 +55,11 @@ export function loadConfig(
 
   const config: WorkerConfig = {
     databaseUrl,
+    apiInternalUrl:
+      environment.API_INTERNAL_URL?.trim() || "http://localhost:4000",
+    documentWorkerToken:
+      environment.DOCUMENT_WORKER_TOKEN?.trim() ||
+      "local-development-document-worker-token",
     workerId:
       environment.WORKER_ID?.trim() ||
       `${process.env.HOSTNAME ?? "local"}-${process.pid}-${randomUUID().slice(0, 8)}`,

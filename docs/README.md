@@ -7,12 +7,13 @@ delivery phases.
 
 ## Status
 
-- Architecture status: proposed baseline
-- Implementation status: student portal core implemented and under active development
+- Architecture status: implemented baseline with an explicit production target
+- Implementation status: functional student portal preview under active development
 - Current product surface: student portal
 - Not yet implemented: counselor, director, enrollment leader, VP of enrollment
 - Local runtime target: Docker Compose
 - Production runtime target: Kubernetes
+- Deployed preview: hardened Google Compute Engine `e2-micro`
 
 ## Architecture in one paragraph
 
@@ -39,7 +40,14 @@ security, ownership, or deployment pressure justifies it.
 11. [Agentic runtime: Edward and document extraction](./11-agentic-runtime.md)
 12. [Student domain state map](./12-student-domain-state-map.md)
 13. [CRM Change Graph](./13-crm-change-graph.md)
-14. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
+14. [Current implementation map](./14-current-implementation-map.md)
+15. [Domain model and object reference](./15-domain-model-reference.md)
+16. [Deployment, security, and CI/CD runbook](./16-deployment-security-and-cicd.md)
+17. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
+
+For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
+explain the architectural decisions, domain workflows, and longer-term design
+in greater depth.
 
 ## Non-negotiable engineering principles
 

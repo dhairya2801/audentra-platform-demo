@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ export class JsonStateStore {
     filePath = defaultDataFile,
     clock = () => new Date(),
     uploadDirectory,
+    stateFactory = createSeedState,
   ) {
     this.filePath = resolve(filePath);
     this.clock = clock;
@@ -24,6 +26,7 @@ export class JsonStateStore {
         process.env.DOCUMENT_UPLOAD_DIR ??
         `${dirname(this.filePath)}/uploads`,
     );
+    this.stateFactory = stateFactory;
   }
 
   async initialize() {
@@ -49,7 +52,7 @@ export class JsonStateStore {
   }
 
   async reset() {
-    const state = createSeedState();
+    const state = this.stateFactory();
     await this.#write(state);
     this.#state = state;
     return this.snapshot();
@@ -60,7 +63,10 @@ export class JsonStateStore {
     await mkdir(this.uploadDirectory, { recursive: true });
     const filePath = resolve(this.uploadDirectory, storageKey);
     assertInsideDirectory(filePath, this.uploadDirectory);
-    await writeFile(filePath, bytes, { mode: 0o600 });
+    const temporaryPath = `${filePath}.${randomUUID()}.uploading`;
+    assertInsideDirectory(temporaryPath, this.uploadDirectory);
+    await writeFile(temporaryPath, bytes, { mode: 0o600 });
+    await rename(temporaryPath, filePath);
     return filePath;
   }
 
@@ -69,6 +75,24 @@ export class JsonStateStore {
     const filePath = resolve(this.uploadDirectory, storageKey);
     assertInsideDirectory(filePath, this.uploadDirectory);
     return readFile(filePath);
+  }
+
+  /**
+   * Development-only provider journal. This is deliberately separate from the
+   * student-facing document record: normalized extraction data belongs on the
+   * document, while the exact provider response belongs to an attempt history.
+   */
+  async recordAiProviderResponse(response) {
+    const record = {
+      ...structuredClone(response),
+      id: randomUUID(),
+      recordedAt: response.recordedAt ?? this.clock().toISOString(),
+    };
+    return this.transact((draft) => {
+      draft.aiProviderResponses ??= [];
+      draft.aiProviderResponses.push(record);
+      return record;
+    });
   }
 
   async transact(mutator) {

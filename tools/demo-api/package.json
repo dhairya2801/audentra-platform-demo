@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@vv/document-preprocessing": "file:../../packages/document-preprocessing"
+  },
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",

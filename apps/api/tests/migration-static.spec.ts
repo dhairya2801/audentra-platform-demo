@@ -16,7 +16,21 @@ describe("initial PostgreSQL migration", () => {
       resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
       "utf8",
     );
-    const migration = `${initialMigration}\n${portalMigration}\n${agenticDocumentMigration}`;
+    const aiResponseMigration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0005_ai_provider_response_attempts.sql",
+      ),
+      "utf8",
+    );
+    const credentialIdentityMigration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0006_credential_identity.sql",
+      ),
+      "utf8",
+    );
+    const migration = `${initialMigration}\n${portalMigration}\n${agenticDocumentMigration}\n${aiResponseMigration}\n${credentialIdentityMigration}`;
     const requiredTables = [
       "tenant",
       "person",
@@ -33,6 +47,11 @@ describe("initial PostgreSQL migration", () => {
       "student_onboarding",
       "student_message",
       "document_record",
+      "ai_provider_response_attempt",
+      "student_identity_invitation",
+      "credential_account",
+      "auth_session",
+      "auth_verification_challenge",
       "student_appointment",
       "payment_transaction",
       "student_profile",
@@ -46,11 +65,52 @@ describe("initial PostgreSQL migration", () => {
     }
   });
 
-  it("persists opaque document content references and reviewable extraction data", async () => {
+  it("stores only hashed credential session and verification tokens", async () => {
     const migration = await readFile(
-      resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
+      resolve(
+        __dirname,
+        "../migrations/0006_credential_identity.sql",
+      ),
       "utf8",
     );
+
+    expect(migration).toContain("password_hash text NOT NULL");
+    expect(migration).toContain("token_hash char(64) NOT NULL UNIQUE");
+    expect(migration).toContain("email_verified_at timestamptz");
+    expect(migration).toContain("phone_verified_at timestamptz");
+    expect(migration).toContain("REFERENCES credential_account(id) ON DELETE CASCADE");
+    expect(migration).not.toContain("session_token");
+  });
+
+  it("stores raw provider attempts separately from normalized document extraction", async () => {
+    const migration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0005_ai_provider_response_attempts.sql",
+      ),
+      "utf8",
+    );
+
+    expect(migration).toContain("raw_response_text text");
+    expect(migration).toContain("response_body jsonb");
+    expect(migration).toContain("transport_error jsonb");
+    expect(migration).toContain("finish_reason varchar(80)");
+    expect(migration).toContain("document_id uuid NOT NULL");
+    expect(migration).toContain("'openrouter', 'groq'");
+  });
+
+  it("persists opaque document content references and reviewable extraction data", async () => {
+    const [agenticMigration, processingPolicyMigration] = await Promise.all([
+      readFile(
+        resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
+        "utf8",
+      ),
+      readFile(
+        resolve(__dirname, "../migrations/0007_document_processing_policy.sql"),
+        "utf8",
+      ),
+    ]);
+    const migration = `${agenticMigration}\n${processingPolicyMigration}`;
 
     expect(migration).toContain("storage_key varchar(512)");
     expect(migration).toContain("sha256 char(64)");
@@ -59,6 +119,8 @@ describe("initial PostgreSQL migration", () => {
     expect(migration).toContain("'needs_review'");
     expect(migration).toContain("'under_review'");
     expect(migration).toContain("document_record_storage_key_idx");
+    expect(migration).toContain("processing_mode varchar(24)");
+    expect(migration).toContain("'manual_review'");
   });
 
   it("preserves the authoritative nine-step onboarding sequence", async () => {

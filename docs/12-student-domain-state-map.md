@@ -33,8 +33,11 @@ synchronously for an immediate demo.
 | Source change | Authoritative update | Dependent updates |
 |---|---|---|
 | Onboarding completed | `student_onboarding` | Future visits route to Dashboard; completion audit and CRM milestone |
+| Housing plan updated | `student_onboarding.payload` | Housing requirement completes, audit/outbox fact is emitted, and the student-visible residence preview refreshes |
 | Offer accepted | `admission_offer` | Enrollment journey and versioned requirement instances |
-| Document uploaded | `document_record` | Original and requirement context stored; parser classifies actual content; only a matching enrollment/financial requirement becomes under review |
+| Document uploaded | `document_record` | Original and requirement context are stored first; server-owned `processing_mode` either queues identity/transcript extraction or sends financial-aid/immunization originals directly to staff review |
+| Identity portrait located | Reviewed `document_record.extraction.visualRegions` | A normalized page region is validated and cropped server-side for the student-ID preview; the original object key remains private |
+| Extraction retry started | `document_record.status` and retryable extraction metadata | Existing opaque original is claimed and re-read; audit/outbox and OpenTelemetry correlation prove the retry without creating a second upload |
 | Extraction confirmed | Reviewed extraction on document | Transcript credits or safe student fields imported; audit and outbox |
 | Transcript credits imported | `student_transcript_credit` | Stored equivalency rules evaluated; exemption-review queue and academic projection rebuilt |
 | Exemption approved by staff | `course_exemption_recommendation` | Target course exempted; prerequisite graph and degree progress recomputed |
@@ -54,29 +57,30 @@ Tracked milestones include:
 
 - enrollment checklist and task viewed;
 - action started, submitted, rejected, completed, or blocked;
-- document upload and reviewed extraction;
+- document upload, parsing retry, and reviewed extraction;
 - financial-aid screen viewed;
 - enrollment task abandoned with duration bucket and last safe interaction;
-- Edward tool invoked, action widget shown, and action outcome.
+- Edward record-context receipt, action widget shown, and action outcome.
 
 The client does not send names, email addresses, raw URLs, transcript values,
 financial amounts, payment credentials, document contents, or free-form text in
 analytics properties. Material changes are separately recorded in the
 immutable audit log.
 
-## Edward tool boundary
+## Edward context boundary
 
-Edward uses typed, read-only data tools first:
+Before Edward receives a question, the authenticated API deterministically
+collects a bounded student projection. The production API currently reads the
+dashboard, profile, documents, onboarding, and payment projections. The local
+preview additionally builds academic, financial, and message summaries from
+its in-memory student record.
 
-- `get_enrollment_status`
-- `get_student_financials`
-- `get_student_academics`
-- `search_course_catalog`
-- `get_campus_life`
-
-An intent router decides which tools are needed. The LLM receives only the
-bounded results of those tools and recent chat turns. Write actions are rendered
-as typed UI widgets. The student explicitly activates the widget; the normal
+Each response includes `contextReceipts` for the sources successfully collected
+for that response. These are evidence of real reads, not model-selected tool
+calls and not inferences from the student's wording. The model receives only
+that bounded projection and recent chat turns; browser-supplied history is
+quoted as untrusted context rather than granted assistant authority. Write actions are rendered as
+typed UI widgets. The student explicitly activates the widget; the normal
 authenticated, idempotent command endpoint performs the change and records the
 audit trail. Edward itself never writes directly to domain tables.
 

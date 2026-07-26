@@ -39,40 +39,39 @@ jobs:
       DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          node-version: 22
+          persist-credentials: false
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22.23.1
           cache: npm
           cache-dependency-path: |
-            packages/contracts/package-lock.json
-            packages/state-effects/package-lock.json
-            apps/api/package-lock.json
-            apps/worker/package-lock.json
-            apps/web/package-lock.json
+            package-lock.json
+            tools/demo-api/package-lock.json
 
-      - name: Install contracts
-        run: npm --prefix packages/contracts ci --workspaces=false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
 
-      - name: Install CRM State Effect Registry
-        run: npm --prefix packages/state-effects ci --workspaces=false
+      - name: Install bounded PDF preprocessing runtime
+        run: |
+          python -m pip install \
+            --disable-pip-version-check \
+            --requirement packages/document-preprocessing/requirements.txt
+          python -m pip check
 
-      - name: Install API
-        run: npm --prefix apps/api ci --workspaces=false
+      - name: Install workspace dependencies
+        run: npm ci
 
-      - name: Install worker
-        run: npm --prefix apps/worker ci --workspaces=false
-
-      - name: Install web
-        run: npm --prefix apps/web ci --workspaces=false
+      - name: Install stateful preview API
+        run: npm --prefix tools/demo-api ci --workspaces=false
 
       - name: Audit production dependencies
         run: |
-          npm --prefix packages/contracts audit --omit=dev --workspaces=false
-          npm --prefix apps/api audit --omit=dev --workspaces=false
-          npm --prefix apps/worker audit --omit=dev --workspaces=false
-          npm --prefix apps/web audit --omit=dev --workspaces=false
+          npm audit --omit=dev --workspaces
+          npm --prefix tools/demo-api audit --omit=dev --workspaces=false
 
       - name: Apply database migrations
         run: npm --prefix apps/api run db:migrate
@@ -82,6 +81,9 @@ jobs:
 
       - name: Typecheck contracts
         run: npm --prefix packages/contracts run typecheck
+
+      - name: Validate document preprocessing
+        run: npm --prefix packages/document-preprocessing test
 
       - name: Validate CRM Change Graph
         run: |
@@ -112,3 +114,70 @@ jobs:
         run: |
           npm --prefix apps/api run build
           npm --prefix apps/worker run build
+
+  deploy-preview:
+    name: Deploy hardened VM preview
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    concurrency:
+      group: vv-edgent-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: even-advantage-502610-n1
+      GCP_ZONE: us-central1-a
+      GCP_INSTANCE: deneme-harness
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39355369148/locations/global/workloadIdentityPools/github-vv-edgent/providers/github
+      GCP_SERVICE_ACCOUNT: vv-edgent-cd@even-advantage-502610-n1.iam.gserviceaccount.com
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - id: google-auth
+        name: Exchange GitHub OIDC token for short-lived Google credentials
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Create immutable source release
+        run: >-
+          git archive
+          --format=tar.gz
+          --output="${RUNNER_TEMP}/vv-edgent-${GITHUB_SHA}.tar.gz"
+          "${GITHUB_SHA}"
+
+      - name: Upload release through IAP
+        run: >-
+          gcloud compute scp
+          "${RUNNER_TEMP}/vv-edgent-${GITHUB_SHA}.tar.gz"
+          "${GCP_INSTANCE}:/tmp/vv-edgent-${GITHUB_SHA}.tar.gz"
+          --project="${GCP_PROJECT_ID}"
+          --zone="${GCP_ZONE}"
+          --tunnel-through-iap
+          --quiet
+
+      - name: Deploy and health-check release
+        run: >-
+          gcloud compute ssh
+          "${GCP_INSTANCE}"
+          --project="${GCP_PROJECT_ID}"
+          --zone="${GCP_ZONE}"
+          --tunnel-through-iap
+          --quiet
+          --command="sudo /usr/local/sbin/vv-edgent-deploy ${GITHUB_SHA}"

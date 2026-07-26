@@ -4,10 +4,13 @@ import type {
   AskEdwardInput,
   AskEdwardResponse,
   ConfirmStudentDocumentExtractionInput,
+  EdwardContextReceipt,
   StudentDocument,
   StudentDocumentCategory,
   StudentDocumentExtraction,
+  StudentDocumentExtractionFailureCode,
 } from "@vv/contracts";
+import { extractStudentDocumentImageRegion } from "@vv/document-preprocessing";
 import type { AuthContext } from "../auth/auth-context";
 import { ApiError, BadRequestError } from "../common/api-error";
 import {
@@ -22,6 +25,10 @@ import {
   STUDENT_AI_GATEWAY,
   type StudentAiGateway,
 } from "./student-ai.gateway";
+import {
+  normalizeEdwardPageContext,
+  normalizeEdwardResponse,
+} from "./edward-safety";
 
 const maximumDocumentBytes = 10_485_760;
 const allowedCategories = new Set<StudentDocumentCategory>([
@@ -82,16 +89,6 @@ export class StudentAgentService {
       idempotencyKey: input.idempotencyKey,
       requestId: input.requestId,
     });
-    const claimed = await this.store.claimStudentDocumentProcessing({
-      auth: input.auth,
-      documentId: reserved.id,
-    });
-    if (!claimed) {
-      return this.store.getStudentDocument({
-        auth: input.auth,
-        documentId: reserved.id,
-      });
-    }
     const reference = await this.store.getStudentDocumentContentReference({
       auth: input.auth,
       documentId: reserved.id,
@@ -104,48 +101,143 @@ export class StudentAgentService {
         sha256,
       });
     } catch {
-      await this.store.releaseStudentDocumentProcessing({
-        auth: input.auth,
-        documentId: reserved.id,
-        requestId: input.requestId,
-      });
       throw new ApiError(
         503,
         "DOCUMENT_STORAGE_UNAVAILABLE",
-        "The document could not be stored. Please try the upload again.",
+        "Your document record was saved, but the original could not be stored yet. Please retry this upload.",
       );
     }
-    let extraction: StudentDocumentExtraction;
-    try {
-      const expectedDocumentType =
-        category === "other" ? undefined : documentTypeForCategory(category);
-      extraction = await this.ai.extractStudentDocument({
-        fileName,
-        mimeType,
-        bytes: input.bytes,
-        ...(expectedDocumentType ? { expectedDocumentType } : {}),
-      });
-      if (
-        expectedDocumentType &&
-        extraction.status === "completed" &&
-        extraction.documentType !== expectedDocumentType
-      ) {
-        extraction = {
-          ...extraction,
-          warnings: [
-            `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
-            ...extraction.warnings,
-          ].slice(0, 12),
-        };
-      }
-    } catch {
-      extraction = failedExtraction(fileName);
-    }
-    return this.store.completeStudentDocumentExtraction({
+
+    // This transaction moves the already-stored original to processing and
+    // writes the extraction-request outbox event. The worker—not the HTTP
+    // request—owns the expensive parser call and can recover after a restart.
+    await this.store.claimStudentDocumentProcessing({
       auth: input.auth,
       documentId: reserved.id,
-      extraction,
       requestId: input.requestId,
+    });
+    return this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: reserved.id,
+    });
+  }
+
+  /**
+   * Retry parsing from the opaque stored object; the student never needs to
+   * upload the same file again. The processing claim serializes the expensive
+   * model call. If a client replays its idempotent request after a terminal
+   * result, returning that current document is stable and does not re-parse.
+   */
+  async retryDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    idempotencyKey: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    const current = await this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: input.documentId,
+    });
+    if (!canRetryDocumentExtraction(current.extraction)) {
+      return current;
+    }
+    const claimed = await this.store.claimStudentDocumentProcessing({
+      auth: input.auth,
+      documentId: input.documentId,
+      retry: true,
+      requestId: input.requestId,
+      retryIdempotencyKey: input.idempotencyKey,
+    });
+    if (!claimed) {
+      return this.store.getStudentDocument({
+        auth: input.auth,
+        documentId: input.documentId,
+      });
+    }
+    return this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: input.documentId,
+    });
+  }
+
+  /**
+   * Invoked only by the outbox worker after the upload transaction has
+   * committed. Re-delivery is safe: a terminal document is returned without
+   * issuing a second model request.
+   */
+  async processQueuedDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    const document = await this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: input.documentId,
+    });
+    if (
+      document.status !== "processing" ||
+      document.extraction?.status !== "processing"
+    ) {
+      return document;
+    }
+    try {
+      const content = await this.getDocumentContent({
+        auth: input.auth,
+        documentId: input.documentId,
+      });
+      return this.processDocumentExtraction({
+        auth: input.auth,
+        documentId: input.documentId,
+        fileName: content.fileName,
+        mimeType: content.mimeType,
+        category: document.category,
+        bytes: content.bytes,
+        requestId: input.requestId,
+      });
+    } catch (error) {
+      return this.store.completeStudentDocumentExtraction({
+        auth: input.auth,
+        documentId: input.documentId,
+        extraction: failedExtraction(
+          document.fileName,
+          documentTypeForCategory(document.category),
+          error,
+        ),
+        requestId: input.requestId,
+      });
+    }
+  }
+
+  /**
+   * Reconciles a reserved upload when an API process stopped after object
+   * storage succeeded but before it could commit the processing outbox event.
+   * It deliberately verifies the opaque original first. A missing object is
+   * retried by the outbox worker rather than ever sent to the parser.
+   */
+  async recoverReservedDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+  }): Promise<StudentDocument> {
+    const document = await this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: input.documentId,
+    });
+    if (document.status !== "uploaded" || document.extraction) {
+      return document;
+    }
+    await this.getDocumentContent({
+      auth: input.auth,
+      documentId: input.documentId,
+    });
+    await this.store.claimStudentDocumentProcessing({
+      auth: input.auth,
+      documentId: input.documentId,
+      requestId: input.requestId,
+    });
+    return this.store.getStudentDocument({
+      auth: input.auth,
+      documentId: input.documentId,
     });
   }
 
@@ -165,6 +257,33 @@ export class StudentAgentService {
     };
   }
 
+  async getDocumentProfilePhoto(input: {
+    auth: AuthContext;
+    documentId: string;
+  }): Promise<Buffer> {
+    const document = await this.store.getStudentDocument(input);
+    const region = document.extraction?.visualRegions?.find(
+      (candidate) => candidate.kind === "profile_photo",
+    );
+    if (
+      document.category !== "identity" ||
+      document.extraction?.status !== "completed" ||
+      !region
+    ) {
+      throw new ApiError(
+        404,
+        "DOCUMENT_PROFILE_PHOTO_NOT_FOUND",
+        "No profile photo was identified in this document",
+      );
+    }
+    const content = await this.getDocumentContent(input);
+    return extractStudentDocumentImageRegion({
+      bytes: content.bytes,
+      mimeType: content.mimeType,
+      region,
+    });
+  }
+
   confirmDocumentExtraction(input: {
     auth: AuthContext;
     documentId: string;
@@ -173,6 +292,91 @@ export class StudentAgentService {
     requestId: string;
   }): Promise<StudentDocument> {
     return this.store.confirmStudentDocumentExtraction(input);
+  }
+
+  private async processDocumentExtraction(input: {
+    auth: AuthContext;
+    documentId: string;
+    fileName: string;
+    mimeType: StudentDocument["mimeType"];
+    category: StudentDocumentCategory;
+    bytes: Buffer;
+    requestId: string;
+    retryIdempotencyKey?: string;
+  }): Promise<StudentDocument> {
+    const expectedDocumentType =
+      input.category === "other"
+        ? undefined
+        : documentTypeForCategory(input.category);
+    let extraction: StudentDocumentExtraction;
+    try {
+      extraction = await this.extractDocumentWithSingleRetry({
+        tenantId: input.auth.tenantId,
+        studentId: input.auth.studentId,
+        documentId: input.documentId,
+        requestId: input.requestId,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        bytes: input.bytes,
+        ...(expectedDocumentType ? { expectedDocumentType } : {}),
+      });
+      if (
+        expectedDocumentType &&
+        extraction.status === "completed" &&
+        extraction.documentType !== expectedDocumentType
+      ) {
+        extraction = {
+          ...extraction,
+          warnings: [
+            `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
+            ...extraction.warnings,
+          ].slice(0, 12),
+        };
+      }
+    } catch (error) {
+      extraction = failedExtraction(
+        input.fileName,
+        expectedDocumentType,
+        error,
+      );
+    }
+    return this.store.completeStudentDocumentExtraction({
+      auth: input.auth,
+      documentId: input.documentId,
+      extraction,
+      requestId: input.requestId,
+      ...(input.retryIdempotencyKey
+        ? { retryIdempotencyKey: input.retryIdempotencyKey }
+        : {}),
+    });
+  }
+
+  /**
+   * A transient provider error should not immediately become a student-facing
+   * failure. Retry once, immediately, and only for errors classified as a
+   * temporary service condition; malformed and unsupported responses never
+   * get a blind second model call.
+   */
+  private async extractDocumentWithSingleRetry(input: {
+    tenantId: string;
+    studentId: string;
+    documentId: string;
+    requestId: string;
+    fileName: string;
+    mimeType: StudentDocument["mimeType"];
+    bytes: Buffer;
+    expectedDocumentType?: StudentDocumentExtraction["documentType"];
+  }): Promise<StudentDocumentExtraction> {
+    const extract = (attempt: number) =>
+      this.ai.extractStudentDocument({ ...input, attempt });
+    try {
+      return await extract(1);
+    } catch (error) {
+      if (!classifyExtractionFailure(error).automaticRetryable) {
+        throw error;
+      }
+      return extract(2);
+    }
   }
 
   async askEdward(input: {
@@ -186,8 +390,9 @@ export class StudentAgentService {
       this.store.getStudentOnboarding(input.auth),
       this.store.getStudentPayments(input.auth),
     ]);
-    return this.ai.askEdward({
+    const response = await this.ai.askEdward({
       ...input.question,
+      pageContext: normalizeEdwardPageContext(input.question.pageContext),
       studentContext: {
         preferredName: profile.preferredName,
         programName: dashboard.offer.programName,
@@ -209,8 +414,23 @@ export class StudentAgentService {
         ),
       },
     });
+    // These receipts are assembled only after all deterministic reads above
+    // succeed. They deliberately describe data supplied to Edward, rather
+    // than inferring imaginary tool calls from the student's wording.
+    return {
+      ...normalizeEdwardResponse(response),
+      contextReceipts: collectedEdwardContextReceipts,
+    };
   }
 }
+
+const collectedEdwardContextReceipts: EdwardContextReceipt[] = [
+  { source: "dashboard" },
+  { source: "profile" },
+  { source: "documents" },
+  { source: "onboarding" },
+  { source: "payments" },
+];
 
 function safeFileName(fileName: string): string {
   const name = fileName
@@ -300,12 +520,126 @@ function validateFileBytes(
   }
 }
 
-function failedExtraction(fileName: string): StudentDocumentExtraction {
+function canRetryDocumentExtraction(
+  extraction: StudentDocumentExtraction | undefined,
+): boolean {
+  return (
+    extraction?.status === "pending_configuration" ||
+    (extraction?.status === "failed" && extraction.retryable !== false)
+  );
+}
+
+interface ExtractionFailureClassification {
+  failureCode: StudentDocumentExtractionFailureCode;
+  retryable: boolean;
+  automaticRetryable: boolean;
+  warning: string;
+}
+
+/**
+ * Provider errors can contain implementation details or even configuration
+ * fragments. Inspect them only to choose a deliberately small public code;
+ * never persist or return the raw message.
+ */
+function classifyExtractionFailure(
+  error: unknown,
+): ExtractionFailureClassification {
+  const candidate =
+    error && typeof error === "object"
+      ? (error as {
+          name?: unknown;
+          code?: unknown;
+          status?: unknown;
+          message?: unknown;
+        })
+      : {};
+  const detail = [
+    candidate.name,
+    candidate.code,
+    candidate.status,
+    candidate.message,
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ")
+    .toLowerCase();
+  if (
+    /(?:timeout|timed out|abort|etimedout|deadline)/.test(detail)
+  ) {
+    return {
+      failureCode: "timeout",
+      retryable: true,
+      automaticRetryable: true,
+      warning:
+        "Parsing took too long. You can retry without uploading the file again.",
+    };
+  }
+  if (
+    /(?:\b429\b|\b5\d\d\b|network|fetch failed|econn|enotfound|temporar(?:y|ily)|unavailable)/.test(
+      detail,
+    )
+  ) {
+    return {
+      failureCode: "provider_unavailable",
+      retryable: true,
+      automaticRetryable: true,
+      warning:
+        "The parsing service is temporarily unavailable. You can retry without uploading the file again.",
+    };
+  }
+  if (/empty (?:completion|structured extraction)|no readable content/.test(detail)) {
+    return {
+      failureCode: "invalid_response",
+      retryable: true,
+      automaticRetryable: true,
+      warning:
+        "The parsing service returned an unusable result. You can retry without uploading the file again.",
+    };
+  }
+  if (
+    error instanceof SyntaxError ||
+    /(?:invalid json|unexpected token|invalid response)/.test(detail)
+  ) {
+    return {
+      failureCode: "invalid_response",
+      retryable: true,
+      automaticRetryable: false,
+      warning:
+        "The parsing service returned an unusable result. You can retry without uploading the file again.",
+    };
+  }
+  if (
+    /(?:\b400\b|\b404\b|\b413\b|\b415\b|\b422\b|unsupported|not supported|capability|file-parser)/.test(
+      detail,
+    )
+  ) {
+    return {
+      failureCode: "unsupported_capability",
+      retryable: false,
+      automaticRetryable: false,
+      warning:
+        "The current parsing setup cannot process this file. The original file remains available for staff review.",
+    };
+  }
+  return {
+    failureCode: "unknown",
+    retryable: true,
+    automaticRetryable: false,
+    warning:
+      "The parsing attempt could not be completed. You can retry without uploading the file again.",
+  };
+}
+
+function failedExtraction(
+  fileName: string,
+  expectedDocumentType?: StudentDocumentExtraction["documentType"],
+  error?: unknown,
+): StudentDocumentExtraction {
+  const failure = classifyExtractionFailure(error);
   return {
     status: "failed",
-    documentType: fileName.toLowerCase().includes("transcript")
-      ? "transcript"
-      : "other",
+    documentType:
+      expectedDocumentType ??
+      (fileName.toLowerCase().includes("transcript") ? "transcript" : "other"),
     summary:
       "The original file was stored, but structured extraction could not be completed.",
     studentName: null,
@@ -313,12 +647,12 @@ function failedExtraction(fileName: string): StudentDocumentExtraction {
     issueDate: null,
     academicTerm: null,
     fields: [],
-    warnings: [
-      "The parsing provider could not complete this attempt. The original file is still available.",
-    ],
+    warnings: [failure.warning],
     model: null,
     provider: "local",
     processedAt: new Date().toISOString(),
     verifiedAt: null,
+    failureCode: failure.failureCode,
+    retryable: failure.retryable,
   };
 }

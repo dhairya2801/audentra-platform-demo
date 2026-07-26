@@ -37,6 +37,7 @@ import { StudentAgentService } from "../agentic/student-agent.service";
 import { CurrentAuth, type AuthContext } from "../auth/auth-context";
 import { ApiError, BadRequestError } from "../common/api-error";
 import { requireIdempotencyKey } from "../common/idempotency-key";
+import { APP_CONFIG, type AppConfig } from "../config/app-config";
 import {
   PLATFORM_STORE,
   type PlatformStore,
@@ -49,6 +50,7 @@ import {
   CreateStudentAppointmentDto,
   CreateStudentDocumentDto,
   UpdateStudentOnboardingDto,
+  UpdateStudentHousingPlanDto,
   UpdateStudentProfileDto,
 } from "./portal.dto";
 
@@ -63,12 +65,28 @@ function isUuid(value: string): boolean {
   );
 }
 
+function requireEmptyRetryBody(value: unknown): void {
+  if (value === undefined) return;
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length > 0
+  ) {
+    throw new BadRequestError(
+      "RETRY_EXTRACTION_BODY_NOT_ALLOWED",
+      "Document extraction retry does not accept a request body",
+    );
+  }
+}
+
 @Controller("v1/student")
 export class PortalController {
   constructor(
     @Inject(PLATFORM_STORE)
     private readonly store: PlatformStore,
     private readonly studentAgent: StudentAgentService,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   @Get("bootstrap")
@@ -106,6 +124,24 @@ export class PortalController {
       auth,
       update,
       idempotencyKey: requireIdempotencyKey(idempotencyKey),
+      requestId: request.id,
+    });
+  }
+
+  @Get("housing-plan")
+  housingPlan(@CurrentAuth() auth: AuthContext) {
+    return this.store.getStudentHousingPlan(auth);
+  }
+
+  @Patch("housing-plan")
+  updateHousingPlan(
+    @CurrentAuth() auth: AuthContext,
+    @Body() update: UpdateStudentHousingPlanDto,
+    @Req() request: FastifyRequest,
+  ) {
+    return this.store.updateStudentHousingPlan({
+      auth,
+      update,
       requestId: request.id,
     });
   }
@@ -276,6 +312,23 @@ export class PortalController {
       .send(document.bytes);
   }
 
+  @Get("documents/:id/profile-photo")
+  async documentProfilePhoto(
+    @CurrentAuth() auth: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const bytes = await this.studentAgent.getDocumentProfilePhoto({
+      auth,
+      documentId: id,
+    });
+    reply
+      .type("image/jpeg")
+      .header("content-disposition", `inline; filename="profile-photo-${id}.jpg"`)
+      .header("cache-control", "private, max-age=300")
+      .send(bytes);
+  }
+
   @Post("documents/:id/confirm-extraction")
   @HttpCode(200)
   confirmDocumentExtraction(
@@ -290,6 +343,76 @@ export class PortalController {
       documentId: id,
       confirmation,
       idempotencyKey: requireIdempotencyKey(idempotencyKey),
+      requestId: request.id,
+    });
+  }
+
+  @Post("documents/:id/retry-extraction")
+  @HttpCode(200)
+  retryDocumentExtraction(
+    @CurrentAuth() auth: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Body() body: unknown,
+    @Headers("idempotency-key") idempotencyKey: string | undefined,
+    @Req() request: FastifyRequest,
+  ): Promise<StudentDocument> {
+    requireEmptyRetryBody(body);
+    // The stored retry record and atomic processing claim prevent concurrent
+    // or replayed requests from spending another parser call.
+    const retryKey = requireIdempotencyKey(idempotencyKey);
+    return this.studentAgent.retryDocumentExtraction({
+      auth,
+      documentId: id,
+      idempotencyKey: retryKey,
+      requestId: request.id,
+    });
+  }
+
+  /**
+   * Private worker command. The public upload endpoint never invokes a model
+   * directly; the outbox worker calls this after the queued event commits.
+   */
+  @Post("/internal/document-extractions/:id")
+  @HttpCode(200)
+  processQueuedDocumentExtraction(
+    @CurrentAuth() auth: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Headers("x-vv-worker-token") workerToken: string | undefined,
+    @Req() request: FastifyRequest,
+  ): Promise<StudentDocument> {
+    if (workerToken !== this.config.documentWorkerToken) {
+      throw new ApiError(
+        403,
+        "WORKER_AUTHENTICATION_FAILED",
+        "The worker credential is not valid",
+      );
+    }
+    return this.studentAgent.processQueuedDocumentExtraction({
+      auth,
+      documentId: id,
+      requestId: request.id,
+    });
+  }
+
+  /** Recovery command for the upload-reservation outbox event. */
+  @Post("/internal/document-extraction-reservations/:id")
+  @HttpCode(200)
+  recoverReservedDocumentExtraction(
+    @CurrentAuth() auth: AuthContext,
+    @Param("id", new ParseUUIDPipe()) id: string,
+    @Headers("x-vv-worker-token") workerToken: string | undefined,
+    @Req() request: FastifyRequest,
+  ): Promise<StudentDocument> {
+    if (workerToken !== this.config.documentWorkerToken) {
+      throw new ApiError(
+        403,
+        "WORKER_AUTHENTICATION_FAILED",
+        "The worker credential is not valid",
+      );
+    }
+    return this.studentAgent.recoverReservedDocumentExtraction({
+      auth,
+      documentId: id,
       requestId: request.id,
     });
   }

@@ -16,6 +16,15 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   "deposit",
 ];
 
+const skippableOnboardingSteps = new Set<OnboardingStep>([
+  "housing",
+  "campus_life",
+]);
+
+export function isSkippableOnboardingStep(step: OnboardingStep): boolean {
+  return skippableOnboardingSteps.has(step);
+}
+
 export function validateOnboardingStepData(
   step: OnboardingStep,
   data: StudentOnboardingData,
@@ -28,6 +37,10 @@ export function validateOnboardingStepData(
       return;
     case "about_you":
       if (
+        !data.firstName ||
+        !data.lastName ||
+        !data.preferredName ||
+        !data.mobilePhone ||
         data.legalNameConfirmed !== true ||
         data.contactInformationConfirmed !== true ||
         data.homeAddressConfirmed !== true ||
@@ -35,7 +48,7 @@ export function validateOnboardingStepData(
         !data.residencyStatus
       ) {
         invalid(
-          "Confirm legal name, contact information, home address, communication preference, and residency status",
+          "Enter your name and mobile phone, then confirm legal name, contact information, home address, communication preference, and residency status",
         );
       }
       return;

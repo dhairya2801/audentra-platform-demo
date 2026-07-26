@@ -20,6 +20,7 @@ import {
 import { DatabaseService } from "../database/database.service";
 import type {
   ActivityIngestionResult,
+  AiProviderResponseAttempt,
   PlatformStore,
 } from "./platform-store";
 import { PostgresPortalStore } from "./postgres-portal.store";
@@ -133,6 +134,10 @@ const propertyAllowlists: Record<
   ]),
   "ui.campus_event_viewed.v1": new Set(["event_id", "surface"]),
   "ui.club_viewed.v1": new Set(["club_id", "surface"]),
+  "ui.edward_context_receipts_received.v1": new Set([
+    "source_count",
+    "page_context",
+  ]),
   "ui.edward_tool_invoked.v1": new Set(["tool_name", "page_context"]),
   "ui.edward_action_widget_viewed.v1": new Set([
     "widget_type",
@@ -186,6 +191,63 @@ export class PostgresPlatformStore
 {
   constructor(database: DatabaseService) {
     super(database);
+  }
+
+  async recordAiProviderResponse(
+    input: AiProviderResponseAttempt,
+  ): Promise<void> {
+    await this.database.db.execute(sql`
+      INSERT INTO ai_provider_response_attempt (
+        id,
+        tenant_id,
+        student_id,
+        document_id,
+        request_id,
+        attempt_number,
+        operation,
+        provider,
+        requested_model,
+        response_model,
+        provider_request_id,
+        http_status,
+        response_ok,
+        finish_reason,
+        usage,
+        raw_response_text,
+        response_body,
+        transport_error,
+        duration_ms,
+        recorded_at
+      )
+      VALUES (
+        ${input.id},
+        ${input.tenantId},
+        ${input.studentId},
+        ${input.documentId},
+        ${input.requestId},
+        ${input.attempt},
+        ${input.operation},
+        ${input.provider},
+        ${input.requestedModel},
+        ${input.responseModel},
+        ${input.providerRequestId},
+        ${input.httpStatus},
+        ${input.responseOk},
+        ${input.finishReason},
+        ${JSON.stringify(input.usage)}::jsonb,
+        ${input.rawResponseText},
+        ${JSON.stringify(input.responseBody ?? null)}::jsonb,
+        ${JSON.stringify(input.transportError)}::jsonb,
+        ${input.durationMs},
+        ${new Date(input.recordedAt)}
+      )
+      ON CONFLICT (
+        tenant_id,
+        document_id,
+        request_id,
+        attempt_number
+      ) DO NOTHING
+    `);
   }
 
   async getStudentDashboard(auth: AuthContext): Promise<StudentDashboard> {

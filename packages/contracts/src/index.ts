@@ -81,6 +81,8 @@ export type ActivityEventName =
   | "ui.exemption_reviewed.v1"
   | "ui.campus_event_viewed.v1"
   | "ui.club_viewed.v1"
+  | "ui.edward_context_receipts_received.v1"
+  /** @deprecated Retained only so older portal clients can finish sending batches. */
   | "ui.edward_tool_invoked.v1"
   | "ui.edward_action_widget_viewed.v1"
   | "ui.edward_action_completed.v1"
@@ -117,14 +119,27 @@ export type OnboardingStep =
   | "review_and_sign"
   | "deposit";
 
+export type HousingPreference = "on_campus" | "off_campus" | "undecided";
+export type HousingResidenceOption =
+  | "aster_residence_hall"
+  | "aster_apartments"
+  | "student_village"
+  | null;
+
 export interface StudentOnboardingData {
+  firstName?: string;
+  lastName?: string;
+  preferredName?: string;
+  mobilePhone?: string;
   legalNameConfirmed?: boolean;
   contactInformationConfirmed?: boolean;
   communicationPreference?: "email" | "sms";
   residencyStatus?: "domestic" | "international";
   supportNeeds?: string[];
   homeAddressConfirmed?: boolean;
-  housingPreference?: "on_campus" | "off_campus" | "undecided";
+  housingPreference?: HousingPreference;
+  housingResidenceOption?: HousingResidenceOption;
+  skippedSteps?: OnboardingStep[];
   campusInterests?: string[];
   emergencyContactConfirmed?: boolean;
   recordsConfirmed?: boolean;
@@ -148,10 +163,24 @@ export interface UpdateStudentOnboardingInput {
   expectedVersion: number;
   currentStep: OnboardingStep;
   data: StudentOnboardingData;
+  skip?: boolean;
 }
 
 export interface CompleteStudentOnboardingInput {
   expectedVersion: number;
+}
+
+export interface StudentHousingPlan {
+  preference: HousingPreference | null;
+  residenceOption: HousingResidenceOption;
+  version: number;
+  updatedAt: string;
+}
+
+export interface UpdateStudentHousingPlanInput {
+  expectedVersion: number;
+  preference: HousingPreference;
+  residenceOption?: Exclude<HousingResidenceOption, null>;
 }
 
 export interface StudentBootstrap {
@@ -247,6 +276,20 @@ export type StudentDocumentCategory =
   | "consent"
   | "other";
 
+export type StudentDocumentProcessingMode = "agentic" | "manual_review";
+
+/**
+ * Server-authored upload policy. The browser may suggest a category, but it
+ * must never decide whether an uploaded document is sent to an AI provider.
+ */
+export function documentProcessingModeForCategory(
+  category: StudentDocumentCategory,
+): StudentDocumentProcessingMode {
+  return category === "identity" || category === "transcript"
+    ? "agentic"
+    : "manual_review";
+}
+
 export interface ExtractedDocumentField {
   key: string;
   label: string;
@@ -263,6 +306,28 @@ export interface ExtractedTranscriptCourse {
   term: string | null;
   confidence: number;
 }
+
+export interface ExtractedDocumentVisualRegion {
+  kind: "profile_photo";
+  pageNumber: number | null;
+  /** Normalized coordinates in the rendered page/image coordinate space. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+}
+
+/**
+ * A deliberately small, student-safe description of why an extraction could
+ * not finish. Provider response bodies are never persisted in this contract.
+ */
+export type StudentDocumentExtractionFailureCode =
+  | "provider_unavailable"
+  | "unsupported_capability"
+  | "timeout"
+  | "invalid_response"
+  | "unknown";
 
 export interface StudentDocumentExtraction {
   status:
@@ -285,11 +350,14 @@ export interface StudentDocumentExtraction {
   academicTerm: string | null;
   fields: ExtractedDocumentField[];
   courses?: ExtractedTranscriptCourse[];
+  visualRegions?: ExtractedDocumentVisualRegion[];
   warnings: string[];
   model: string | null;
-  provider: "openrouter" | "local";
+  provider: "openrouter" | "groq" | "local";
   processedAt: string | null;
   verifiedAt: string | null;
+  failureCode?: StudentDocumentExtractionFailureCode;
+  retryable?: boolean;
   acceptedFieldKeys?: string[];
 }
 
@@ -300,6 +368,7 @@ export interface StudentDocument {
   mimeType: "application/pdf" | "image/jpeg" | "image/png";
   sizeBytes: number;
   category: StudentDocumentCategory;
+  processingMode?: StudentDocumentProcessingMode;
   status:
     | "placeholder"
     | "uploaded"
@@ -339,6 +408,23 @@ export interface AskEdwardInput {
   message: string;
   pageContext: string;
   history?: EdwardChatMessage[];
+}
+
+/**
+ * A bounded record projection that was collected by the request orchestrator
+ * before Edward generated a reply. These are receipts for real reads, not
+ * declarations of model-selected tools.
+ */
+export interface EdwardContextReceipt {
+  source:
+    | "dashboard"
+    | "profile"
+    | "documents"
+    | "onboarding"
+    | "payments"
+    | "academics"
+    | "financials"
+    | "messages";
 }
 
 export type EdwardActionWidget =
@@ -381,7 +467,7 @@ export interface AskEdwardResponse {
     label: string;
     href: string;
   }[];
-  toolsUsed: string[];
+  contextReceipts: EdwardContextReceipt[];
   widgets: EdwardActionWidget[];
 }
 
@@ -592,6 +678,11 @@ export interface CreateDepositPaymentInput {
 export interface StudentProfile {
   studentId: string;
   preferredName: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  emailVerified?: boolean;
+  phoneVerified?: boolean;
   pronouns: string | null;
   mobilePhone: string | null;
   communicationPreference: "email" | "sms";

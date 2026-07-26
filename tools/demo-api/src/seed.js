@@ -280,8 +280,8 @@ const programs = [
   },
 ];
 
-export function createSeedState() {
-  return {
+export function createSeedState(options = {}) {
+  const state = {
     schemaVersion: 4,
     fixture: {
       version: FIXTURE_VERSION,
@@ -352,6 +352,7 @@ export function createSeedState() {
       },
     ],
     documents: [],
+    aiProviderResponses: [],
     academicCatalog: {
       version: "2027-2028.v1",
       programs,
@@ -598,6 +599,33 @@ export function createSeedState() {
     activities: [],
     idempotency: {},
   };
+  if (options.studentId) {
+    state.auth.demoIdentity.studentId = options.studentId;
+    state.profile.studentId = options.studentId;
+  }
+  if (options.actorId) {
+    state.auth.demoIdentity.actorId = options.actorId;
+  }
+  if (options.phone) {
+    state.profile.mobilePhone = options.phone;
+    state.onboarding.data.mobilePhone = options.phone;
+  }
+  if (options.email) {
+    state.profile.email = options.email;
+    state.profile.emailVerified = false;
+    state.profile.phoneVerified = false;
+  }
+  if (options.freshStudent) {
+    state.auth.demoIdentity.displayName = "New student";
+    state.profile.preferredName = "Student";
+    state.profile.firstName = "";
+    state.profile.lastName = "";
+    state.messages[0].body =
+      "Welcome to Aster. Complete onboarding to create your student profile.";
+    state.academics.transcriptCredits = [];
+    state.academics.exemptions = [];
+  }
+  return state;
 }
 
 export function createJourney(acceptedAt) {

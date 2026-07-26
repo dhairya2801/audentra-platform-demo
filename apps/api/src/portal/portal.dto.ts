@@ -24,10 +24,13 @@ import type {
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
   StudentDocumentCategory,
+  HousingPreference,
+  HousingResidenceOption,
   OnboardingStep,
   StudentAppointmentType,
   StudentOnboardingData,
   UpdateStudentOnboardingInput,
+  UpdateStudentHousingPlanInput,
   UpdateStudentProfileInput,
 } from "@vv/contracts";
 
@@ -44,6 +47,26 @@ const onboardingSteps: OnboardingStep[] = [
 ];
 
 export class StudentOnboardingDataDto implements StudentOnboardingData {
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  firstName?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  lastName?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  preferredName?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^\+[1-9][0-9]{7,14}$/)
+  mobilePhone?: string;
+
   @IsOptional()
   @IsBoolean()
   legalNameConfirmed?: boolean;
@@ -99,6 +122,7 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   @IsOptional()
   @IsBoolean()
   depositAcknowledged?: boolean;
+
 }
 
 export class UpdateStudentOnboardingDto
@@ -114,6 +138,10 @@ export class UpdateStudentOnboardingDto
   @ValidateNested()
   @Type(() => StudentOnboardingDataDto)
   data!: StudentOnboardingDataDto;
+
+  @IsOptional()
+  @IsBoolean()
+  skip?: boolean;
 }
 
 export class CompleteStudentOnboardingDto
@@ -122,6 +150,21 @@ export class CompleteStudentOnboardingDto
   @IsInt()
   @Min(1)
   expectedVersion!: number;
+}
+
+export class UpdateStudentHousingPlanDto
+  implements UpdateStudentHousingPlanInput
+{
+  @IsInt()
+  @Min(1)
+  expectedVersion!: number;
+
+  @IsIn(["on_campus", "off_campus", "undecided"])
+  preference!: HousingPreference;
+
+  @IsOptional()
+  @IsIn(["aster_residence_hall", "aster_apartments", "student_village"])
+  residenceOption?: Exclude<HousingResidenceOption, null>;
 }
 
 const documentCategories: StudentDocumentCategory[] = [

@@ -1,8 +1,13 @@
-# Course Exemption Skill
+---
+name: recommend-course-exemptions
+description: Produce explainable, non-binding course-exemption predictions automatically from successfully parsed transcript evidence and versioned university equivalency rules. Use after transcript extraction completes, or when explaining why a source course or exam may satisfy an Aster course.
+---
+
+# Recommend Course Exemptions
 
 ## Purpose
 
-Turn reviewed transcript evidence into explainable course-exemption
+Turn successfully parsed transcript evidence into explainable course-exemption
 recommendations for a student's selected academic program.
 
 This skill recommends. It never grants credit, changes a degree audit, or makes
@@ -12,7 +17,7 @@ an official registrar decision.
 
 - student and tenant identifiers from the authenticated server context;
 - selected program and catalog version;
-- reviewed transcript courses, exams, scores, grades, credits, terms, and
+- parsed transcript courses, exams, scores, grades, credits, terms, and
   source-document identifiers;
 - versioned course catalog, prerequisite graph, program requirements, and
   equivalency rules from the database;
@@ -21,10 +26,35 @@ an official registrar decision.
 Do not accept catalog rules, student identity, or approval status from the
 model or the browser.
 
+## Rule bundle
+
+Load the active rules from `course_equivalency_rule` for the authenticated
+tenant, selected program, and catalog version. Pass only this bounded,
+server-authored array to the matcher:
+
+```json
+[
+  {
+    "code": "AP-CALC-AB-4-MATH151",
+    "sourceType": "ap",
+    "sourceCode": "AP Calculus AB",
+    "minimumScore": 4,
+    "targetCourseCode": "MATH 151",
+    "catalogVersion": "2027-2028.v1",
+    "confidence": 1
+  }
+]
+```
+
+The database table—not this example and not the model—is the source of truth.
+Staff edits create a new version instead of silently changing historical
+recommendations.
+
 ## Processing order
 
-1. Confirm the source document belongs to the authenticated student and its
-   extracted fields were reviewed.
+1. Confirm the source document belongs to the authenticated student, extraction
+   completed successfully, and the content was classified as a transcript.
+   Student confirmation is not a prerequisite.
 2. Normalize source labels only. Examples: `AP Calc AB` to
    `AP Calculus AB`, or a transfer-school course code to its canonical source
    code. Preserve the original text.
@@ -43,6 +73,9 @@ model or the browser.
    - a changed source or catalog rule supersedes the old recommendation and
      queues a new review.
 7. Write the audit event and outbox event in the same database transaction.
+
+Run this workflow automatically after transcript extraction. Do not wait for a
+student confirmation action.
 
 ## Model boundary
 
@@ -63,6 +96,10 @@ The model must not:
 If no stored rule matches, return `no_rule_found` and route the item to a
 registrar review queue. Do not use semantic similarity as an automatic
 equivalency.
+
+Never describe `suggested` or `needs_review` as approved, exempted, awarded, or
+final. Student-facing copy must use language such as “potential match” or “you
+may be eligible” and must always display “Registrar approval required.”
 
 ## Required output
 
@@ -85,5 +122,5 @@ equivalency.
 - Send only ambiguous labels—not the full transcript—to any normalization
   model.
 - Batch ambiguous courses from one document into one bounded request.
-- Never rerun on a page view. Rerun only when the reviewed source, selected
+- Never rerun on a page view. Rerun only when the parsed source, selected
   program, catalog version, or active rule changes.

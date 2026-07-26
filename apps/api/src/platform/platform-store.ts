@@ -17,6 +17,7 @@ import type {
   StudentDocumentExtraction,
   StudentDocumentList,
   StudentHelp,
+  StudentHousingPlan,
   StudentFinancials,
   StudentMessage,
   StudentMessageList,
@@ -27,6 +28,7 @@ import type {
   StudentRequirementDetail,
   StudentRequirementList,
   UpdateStudentOnboardingInput,
+  UpdateStudentHousingPlanInput,
   UpdateStudentProfileInput,
 } from "@vv/contracts";
 import type { AuthContext } from "../auth/auth-context";
@@ -38,7 +40,31 @@ export interface ActivityIngestionResult {
   duplicates: number;
 }
 
+export interface AiProviderResponseAttempt {
+  id: string;
+  tenantId: string;
+  studentId: string;
+  documentId: string;
+  requestId: string;
+  attempt: number;
+  operation: "document_extraction";
+  provider: "openrouter" | "groq";
+  requestedModel: string | null;
+  responseModel: string | null;
+  providerRequestId: string | null;
+  httpStatus: number | null;
+  responseOk: boolean;
+  finishReason: string | null;
+  usage: Record<string, unknown> | null;
+  rawResponseText: string | null;
+  responseBody: unknown;
+  transportError: { name: string; message: string } | null;
+  durationMs: number;
+  recordedAt: string;
+}
+
 export interface PlatformStore {
+  recordAiProviderResponse(input: AiProviderResponseAttempt): Promise<void>;
   getStudentDashboard(auth: AuthContext): Promise<StudentDashboard>;
   getStudentAcademics(auth: AuthContext): Promise<StudentAcademics>;
   searchCatalogCourses(
@@ -77,6 +103,12 @@ export interface PlatformStore {
     idempotencyKey: string;
     requestId: string;
   }): Promise<StudentOnboarding>;
+  getStudentHousingPlan(auth: AuthContext): Promise<StudentHousingPlan>;
+  updateStudentHousingPlan(input: {
+    auth: AuthContext;
+    update: UpdateStudentHousingPlanInput;
+    requestId: string;
+  }): Promise<StudentHousingPlan>;
   getStudentRequirements(auth: AuthContext): Promise<StudentRequirementList>;
   getStudentRequirement(
     auth: AuthContext,
@@ -105,6 +137,15 @@ export interface PlatformStore {
   claimStudentDocumentProcessing(input: {
     auth: AuthContext;
     documentId: string;
+    /**
+     * An initial upload may claim only an unprocessed document. A retry may
+     * claim only a stored failed or pending-configuration extraction, so an
+     * accidental retry cannot spend another model call for a reviewed file.
+     */
+    retry?: boolean;
+    requestId?: string;
+    /** Required for retry claims so a lost response cannot start another parse. */
+    retryIdempotencyKey?: string;
   }): Promise<boolean>;
   releaseStudentDocumentProcessing(input: {
     auth: AuthContext;
@@ -116,6 +157,8 @@ export interface PlatformStore {
     documentId: string;
     extraction: StudentDocumentExtraction;
     requestId: string;
+    /** Finalizes the retry idempotency record once the parse result is stored. */
+    retryIdempotencyKey?: string;
   }): Promise<StudentDocument>;
   getStudentDocument(input: {
     auth: AuthContext;

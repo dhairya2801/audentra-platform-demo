@@ -1,7 +1,9 @@
 # VV background worker
 
 This service consumes the PostgreSQL transactional outbox and maintains the
-student dashboard projection.
+student dashboard projection. It also handles
+`document.extraction_requested.v1` by calling the API's private extraction
+command with the original event identity and correlation ID.
 
 ## Delivery behavior
 
@@ -31,4 +33,6 @@ The HTTP listener exposes:
 unprocessed claims, close the health listener, and drain the database pool.
 
 Configuration is environment-based. See `infra/.env.example` and
-`src/config.ts` for supported settings.
+`src/config.ts` for supported settings. `API_INTERNAL_URL` and
+`DOCUMENT_WORKER_TOKEN` must match the API deployment; use a long unique token
+outside local development.

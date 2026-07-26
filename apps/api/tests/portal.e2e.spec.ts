@@ -21,6 +21,7 @@ const config: AppConfig = {
   databaseUrl: "postgresql://unused/unused",
   webOrigins: ["http://localhost:3000"],
   authMode: "demo",
+  documentWorkerToken: "test-document-worker-token",
   demoIds: {
     tenantId: DEMO_IDS.tenantId,
     studentId: DEMO_IDS.studentId,
@@ -33,6 +34,7 @@ describe("functional student portal API", () => {
   const storedObjects = new Map<string, Buffer>();
   let extractionCalls = 0;
   let storageFailuresRemaining = 0;
+  const queuedExtractionOutcomes: Array<StudentDocumentExtraction | Error> = [];
   const documentStorage: DocumentStorage = {
     async put(input) {
       if (storageFailuresRemaining > 0) {
@@ -50,6 +52,9 @@ describe("functional student portal API", () => {
   const studentAiGateway: StudentAiGateway = {
     async extractStudentDocument(): Promise<StudentDocumentExtraction> {
       extractionCalls += 1;
+      const queued = queuedExtractionOutcomes.shift();
+      if (queued instanceof Error) throw queued;
+      if (queued) return structuredClone(queued);
       return {
         status: "completed",
         documentType: "ferpa",
@@ -86,7 +91,7 @@ describe("functional student portal API", () => {
         suggestedActions: [
           { label: "Open documents", href: "/documents" },
         ],
-        toolsUsed: ["get_enrollment_status"],
+        contextReceipts: [{ source: "dashboard" }],
         widgets: [],
       };
     },
@@ -101,6 +106,13 @@ describe("functional student portal API", () => {
       logger: false,
     });
   });
+
+  const processQueuedDocument = (documentId: string) =>
+    app.inject({
+      method: "POST",
+      url: `/v1/student/internal/document-extractions/${documentId}`,
+      headers: { "x-vv-worker-token": "test-document-worker-token" },
+    });
 
   afterAll(async () => {
     await app.close();
@@ -201,6 +213,10 @@ describe("functional student portal API", () => {
       {
         step: "about_you",
         data: {
+          firstName: "Alex",
+          lastName: "Morgan",
+          preferredName: "Alex",
+          mobilePhone: "+15550102027",
           legalNameConfirmed: true,
           contactInformationConfirmed: true,
           homeAddressConfirmed: true,
@@ -442,18 +458,21 @@ describe("functional student portal API", () => {
     expect(uploaded.json()).toMatchObject({
       fileName: "release.pdf",
       category: "consent",
-      status: "needs_review",
-      extraction: {
-        status: "completed",
-        documentType: "ferpa",
-      },
+      status: "processing",
+      extraction: { status: "processing" },
     });
     expect(uploaded.json().sha256).toMatch(/^[0-9a-f]{64}$/);
+    const processed = await processQueuedDocument(uploaded.json().id);
+    expect(processed.statusCode).toBe(200);
+    expect(processed.json()).toMatchObject({
+      status: "needs_review",
+      extraction: { status: "completed", documentType: "ferpa" },
+    });
     expect(extractionCalls).toBe(1);
 
     const content = await app.inject({
       method: "GET",
-      url: uploaded.json().contentUrl,
+      url: processed.json().contentUrl,
     });
     expect(content.statusCode).toBe(200);
     expect(content.headers["content-type"]).toMatch(/^application\/pdf/);
@@ -461,7 +480,7 @@ describe("functional student portal API", () => {
 
     const confirmed = await app.inject({
       method: "POST",
-      url: `/v1/student/documents/${uploaded.json().id}/confirm-extraction`,
+      url: `/v1/student/documents/${processed.json().id}/confirm-extraction`,
       headers: { "idempotency-key": "portal.document.confirm.0001" },
       payload: { acceptedFieldKeys: ["student_name"] },
     });
@@ -515,10 +534,295 @@ describe("functional student portal API", () => {
     expect(retried.statusCode).toBe(201);
     expect(retried.json()).toMatchObject({
       fileName: "retry.pdf",
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    const processed = await processQueuedDocument(retried.json().id);
+    expect(processed.json()).toMatchObject({
       status: "needs_review",
       extraction: { status: "completed" },
     });
     expect(extractionCalls).toBe(previousExtractionCalls + 1);
+  });
+
+  it("retries transient parsing once and supports stored failed or pending retries without re-uploading", async () => {
+    const failedBoundary = "vv-extraction-retry-boundary";
+    const failedPayload = Buffer.from(
+      [
+        `--${failedBoundary}`,
+        'Content-Disposition: form-data; name="category"',
+        "",
+        "consent",
+        `--${failedBoundary}`,
+        'Content-Disposition: form-data; name="file"; filename="retry-safe.pdf"',
+        "Content-Type: application/pdf",
+        "",
+        "%PDF-1.7",
+        "stored original used for retry",
+        "%%EOF",
+        `--${failedBoundary}--`,
+        "",
+      ].join("\r\n"),
+    );
+    const callsBeforeAutomaticRetry = extractionCalls;
+    queuedExtractionOutcomes.push(
+      new Error("OpenRouter returned an empty completion"),
+    );
+    const automaticallyRetriedUpload = await app.inject({
+      method: "POST",
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${failedBoundary}`,
+        "idempotency-key": "portal.document.automatic-retry.0001",
+      },
+      payload: failedPayload,
+    });
+    expect(automaticallyRetriedUpload.statusCode).toBe(201);
+    expect(automaticallyRetriedUpload.json()).toMatchObject({
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    const automaticallyRetriedProcessed = await processQueuedDocument(
+      automaticallyRetriedUpload.json().id,
+    );
+    expect(automaticallyRetriedProcessed.json()).toMatchObject({
+      status: "needs_review",
+      extraction: { status: "completed" },
+    });
+    expect(extractionCalls).toBe(callsBeforeAutomaticRetry + 2);
+
+    const callsBeforeFailure = extractionCalls;
+    queuedExtractionOutcomes.push(
+      new Error(
+        "OpenRouter returned HTTP 503: bearer sk-this-must-never-reach-a-student",
+      ),
+    );
+    queuedExtractionOutcomes.push(
+      new Error(
+        "OpenRouter returned HTTP 503: bearer sk-this-must-never-reach-a-student",
+      ),
+    );
+    const failedUpload = await app.inject({
+      method: "POST",
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${failedBoundary}`,
+        "idempotency-key": "portal.document.extraction-failure.0001",
+      },
+      payload: failedPayload,
+    });
+
+    expect(failedUpload.statusCode).toBe(201);
+    expect(failedUpload.json()).toMatchObject({
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    const failedProcessed = await processQueuedDocument(failedUpload.json().id);
+    expect(failedProcessed.json()).toMatchObject({
+      status: "uploaded",
+      extraction: {
+        status: "failed",
+        failureCode: "provider_unavailable",
+        retryable: true,
+      },
+    });
+    expect(JSON.stringify(failedProcessed.json())).not.toContain(
+      "sk-this-must-never-reach-a-student",
+    );
+    expect(extractionCalls).toBe(callsBeforeFailure + 2);
+
+    const missingRetryKey = await app.inject({
+      method: "POST",
+      url: `/v1/student/documents/${failedUpload.json().id}/retry-extraction`,
+    });
+    expect(missingRetryKey.statusCode).toBe(400);
+    expect(missingRetryKey.json()).toMatchObject({
+      error: { code: "IDEMPOTENCY_KEY_REQUIRED" },
+    });
+    const retryWithBody = await app.inject({
+      method: "POST",
+      url: `/v1/student/documents/${failedUpload.json().id}/retry-extraction`,
+      headers: { "idempotency-key": "portal.document.retry-body.0001" },
+      payload: { unexpected: true },
+    });
+    expect(retryWithBody.statusCode).toBe(400);
+    expect(retryWithBody.json()).toMatchObject({
+      error: { code: "RETRY_EXTRACTION_BODY_NOT_ALLOWED" },
+    });
+
+    const retryRequest = {
+      method: "POST" as const,
+      url: `/v1/student/documents/${failedUpload.json().id}/retry-extraction`,
+      headers: { "idempotency-key": "portal.document.retry-extraction.0001" },
+    };
+    queuedExtractionOutcomes.push(
+      new Error("OpenRouter returned HTTP 503: retry still unavailable"),
+      new Error("OpenRouter returned HTTP 503: retry still unavailable"),
+    );
+    const failedRetry = await app.inject(retryRequest);
+    const failedRetryReplay = await app.inject(retryRequest);
+
+    expect(failedRetry.statusCode).toBe(200);
+    expect(failedRetry.json()).toMatchObject({
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    expect(failedRetryReplay.json()).toEqual(failedRetry.json());
+    const failedRetryProcessed = await processQueuedDocument(
+      failedUpload.json().id,
+    );
+    expect(failedRetryProcessed.json()).toMatchObject({
+      status: "uploaded",
+      extraction: { status: "failed", failureCode: "provider_unavailable" },
+    });
+    expect(extractionCalls).toBe(callsBeforeFailure + 4);
+
+    const recoveredRetryRequest = {
+      ...retryRequest,
+      headers: { "idempotency-key": "portal.document.retry-extraction.0002" },
+    };
+    const retried = await app.inject(recoveredRetryRequest);
+    const replay = await app.inject(recoveredRetryRequest);
+
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toMatchObject({
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    expect(replay.json()).toEqual(retried.json());
+    const recoveredProcessed = await processQueuedDocument(
+      failedUpload.json().id,
+    );
+    expect(recoveredProcessed.json()).toMatchObject({
+      status: "needs_review",
+      extraction: { status: "completed" },
+    });
+    // The same key is durable even after a retry fails; a new key is an
+    // explicit subsequent attempt. Terminal replays do not parse again.
+    const terminalReplay = await app.inject(recoveredRetryRequest);
+    expect(terminalReplay.json()).toEqual(recoveredProcessed.json());
+    expect(extractionCalls).toBe(callsBeforeFailure + 5);
+
+    const pendingBoundary = "vv-pending-extraction-retry-boundary";
+    const pendingPayload = Buffer.from(
+      [
+        `--${pendingBoundary}`,
+        'Content-Disposition: form-data; name="category"',
+        "",
+        "identity",
+        `--${pendingBoundary}`,
+        'Content-Disposition: form-data; name="file"; filename="identity-pending.pdf"',
+        "Content-Type: application/pdf",
+        "",
+        "%PDF-1.7",
+        "configuration becomes available before retry",
+        "%%EOF",
+        `--${pendingBoundary}--`,
+        "",
+      ].join("\r\n"),
+    );
+    queuedExtractionOutcomes.push({
+      status: "pending_configuration",
+      documentType: "identity",
+      summary: "File stored securely. Parsing is awaiting configuration.",
+      studentName: null,
+      institutionName: null,
+      issueDate: null,
+      academicTerm: null,
+      fields: [],
+      courses: [],
+      warnings: ["Parsing is awaiting configuration."],
+      model: null,
+      provider: "local",
+      processedAt: null,
+      verifiedAt: null,
+      retryable: true,
+    });
+    const pendingUpload = await app.inject({
+      method: "POST",
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${pendingBoundary}`,
+        "idempotency-key": "portal.document.pending-extraction.0001",
+      },
+      payload: pendingPayload,
+    });
+    const pendingProcessed = await processQueuedDocument(pendingUpload.json().id);
+    const pendingRetry = await app.inject({
+      method: "POST",
+      url: `/v1/student/documents/${pendingUpload.json().id}/retry-extraction`,
+      headers: { "idempotency-key": "portal.document.pending-retry.0001" },
+    });
+
+    expect(pendingProcessed.json()).toMatchObject({
+      status: "uploaded",
+      extraction: { status: "pending_configuration", retryable: true },
+    });
+    expect(pendingRetry.statusCode).toBe(200);
+    expect(pendingRetry.json()).toMatchObject({
+      status: "processing",
+      extraction: { status: "processing" },
+    });
+    const pendingRetryProcessed = await processQueuedDocument(
+      pendingUpload.json().id,
+    );
+    expect(pendingRetryProcessed.json()).toMatchObject({
+      status: "needs_review",
+      extraction: { status: "completed" },
+    });
+
+    const unsupportedBoundary = "vv-unsupported-extraction-boundary";
+    const unsupportedPayload = Buffer.from(
+      [
+        `--${unsupportedBoundary}`,
+        'Content-Disposition: form-data; name="category"',
+        "",
+        "identity",
+        `--${unsupportedBoundary}`,
+        'Content-Disposition: form-data; name="file"; filename="unsupported.pdf"',
+        "Content-Type: application/pdf",
+        "",
+        "%PDF-1.7",
+        "requires staff review",
+        "%%EOF",
+        `--${unsupportedBoundary}--`,
+        "",
+      ].join("\r\n"),
+    );
+    const callsBeforeUnsupported = extractionCalls;
+    queuedExtractionOutcomes.push(
+      new Error("OpenRouter returned HTTP 415 unsupported parser capability"),
+    );
+    const unsupportedUpload = await app.inject({
+      method: "POST",
+      url: "/v1/student/documents/upload",
+      headers: {
+        "content-type": `multipart/form-data; boundary=${unsupportedBoundary}`,
+        "idempotency-key": "portal.document.unsupported-extraction.0001",
+      },
+      payload: unsupportedPayload,
+    });
+    const unsupportedProcessed = await processQueuedDocument(
+      unsupportedUpload.json().id,
+    );
+    const unsupportedRetry = await app.inject({
+      method: "POST",
+      url: `/v1/student/documents/${unsupportedUpload.json().id}/retry-extraction`,
+      headers: {
+        "idempotency-key": "portal.document.unsupported-retry.0001",
+      },
+    });
+
+    expect(unsupportedProcessed.json()).toMatchObject({
+      status: "uploaded",
+      extraction: {
+        status: "failed",
+        failureCode: "unsupported_capability",
+        retryable: false,
+      },
+    });
+    expect(unsupportedRetry.json()).toEqual(unsupportedProcessed.json());
+    expect(extractionCalls).toBe(callsBeforeUnsupported + 1);
   });
 
   it("serves Edward through the same bounded AI adapter", async () => {
@@ -539,6 +843,13 @@ describe("functional student portal API", () => {
       usage: { totalTokens: 58 },
       suggestedActions: [
         { label: "Open documents", href: "/documents" },
+      ],
+      contextReceipts: [
+        { source: "dashboard" },
+        { source: "profile" },
+        { source: "documents" },
+        { source: "onboarding" },
+        { source: "payments" },
       ],
     });
   });

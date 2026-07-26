@@ -28,6 +28,7 @@ export const DEMO_IDS = {
 
 export type AppEnvironment = "development" | "test" | "production";
 export type AuthMode = "demo";
+export type TranscriptParsingProvider = "openrouter" | "groq";
 
 export interface AppConfig {
   environment: AppEnvironment;
@@ -35,6 +36,8 @@ export interface AppConfig {
   databaseUrl: string;
   webOrigins: string[];
   authMode: AuthMode;
+  /** Shared only with the outbox worker for internal parser commands. */
+  documentWorkerToken: string;
   demoIds: {
     tenantId: string;
     studentId: string;
@@ -45,6 +48,19 @@ export interface AppConfig {
     model: string;
     appUrl: string;
     appName: string;
+    storeResponses?: boolean;
+    documentTimeoutMs?: number;
+    documentMaxTokens?: number;
+    documentReasoningTokens?: number;
+  };
+  transcriptParsing?: TranscriptParsingProvider;
+  groq?: {
+    apiKey: string;
+    model: string;
+    documentTimeoutMs: number;
+    documentMaxTokens: number;
+    documentMaxTextCharacters: number;
+    reasoningEffort: "low" | "medium" | "high";
   };
   objectStorage?: {
     endpoint: string;
@@ -81,6 +97,32 @@ function parseOrigins(value: string | undefined): string[] {
   return origins;
 }
 
+function parseBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  const number = Number(value ?? fallback);
+  if (!Number.isInteger(number)) return fallback;
+  return Math.max(minimum, Math.min(maximum, number));
+}
+
+function parseTranscriptParsing(
+  value: string | undefined,
+): TranscriptParsingProvider {
+  return value?.trim().toLowerCase() === "groq" ? "groq" : "openrouter";
+}
+
+function parseGroqReasoningEffort(
+  value: string | undefined,
+): "low" | "medium" | "high" {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "medium" || normalized === "high"
+    ? normalized
+    : "low";
+}
+
 export function loadAppConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): AppConfig {
@@ -104,6 +146,9 @@ export function loadAppConfig(
       "postgresql://vv:vv_local_password@localhost:5432/vv_enrollment",
     webOrigins: parseOrigins(environment.WEB_ORIGIN),
     authMode,
+    documentWorkerToken:
+      environment.DOCUMENT_WORKER_TOKEN?.trim() ||
+      "local-development-document-worker-token",
     demoIds: {
       tenantId: environment.DEMO_TENANT_ID ?? DEMO_IDS.tenantId,
       studentId: environment.DEMO_STUDENT_ID ?? DEMO_IDS.studentId,
@@ -116,6 +161,57 @@ export function loadAppConfig(
         environment.OPENROUTER_APP_URL?.trim() || "http://localhost:3000",
       appName:
         environment.OPENROUTER_APP_NAME?.trim() || "Aster Student Portal",
+      storeResponses:
+        environment.OPENROUTER_STORE_RESPONSES?.trim().toLowerCase() === "true" ||
+        (environment.OPENROUTER_STORE_RESPONSES === undefined &&
+          (appEnvironment === "development" || appEnvironment === "test")),
+      documentTimeoutMs: parseBoundedInteger(
+        environment.OPENROUTER_DOCUMENT_TIMEOUT_MS,
+        120_000,
+        1_000,
+        300_000,
+      ),
+      documentMaxTokens: parseBoundedInteger(
+        environment.OPENROUTER_DOCUMENT_MAX_TOKENS,
+        6_000,
+        1_200,
+        16_000,
+      ),
+      documentReasoningTokens: parseBoundedInteger(
+        environment.OPENROUTER_DOCUMENT_REASONING_TOKENS,
+        256,
+        0,
+        4_096,
+      ),
+    },
+    transcriptParsing: parseTranscriptParsing(
+      environment.TRANSCRIPT_PARSING,
+    ),
+    groq: {
+      apiKey: environment.GROQ_API_KEY?.trim() ?? "",
+      model:
+        environment.GROQ_MODEL?.trim() || "openai/gpt-oss-120b",
+      documentTimeoutMs: parseBoundedInteger(
+        environment.GROQ_TRANSCRIPT_TIMEOUT_MS,
+        60_000,
+        1_000,
+        300_000,
+      ),
+      documentMaxTokens: parseBoundedInteger(
+        environment.GROQ_TRANSCRIPT_MAX_TOKENS,
+        4_000,
+        1_200,
+        7_000,
+      ),
+      documentMaxTextCharacters: parseBoundedInteger(
+        environment.GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS,
+        10_000,
+        2_000,
+        20_000,
+      ),
+      reasoningEffort: parseGroqReasoningEffort(
+        environment.GROQ_TRANSCRIPT_REASONING_EFFORT,
+      ),
     },
     objectStorage: {
       endpoint:

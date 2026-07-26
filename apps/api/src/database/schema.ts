@@ -66,6 +66,130 @@ export const student = pgTable(
   ],
 );
 
+export const studentIdentityInvitation = pgTable(
+  "student_identity_invitation",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => student.id),
+    emailNormalized: varchar("email_normalized", { length: 254 }).notNull(),
+    phoneE164: varchar("phone_e164", { length: 16 }).notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("student_identity_invitation_token_uidx").on(table.tokenHash),
+    index("student_identity_invitation_lookup_idx").on(
+      table.tenantId,
+      table.emailNormalized,
+      table.expiresAt,
+    ),
+  ],
+);
+
+export const credentialAccount = pgTable(
+  "credential_account",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => student.id),
+    emailNormalized: varchar("email_normalized", { length: 254 }).notNull(),
+    phoneE164: varchar("phone_e164", { length: 16 }).notNull(),
+    passwordHash: text("password_hash").notNull(),
+    passwordAlgorithm: varchar("password_algorithm", { length: 32 }).notNull(),
+    emailVerifiedAt: timestamp("email_verified_at", { withTimezone: true }),
+    phoneVerifiedAt: timestamp("phone_verified_at", { withTimezone: true }),
+    status: varchar("status", { length: 24 }).notNull(),
+    failedSignInCount: smallint("failed_sign_in_count").notNull().default(0),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    passwordChangedAt: timestamp("password_changed_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
+    lastSignedInAt: timestamp("last_signed_in_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("credential_account_student_uidx").on(
+      table.tenantId,
+      table.studentId,
+    ),
+    uniqueIndex("credential_account_email_uidx").on(
+      table.tenantId,
+      table.emailNormalized,
+    ),
+    uniqueIndex("credential_account_phone_uidx").on(
+      table.tenantId,
+      table.phoneE164,
+    ),
+  ],
+);
+
+export const authSession = pgTable(
+  "auth_session",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => credentialAccount.id, { onDelete: "cascade" }),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("auth_session_token_uidx").on(table.tokenHash),
+    index("auth_session_account_idx").on(table.accountId, table.expiresAt),
+  ],
+);
+
+export const authVerificationChallenge = pgTable(
+  "auth_verification_challenge",
+  {
+    id: uuid("id").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => credentialAccount.id, { onDelete: "cascade" }),
+    channel: varchar("channel", { length: 16 }).notNull(),
+    destinationNormalized: varchar("destination_normalized", {
+      length: 254,
+    }).notNull(),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    failedAttemptCount: smallint("failed_attempt_count").notNull().default(0),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("auth_verification_challenge_token_uidx").on(table.tokenHash),
+    index("auth_verification_challenge_account_idx").on(
+      table.accountId,
+      table.channel,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const campus = pgTable("campus", {
   id: uuid("id").primaryKey(),
   tenantId: uuid("tenant_id")
@@ -499,10 +623,16 @@ export const documentRecord = pgTable(
     id: uuid("id").primaryKey(),
     tenantId: uuid("tenant_id").notNull(),
     studentId: uuid("student_id").notNull(),
+    requirementId: uuid("requirement_id").references(
+      () => studentRequirement.id,
+    ),
     fileName: varchar("file_name", { length: 255 }).notNull(),
     mimeType: varchar("mime_type", { length: 80 }).notNull(),
     sizeBytes: integer("size_bytes").notNull(),
     category: varchar("category", { length: 40 }).notNull(),
+    processingMode: varchar("processing_mode", { length: 24 })
+      .notNull()
+      .default("agentic"),
     status: varchar("status", { length: 40 }).notNull(),
     storageProvider: varchar("storage_provider", { length: 40 }).notNull(),
     storageKey: varchar("storage_key", { length: 512 }),
@@ -515,6 +645,54 @@ export const documentRecord = pgTable(
       table.tenantId,
       table.studentId,
       table.createdAt,
+    ),
+  ],
+);
+
+export const aiProviderResponseAttempt = pgTable(
+  "ai_provider_response_attempt",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id").notNull(),
+    studentId: uuid("student_id").notNull(),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documentRecord.id, { onDelete: "cascade" }),
+    requestId: varchar("request_id", { length: 128 }).notNull(),
+    attemptNumber: smallint("attempt_number").notNull(),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    provider: varchar("provider", { length: 40 }).notNull(),
+    requestedModel: varchar("requested_model", { length: 200 }),
+    responseModel: varchar("response_model", { length: 200 }),
+    providerRequestId: varchar("provider_request_id", { length: 200 }),
+    httpStatus: integer("http_status"),
+    responseOk: boolean("response_ok").notNull(),
+    finishReason: varchar("finish_reason", { length: 80 }),
+    usage: jsonb("usage").$type<Record<string, unknown>>(),
+    rawResponseText: text("raw_response_text"),
+    responseBody: jsonb("response_body"),
+    transportError: jsonb("transport_error").$type<{
+      name: string;
+      message: string;
+    }>(),
+    durationMs: integer("duration_ms").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    index("ai_provider_response_attempt_document_idx").on(
+      table.tenantId,
+      table.studentId,
+      table.documentId,
+      table.recordedAt,
+    ),
+    uniqueIndex("ai_provider_response_attempt_delivery_uidx").on(
+      table.tenantId,
+      table.documentId,
+      table.requestId,
+      table.attemptNumber,
     ),
   ],
 );

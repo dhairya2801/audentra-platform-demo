@@ -55,6 +55,35 @@ describe("JsonStateStore", () => {
     assert.equal(store.snapshot().fixture.revision, 3);
   });
 
+  it("persists exact AI provider responses in the development attempt journal", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vv-demo-ai-response-"));
+    const store = new JsonStateStore(join(directory, "state.json"), fixedClock);
+    await store.initialize();
+
+    const saved = await store.recordAiProviderResponse({
+      operation: "document_extraction",
+      documentId: "document-123",
+      requestId: "request-123",
+      httpStatus: 200,
+      finishReason: "length",
+      rawResponseText: "{\"choices\":[]}",
+      responseBody: { choices: [] },
+    });
+
+    const restored = new JsonStateStore(
+      join(directory, "state.json"),
+      fixedClock,
+    );
+    await restored.initialize();
+    assert.equal(restored.snapshot().aiProviderResponses.length, 1);
+    assert.equal(restored.snapshot().aiProviderResponses[0].id, saved.id);
+    assert.equal(restored.snapshot().aiProviderResponses[0].finishReason, "length");
+    assert.equal(
+      restored.snapshot().aiProviderResponses[0].rawResponseText,
+      "{\"choices\":[]}",
+    );
+  });
+
   it("reset restores the exact fixture boundary", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vv-demo-reset-"));
     const store = new JsonStateStore(join(directory, "state.json"), fixedClock);

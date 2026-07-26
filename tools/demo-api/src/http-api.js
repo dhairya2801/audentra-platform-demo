@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import { extractStudentDocumentImageRegion } from "@vv/document-preprocessing";
 import { createServer } from "node:http";
-import { extname } from "node:path";
+import { dirname, extname, join } from "node:path";
 import {
   acceptOffer,
+  autoProjectCompletedTranscripts,
   buildBootstrap,
   buildCampusLife,
   buildDashboard,
@@ -10,15 +12,16 @@ import {
   buildStudentAcademics,
   buildStudentFinancials,
   completeOnboarding,
+  completeDocumentExtractionRetry,
   createAppointment,
   createDepositPayment,
   createDocumentMetadata,
-  createUploadedDocument,
   confirmDocumentExtraction,
   createHelpRequest,
   findDocumentForDownload,
   fixtureSummary,
   getHelpTopics,
+  housingPlanResponse,
   idempotentMutation,
   ingestActivities,
   listMessages,
@@ -28,18 +31,29 @@ import {
   markMessageRead,
   patchProfile,
   profileResponse,
+  queueDocumentExtraction,
+  queueDocumentExtractionRetry,
+  reserveDocumentUpload,
   requirementDetail,
   selectFinancialPaymentPlan,
+  updateHousingPlan,
   updateOnboarding,
 } from "./domain.js";
 import {
   HttpError,
   badRequest,
+  conflict,
   notFound,
   unauthorized,
 } from "./errors.js";
 import { JsonStateStore } from "./store.js";
+import { CredentialAuthStore } from "./credential-auth-store.js";
+import { StudentStoreRegistry } from "./student-store-registry.js";
 import { createOpenRouterGatewayFromEnv } from "./openrouter.js";
+import {
+  normalizeEdwardPageContext,
+  normalizeEdwardResponse,
+} from "./edward-safety.js";
 import {
   exactKeys,
   objectBody,
@@ -50,23 +64,53 @@ const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const maximumBodyBytes = 262_144;
 const maximumUploadBytes = 10_485_760;
 const maximumMultipartBytes = maximumUploadBytes + 65_536;
+// Version the development fixture cookie so a browser session created before
+// credential authentication was introduced cannot silently keep entering the
+// shared Alex fixture.
+const demoSessionToken = "demo-session-v2";
 
 export async function createDemoApi(options = {}) {
+  const clock = options.clock ?? (() => new Date());
   const store =
     options.store ??
     new JsonStateStore(
       options.dataFile,
-      options.clock ?? (() => new Date()),
+      clock,
     );
   await store.initialize();
-  const clock = options.clock ?? (() => new Date());
+  await reconcileCompletedTranscripts(store, clock);
   const logger = options.logger === undefined ? console : options.logger;
+  const authStore =
+    options.authStore ??
+    new CredentialAuthStore(join(dirname(store.filePath), "auth.json"), clock);
+  await authStore.initialize();
+  const studentStores =
+    options.studentStores ??
+    new StudentStoreRegistry(join(dirname(store.filePath), "students"), clock);
+  await studentStores.initialize();
+  for (const account of authStore.listAccounts()) {
+    const studentStore = await studentStores.get(account);
+    await reconcileCompletedTranscripts(studentStore, clock);
+  }
+  const storeOpenRouterResponses =
+    options.storeOpenRouterResponses ??
+    developmentResponseStorageEnabled(process.env);
   const ai =
     options.ai ??
     createOpenRouterGatewayFromEnv({
       apiKey: options.openRouterApiKey,
       model: options.openRouterModel,
       fetch: options.fetch,
+      responseRecorder:
+        options.openRouterResponseRecorder ??
+        (storeOpenRouterResponses
+          ? (response) =>
+              studentStores.recordAiProviderResponse(
+                response,
+                authStore.listAccounts(),
+                store,
+              )
+          : undefined),
     });
   const allowedOrigins = new Set(
     options.allowedOrigins ?? [
@@ -74,6 +118,177 @@ export async function createDemoApi(options = {}) {
       "http://127.0.0.1:3000",
     ],
   );
+  // This API is a local development fixture. Keep its state-resetting entry
+  // point unavailable in a production process even if this module is reused.
+  const guidedOnboardingResetEnabled =
+    options.enableGuidedOnboardingReset ?? process.env.NODE_ENV !== "production";
+
+  /**
+   * The preview intentionally models production's outbox/worker boundary:
+   * HTTP persists metadata and immutable bytes, then this in-process worker
+   * consumes the durable queued state.  It is a Set rather than a promise
+   * chain so duplicate/replayed requests cannot launch parallel model calls.
+   */
+  const scheduledDocumentJobs = new Set();
+  const enqueueDocumentExtraction = (
+    studentStore,
+    documentId,
+    requestId = randomUUID(),
+  ) => {
+    const jobKey = `${studentStore.filePath}:${documentId}`;
+    if (scheduledDocumentJobs.has(jobKey)) return;
+    scheduledDocumentJobs.add(jobKey);
+    // A microtask is sufficient to release the request stack before beginning
+    // extraction and avoids Node 26's native async-id assertion around
+    // setImmediate callbacks created from an HTTP request callback.
+    queueMicrotask(() => {
+      void runQueuedDocumentExtraction({
+        studentStore,
+        documentId,
+        requestId,
+      }).finally(() => {
+        scheduledDocumentJobs.delete(jobKey);
+      });
+    });
+  };
+
+  const runQueuedDocumentExtraction = async ({
+    studentStore,
+    documentId,
+    requestId,
+  }) => {
+    const startedAt = performance.now();
+    const document = studentStore
+      .snapshot()
+      .documents.find((candidate) => candidate.id === documentId);
+    if (
+      !document ||
+      document.status !== "processing" ||
+      document.extraction?.status !== "processing" ||
+      !document.storageKey ||
+      document.contentStored === false
+    ) {
+      return;
+    }
+
+    logger?.info?.(
+      JSON.stringify({
+        timestamp: clock().toISOString(),
+        level: "info",
+        service: "vv-demo-api",
+        event: "document_extraction_started",
+        documentId,
+        requestId,
+        category: document.category,
+        fileName: document.fileName,
+      }),
+    );
+
+    let extraction;
+    try {
+      const bytes = await studentStore.readUpload(document.storageKey);
+      extraction = await extractStudentDocumentSafely({
+        ai,
+        documentId,
+        fileName: document.fileName,
+        mimeType: document.mimeType,
+        bytes,
+        category: document.category,
+        requirementId: document.requirementId,
+        clock,
+        logger,
+        requestId,
+      });
+    } catch (error) {
+      extraction = failedExtraction(
+        classifyExtractionFailure(error),
+        document.fileName,
+        clock(),
+      );
+    }
+
+    const completed = await studentStore.transact((draft) => {
+      const latest = draft.documents.find(
+        (candidate) => candidate.id === documentId,
+      );
+      if (
+        !latest ||
+        latest.status !== "processing" ||
+        latest.extraction?.status !== "processing"
+      ) {
+        return latest ? structuredClone(latest) : null;
+      }
+      return completeDocumentExtractionRetry(draft, documentId, extraction, clock());
+    });
+    logger?.info?.(
+      JSON.stringify({
+        timestamp: clock().toISOString(),
+        level: "info",
+        service: "vv-demo-api",
+        event: "document_extraction_completed",
+        documentId,
+        requestId,
+        status: completed?.extraction?.status ?? extraction.status,
+        provider: completed?.extraction?.provider ?? extraction.provider,
+        model: completed?.extraction?.model ?? extraction.model,
+        courseCount:
+          completed?.extraction?.courses?.length ??
+          extraction.courses?.length ??
+          0,
+        warningCount:
+          completed?.extraction?.warnings?.length ??
+          extraction.warnings?.length ??
+          0,
+        failureCode:
+          completed?.extraction?.failureCode ??
+          extraction.failureCode ??
+          null,
+        durationMs: Math.round(performance.now() - startedAt),
+      }),
+    );
+  };
+
+  // Recovery covers a process stop after object storage succeeds but before
+  // the queued-state transaction or local worker scheduling has run.
+  const recoverDocumentJobs = (studentStore) => {
+    for (const document of studentStore.snapshot().documents) {
+      if (document.status === "processing" && document.extraction?.status === "processing") {
+        enqueueDocumentExtraction(
+          studentStore,
+          document.id,
+          `recovery-${document.id}`,
+        );
+        continue;
+      }
+      if (
+        document.status === "placeholder" &&
+        document.storageKey &&
+        document.contentStored === false
+      ) {
+        void studentStore.readUpload(document.storageKey).then(
+          () =>
+            studentStore
+              .transact((draft) => queueDocumentExtraction(draft, document.id, clock()))
+              .then(() =>
+                enqueueDocumentExtraction(
+                  studentStore,
+                  document.id,
+                  `recovery-${document.id}`,
+                ),
+              ),
+          () => undefined,
+        );
+      }
+    }
+  };
+  // Inspect durable queued state before accepting traffic. Recovery itself
+  // schedules only the jobs that actually exist; avoiding a wrapper immediate
+  // also prevents a server from closing while an empty startup callback is
+  // still pending.
+  recoverDocumentJobs(store);
+  for (const studentStore of studentStores.cachedStores()) {
+    recoverDocumentJobs(studentStore);
+  }
 
   const server = createServer(async (request, response) => {
     const startedAt = performance.now();
@@ -95,6 +310,13 @@ export async function createDemoApi(options = {}) {
         store,
         clock,
         ai,
+        logger,
+        requestId,
+        enqueueDocumentExtraction,
+        authStore,
+        studentStores,
+        recoverDocumentJobs,
+        guidedOnboardingResetEnabled,
       });
       if (result.headers) {
         for (const [name, value] of Object.entries(result.headers)) {
@@ -124,10 +346,30 @@ export async function createDemoApi(options = {}) {
     }
   });
 
-  return { server, store };
+  return { server, store, authStore, studentStores };
 }
 
-async function route({ request, store, clock, ai }) {
+async function reconcileCompletedTranscripts(store, clock) {
+  await store.transact((draft, transaction) => {
+    const projected = autoProjectCompletedTranscripts(draft, clock());
+    if (projected === 0) transaction.skipWrite();
+    return projected;
+  });
+}
+
+async function route({
+  request,
+  store,
+  clock,
+  ai,
+  logger,
+  requestId,
+  enqueueDocumentExtraction,
+  authStore,
+  studentStores,
+  recoverDocumentJobs,
+  guidedOnboardingResetEnabled,
+}) {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
   const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -158,11 +400,69 @@ async function route({ request, store, clock, ai }) {
     return { body: fixtureSummary(store.snapshot()) };
   }
   if (method === "GET" && path === "/v1/auth/session") {
+    const credentialSession = credentialSessionFor(request, authStore);
+    if (credentialSession) {
+      const studentStore = await studentStores.get(credentialSession.account);
+      return {
+        body: credentialSessionResponse(
+          credentialSession.account,
+          studentStore.snapshot(),
+        ),
+      };
+    }
     const authenticated = hasDemoSession(request);
     return {
       body: authenticated
         ? sessionResponse(store.snapshot())
         : { authenticated: false, mode: "demo" },
+    };
+  }
+  if (method === "POST" && path === "/v1/auth/sign-up") {
+    const body = await readJson(request);
+    const created = await authStore.signUp(body);
+    const studentStore = await studentStores.get(created.account);
+    recoverDocumentJobs(studentStore);
+    return {
+      status: 201,
+      body: credentialSessionResponse(
+        created.account,
+        studentStore.snapshot(),
+      ),
+      headers: {
+        "set-cookie": credentialSessionCookie(
+          created.sessionToken,
+          created.expiresAt,
+        ),
+      },
+    };
+  }
+  if (method === "POST" && path === "/v1/auth/sign-in") {
+    const body = await readJson(request);
+    const signedIn = await authStore.signIn(body);
+    const studentStore = await studentStores.get(signedIn.account);
+    recoverDocumentJobs(studentStore);
+    return {
+      body: credentialSessionResponse(
+        signedIn.account,
+        studentStore.snapshot(),
+      ),
+      headers: {
+        "set-cookie": credentialSessionCookie(
+          signedIn.sessionToken,
+          signedIn.expiresAt,
+        ),
+      },
+    };
+  }
+  if (method === "POST" && path === "/v1/auth/sign-out") {
+    const cookies = parseCookies(request.headers.cookie);
+    await authStore.signOut(cookies.vv_session);
+    return {
+      body: { authenticated: false, mode: "credentials" },
+      headers: {
+        "set-cookie":
+          `vv_session=signed-out; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${cookieSecuritySuffix()}`,
+      },
     };
   }
   if (method === "POST" && path === "/v1/auth/demo/sign-in") {
@@ -172,7 +472,25 @@ async function route({ request, store, clock, ai }) {
       body: sessionResponse(store.snapshot()),
       headers: {
         "set-cookie":
-          "vv_demo_session=demo-session; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+          `vv_demo_session=${demoSessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${cookieSecuritySuffix()}`,
+      },
+    };
+  }
+  if (method === "POST" && path === "/v1/auth/demo/start-guided-onboarding") {
+    if (!guidedOnboardingResetEnabled) {
+      throw notFound(
+        "DEMO_GUIDED_ONBOARDING_DISABLED",
+        "Guided demo onboarding is only available in the development preview",
+      );
+    }
+    const body = await readJson(request);
+    exactKeys(objectBody(body), []);
+    const freshState = await store.reset();
+    return {
+      body: sessionResponse(freshState),
+      headers: {
+        "set-cookie":
+          `vv_demo_session=${demoSessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${cookieSecuritySuffix()}`,
       },
     };
   }
@@ -181,12 +499,17 @@ async function route({ request, store, clock, ai }) {
       body: { authenticated: false, mode: "demo" },
       headers: {
         "set-cookie":
-          "vv_demo_session=signed-out; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+          `vv_demo_session=signed-out; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${cookieSecuritySuffix()}`,
       },
     };
   }
 
-  requireDemoSession(request);
+  const credentialSession = credentialSessionFor(request, authStore);
+  if (credentialSession) {
+    store = await studentStores.get(credentialSession.account);
+  } else {
+    requireDemoSession(request);
+  }
 
   if (
     method === "GET" &&
@@ -249,6 +572,16 @@ async function route({ request, store, clock, ai }) {
       body,
       mutate: (draft) => completeOnboarding(draft, body, clock()),
     });
+  }
+  if (method === "GET" && path === "/v1/student/housing-plan") {
+    return { body: housingPlanResponse(store.snapshot()) };
+  }
+  if (method === "PATCH" && path === "/v1/student/housing-plan") {
+    const body = await readJson(request);
+    const result = await store.transact((draft) =>
+      updateHousingPlan(draft, body, clock()),
+    );
+    return { body: result };
   }
 
   const offerMatch = path.match(
@@ -331,10 +664,13 @@ async function route({ request, store, clock, ai }) {
   if (method === "POST" && path === "/v1/student/documents/upload") {
     const upload = await readDocumentUpload(request);
     const digest = createHash("sha256").update(upload.bytes).digest("hex");
-    const result = await materialWrite({
+    // Phase 1: commit the student/document metadata before touching either
+    // object storage or an AI provider. A client retry with this idempotency
+    // key reuses the same durable record and storage key.
+    const reservation = await materialWrite({
       request,
       store,
-      operation: "document.upload",
+      operation: "document.upload.reserve",
       body: {
         fileName: upload.fileName,
         mimeType: upload.mimeType,
@@ -343,50 +679,29 @@ async function route({ request, store, clock, ai }) {
         requirementId: upload.requirementId,
         sha256: digest,
       },
-      mutate: async (draft) => {
-        if (
-          upload.requirementId &&
-          !draft.requirements.some(
-            (requirement) =>
-              requirement.id === upload.requirementId &&
-              requirement.submissionType === "document",
-          )
-        ) {
-          throw badRequest(
-            "DOCUMENT_REQUIREMENT_NOT_FOUND",
-            "The document requirement was not found",
+      mutate: (draft) => {
+        if (upload.requirementId) {
+          const requirement = draft.requirements.find(
+            (candidate) =>
+              candidate.id === upload.requirementId &&
+              candidate.submissionType === "document",
           );
+          if (!requirement) {
+            throw badRequest(
+              "DOCUMENT_REQUIREMENT_NOT_FOUND",
+              "The document requirement was not found",
+            );
+          }
+          if (requirement.status === "blocked") {
+            throw conflict(
+              "DOCUMENT_REQUIREMENT_BLOCKED",
+              "Complete the prerequisite enrollment tasks before uploading this document.",
+            );
+          }
         }
         const id = randomUUID();
         const storageKey = `${id}${safeExtension(upload.fileName, upload.mimeType)}`;
-        await store.writeUpload(storageKey, upload.bytes);
-        let extraction;
-        try {
-          extraction = await ai.extractStudentDocument({
-            fileName: upload.fileName,
-            mimeType: upload.mimeType,
-            bytes: upload.bytes,
-            expectedDocumentType: documentTypeForCategory(upload.category),
-          });
-          const expectedDocumentType = documentTypeForCategory(upload.category);
-          if (
-            upload.requirementId &&
-            expectedDocumentType &&
-            extraction.status === "completed" &&
-            extraction.documentType !== expectedDocumentType
-          ) {
-            extraction = {
-              ...extraction,
-              warnings: [
-                `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
-                ...extraction.warnings,
-              ].slice(0, 12),
-            };
-          }
-        } catch (error) {
-          extraction = failedExtraction(error, upload.fileName, clock());
-        }
-        return createUploadedDocument(
+        return reserveDocumentUpload(
           draft,
           {
             id,
@@ -397,13 +712,70 @@ async function route({ request, store, clock, ai }) {
             requirementId: upload.requirementId,
             sha256: digest,
             storageKey,
-            extraction,
           },
           clock(),
         );
       },
     });
-    return { ...result, status: 201 };
+
+    const persisted = store
+      .snapshot()
+      .documents.find((document) => document.id === reservation.body.id);
+    if (!persisted?.storageKey) {
+      throw new HttpError(
+        500,
+        "DOCUMENT_RESERVATION_INCOMPLETE",
+        "The document record could not be prepared for storage.",
+      );
+    }
+
+    // Phase 2: atomically place the immutable original. If this fails, the
+    // placeholder remains in the database and a replay safely resumes from
+    // this exact point; no parser has seen the file.
+    try {
+      await store.writeUpload(persisted.storageKey, upload.bytes);
+    } catch {
+      throw new HttpError(
+        503,
+        "DOCUMENT_STORAGE_UNAVAILABLE",
+        "Your document record was saved, but the original could not be stored yet. Please retry this upload.",
+      );
+    }
+
+    // Phase 3: durable state transition, then asynchronous extraction. The
+    // HTTP response intentionally represents the saved/processing state.
+    const queued = await store.transact((draft) =>
+      queueDocumentExtraction(draft, persisted.id, clock()),
+    );
+    if (
+      queued.status === "processing" &&
+      queued.extraction?.status === "processing"
+    ) {
+      enqueueDocumentExtraction(store, persisted.id, requestId);
+    }
+    return { ...reservation, body: queued, status: 201 };
+  }
+  const retryExtractionMatch = path.match(
+    /^\/v1\/student\/documents\/([^/]+)\/retry-extraction$/,
+  );
+  if (method === "POST" && retryExtractionMatch) {
+    const body = await readJson(request);
+    exactKeys(objectBody(body), []);
+    const documentId = decodeURIComponent(retryExtractionMatch[1]);
+    const queued = await materialWrite({
+      request,
+      store,
+      operation: `document.extraction.retry:${documentId}`,
+      body,
+      mutate: (draft) => queueDocumentExtractionRetry(draft, documentId, clock()).document,
+    });
+    if (
+      queued.body.status === "processing" &&
+      queued.body.extraction?.status === "processing"
+    ) {
+      enqueueDocumentExtraction(store, documentId, requestId);
+    }
+    return queued;
   }
   const documentContentMatch = path.match(
     /^\/v1\/student\/documents\/([^/]+)\/content$/,
@@ -418,6 +790,41 @@ async function route({ request, store, clock, ai }) {
       headers: {
         "content-type": document.mimeType,
         "content-disposition": `inline; filename="${safeDownloadName(document.fileName)}"`,
+      },
+    };
+  }
+  const documentProfilePhotoMatch = path.match(
+    /^\/v1\/student\/documents\/([^/]+)\/profile-photo$/,
+  );
+  if (method === "GET" && documentProfilePhotoMatch) {
+    const document = findDocumentForDownload(
+      store.snapshot(),
+      decodeURIComponent(documentProfilePhotoMatch[1]),
+    );
+    const region = document.extraction?.visualRegions?.find(
+      (candidate) => candidate.kind === "profile_photo",
+    );
+    if (
+      document.category !== "identity" ||
+      document.extraction?.status !== "completed" ||
+      !region
+    ) {
+      throw new HttpError(
+        404,
+        "DOCUMENT_PROFILE_PHOTO_NOT_FOUND",
+        "No profile photo was identified in this document",
+      );
+    }
+    return {
+      bytes: await extractStudentDocumentImageRegion({
+        bytes: await store.readUpload(document.storageKey),
+        mimeType: document.mimeType,
+        region,
+      }),
+      headers: {
+        "content-type": "image/jpeg",
+        "content-disposition": `inline; filename="profile-photo-${document.id}.jpg"`,
+        "cache-control": "private, max-age=300",
       },
     };
   }
@@ -439,15 +846,22 @@ async function route({ request, store, clock, ai }) {
 
   if (method === "POST" && path === "/v1/student/assistant/messages") {
     const body = await readJson(request);
-    validateEdwardInput(body);
+    const pageContext = validateEdwardInput(body);
     const state = store.snapshot();
+    const studentContext = buildAssistantContext(state);
+    const response = await ai.askEdward({
+      message: body.message,
+      pageContext,
+      history: body.history,
+      studentContext,
+    });
     return {
-      body: await ai.askEdward({
-        message: body.message,
-        pageContext: body.pageContext,
-        history: body.history,
-        studentContext: buildAssistantContext(state),
-      }),
+      // The preview mirrors the production API: the orchestration layer—not
+      // an intent regex—attaches receipts for projections it just collected.
+      body: {
+        ...normalizeEdwardResponse(response),
+        contextReceipts: studentContext.contextReceipts,
+      },
     };
   }
 
@@ -584,9 +998,34 @@ async function readDocumentUpload(request) {
   if (!form) {
     throw badRequest("INVALID_MULTIPART", "The upload form could not be read");
   }
-  const file = form.get("file");
-  const category = form.get("category");
-  const requirementId = form.get("requirementId");
+  const allowedFields = new Set(["file", "category", "requirementId"]);
+  for (const field of form.keys()) {
+    if (!allowedFields.has(field)) {
+      throw badRequest(
+        "INVALID_MULTIPART_FIELD",
+        `Unexpected multipart field: ${field}`,
+      );
+    }
+  }
+  const files = form.getAll("file");
+  const categories = form.getAll("category");
+  const requirementIds = form.getAll("requirementId");
+  if (files.length !== 1) {
+    throw badRequest(
+      "ONE_FILE_PER_UPLOAD",
+      "Upload exactly one document per request",
+    );
+  }
+  if (categories.length > 1 || requirementIds.length > 1) {
+    throw badRequest(
+      "DUPLICATE_MULTIPART_FIELD",
+      "Category and requirement context may only be provided once",
+    );
+  }
+  const [file] = files;
+  const category = categories.length === 1 ? categories[0] : null;
+  const requirementId =
+    requirementIds.length === 1 ? requirementIds[0] : null;
   if (!(file instanceof File)) {
     throw badRequest("FILE_REQUIRED", "Choose a document file to upload");
   }
@@ -711,7 +1150,24 @@ function requireDemoSession(request) {
 
 function hasDemoSession(request) {
   const cookies = parseCookies(request.headers.cookie);
-  return cookies.vv_demo_session === "demo-session";
+  return cookies.vv_demo_session === demoSessionToken;
+}
+
+function credentialSessionFor(request, authStore) {
+  const cookies = parseCookies(request.headers.cookie);
+  return authStore.getSession(cookies.vv_session);
+}
+
+function credentialSessionCookie(token, expiresAt) {
+  const maxAge = Math.max(
+    0,
+    Math.floor((Date.parse(expiresAt) - Date.now()) / 1_000),
+  );
+  return `vv_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}; Priority=High${cookieSecuritySuffix()}`;
+}
+
+function cookieSecuritySuffix() {
+  return process.env.NODE_ENV === "production" ? "; Secure" : "";
 }
 
 function parseCookies(header) {
@@ -739,6 +1195,27 @@ function sessionResponse(state) {
     },
     notice:
       "Development fixture only. This is not an institutional authentication session.",
+  };
+}
+
+function credentialSessionResponse(account, state) {
+  return {
+    authenticated: true,
+    mode: "credentials",
+    actorType: "student",
+    student: {
+      id: state.profile.studentId,
+      preferredName:
+        state.onboarding.status === "completed"
+          ? state.profile.preferredName
+          : null,
+      email: account.email,
+      phone: account.phone,
+      emailVerified: account.emailVerified,
+      phoneVerified: account.phoneVerified,
+    },
+    notice:
+      "Email and phone verification are pending until delivery providers are configured.",
   };
 }
 
@@ -840,12 +1317,23 @@ function validateEdwardInput(input) {
       "history must contain up to 8 short user or assistant messages",
     );
   }
+  return normalizeEdwardPageContext(body.pageContext);
 }
 
 function buildAssistantContext(state) {
   const academics = buildStudentAcademics(state);
   const financials = buildStudentFinancials(state);
   return {
+    contextReceipts: [
+      { source: "dashboard" },
+      { source: "profile" },
+      { source: "documents" },
+      { source: "onboarding" },
+      { source: "payments" },
+      { source: "academics" },
+      { source: "financials" },
+      { source: "messages" },
+    ],
     preferredName: state.profile.preferredName,
     programName: state.offer.programName,
     termName: state.offer.termName,
@@ -935,7 +1423,223 @@ function matchesDeclaredFileType(bytes, mimeType) {
   return false;
 }
 
+/**
+ * A stored upload is always retained when a parser call fails. We make one
+ * bounded retry only for provider-shaped/transient failures (such as the
+ * observed HTTP 200 response without a completion), then persist a safe
+ * diagnostic rather than an opaque success-looking record.
+ */
+async function extractStudentDocumentSafely({
+  ai,
+  documentId,
+  fileName,
+  mimeType,
+  bytes,
+  category,
+  requirementId,
+  clock,
+  logger,
+  requestId,
+}) {
+  const expectedDocumentType = documentTypeForCategory(category);
+  let firstFailure = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      let extraction = await ai.extractStudentDocument({
+        documentId,
+        requestId,
+        attempt: attempt + 1,
+        fileName,
+        mimeType,
+        bytes,
+        expectedDocumentType,
+      });
+      extraction = failedExtractionForNoUsefulOutput(extraction, clock());
+      if (
+        requirementId &&
+        expectedDocumentType &&
+        extraction.status === "completed" &&
+        extraction.documentType !== expectedDocumentType
+      ) {
+        extraction = {
+          ...extraction,
+          warnings: [
+            `This file was uploaded for a ${expectedDocumentType.replaceAll("_", " ")} requirement, but its contents look like ${extraction.documentType.replaceAll("_", " ")}. The requirement was not advanced automatically.`,
+            ...extraction.warnings,
+          ].slice(0, 12),
+        };
+      }
+      return extraction;
+    } catch (error) {
+      const failure = classifyExtractionFailure(error);
+      if (attempt === 0 && shouldAutomaticallyRetryExtraction(error, failure)) {
+        firstFailure = failure;
+        logDocumentExtractionEvent(logger, {
+          requestId,
+          event: "document_extraction_retrying",
+          failureCode: failure.failureCode,
+        });
+        continue;
+      }
+      const extraction = failedExtraction(failure, fileName, clock());
+      logDocumentExtractionEvent(logger, {
+        requestId,
+        event: "document_extraction_failed",
+        failureCode: extraction.failureCode,
+        retryable: extraction.retryable,
+        ...(firstFailure
+          ? { initialFailureCode: firstFailure.failureCode }
+          : {}),
+      });
+      return extraction;
+    }
+  }
+  // The loop always returns. This guard makes the state safe if it is changed.
+  return failedExtraction(
+    { failureCode: "unknown", retryable: true },
+    fileName,
+    clock(),
+  );
+}
+
+function developmentResponseStorageEnabled(environment) {
+  const configured = environment.OPENROUTER_STORE_RESPONSES?.trim().toLowerCase();
+  if (configured === "true") return true;
+  if (configured === "false") return false;
+  return environment.NODE_ENV !== "production";
+}
+
+function failedExtractionForNoUsefulOutput(extraction, now) {
+  if (
+    extraction?.status !== "completed" ||
+    hasUsefulStructuredOutput(extraction)
+  ) {
+    return extraction;
+  }
+  return {
+    ...extraction,
+    status: "failed",
+    summary:
+      "The file was stored, but the parser did not find usable student-record information.",
+    fields: [],
+    courses: [],
+    warnings: [
+      "The parser could not produce usable structured information from this file.",
+      "You can retry parsing without uploading the file again.",
+    ],
+    failureCode: "invalid_response",
+    retryable: true,
+    processedAt: extraction.processedAt ?? now.toISOString(),
+    verifiedAt: null,
+  };
+}
+
+function hasUsefulStructuredOutput(extraction) {
+  if (extraction.documentType && extraction.documentType !== "other") {
+    // A confident document classification is useful for a review queue even
+    // when intentionally redacted identity documents have no safe fields.
+    return true;
+  }
+  if (
+    Array.isArray(extraction.fields) &&
+    extraction.fields.some(
+      (field) => typeof field?.value === "string" && field.value.trim(),
+    )
+  ) {
+    return true;
+  }
+  if (
+    Array.isArray(extraction.courses) &&
+    extraction.courses.some(
+      (course) => typeof course?.title === "string" && course.title.trim(),
+    )
+  ) {
+    return true;
+  }
+  return [
+    extraction.studentName,
+    extraction.institutionName,
+    extraction.issueDate,
+    extraction.academicTerm,
+  ].some((value) => typeof value === "string" && value.trim());
+}
+
+function shouldAutomaticallyRetryExtraction(error, failure) {
+  if (!failure.retryable) return false;
+  const status = Number(error?.status);
+  const message = String(error?.message ?? "").toLowerCase();
+  return (
+    failure.failureCode === "provider_unavailable" ||
+    failure.failureCode === "timeout" ||
+    /empty completion|no readable content/.test(message) ||
+    status === 429 ||
+    status >= 500
+  );
+}
+
+function classifyExtractionFailure(error) {
+  const status = Number(error?.status);
+  const name = String(error?.name ?? "").toLowerCase();
+  const message = String(error?.message ?? "").toLowerCase();
+  if (
+    name.includes("timeout") ||
+    /timed? out|timeout|aborted due to timeout/.test(message) ||
+    status === 408 ||
+    status === 504
+  ) {
+    return { failureCode: "timeout", retryable: true };
+  }
+  if (
+    /unsupported|not support|no compatible|invalid.*(?:schema|response|file)|unavailable for free/.test(
+      message,
+    ) ||
+    status === 400 ||
+    status === 404 ||
+    status === 422
+  ) {
+    return { failureCode: "unsupported_capability", retryable: false };
+  }
+  if (
+    status === 429 ||
+    status >= 500 ||
+    /rate limit|provider returned error|temporar(?:y|ily)|unavailable|fetch failed|econn|enotfound/.test(
+      message,
+    )
+  ) {
+    return { failureCode: "provider_unavailable", retryable: true };
+  }
+  if (/empty completion|no readable content|json|schema/.test(message)) {
+    return { failureCode: "invalid_response", retryable: true };
+  }
+  return { failureCode: "unknown", retryable: true };
+}
+
+function logDocumentExtractionEvent(logger, event) {
+  logger?.warn?.(
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "warn",
+      service: "vv-demo-api",
+      ...event,
+    }),
+  );
+}
+
 function failedExtraction(error, fileName, now) {
+  const { failureCode, retryable } = error;
+  const message = {
+    provider_unavailable:
+      "The document parser is temporarily unavailable. You can retry parsing without uploading the file again.",
+    unsupported_capability:
+      "This document cannot be parsed with the current parser configuration. The original file is still available.",
+    invalid_response:
+      "The document parser did not return usable structured information. You can retry parsing without uploading the file again.",
+    timeout:
+      "Parsing took too long to finish. You can retry parsing without uploading the file again.",
+    unknown:
+      "The parsing attempt did not finish. You can retry parsing without uploading the file again.",
+  }[failureCode] ??
+    "The parsing attempt did not finish. You can retry parsing without uploading the file again.";
   return {
     status: "failed",
     documentType: fileName.toLowerCase().includes("transcript")
@@ -948,12 +1652,13 @@ function failedExtraction(error, fileName, now) {
     issueDate: null,
     academicTerm: null,
     fields: [],
-    warnings: [
-      "The parsing provider could not complete this attempt. The original file is still available.",
-    ],
+    courses: [],
+    warnings: [message],
     model: null,
     provider: "local",
     processedAt: now.toISOString(),
     verifiedAt: null,
+    failureCode,
+    retryable,
   };
 }

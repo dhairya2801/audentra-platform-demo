@@ -100,6 +100,10 @@ const activityPropertyAllowlists = {
   ]),
   "ui.campus_event_viewed.v1": new Set(["event_id", "surface"]),
   "ui.club_viewed.v1": new Set(["club_id", "surface"]),
+  "ui.edward_context_receipts_received.v1": new Set([
+    "source_count",
+    "page_context",
+  ]),
   "ui.edward_tool_invoked.v1": new Set(["tool_name", "page_context"]),
   "ui.edward_action_widget_viewed.v1": new Set([
     "widget_type",
@@ -452,7 +456,7 @@ function acceptOfferResponse(state) {
 
 export function updateOnboarding(draft, input, now) {
   const body = objectBody(input);
-  exactKeys(body, ["expectedVersion", "currentStep", "data"]);
+  exactKeys(body, ["expectedVersion", "currentStep", "data", "skip"]);
   const expectedVersion = integerValue(
     body.expectedVersion,
     "expectedVersion",
@@ -483,14 +487,57 @@ export function updateOnboarding(draft, input, now) {
     );
   }
   validateCompletedStepSequence(draft);
+  const skip = body.skip === true;
+  if (body.skip !== undefined && typeof body.skip !== "boolean") {
+    throw badRequest("INVALID_FIELD", "skip must be a boolean");
+  }
+  if (skip && !isSkippableOnboardingStep(currentStep)) {
+    throw badRequest(
+      "ONBOARDING_STEP_REQUIRED",
+      "This onboarding step is required before you can continue",
+    );
+  }
   const suppliedData = validateOnboardingData(body.data);
   const mergedData = {
     ...draft.onboarding.data,
     ...suppliedData,
+    ...(skip
+      ? {
+          skippedSteps: [
+            ...new Set([
+              ...(draft.onboarding.data.skippedSteps ?? []),
+              currentStep,
+            ]),
+          ],
+        }
+      : {}),
   };
-  validateOnboardingStep(draft, currentStep, mergedData);
+  if (!skip) {
+    validateOnboardingStep(draft, currentStep, mergedData);
+  }
 
   draft.onboarding.data = mergedData;
+  if (currentStep === "about_you" && !skip) {
+    draft.profile.firstName = mergedData.firstName;
+    draft.profile.lastName = mergedData.lastName;
+    draft.profile.preferredName = mergedData.preferredName;
+    draft.profile.mobilePhone = mergedData.mobilePhone;
+    draft.profile.communicationPreference =
+      mergedData.communicationPreference;
+    draft.profile.version += 1;
+    draft.profile.updatedAt = now.toISOString();
+    draft.auth.demoIdentity.displayName =
+      `${mergedData.firstName} ${mergedData.lastName}`.trim();
+    // About-you is the authoritative first collection of these same profile
+    // fields. Completing it must satisfy the enrollment profile requirement
+    // and release downstream document tasks instead of asking the student to
+    // verify identical data a second time.
+    completeRequirementAndRefreshDependencies(
+      draft,
+      "profile_verification",
+    );
+    draft.portalProjectionVersion += 1;
+  }
   draft.onboarding.completedSteps.push(currentStep);
   const currentIndex = ONBOARDING_STEPS.indexOf(currentStep);
   draft.onboarding.currentStep =
@@ -499,6 +546,70 @@ export function updateOnboarding(draft, input, now) {
   draft.onboarding.version += 1;
   draft.onboarding.updatedAt = now.toISOString();
   return buildOnboarding(draft);
+}
+
+export function housingPlanResponse(state) {
+  const preference = ["on_campus", "off_campus", "undecided"].includes(
+    state.onboarding.data.housingPreference,
+  )
+    ? state.onboarding.data.housingPreference
+    : null;
+  const residenceOption = [
+    "aster_residence_hall",
+    "aster_apartments",
+    "student_village",
+  ].includes(state.onboarding.data.housingResidenceOption)
+    ? state.onboarding.data.housingResidenceOption
+    : null;
+  return {
+    preference,
+    residenceOption,
+    version: state.onboarding.version,
+    updatedAt: state.onboarding.updatedAt,
+  };
+}
+
+export function updateHousingPlan(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["expectedVersion", "preference", "residenceOption"]);
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (draft.onboarding.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "Your housing plan changed in another session",
+    );
+  }
+  const preference = enumValue(body.preference, "preference", [
+    "on_campus",
+    "off_campus",
+    "undecided",
+  ]);
+  const residenceOption =
+    preference === "on_campus"
+      ? body.residenceOption === undefined
+        ? "aster_residence_hall"
+        : enumValue(body.residenceOption, "residenceOption", [
+            "aster_residence_hall",
+            "aster_apartments",
+            "student_village",
+          ])
+      : null;
+
+  draft.onboarding.data = {
+    ...draft.onboarding.data,
+    housingPreference: preference,
+    housingResidenceOption: residenceOption,
+  };
+  draft.onboarding.version += 1;
+  draft.onboarding.updatedAt = now.toISOString();
+  completeRequirementAndRefreshDependencies(draft, "housing_preference");
+  draft.portalProjectionVersion += 1;
+  return housingPlanResponse(draft);
 }
 
 export function completeOnboarding(draft, input, now) {
@@ -615,7 +726,12 @@ export function patchProfile(draft, input, now) {
 
   if (preferredName !== undefined) draft.profile.preferredName = preferredName;
   if (pronouns !== undefined) draft.profile.pronouns = pronouns;
-  if (mobilePhone !== undefined) draft.profile.mobilePhone = mobilePhone;
+  if (mobilePhone !== undefined) {
+    if (draft.profile.mobilePhone !== mobilePhone) {
+      draft.profile.phoneVerified = false;
+    }
+    draft.profile.mobilePhone = mobilePhone;
+  }
   if (communicationPreference !== undefined) {
     draft.profile.communicationPreference = communicationPreference;
   }
@@ -630,6 +746,15 @@ export function profileResponse(state) {
   return {
     studentId: state.profile.studentId,
     preferredName: state.profile.preferredName,
+    firstName: state.profile.firstName,
+    lastName: state.profile.lastName,
+    ...(state.profile.email
+      ? {
+          email: state.profile.email,
+          emailVerified: state.profile.emailVerified === true,
+          phoneVerified: state.profile.phoneVerified === true,
+        }
+      : {}),
     pronouns: state.profile.pronouns,
     mobilePhone: state.profile.mobilePhone,
     communicationPreference: state.profile.communicationPreference,
@@ -822,6 +947,299 @@ export function createUploadedDocument(draft, input, now) {
   return documentResponse(document);
 }
 
+/**
+ * Creates the durable database record before object storage or AI work starts.
+ *
+ * `contentStored` is deliberately internal-only.  A client cannot obtain a
+ * content URL until the original object is confirmed in storage, while the
+ * record itself is already recoverable if the process stops between steps.
+ */
+export function reserveDocumentUpload(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "id",
+    "fileName",
+    "mimeType",
+    "sizeBytes",
+    "category",
+    "requirementId",
+    "sha256",
+    "storageKey",
+  ]);
+  const id = uuidValue(body.id, "id");
+  const fileName = requiredString(body.fileName, "fileName", {
+    min: 1,
+    max: 255,
+  });
+  if (
+    fileName.includes("/") ||
+    fileName.includes("\\") ||
+    /[\u0000-\u001f]/.test(fileName)
+  ) {
+    throw badRequest("INVALID_FILE_NAME", "fileName must be a plain file name");
+  }
+  const mimeType = enumValue(body.mimeType, "mimeType", [
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+  ]);
+  const sizeBytes = integerValue(body.sizeBytes, "sizeBytes", 1, 10_485_760);
+  let category = enumValue(body.category, "category", [
+    "identity",
+    "residency",
+    "transcript",
+    "financial_aid",
+    "health",
+    "consent",
+    "other",
+  ]);
+  const requirementId =
+    body.requirementId === undefined
+      ? undefined
+      : uuidValue(body.requirementId, "requirementId");
+  if (requirementId) {
+    const requirement = draft.requirements.find(
+      (candidate) =>
+        candidate.id === requirementId &&
+        candidate.submissionType === "document",
+    );
+    if (!requirement) {
+      throw notFound(
+        "DOCUMENT_REQUIREMENT_NOT_FOUND",
+        "The document requirement was not found",
+      );
+    }
+    category = documentCategoryForRequirement(requirement.code) ?? category;
+  }
+  const sha256 = requiredString(body.sha256, "sha256", { min: 64, max: 64 });
+  if (!/^[0-9a-f]{64}$/.test(sha256)) {
+    throw badRequest("INVALID_FIELD", "sha256 must be a lowercase SHA-256 hash");
+  }
+  const storageKey = requiredString(body.storageKey, "storageKey", {
+    min: 39,
+    max: 42,
+  });
+  if (!/^[0-9a-f-]{36}\.[a-z0-9]{2,5}$/i.test(storageKey)) {
+    throw badRequest("INVALID_FIELD", "storageKey is invalid");
+  }
+
+  const document = {
+    id,
+    ...(requirementId ? { requirementId } : {}),
+    fileName,
+    mimeType,
+    sizeBytes,
+    category,
+    processingMode: documentProcessingModeForCategory(category),
+    status: "placeholder",
+    sha256,
+    storageKey,
+    contentStored: false,
+    extraction: null,
+    createdAt: now.toISOString(),
+  };
+  draft.documents.push(document);
+  draft.portalProjectionVersion += 1;
+  return documentResponse(document);
+}
+
+/**
+ * This transition is the durable hand-off to the asynchronous extractor.  It
+ * happens only after the immutable object write succeeds, and is idempotent
+ * so a replayed upload cannot enqueue a second parser job.
+ */
+export function queueDocumentExtraction(draft, documentId, now) {
+  uuidValue(documentId, "documentId");
+  const document = draft.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document) {
+    throw notFound("STUDENT_DOCUMENT_NOT_FOUND", "The document was not found");
+  }
+  if (!document.storageKey) {
+    throw conflict(
+      "DOCUMENT_CONTENT_NOT_AVAILABLE",
+      "The original document has not been stored yet",
+    );
+  }
+  if (document.status === "processing") return documentResponse(document);
+  if (
+    document.status !== "placeholder" &&
+    document.status !== "uploaded"
+  ) {
+    return documentResponse(document);
+  }
+
+  document.contentStored = true;
+  document.processingMode ??= documentProcessingModeForCategory(
+    document.category,
+  );
+  if (document.processingMode === "manual_review") {
+    document.status = "under_review";
+    document.extraction = null;
+    updateDocumentRequirement(draft, document);
+    draft.portalProjectionVersion += 1;
+    return documentResponse(document);
+  }
+  document.status = "processing";
+  document.extraction = {
+    status: "processing",
+    documentType: documentTypeForCategory(document.category),
+    summary:
+      "The original file is safely stored. Edward is preparing a reviewable record.",
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    courses: [],
+    warnings: [],
+    model: null,
+    provider: "local",
+    processedAt: null,
+    verifiedAt: null,
+  };
+  draft.portalProjectionVersion += 1;
+  return documentResponse(document);
+}
+
+/** Marks an already-stored, retryable document as queued without reading it. */
+export function queueDocumentExtractionRetry(draft, documentId, now) {
+  const reference = prepareDocumentExtractionRetry(draft, documentId);
+  const document = draft.documents.find(
+    (candidate) => candidate.id === reference.id,
+  );
+  document.status = "processing";
+  document.extraction = {
+    status: "processing",
+    documentType: documentTypeForCategory(document.category),
+    summary:
+      "The original file is safely stored. Edward is retrying structured extraction.",
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    courses: [],
+    warnings: [],
+    model: null,
+    provider: "local",
+    processedAt: null,
+    verifiedAt: null,
+  };
+  draft.portalProjectionVersion += 1;
+  return { document: documentResponse(document), reference };
+}
+
+/**
+ * Returns the immutable storage reference needed to retry a failed document
+ * parse. The caller reads the bytes and then calls
+ * `completeDocumentExtractionRetry` inside the same serialized mutation.
+ *
+ * The preview store serializes mutations, so this check also prevents a
+ * second idempotency key from starting another parser call after a successful
+ * retry has already reached a terminal reviewable state.
+ */
+export function prepareDocumentExtractionRetry(draft, documentId) {
+  uuidValue(documentId, "documentId");
+  const document = draft.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document) {
+    throw notFound("STUDENT_DOCUMENT_NOT_FOUND", "The document was not found");
+  }
+  if (!document.storageKey || document.contentStored === false) {
+    throw conflict(
+      "DOCUMENT_CONTENT_NOT_AVAILABLE",
+      "The original document is not available for parsing",
+    );
+  }
+  const extraction = document.extraction;
+  const retryableFailure =
+    extraction?.status === "failed" && extraction.retryable !== false;
+  const pendingConfiguration = extraction?.status === "pending_configuration";
+  if (!retryableFailure && !pendingConfiguration) {
+    throw conflict(
+      "DOCUMENT_EXTRACTION_NOT_RETRYABLE",
+      "This document is not waiting for a retryable parsing attempt",
+    );
+  }
+  return {
+    id: document.id,
+    storageKey: document.storageKey,
+    fileName: document.fileName,
+    mimeType: document.mimeType,
+    category: document.category,
+    requirementId: document.requirementId,
+  };
+}
+
+/**
+ * Replaces an existing extraction without creating a second document record
+ * or a second object-storage reference. The original upload remains the
+ * canonical record through all retry attempts.
+ */
+export function completeDocumentExtractionRetry(
+  draft,
+  documentId,
+  extraction,
+  now,
+) {
+  uuidValue(documentId, "documentId");
+  const document = draft.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document) {
+    throw notFound("STUDENT_DOCUMENT_NOT_FOUND", "The document was not found");
+  }
+  document.extraction = validateExtraction(extraction);
+  const automaticallyProjectedTranscript =
+    document.category === "transcript" &&
+    document.extraction.status === "completed" &&
+    document.extraction.documentType === "transcript";
+  document.status = automaticallyProjectedTranscript
+    ? "under_review"
+    : document.extraction.status === "completed"
+      ? "needs_review"
+      : "uploaded";
+  if (
+    automaticallyProjectedTranscript &&
+    Array.isArray(document.extraction.courses)
+  ) {
+    ingestTranscriptCourses(draft, document, now);
+  }
+  updateDocumentRequirement(draft, document);
+  draft.portalProjectionVersion += 1;
+  return documentResponse(document);
+}
+
+/**
+ * One-time recovery for transcript extractions created before transcripts
+ * became an automatic, read-only projection. It is idempotent because course
+ * ingestion is keyed by source document and the document leaves needs_review.
+ */
+export function autoProjectCompletedTranscripts(draft, now) {
+  let projected = 0;
+  for (const document of draft.documents) {
+    if (
+      document.category !== "transcript" ||
+      document.status !== "needs_review" ||
+      document.extraction?.status !== "completed" ||
+      document.extraction.documentType !== "transcript"
+    ) {
+      continue;
+    }
+    document.status = "under_review";
+    if (Array.isArray(document.extraction.courses)) {
+      ingestTranscriptCourses(draft, document, now);
+    }
+    updateDocumentRequirement(draft, document);
+    projected += 1;
+  }
+  if (projected > 0) draft.portalProjectionVersion += 1;
+  return projected;
+}
+
 function documentCategoryForExtraction(documentType) {
   return (
     {
@@ -833,6 +1251,25 @@ function documentCategoryForExtraction(documentType) {
       residency: "residency",
     }[documentType] ?? "other"
   );
+}
+
+function documentTypeForCategory(category) {
+  return (
+    {
+      transcript: "transcript",
+      identity: "identity",
+      financial_aid: "financial_aid",
+      health: "immunization",
+      consent: "ferpa",
+      residency: "residency",
+    }[category] ?? "other"
+  );
+}
+
+function documentProcessingModeForCategory(category) {
+  return category === "identity" || category === "transcript"
+    ? "agentic"
+    : "manual_review";
 }
 
 export function confirmDocumentExtraction(draft, documentId, input, now) {
@@ -874,6 +1311,7 @@ export function confirmDocumentExtraction(draft, documentId, input, now) {
   document.extraction.acceptedFieldKeys = accepted;
   document.extraction.verifiedAt = now.toISOString();
   document.status = "under_review";
+  applySafeProfileProjectionFromExtraction(draft, document, accepted, now);
   if (
     document.extraction.documentType === "transcript" &&
     Array.isArray(document.extraction.courses)
@@ -882,6 +1320,41 @@ export function confirmDocumentExtraction(draft, documentId, input, now) {
   }
   draft.portalProjectionVersion += 1;
   return documentResponse(document);
+}
+
+function applySafeProfileProjectionFromExtraction(
+  state,
+  document,
+  acceptedFieldKeys,
+  now,
+) {
+  const accepted = new Set(acceptedFieldKeys);
+  const projection = {};
+  for (const field of document.extraction.fields) {
+    if (!accepted.has(field.key)) continue;
+    const value = field.value.trim();
+    if (!value) continue;
+    if (field.key === "preferred_name" && value.length <= 120) {
+      projection.preferredName = value;
+    } else if (field.key === "pronouns" && value.length <= 80) {
+      projection.pronouns = value;
+    } else if (
+      field.key === "mobile_phone" &&
+      /^\+?[0-9 ()-]{7,32}$/.test(value)
+    ) {
+      projection.mobilePhone = value;
+    } else if (
+      field.key === "communication_preference" &&
+      (value.toLowerCase() === "email" || value.toLowerCase() === "sms")
+    ) {
+      projection.communicationPreference = value.toLowerCase();
+    }
+  }
+  if (Object.keys(projection).length === 0) return;
+  Object.assign(state.profile, projection, {
+    version: state.profile.version + 1,
+    updatedAt: now.toISOString(),
+  });
 }
 
 export function listDocuments(state) {
@@ -900,7 +1373,7 @@ export function findDocumentForDownload(state, documentId) {
   const document = state.documents.find(
     (candidate) => candidate.id === documentId,
   );
-  if (!document || !document.storageKey) {
+  if (!document || !document.storageKey || document.contentStored === false) {
     throw notFound(
       "STUDENT_DOCUMENT_CONTENT_NOT_FOUND",
       "The uploaded document content was not found",
@@ -1054,6 +1527,21 @@ function validateExtraction(value) {
     "completed",
     "failed",
   ]);
+  const failureCode =
+    status === "failed" && extraction.failureCode !== undefined
+      ? enumValue(extraction.failureCode, "extraction.failureCode", [
+          "provider_unavailable",
+          "unsupported_capability",
+          "invalid_response",
+          "timeout",
+          "unknown",
+        ])
+      : undefined;
+  const retryable =
+    (status === "failed" || status === "pending_configuration") &&
+    extraction.retryable !== undefined
+      ? booleanValue(extraction.retryable, "extraction.retryable")
+      : undefined;
   const documentType = enumValue(
     extraction.documentType,
     "extraction.documentType",
@@ -1120,6 +1608,34 @@ function validateExtraction(value) {
         };
       })
     : [];
+  const visualRegions = Array.isArray(extraction.visualRegions)
+    ? extraction.visualRegions.slice(0, 4).flatMap((candidate, index) => {
+        const region = objectBody(candidate);
+        if (region.kind !== "profile_photo") return [];
+        const x = boundedNormalizedNumber(region.x);
+        const y = boundedNormalizedNumber(region.y);
+        const width = Math.min(1 - x, boundedNormalizedNumber(region.width));
+        const height = Math.min(1 - y, boundedNormalizedNumber(region.height));
+        if (width < 0.02 || height < 0.02) return [];
+        return [{
+          kind: "profile_photo",
+          pageNumber:
+            region.pageNumber === null || region.pageNumber === undefined
+              ? null
+              : integerValue(
+                  region.pageNumber,
+                  `visualRegions[${index}].pageNumber`,
+                  1,
+                  8,
+                ),
+          x,
+          y,
+          width,
+          height,
+          confidence: boundedNormalizedNumber(region.confidence),
+        }];
+      })
+    : [];
   return {
     status,
     documentType,
@@ -1133,6 +1649,7 @@ function validateExtraction(value) {
     academicTerm: nullableBoundedText(extraction.academicTerm, 120),
     fields,
     courses,
+    visualRegions,
     warnings: Array.isArray(extraction.warnings)
       ? extraction.warnings
           .slice(0, 12)
@@ -1146,11 +1663,20 @@ function validateExtraction(value) {
     model: nullableBoundedText(extraction.model, 160),
     provider: enumValue(extraction.provider, "extraction.provider", [
       "openrouter",
+      "groq",
       "local",
     ]),
     processedAt: nullableBoundedText(extraction.processedAt, 80),
     verifiedAt: null,
+    ...(failureCode ? { failureCode } : {}),
+    ...(retryable !== undefined ? { retryable } : {}),
   };
+}
+
+function boundedNormalizedNumber(value) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0;
 }
 
 function publicProgram(program) {
@@ -1253,6 +1779,7 @@ function nullableBoundedText(value, maximum) {
 function documentResponse(document) {
   const {
     storageKey: _storageKey,
+    contentStored: _contentStored,
     sha256,
     extraction,
     ...publicDocument
@@ -1260,7 +1787,7 @@ function documentResponse(document) {
   return {
     ...publicDocument,
     ...(sha256 ? { sha256 } : {}),
-    ...(document.storageKey
+    ...(document.storageKey && document.contentStored !== false
       ? { contentUrl: `/v1/student/documents/${document.id}/content` }
       : {}),
     ...(extraction ? { extraction } : {}),
@@ -1268,8 +1795,14 @@ function documentResponse(document) {
 }
 
 function updateDocumentRequirement(draft, document) {
-  if (document.extraction?.status !== "completed") return;
+  const manuallyStoredForReview =
+    (document.processingMode ??
+      documentProcessingModeForCategory(document.category)) ===
+      "manual_review" && document.status === "under_review";
+  const completedExtraction = document.extraction?.status === "completed";
+  if (!manuallyStoredForReview && !completedExtraction) return;
   if (
+    completedExtraction &&
     document.requirementId &&
     documentCategoryForExtraction(document.extraction?.documentType) !==
       document.category
@@ -1479,9 +2012,17 @@ function validateCompletedStepSequence(state) {
   }
 }
 
+function isSkippableOnboardingStep(step) {
+  return step === "housing" || step === "campus_life";
+}
+
 function validateOnboardingData(input) {
   const data = objectBody(input);
   const fields = [
+    "firstName",
+    "lastName",
+    "preferredName",
+    "mobilePhone",
     "legalNameConfirmed",
     "contactInformationConfirmed",
     "communicationPreference",
@@ -1489,6 +2030,7 @@ function validateOnboardingData(input) {
     "supportNeeds",
     "homeAddressConfirmed",
     "housingPreference",
+    "housingResidenceOption",
     "campusInterests",
     "emergencyContactConfirmed",
     "recordsConfirmed",
@@ -1498,6 +2040,30 @@ function validateOnboardingData(input) {
   ];
   exactKeys(data, fields);
   const result = {};
+  for (const field of ["firstName", "lastName", "preferredName"]) {
+    if (data[field] !== undefined) {
+      result[field] = requiredString(data[field], field, {
+        min: 1,
+        max: 120,
+      });
+    }
+  }
+  if (data.mobilePhone !== undefined) {
+    const mobilePhone = requiredString(data.mobilePhone, "mobilePhone", {
+      min: 8,
+      max: 32,
+    }).replace(/[ ()-]/g, "");
+    const normalizedPhone = mobilePhone.startsWith("+")
+      ? mobilePhone
+      : `+${mobilePhone}`;
+    if (!/^\+[1-9][0-9]{7,14}$/.test(normalizedPhone)) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "mobilePhone must include a valid country code",
+      );
+    }
+    result.mobilePhone = normalizedPhone;
+  }
   for (const field of [
     "legalNameConfirmed",
     "contactInformationConfirmed",
@@ -1533,6 +2099,13 @@ function validateOnboardingData(input) {
       ["on_campus", "off_campus", "undecided"],
     );
   }
+  if (data.housingResidenceOption !== undefined) {
+    result.housingResidenceOption = enumValue(
+      data.housingResidenceOption,
+      "housingResidenceOption",
+      ["aster_residence_hall", "aster_apartments", "student_village"],
+    );
+  }
   for (const field of ["supportNeeds", "campusInterests"]) {
     if (data[field] === undefined) continue;
     if (!Array.isArray(data[field])) {
@@ -1560,6 +2133,10 @@ function validateOnboardingStep(state, step, data) {
   }
   if (step === "about_you") {
     if (
+      !data.firstName ||
+      !data.lastName ||
+      !data.preferredName ||
+      !data.mobilePhone ||
       data.legalNameConfirmed !== true ||
       data.contactInformationConfirmed !== true ||
       data.homeAddressConfirmed !== true ||
@@ -1567,7 +2144,7 @@ function validateOnboardingStep(state, step, data) {
       !data.residencyStatus
     ) {
       invalid(
-        "Confirm legal name, contact information, home address, communication preference, and residency status",
+        "Enter your name and mobile phone, then confirm legal name, contact information, home address, communication preference, and residency status",
       );
     }
     return;
@@ -1660,6 +2237,6 @@ export function fixtureSummary(state) {
       activities: state.activities.length,
       idempotencyRecords: Object.keys(state.idempotency).length,
     },
-    demoStudentId: ids.student,
+    demoStudentId: state.profile.studentId,
   };
 }

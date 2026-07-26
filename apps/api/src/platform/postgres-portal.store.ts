@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  documentProcessingModeForCategory,
   documentCategoryForRequirement,
   studentRequirementCodeFromSlug,
   studentRequirementSlug,
@@ -20,6 +21,7 @@ import {
   type StudentDocumentExtraction,
   type StudentDocumentList,
   type StudentHelp,
+  type StudentHousingPlan,
   type StudentFinancials,
   type StudentMessage,
   type StudentMessageList,
@@ -31,6 +33,7 @@ import {
   type StudentRequirementDetail,
   type StudentRequirementList,
   type UpdateStudentOnboardingInput,
+  type UpdateStudentHousingPlanInput,
   type UpdateStudentProfileInput,
 } from "@vv/contracts";
 import { sql } from "drizzle-orm";
@@ -44,6 +47,7 @@ import {
 import { DatabaseService } from "../database/database.service";
 import {
   ONBOARDING_STEPS,
+  isSkippableOnboardingStep,
   validateOnboardingStepData,
 } from "../portal/onboarding-policy";
 import { getRuntimeLineage } from "../observability/runtime-lineage";
@@ -99,6 +103,7 @@ interface DocumentRow {
   mime_type: StudentDocument["mimeType"];
   size_bytes: number;
   category: StudentDocument["category"];
+  processing_mode: NonNullable<StudentDocument["processingMode"]>;
   status: StudentDocument["status"];
   storage_key: string | null;
   sha256: string | null;
@@ -148,6 +153,47 @@ const requirementCodeByDocumentCategory: Partial<
   health: "immunization_record",
 };
 
+type SafeProfileProjection = Partial<
+  Pick<
+    StudentProfile,
+    "preferredName" | "pronouns" | "mobilePhone" | "communicationPreference"
+  >
+>;
+
+function safeProfileProjectionFromExtraction(
+  fields: StudentDocumentExtraction["fields"],
+  acceptedFieldKeys: readonly string[],
+): SafeProfileProjection {
+  const accepted = new Set(acceptedFieldKeys);
+  const projection: SafeProfileProjection = {};
+  for (const field of fields) {
+    if (!accepted.has(field.key)) continue;
+    const value = field.value.trim();
+    if (!value) continue;
+    switch (field.key) {
+      case "preferred_name":
+        if (value.length <= 120) projection.preferredName = value;
+        break;
+      case "pronouns":
+        if (value.length <= 80) projection.pronouns = value;
+        break;
+      case "mobile_phone":
+        if (/^\+?[0-9 ()-]{7,32}$/.test(value)) {
+          projection.mobilePhone = value;
+        }
+        break;
+      case "communication_preference": {
+        const preference = value.toLowerCase();
+        if (preference === "email" || preference === "sms") {
+          projection.communicationPreference = preference;
+        }
+        break;
+      }
+    }
+  }
+  return projection;
+}
+
 function mapOnboarding(row: OnboardingRow): StudentOnboarding {
   return {
     studentId: row.student_id,
@@ -157,6 +203,27 @@ function mapOnboarding(row: OnboardingRow): StudentOnboarding {
     data: row.payload,
     version: row.version,
     completedAt: row.completed_at?.toISOString() ?? null,
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+function mapHousingPlan(row: OnboardingRow): StudentHousingPlan {
+  const preference =
+    row.payload.housingPreference === "on_campus" ||
+    row.payload.housingPreference === "off_campus" ||
+    row.payload.housingPreference === "undecided"
+      ? row.payload.housingPreference
+      : null;
+  const residenceOption =
+    row.payload.housingResidenceOption === "aster_residence_hall" ||
+    row.payload.housingResidenceOption === "aster_apartments" ||
+    row.payload.housingResidenceOption === "student_village"
+      ? row.payload.housingResidenceOption
+      : null;
+  return {
+    preference,
+    residenceOption,
+    version: row.version,
     updatedAt: row.updated_at.toISOString(),
   };
 }
@@ -199,6 +266,7 @@ function mapDocument(row: DocumentRow): StudentDocument {
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     category: row.category,
+    processingMode: row.processing_mode,
     status: row.status,
     ...(row.storage_key
       ? { contentUrl: `/v1/student/documents/${row.id}/content` }
@@ -325,6 +393,136 @@ export class PostgresPortalStore {
     return mapOnboarding(row);
   }
 
+  async getStudentHousingPlan(auth: AuthContext): Promise<StudentHousingPlan> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        student_id,
+        status,
+        current_step,
+        completed_steps,
+        payload,
+        version,
+        completed_at,
+        updated_at
+      FROM student_onboarding
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+      LIMIT 1
+    `);
+    const row = rows<OnboardingRow>(result)[0];
+    if (!row) {
+      throw new NotFoundError(
+        "STUDENT_ONBOARDING_NOT_FOUND",
+        "Student onboarding was not found",
+      );
+    }
+    return mapHousingPlan(row);
+  }
+
+  async updateStudentHousingPlan(input: {
+    auth: AuthContext;
+    update: UpdateStudentHousingPlanInput;
+    requestId: string;
+  }): Promise<StudentHousingPlan> {
+    return this.database.db.transaction(async (transaction) => {
+      const currentResult = await transaction.execute(sql`
+        SELECT
+          student_id,
+          status,
+          current_step,
+          completed_steps,
+          payload,
+          version,
+          completed_at,
+          updated_at
+        FROM student_onboarding
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+        FOR UPDATE
+      `);
+      const current = rows<OnboardingRow>(currentResult)[0];
+      if (!current) {
+        throw new NotFoundError(
+          "STUDENT_ONBOARDING_NOT_FOUND",
+          "Student onboarding was not found",
+        );
+      }
+      if (current.version !== input.update.expectedVersion) {
+        throw new ConflictError(
+          "VERSION_CONFLICT",
+          "Your housing plan changed in another session",
+        );
+      }
+
+      const residenceOption =
+        input.update.preference === "on_campus"
+          ? input.update.residenceOption ?? "aster_residence_hall"
+          : null;
+      const payload: StudentOnboardingData = {
+        ...current.payload,
+        housingPreference: input.update.preference,
+        housingResidenceOption: residenceOption,
+      };
+      const now = new Date();
+      const updatedResult = await transaction.execute(sql`
+        UPDATE student_onboarding
+        SET payload = ${JSON.stringify(payload)}::jsonb,
+            version = version + 1,
+            updated_at = ${now}
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND version = ${input.update.expectedVersion}
+        RETURNING
+          student_id,
+          status,
+          current_step,
+          completed_steps,
+          payload,
+          version,
+          completed_at,
+          updated_at
+      `);
+      const updated = rows<OnboardingRow>(updatedResult)[0];
+      if (!updated) {
+        throw new ConflictError(
+          "VERSION_CONFLICT",
+          "Your housing plan changed in another session",
+        );
+      }
+      await this.completeRequirementAndRefreshDependencies(
+        transaction,
+        input.auth,
+        "housing_preference",
+      );
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "student_housing_plan.updated",
+        resourceType: "student_onboarding",
+        resourceId: input.auth.studentId,
+        requestId: input.requestId,
+        metadata: {
+          preference: input.update.preference,
+          residenceOption,
+          version: updated.version,
+        },
+      });
+      await this.insertOutbox(transaction, {
+        auth: input.auth,
+        eventName: "student.housing_plan_updated.v1",
+        aggregateType: "student_onboarding",
+        aggregateId: input.auth.studentId,
+        aggregateVersion: updated.version,
+        requestId: input.requestId,
+        data: {
+          studentId: input.auth.studentId,
+          preference: input.update.preference,
+          residenceOption,
+        },
+      });
+      return mapHousingPlan(updated);
+    });
+  }
+
   async updateStudentOnboarding(input: {
     auth: AuthContext;
     update: UpdateStudentOnboardingInput;
@@ -385,13 +583,77 @@ export class PostgresPortalStore {
           "The stored onboarding sequence is inconsistent",
         );
       }
-      const mergedData = { ...current.payload, ...input.update.data };
-      await this.validateOnboardingStep(
-        transaction,
-        input.auth,
-        current.current_step,
-        mergedData,
-      );
+      const skip = input.update.skip === true;
+      if (skip && !isSkippableOnboardingStep(current.current_step)) {
+        throw new BadRequestError(
+          "ONBOARDING_STEP_REQUIRED",
+          "This onboarding step is required before you can continue",
+        );
+      }
+      const { skippedSteps: _submittedSkippedSteps, ...submittedData } =
+        input.update.data;
+      const mergedData: StudentOnboardingData = {
+        ...current.payload,
+        ...submittedData,
+        ...(skip
+          ? {
+              skippedSteps: [
+                ...new Set([
+                  ...(current.payload.skippedSteps ?? []),
+                  current.current_step,
+                ]),
+              ],
+            }
+          : {}),
+      };
+      if (!skip) {
+        await this.validateOnboardingStep(
+          transaction,
+          input.auth,
+          current.current_step,
+          mergedData,
+        );
+      }
+      let synchronizedProfileVersion: number | null = null;
+      if (
+        current.current_step === "about_you" &&
+        mergedData.firstName &&
+        mergedData.lastName &&
+        mergedData.preferredName &&
+        mergedData.mobilePhone &&
+        mergedData.communicationPreference
+      ) {
+        await transaction.execute(sql`
+          UPDATE person p
+          SET first_name = ${mergedData.firstName},
+              last_name = ${mergedData.lastName},
+              preferred_name = ${mergedData.preferredName},
+              updated_at = now()
+          FROM student s
+          WHERE s.tenant_id = ${input.auth.tenantId}
+            AND s.id = ${input.auth.studentId}
+            AND p.tenant_id = s.tenant_id
+            AND p.id = s.person_id
+        `);
+        const profileUpdateResult = await transaction.execute(sql`
+          UPDATE student_profile
+          SET preferred_name = ${mergedData.preferredName},
+              mobile_phone = ${mergedData.mobilePhone},
+              communication_preference = ${mergedData.communicationPreference},
+              version = version + 1,
+              updated_at = now()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+          RETURNING version
+        `);
+        synchronizedProfileVersion =
+          rows<{ version: number }>(profileUpdateResult)[0]?.version ?? null;
+        await this.completeRequirementAndRefreshDependencies(
+          transaction,
+          input.auth,
+          "profile_verification",
+        );
+      }
       const completedSteps = [...current.completed_steps, current.current_step];
       const nextStep =
         ONBOARDING_STEPS[stepIndex + 1] ?? ONBOARDING_STEPS[stepIndex];
@@ -437,8 +699,34 @@ export class PostgresPortalStore {
         resourceType: "student_onboarding",
         resourceId: input.auth.studentId,
         requestId: input.requestId,
-        metadata: { step: current.current_step, version: updated.version },
+        metadata: {
+          step: current.current_step,
+          skipped: skip,
+          version: updated.version,
+          profileSynchronized: synchronizedProfileVersion !== null,
+        },
       });
+      if (synchronizedProfileVersion !== null) {
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "student.profile_updated.v1",
+          aggregateType: "student_profile",
+          aggregateId: input.auth.studentId,
+          aggregateVersion: synchronizedProfileVersion,
+          requestId: input.requestId,
+          data: {
+            studentId: input.auth.studentId,
+            source: "onboarding.about_you",
+            changedFields: [
+              "firstName",
+              "lastName",
+              "preferredName",
+              "mobilePhone",
+              "communicationPreference",
+            ],
+          },
+        });
+      }
       return mapOnboarding(updated);
     });
   }
@@ -685,7 +973,7 @@ export class PostgresPortalStore {
   async getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList> {
     const result = await this.database.db.execute(sql`
       SELECT
-        id, requirement_id, file_name, mime_type, size_bytes, category, status,
+        id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
         storage_key, sha256, extraction, created_at
       FROM document_record
       WHERE tenant_id = ${auth.tenantId}
@@ -718,6 +1006,7 @@ export class PostgresPortalStore {
             mime_type,
             size_bytes,
             category,
+            processing_mode,
             status,
             storage_provider
           )
@@ -729,13 +1018,14 @@ export class PostgresPortalStore {
             ${input.document.mimeType},
             ${input.document.sizeBytes},
             ${input.document.category},
+            ${documentProcessingModeForCategory(input.document.category)},
             'placeholder',
             'local_placeholder'
           FROM student s
           WHERE s.tenant_id = ${input.auth.tenantId}
             AND s.id = ${input.auth.studentId}
           RETURNING
-            id, requirement_id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
             storage_key, sha256, extraction, created_at
         `);
         const created = rows<DocumentRow>(result)[0];
@@ -790,7 +1080,7 @@ export class PostgresPortalStore {
         let category = input.document.category;
         if (input.requirementId) {
           const requirementResult = await transaction.execute(sql`
-            SELECT rdv.code
+            SELECT rdv.code, sr.status
             FROM student_requirement sr
             JOIN enrollment_journey j
               ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
@@ -803,11 +1093,19 @@ export class PostgresPortalStore {
               AND rdv.submission_type = 'document'
             LIMIT 1
           `);
-          const requirement = rows<{ code: string }>(requirementResult)[0];
+          const requirement = rows<{ code: string; status: string }>(
+            requirementResult,
+          )[0];
           if (!requirement) {
             throw new NotFoundError(
               "DOCUMENT_REQUIREMENT_NOT_FOUND",
               "The document requirement was not found",
+            );
+          }
+          if (requirement.status === "blocked") {
+            throw new ConflictError(
+              "DOCUMENT_REQUIREMENT_BLOCKED",
+              "Complete the prerequisite enrollment tasks before uploading this document.",
             );
           }
           category =
@@ -829,6 +1127,7 @@ export class PostgresPortalStore {
             mime_type,
             size_bytes,
             category,
+            processing_mode,
             status,
             storage_provider,
             storage_key,
@@ -843,6 +1142,7 @@ export class PostgresPortalStore {
             ${input.document.mimeType},
             ${input.document.sizeBytes},
             ${category},
+            ${documentProcessingModeForCategory(category)},
             'uploaded',
             's3',
             ${storageKey},
@@ -851,7 +1151,7 @@ export class PostgresPortalStore {
           WHERE s.tenant_id = ${input.auth.tenantId}
             AND s.id = ${input.auth.studentId}
           RETURNING
-            id, requirement_id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
             storage_key, sha256, extraction, created_at
         `);
         const created = rows<DocumentRow>(result)[0];
@@ -896,18 +1196,255 @@ export class PostgresPortalStore {
   async claimStudentDocumentProcessing(input: {
     auth: AuthContext;
     documentId: string;
+    retry?: boolean;
+    requestId?: string;
+    retryIdempotencyKey?: string;
   }): Promise<boolean> {
-    const result = await this.database.db.execute(sql`
-      UPDATE document_record
-      SET status = 'processing', updated_at = NOW()
-      WHERE tenant_id = ${input.auth.tenantId}
-        AND student_id = ${input.auth.studentId}
-        AND id = ${input.documentId}
-        AND status = 'uploaded'
-        AND extraction IS NULL
-      RETURNING id
-    `);
-    return rows(result).length === 1;
+    const processingExtraction = JSON.stringify(
+      documentProcessingExtraction(),
+    );
+    if (input.retry) {
+      return this.database.db.transaction(async (transaction) => {
+        if (!input.retryIdempotencyKey) {
+          throw new BadRequestError(
+            "IDEMPOTENCY_KEY_REQUIRED",
+            "The Idempotency-Key header is required",
+          );
+        }
+        const operation = `student_document.extraction.retry:${input.documentId}`;
+        const requestHash = createHash("sha256")
+          .update(
+            JSON.stringify({
+              tenantId: input.auth.tenantId,
+              studentId: input.auth.studentId,
+              documentId: input.documentId,
+            }),
+          )
+          .digest("hex");
+        const lockKey = [
+          input.auth.tenantId,
+          input.auth.actorId,
+          operation,
+          input.retryIdempotencyKey,
+        ].join(":");
+        await transaction.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`,
+        );
+        const existingResult = await transaction.execute(sql`
+          SELECT request_hash, response_body
+          FROM idempotency_record
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND actor_id = ${input.auth.actorId}
+            AND operation = ${operation}
+            AND idempotency_key = ${input.retryIdempotencyKey}
+        `);
+        const existing = rows<IdempotencyRow<Record<string, unknown>>>(
+          existingResult,
+        )[0];
+        if (existing) {
+          if (existing.request_hash !== requestHash) {
+            throw new ConflictError(
+              "IDEMPOTENCY_KEY_REUSED",
+              "This idempotency key was already used for a different request",
+            );
+          }
+          // The caller reads the current document after a false claim. This
+          // handles both an in-flight replay and a completed failed retry
+          // without issuing another parser request.
+          return false;
+        }
+        const result = await transaction.execute(sql`
+          UPDATE document_record
+          SET
+            status = 'processing',
+            extraction = ${processingExtraction}::jsonb,
+            updated_at = NOW()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND id = ${input.documentId}
+            AND status = 'uploaded'
+            AND extraction IS NOT NULL
+            AND (
+              extraction ->> 'status' = 'pending_configuration'
+              OR (
+                extraction ->> 'status' = 'failed'
+                AND COALESCE(extraction -> 'retryable', 'true'::jsonb) <> 'false'::jsonb
+              )
+            )
+          RETURNING extraction
+        `);
+        const claimed = rows<{ extraction: StudentDocumentExtraction }>(
+          result,
+        )[0];
+        if (!claimed) return false;
+        await transaction.execute(sql`
+          INSERT INTO idempotency_record (
+            tenant_id,
+            actor_id,
+            operation,
+            idempotency_key,
+            request_hash,
+            response_status,
+            response_body,
+            created_at,
+            expires_at
+          )
+          VALUES (
+            ${input.auth.tenantId},
+            ${input.auth.actorId},
+            ${operation},
+            ${input.retryIdempotencyKey},
+            ${requestHash},
+            202,
+            ${JSON.stringify({
+              documentId: input.documentId,
+              status: "processing",
+            })}::jsonb,
+            NOW(),
+            NOW() + INTERVAL '24 hours'
+          )
+        `);
+        const requestId = input.requestId ?? "document-extraction-retry";
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "document.extraction_retry_started",
+          resourceType: "document_record",
+          resourceId: input.documentId,
+          requestId,
+          metadata: {
+            previousExtractionStatus: claimed.extraction.status,
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "document.extraction_retry_started.v1",
+          aggregateType: "document_record",
+          aggregateId: input.documentId,
+          aggregateVersion: 2,
+          requestId,
+          data: {
+            studentId: input.auth.studentId,
+            previousExtractionStatus: claimed.extraction.status,
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "document.extraction_requested.v1",
+          aggregateType: "document_record",
+          aggregateId: input.documentId,
+          aggregateVersion: 3,
+          requestId,
+          data: {
+            studentId: input.auth.studentId,
+            retry: true,
+          },
+        });
+        return true;
+      });
+    }
+    return this.database.db.transaction(async (transaction) => {
+      const requestId = input.requestId ?? "document-extraction-request";
+      const manualResult = await transaction.execute(sql`
+        UPDATE document_record
+        SET status = 'under_review', updated_at = NOW()
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+          AND status = 'uploaded'
+          AND extraction IS NULL
+          AND processing_mode = 'manual_review'
+        RETURNING requirement_id, category
+      `);
+      const manual = rows<{
+        requirement_id: string | null;
+        category: StudentDocument["category"];
+      }>(manualResult)[0];
+      if (manual) {
+        if (manual.requirement_id) {
+          await transaction.execute(sql`
+            UPDATE student_requirement
+            SET status = 'under_review', progress_percent = 80, updated_at = NOW()
+            WHERE tenant_id = ${input.auth.tenantId}
+              AND id = ${manual.requirement_id}
+              AND status <> 'completed'
+          `);
+        }
+        if (manual.category === "financial_aid") {
+          await transaction.execute(sql`
+            UPDATE financial_document_requirement
+            SET status = 'under_review',
+                document_id = ${input.documentId},
+                version = version + 1,
+                updated_at = NOW()
+            WHERE tenant_id = ${input.auth.tenantId}
+              AND student_id = ${input.auth.studentId}
+              AND code = 'verification_worksheet'
+          `);
+        }
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "document.stored_for_review",
+          resourceType: "document_record",
+          resourceId: input.documentId,
+          requestId,
+          metadata: {
+            storageConfirmed: true,
+            processingMode: "manual_review",
+            category: manual.category,
+          },
+        });
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "document.stored_for_review.v1",
+          aggregateType: "document_record",
+          aggregateId: input.documentId,
+          aggregateVersion: 2,
+          requestId,
+          data: {
+            studentId: input.auth.studentId,
+            category: manual.category,
+            requirementId: manual.requirement_id,
+          },
+        });
+        return false;
+      }
+      const result = await transaction.execute(sql`
+        UPDATE document_record
+        SET
+          status = 'processing',
+          extraction = ${processingExtraction}::jsonb,
+          updated_at = NOW()
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+          AND status = 'uploaded'
+          AND extraction IS NULL
+          AND processing_mode = 'agentic'
+        RETURNING id
+      `);
+      if (rows(result).length !== 1) return false;
+      await this.insertAudit(transaction, {
+        auth: input.auth,
+        action: "document.extraction_queued",
+        resourceType: "document_record",
+        resourceId: input.documentId,
+        requestId,
+        metadata: { storageConfirmed: true },
+      });
+      await this.insertOutbox(transaction, {
+        auth: input.auth,
+        eventName: "document.extraction_requested.v1",
+        aggregateType: "document_record",
+        aggregateId: input.documentId,
+        aggregateVersion: 2,
+        requestId,
+        data: {
+          studentId: input.auth.studentId,
+          retry: false,
+        },
+      });
+      return true;
+    });
   }
 
   async releaseStudentDocumentProcessing(input: {
@@ -959,6 +1496,7 @@ export class PostgresPortalStore {
     documentId: string;
     extraction: StudentDocumentExtraction;
     requestId: string;
+    retryIdempotencyKey?: string;
   }): Promise<StudentDocument> {
     return this.database.db.transaction(async (transaction) => {
       const status =
@@ -982,7 +1520,7 @@ export class PostgresPortalStore {
           AND id = ${input.documentId}
           AND status = 'processing'
         RETURNING
-          id, requirement_id, file_name, mime_type, size_bytes, category, status,
+          id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
           storage_key, sha256, extraction, created_at
       `);
       const updated = rows<DocumentRow>(result)[0];
@@ -998,6 +1536,11 @@ export class PostgresPortalStore {
         !updated.requirement_id ||
         documentCategoryForExtractionType(input.extraction.documentType) ===
           updated.category;
+      const automaticallyProjectedTranscript =
+        updated.category === "transcript" &&
+        extractionCompleted &&
+        classificationMatchesRequirement &&
+        input.extraction.documentType === "transcript";
       if (
         requirementCode &&
         extractionCompleted &&
@@ -1036,6 +1579,126 @@ export class PostgresPortalStore {
           `);
         }
       }
+      if (automaticallyProjectedTranscript) {
+        await transaction.execute(sql`
+          UPDATE document_record
+          SET status = 'under_review',
+              updated_at = NOW()
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND id = ${input.documentId}
+        `);
+        updated.status = "under_review";
+        for (const course of input.extraction.courses ?? []) {
+          const sourceLabel =
+            `${course.sourceCode ?? ""} ${course.title}`.toLowerCase();
+          const sourceType = sourceLabel.includes("ap ")
+            ? "ap"
+            : sourceLabel.includes("ib ")
+              ? "ib"
+              : "transcript";
+          await transaction.execute(sql`
+            INSERT INTO student_transcript_credit (
+              id,
+              tenant_id,
+              student_id,
+              source_document_id,
+              source_type,
+              source_code,
+              title,
+              grade_or_score,
+              credits,
+              institution_name,
+              evidence,
+              reviewed_at
+            )
+            SELECT
+              ${randomUUID()},
+              ${input.auth.tenantId},
+              ${input.auth.studentId},
+              ${input.documentId},
+              ${sourceType},
+              ${course.sourceCode},
+              ${course.title},
+              ${course.score ?? course.grade},
+              ${course.credits},
+              ${input.extraction.institutionName},
+              ${JSON.stringify({
+                term: course.term,
+                confidence: course.confidence,
+                projection: "automatic_transcript_extraction",
+              })}::jsonb,
+              NOW()
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM student_transcript_credit stc
+              WHERE stc.tenant_id = ${input.auth.tenantId}
+                AND stc.student_id = ${input.auth.studentId}
+                AND stc.source_document_id = ${input.documentId}
+                AND COALESCE(stc.source_code, '') = COALESCE(${course.sourceCode}, '')
+                AND stc.title = ${course.title}
+            )
+          `);
+        }
+        await transaction.execute(sql`
+          INSERT INTO course_exemption_recommendation (
+            id,
+            tenant_id,
+            student_id,
+            program_id,
+            catalog_version_id,
+            transcript_credit_id,
+            target_course_id,
+            equivalency_rule_id,
+            status,
+            confidence,
+            rationale
+          )
+          SELECT
+            md5(stc.id::text || rule.id::text)::uuid,
+            stc.tenant_id,
+            stc.student_id,
+            ao.program_id,
+            rule.catalog_version_id,
+            stc.id,
+            rule.target_course_id,
+            rule.id,
+            'suggested',
+            rule.confidence,
+            COALESCE(stc.source_code, stc.title) || ' score ' ||
+              COALESCE(stc.grade_or_score, 'not provided') ||
+              ' meets stored rule ' || rule.code || '.'
+          FROM student_transcript_credit stc
+          JOIN admission_offer ao
+            ON ao.tenant_id = stc.tenant_id
+           AND ao.student_id = stc.student_id
+          JOIN course_equivalency_rule rule
+            ON rule.tenant_id = stc.tenant_id
+           AND rule.active = true
+           AND lower(rule.source_code) = lower(stc.source_code)
+          WHERE stc.tenant_id = ${input.auth.tenantId}
+            AND stc.student_id = ${input.auth.studentId}
+            AND stc.source_document_id = ${input.documentId}
+            AND NULLIF(
+              regexp_replace(stc.grade_or_score, '[^0-9.]', '', 'g'),
+              ''
+            )::numeric >= rule.minimum_score
+          ON CONFLICT DO NOTHING
+        `);
+        await this.insertOutbox(transaction, {
+          auth: input.auth,
+          eventName: "student.transcript_credits_imported.v1",
+          aggregateType: "document_record",
+          aggregateId: input.documentId,
+          aggregateVersion: 3,
+          requestId: input.requestId,
+          data: {
+            studentId: input.auth.studentId,
+            courseCount: input.extraction.courses?.length ?? 0,
+            projection: "automatic",
+          },
+        });
+      }
       if (
         updated.category === "financial_aid" &&
         extractionCompleted &&
@@ -1063,6 +1726,9 @@ export class PostgresPortalStore {
           provider: input.extraction.provider,
           model: input.extraction.model,
           extractedFieldCount: input.extraction.fields.length,
+          failureCode: input.extraction.failureCode ?? null,
+          retryable: input.extraction.retryable ?? null,
+          automaticallyProjectedTranscript,
         },
       });
       await this.insertOutbox(transaction, {
@@ -1076,9 +1742,24 @@ export class PostgresPortalStore {
           studentId: input.auth.studentId,
           category: updated.category,
           extractionStatus: input.extraction.status,
+          failureCode: input.extraction.failureCode ?? null,
+          retryable: input.extraction.retryable ?? null,
         },
       });
-      return mapDocument(updated);
+      const document = mapDocument(updated);
+      if (input.retryIdempotencyKey) {
+        const operation = `student_document.extraction.retry:${input.documentId}`;
+        await transaction.execute(sql`
+          UPDATE idempotency_record
+          SET response_status = 200,
+              response_body = ${JSON.stringify(document)}::jsonb
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND actor_id = ${input.auth.actorId}
+            AND operation = ${operation}
+            AND idempotency_key = ${input.retryIdempotencyKey}
+        `);
+      }
+      return document;
     });
   }
 
@@ -1088,7 +1769,7 @@ export class PostgresPortalStore {
   }): Promise<StudentDocument> {
     const result = await this.database.db.execute(sql`
       SELECT
-        id, requirement_id, file_name, mime_type, size_bytes, category, status,
+        id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
         storage_key, sha256, extraction, created_at
       FROM document_record
       WHERE tenant_id = ${input.auth.tenantId}
@@ -1156,7 +1837,7 @@ export class PostgresPortalStore {
       async (transaction) => {
         const currentResult = await transaction.execute(sql`
           SELECT
-            id, requirement_id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
             storage_key, sha256, extraction, created_at
           FROM document_record
           WHERE tenant_id = ${input.auth.tenantId}
@@ -1204,7 +1885,7 @@ export class PostgresPortalStore {
             AND student_id = ${input.auth.studentId}
             AND id = ${input.documentId}
           RETURNING
-            id, requirement_id, file_name, mime_type, size_bytes, category, status,
+            id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
             storage_key, sha256, extraction, created_at
         `);
         const updated = rows<DocumentRow>(updatedResult)[0];
@@ -1213,6 +1894,77 @@ export class PostgresPortalStore {
             "DOCUMENT_PROCESSING_STATE_CHANGED",
             "The document review state changed before confirmation",
           );
+        }
+        const profileProjection = safeProfileProjectionFromExtraction(
+          extraction.fields,
+          acceptedFieldKeys,
+        );
+        const projectedProfileFields = Object.keys(profileProjection);
+        if (projectedProfileFields.length > 0) {
+          const now = new Date();
+          const profileResult = await transaction.execute(sql`
+            UPDATE student_profile
+            SET preferred_name = CASE
+                  WHEN ${profileProjection.preferredName !== undefined}
+                    THEN ${profileProjection.preferredName ?? ""}
+                  ELSE preferred_name
+                END,
+                pronouns = CASE
+                  WHEN ${profileProjection.pronouns !== undefined}
+                    THEN ${profileProjection.pronouns ?? null}
+                  ELSE pronouns
+                END,
+                mobile_phone = CASE
+                  WHEN ${profileProjection.mobilePhone !== undefined}
+                    THEN ${profileProjection.mobilePhone ?? null}
+                  ELSE mobile_phone
+                END,
+                communication_preference = CASE
+                  WHEN ${profileProjection.communicationPreference !== undefined}
+                    THEN ${profileProjection.communicationPreference ?? "email"}
+                  ELSE communication_preference
+                END,
+                version = version + 1,
+                updated_at = ${now}
+            WHERE tenant_id = ${input.auth.tenantId}
+              AND student_id = ${input.auth.studentId}
+            RETURNING
+              student_id,
+              preferred_name,
+              pronouns,
+              mobile_phone,
+              communication_preference,
+              version,
+              updated_at
+          `);
+          const profile = rows<ProfileRow>(profileResult)[0];
+          if (profile && profileProjection.preferredName !== undefined) {
+            await transaction.execute(sql`
+              UPDATE person p
+              SET preferred_name = ${profile.preferred_name},
+                  updated_at = ${now}
+              FROM student s
+              WHERE s.person_id = p.id
+                AND s.tenant_id = p.tenant_id
+                AND s.tenant_id = ${input.auth.tenantId}
+                AND s.id = ${input.auth.studentId}
+            `);
+          }
+          if (profile) {
+            await this.insertOutbox(transaction, {
+              auth: input.auth,
+              eventName: "student.profile_updated.v1",
+              aggregateType: "student_profile",
+              aggregateId: input.auth.studentId,
+              aggregateVersion: profile.version,
+              requestId: input.requestId,
+              data: {
+                studentId: input.auth.studentId,
+                changedFields: projectedProfileFields,
+                source: "confirmed_document_extraction",
+              },
+            });
+          }
         }
         if (
           extraction.documentType === "transcript" &&
@@ -1331,7 +2083,7 @@ export class PostgresPortalStore {
           resourceType: "document_record",
           resourceId: input.documentId,
           requestId: input.requestId,
-          metadata: { acceptedFieldKeys },
+          metadata: { acceptedFieldKeys, projectedProfileFields },
         });
         return mapDocument(updated);
       },
@@ -2640,6 +3392,26 @@ function documentCategoryForExtractionType(
     residency: "residency",
     other: "other",
   }[documentType] as StudentDocument["category"];
+}
+
+function documentProcessingExtraction(): StudentDocumentExtraction {
+  return {
+    status: "processing",
+    documentType: "other",
+    summary:
+      "The original file is safely stored. Edward is preparing a reviewable record.",
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    courses: [],
+    warnings: [],
+    model: null,
+    provider: "local",
+    processedAt: null,
+    verifiedAt: null,
+  };
 }
 
 function mapProgram(row: {

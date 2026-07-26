@@ -1,6 +1,7 @@
 import { loadConfig } from "./config.js";
 import { StudentDashboardProjector } from "./dashboard-projector.js";
 import { createDatabasePool } from "./database.js";
+import { DocumentExtractionRunner } from "./document-extraction-runner.js";
 import {
   EventDispatcher,
   portalEventsWithoutWorkerProjection,
@@ -24,10 +25,15 @@ async function main(): Promise<void> {
     config.consumerName,
     logger,
   );
-  const dispatcher = new EventDispatcher(logger).register(
-    "enrollment.journey_created.v1",
-    (event) => projector.handle(event),
-  );
+  const extractionRunner = new DocumentExtractionRunner(config, logger);
+  const dispatcher = new EventDispatcher(logger)
+    .register("enrollment.journey_created.v1", (event) => projector.handle(event))
+    .register("document.upload_reserved.v1", (event) =>
+      extractionRunner.handle(event),
+    )
+    .register("document.extraction_requested.v1", (event) =>
+      extractionRunner.handle(event),
+    );
   for (const eventName of portalEventsWithoutWorkerProjection) {
     dispatcher.registerIgnored(eventName);
   }

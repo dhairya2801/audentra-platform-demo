@@ -1,4 +1,5 @@
 export const domainOwners = [
+  "identity",
   "admissions",
   "onboarding",
   "documents",
@@ -19,7 +20,7 @@ export interface StateFieldOwnership {
   field: string;
   owner: DomainOwner;
   description: string;
-  classification: "public" | "internal" | "sensitive";
+  classification: "public" | "internal" | "sensitive" | "restricted";
 }
 
 export interface IdempotencyContract {

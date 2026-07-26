@@ -1,0 +1,143 @@
+name: vv-edgent-preview
+
+services:
+  api:
+    image: vv-edgent-preview-api:${DEPLOY_IMAGE_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: infra/preview-vm/demo-api.Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 384m
+    environment:
+      NODE_ENV: production
+      PYTHONDONTWRITEBYTECODE: "1"
+      DEMO_API_PORT: 4000
+      DEMO_API_DATA_FILE: /var/lib/vv/state.json
+      DOCUMENT_UPLOAD_DIR: /var/lib/vv/uploads
+      DEMO_API_ORIGINS: https://${SITE_HOST}
+      OPENROUTER_APP_URL: https://${SITE_HOST}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free}
+      OPENROUTER_APP_NAME: ${OPENROUTER_APP_NAME:-Aster Student Portal}
+      OPENROUTER_STORE_RESPONSES: ${OPENROUTER_STORE_RESPONSES:-true}
+      OPENROUTER_DOCUMENT_TIMEOUT_MS: ${OPENROUTER_DOCUMENT_TIMEOUT_MS:-120000}
+      OPENROUTER_DOCUMENT_MAX_TOKENS: ${OPENROUTER_DOCUMENT_MAX_TOKENS:-6000}
+      OPENROUTER_DOCUMENT_REASONING_TOKENS: ${OPENROUTER_DOCUMENT_REASONING_TOKENS:-256}
+      TRANSCRIPT_PARSING: ${TRANSCRIPT_PARSING:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
+      GROQ_TRANSCRIPT_TIMEOUT_MS: ${GROQ_TRANSCRIPT_TIMEOUT_MS:-60000}
+      GROQ_TRANSCRIPT_MAX_TOKENS: ${GROQ_TRANSCRIPT_MAX_TOKENS:-4000}
+      GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS: ${GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS:-10000}
+      GROQ_TRANSCRIPT_REASONING_EFFORT: ${GROQ_TRANSCRIPT_REASONING_EFFORT:-low}
+    expose:
+      - "4000"
+    volumes:
+      - preview-data:/var/lib/vv
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=128m
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - preview
+
+  web:
+    image: vv-edgent-preview-web:${DEPLOY_IMAGE_TAG:-local}
+    build:
+      context: ../..
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: https://${SITE_HOST}
+        NEXT_PUBLIC_SITE_URL: https://${SITE_HOST}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      API_BASE_URL: http://api:4000
+      WRANGLER_WRITE_LOGS: "false"
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    expose:
+      - "3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    networks:
+      - preview
+
+  caddy:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 96m
+    environment:
+      SITE_HOST: ${SITE_HOST}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    networks:
+      - preview
+
+volumes:
+  preview-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  preview:
+    driver: bridge

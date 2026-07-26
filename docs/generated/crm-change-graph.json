@@ -4,6 +4,30 @@
   "warning": "This graph declares intended CRM semantics. CodeGraphContext adds static call-graph evidence. Neither is runtime lineage; correlate OpenTelemetry spans with audit_event and outbox_event records.",
   "owners": [
     {
+      "field": "identity.invitation",
+      "owner": "identity",
+      "description": "Single-use tenant-scoped link between credential registration and an admitted student.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "identity.account",
+      "owner": "identity",
+      "description": "Credential status, normalized contacts, and password-hash metadata.",
+      "classification": "restricted"
+    },
+    {
+      "field": "identity.verification",
+      "owner": "identity",
+      "description": "Email and phone verification lifecycle behind delivery adapters.",
+      "classification": "restricted"
+    },
+    {
+      "field": "identity.session",
+      "owner": "identity",
+      "description": "Hashed, expiring, and revocable opaque browser sessions.",
+      "classification": "restricted"
+    },
+    {
       "field": "admission.offer.status",
       "owner": "admissions",
       "description": "Authoritative admission-offer decision state.",
@@ -40,6 +64,12 @@
       "classification": "sensitive"
     },
     {
+      "field": "student.housing.plan",
+      "owner": "onboarding",
+      "description": "Student-selected living preference and optional residence choice.",
+      "classification": "sensitive"
+    },
+    {
       "field": "document.status",
       "owner": "documents",
       "description": "Upload, storage, extraction, and review state.",
@@ -52,6 +82,12 @@
       "classification": "internal"
     },
     {
+      "field": "document.processingMode",
+      "owner": "documents",
+      "description": "Server-authored policy deciding whether a stored original enters agentic extraction or direct staff review.",
+      "classification": "internal"
+    },
+    {
       "field": "document.requirementId",
       "owner": "documents",
       "description": "Enrollment requirement that supplied context for an upload.",
@@ -60,13 +96,19 @@
     {
       "field": "document.extraction",
       "owner": "documents",
-      "description": "Untrusted structured extraction pending student or staff confirmation.",
+      "description": "Untrusted structured extraction for enabled categories, including normalized identity-photo regions and advisory transcript evidence.",
+      "classification": "sensitive"
+    },
+    {
+      "field": "document.extractionAttempt.providerResponse",
+      "owner": "documents",
+      "description": "Internal provider response and transport metadata for a correlated extraction attempt.",
       "classification": "sensitive"
     },
     {
       "field": "academics.transcriptCredits",
       "owner": "academics",
-      "description": "Confirmed normalized transcript coursework and exam credit.",
+      "description": "Normalized transcript coursework and exam evidence; automatic imports remain advisory until registrar review.",
       "classification": "sensitive"
     },
     {
@@ -107,6 +149,66 @@
     }
   ],
   "effects": [
+    {
+      "id": "identity.registerCredential",
+      "version": 1,
+      "owner": "identity",
+      "kind": "command",
+      "handler": "CredentialAuthService.signUp",
+      "description": "Consumes one student invitation, stores a slow password hash, and creates a hashed opaque session atomically.",
+      "reads": [
+        "identity.invitation"
+      ],
+      "writes": [
+        "identity.invitation",
+        "identity.account",
+        "identity.verification",
+        "identity.session"
+      ],
+      "emits": [
+        "identity.account_registered.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "invitation token + normalized email",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "serializable"
+      }
+    },
+    {
+      "id": "identity.createSession",
+      "version": 1,
+      "owner": "identity",
+      "kind": "command",
+      "handler": "CredentialAuthService.signIn",
+      "description": "Verifies a password with generic failures, applies lockout policy, and stores only the opaque session-token digest.",
+      "reads": [
+        "identity.account"
+      ],
+      "writes": [
+        "identity.account",
+        "identity.session"
+      ],
+      "emits": [
+        "identity.session_created.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "new random session token",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "serializable"
+      }
+    },
     {
       "id": "admissions.acceptOffer",
       "version": 1,
@@ -152,9 +254,12 @@
       ],
       "writes": [
         "student.onboarding.currentStep",
-        "student.onboarding.payload"
+        "student.onboarding.payload",
+        "student.profile"
       ],
-      "emits": [],
+      "emits": [
+        "student.profile_updated.v1"
+      ],
       "consumes": [],
       "synchronousCalls": [],
       "idempotency": {
@@ -163,7 +268,7 @@
         "scope": "aggregate"
       },
       "transaction": {
-        "boundary": "single_database",
+        "boundary": "database_and_outbox",
         "isolation": "database_default"
       }
     },
@@ -198,18 +303,50 @@
       }
     },
     {
+      "id": "onboarding.updateHousingPlan",
+      "version": 1,
+      "owner": "onboarding",
+      "kind": "command",
+      "handler": "PostgresPortalStore.updateStudentHousingPlan",
+      "description": "Updates a student-owned housing selection and completes its enrollment requirement atomically.",
+      "reads": [
+        "student.onboarding.payload",
+        "enrollment.requirement.status"
+      ],
+      "writes": [
+        "student.onboarding.payload",
+        "student.housing.plan",
+        "enrollment.requirement.status"
+      ],
+      "emits": [
+        "student.housing_plan_updated.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "expectedVersion",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
       "id": "documents.reserveUpload",
       "version": 1,
       "owner": "documents",
       "kind": "command",
       "handler": "PostgresPortalStore.reserveStudentDocumentUpload",
-      "description": "Reserves a content-addressed upload before object storage transfer.",
+      "description": "Commits a recoverable upload reservation before immutable object storage transfer.",
       "reads": [
         "enrollment.requirement.status"
       ],
       "writes": [
         "document.status",
         "document.category",
+        "document.processingMode",
         "document.requirementId"
       ],
       "emits": [
@@ -228,12 +365,132 @@
       }
     },
     {
+      "id": "documents.queueExtraction",
+      "version": 1,
+      "owner": "documents",
+      "kind": "command",
+      "handler": "PostgresPortalStore.claimStudentDocumentProcessing",
+      "description": "After object storage succeeds, atomically routes agentic categories to extraction and disabled categories directly to staff review.",
+      "reads": [
+        "document.status",
+        "document.processingMode",
+        "document.extraction"
+      ],
+      "writes": [
+        "document.status",
+        "document.extraction",
+        "enrollment.requirement.status",
+        "financial.requiredDocument.status"
+      ],
+      "emits": [
+        "document.extraction_requested.v1",
+        "document.stored_for_review.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": false,
+        "key": "documentId + processing state",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.processQueuedExtraction",
+      "version": 1,
+      "owner": "documents",
+      "kind": "event_handler",
+      "handler": "StudentAgentService.processQueuedDocumentExtraction",
+      "description": "The outbox worker reads the immutable original and records a terminal reviewable extraction; duplicate delivery returns the current terminal document without another model call.",
+      "reads": [
+        "document.status",
+        "document.category",
+        "document.extraction"
+      ],
+      "writes": [],
+      "emits": [],
+      "consumes": [
+        "document.extraction_requested.v1"
+      ],
+      "synchronousCalls": [
+        "documents.recordProviderResponse",
+        "documents.completeExtraction"
+      ],
+      "idempotency": {
+        "required": true,
+        "key": "outbox event id + document processing state",
+        "scope": "event"
+      },
+      "transaction": {
+        "boundary": "none",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.recordProviderResponse",
+      "version": 1,
+      "owner": "documents",
+      "kind": "command",
+      "handler": "PostgresPlatformStore.recordAiProviderResponse",
+      "description": "Persists the exact provider completion or transport failure separately from the normalized document extraction.",
+      "reads": [
+        "document.status"
+      ],
+      "writes": [
+        "document.extractionAttempt.providerResponse"
+      ],
+      "emits": [],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "documentId + requestId + attempt",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "single_database",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.recoverReservedUpload",
+      "version": 1,
+      "owner": "documents",
+      "kind": "event_handler",
+      "handler": "StudentAgentService.recoverReservedDocumentExtraction",
+      "description": "Reconciles a reservation after a process interruption by verifying immutable storage before it queues extraction.",
+      "reads": [
+        "document.status",
+        "document.extraction"
+      ],
+      "writes": [],
+      "emits": [],
+      "consumes": [
+        "document.upload_reserved.v1"
+      ],
+      "synchronousCalls": [
+        "documents.queueExtraction"
+      ],
+      "idempotency": {
+        "required": true,
+        "key": "outbox event id + document processing state",
+        "scope": "event"
+      },
+      "transaction": {
+        "boundary": "none",
+        "isolation": "database_default"
+      }
+    },
+    {
       "id": "documents.completeExtraction",
       "version": 1,
       "owner": "documents",
       "kind": "command",
       "handler": "PostgresPortalStore.completeStudentDocumentExtraction",
-      "description": "Stores model extraction as untrusted reviewable data.",
+      "description": "Stores model extraction as reviewable data and automatically projects correctly classified transcript courses into advisory equivalency matching.",
       "reads": [
         "document.status",
         "document.category",
@@ -244,10 +501,13 @@
         "document.category",
         "document.extraction",
         "enrollment.requirement.status",
-        "financial.requiredDocument.status"
+        "financial.requiredDocument.status",
+        "academics.transcriptCredits",
+        "academics.exemptionRecommendations"
       ],
       "emits": [
-        "document.extraction_completed.v1"
+        "document.extraction_completed.v1",
+        "student.transcript_credits_imported.v1"
       ],
       "consumes": [],
       "synchronousCalls": [],
@@ -262,23 +522,58 @@
       }
     },
     {
-      "id": "academics.confirmTranscriptExtraction",
+      "id": "documents.retryExtraction",
       "version": 1,
-      "owner": "academics",
+      "owner": "documents",
+      "kind": "command",
+      "handler": "StudentAgentService.retryDocumentExtraction",
+      "description": "Atomically queues a retryable stored extraction and publishes a new durable worker request without rereading the original in the HTTP request.",
+      "reads": [
+        "document.status",
+        "document.category",
+        "document.requirementId",
+        "document.extraction"
+      ],
+      "writes": [
+        "document.status",
+        "document.extraction"
+      ],
+      "emits": [
+        "document.extraction_retry_started.v1",
+        "document.extraction_requested.v1"
+      ],
+      "consumes": [],
+      "synchronousCalls": [],
+      "idempotency": {
+        "required": true,
+        "key": "Idempotency-Key",
+        "scope": "aggregate"
+      },
+      "transaction": {
+        "boundary": "database_and_outbox",
+        "isolation": "database_default"
+      }
+    },
+    {
+      "id": "documents.confirmExtraction",
+      "version": 1,
+      "owner": "documents",
       "kind": "command",
       "handler": "PostgresPortalStore.confirmStudentDocumentExtraction",
-      "description": "Confirms transcript data and applies deterministic, versioned equivalency rules.",
+      "description": "Confirms selected non-transcript document fields and projects only safe student-owned fields; retained as an idempotent compatibility path for older transcript reviews.",
       "reads": [
         "document.extraction"
       ],
       "writes": [
         "document.status",
+        "student.profile",
         "academics.transcriptCredits",
         "academics.exemptionRecommendations",
         "enrollment.requirement.status"
       ],
       "emits": [
-        "student.transcript_credits_imported.v1"
+        "student.transcript_credits_imported.v1",
+        "student.profile_updated.v1"
       ],
       "consumes": [],
       "synchronousCalls": [],
@@ -412,12 +707,6 @@
   ],
   "nodes": [
     {
-      "id": "effect:academics.confirmTranscriptExtraction",
-      "type": "effect",
-      "label": "academics.confirmTranscriptExtraction",
-      "owner": "academics"
-    },
-    {
       "id": "effect:admissions.acceptOffer",
       "type": "effect",
       "label": "admissions.acceptOffer",
@@ -430,9 +719,45 @@
       "owner": "documents"
     },
     {
+      "id": "effect:documents.confirmExtraction",
+      "type": "effect",
+      "label": "documents.confirmExtraction",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.processQueuedExtraction",
+      "type": "effect",
+      "label": "documents.processQueuedExtraction",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.queueExtraction",
+      "type": "effect",
+      "label": "documents.queueExtraction",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.recordProviderResponse",
+      "type": "effect",
+      "label": "documents.recordProviderResponse",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.recoverReservedUpload",
+      "type": "effect",
+      "label": "documents.recoverReservedUpload",
+      "owner": "documents"
+    },
+    {
       "id": "effect:documents.reserveUpload",
       "type": "effect",
       "label": "documents.reserveUpload",
+      "owner": "documents"
+    },
+    {
+      "id": "effect:documents.retryExtraction",
+      "type": "effect",
+      "label": "documents.retryExtraction",
       "owner": "documents"
     },
     {
@@ -454,6 +779,18 @@
       "owner": "financials"
     },
     {
+      "id": "effect:identity.createSession",
+      "type": "effect",
+      "label": "identity.createSession",
+      "owner": "identity"
+    },
+    {
+      "id": "effect:identity.registerCredential",
+      "type": "effect",
+      "label": "identity.registerCredential",
+      "owner": "identity"
+    },
+    {
       "id": "effect:onboarding.complete",
       "type": "effect",
       "label": "onboarding.complete",
@@ -463,6 +800,12 @@
       "id": "effect:onboarding.saveStep",
       "type": "effect",
       "label": "onboarding.saveStep",
+      "owner": "onboarding"
+    },
+    {
+      "id": "effect:onboarding.updateHousingPlan",
+      "type": "effect",
+      "label": "onboarding.updateHousingPlan",
       "owner": "onboarding"
     },
     {
@@ -482,6 +825,21 @@
       "label": "document.extraction_completed.v1"
     },
     {
+      "id": "event:document.extraction_requested.v1",
+      "type": "event",
+      "label": "document.extraction_requested.v1"
+    },
+    {
+      "id": "event:document.extraction_retry_started.v1",
+      "type": "event",
+      "label": "document.extraction_retry_started.v1"
+    },
+    {
+      "id": "event:document.stored_for_review.v1",
+      "type": "event",
+      "label": "document.stored_for_review.v1"
+    },
+    {
       "id": "event:document.upload_reserved.v1",
       "type": "event",
       "label": "document.upload_reserved.v1"
@@ -492,6 +850,16 @@
       "label": "enrollment.journey_created.v1"
     },
     {
+      "id": "event:identity.account_registered.v1",
+      "type": "event",
+      "label": "identity.account_registered.v1"
+    },
+    {
+      "id": "event:identity.session_created.v1",
+      "type": "event",
+      "label": "identity.session_created.v1"
+    },
+    {
       "id": "event:payment.deposit_succeeded.v1",
       "type": "event",
       "label": "payment.deposit_succeeded.v1"
@@ -500,6 +868,11 @@
       "id": "event:student_financial.payment_plan_selected.v1",
       "type": "event",
       "label": "student_financial.payment_plan_selected.v1"
+    },
+    {
+      "id": "event:student.housing_plan_updated.v1",
+      "type": "event",
+      "label": "student.housing_plan_updated.v1"
     },
     {
       "id": "event:student.onboarding_completed.v1",
@@ -544,6 +917,18 @@
       "id": "field:document.extraction",
       "type": "field",
       "label": "document.extraction",
+      "owner": "documents"
+    },
+    {
+      "id": "field:document.extractionAttempt.providerResponse",
+      "type": "field",
+      "label": "document.extractionAttempt.providerResponse",
+      "owner": "documents"
+    },
+    {
+      "id": "field:document.processingMode",
+      "type": "field",
+      "label": "document.processingMode",
       "owner": "documents"
     },
     {
@@ -593,6 +978,36 @@
       "type": "field",
       "label": "financial.requiredDocument.status",
       "owner": "financials"
+    },
+    {
+      "id": "field:identity.account",
+      "type": "field",
+      "label": "identity.account",
+      "owner": "identity"
+    },
+    {
+      "id": "field:identity.invitation",
+      "type": "field",
+      "label": "identity.invitation",
+      "owner": "identity"
+    },
+    {
+      "id": "field:identity.session",
+      "type": "field",
+      "label": "identity.session",
+      "owner": "identity"
+    },
+    {
+      "id": "field:identity.verification",
+      "type": "field",
+      "label": "identity.verification",
+      "owner": "identity"
+    },
+    {
+      "id": "field:student.housing.plan",
+      "type": "field",
+      "label": "student.housing.plan",
+      "owner": "onboarding"
     },
     {
       "id": "field:student.onboarding.currentStep",
@@ -649,6 +1064,12 @@
       "owner": "financials"
     },
     {
+      "id": "owner:identity",
+      "type": "owner",
+      "label": "identity",
+      "owner": "identity"
+    },
+    {
       "id": "owner:onboarding",
       "type": "owner",
       "label": "onboarding",
@@ -662,36 +1083,6 @@
     }
   ],
   "edges": [
-    {
-      "from": "effect:academics.confirmTranscriptExtraction",
-      "to": "event:student.transcript_credits_imported.v1",
-      "type": "emits",
-      "runtimeEvidence": true
-    },
-    {
-      "from": "effect:academics.confirmTranscriptExtraction",
-      "to": "field:academics.exemptionRecommendations",
-      "type": "writes",
-      "runtimeEvidence": false
-    },
-    {
-      "from": "effect:academics.confirmTranscriptExtraction",
-      "to": "field:academics.transcriptCredits",
-      "type": "writes",
-      "runtimeEvidence": false
-    },
-    {
-      "from": "effect:academics.confirmTranscriptExtraction",
-      "to": "field:document.status",
-      "type": "writes",
-      "runtimeEvidence": false
-    },
-    {
-      "from": "effect:academics.confirmTranscriptExtraction",
-      "to": "field:enrollment.requirement.status",
-      "type": "writes",
-      "runtimeEvidence": false
-    },
     {
       "from": "effect:admissions.acceptOffer",
       "to": "event:admission.offer_accepted.v1",
@@ -730,6 +1121,24 @@
     },
     {
       "from": "effect:documents.completeExtraction",
+      "to": "event:student.transcript_credits_imported.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:academics.exemptionRecommendations",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
+      "to": "field:academics.transcriptCredits",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.completeExtraction",
       "to": "field:document.category",
       "type": "writes",
       "runtimeEvidence": false
@@ -759,6 +1168,108 @@
       "runtimeEvidence": false
     },
     {
+      "from": "effect:documents.confirmExtraction",
+      "to": "event:student.profile_updated.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "event:student.transcript_credits_imported.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "field:academics.exemptionRecommendations",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "field:academics.transcriptCredits",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.confirmExtraction",
+      "to": "field:student.profile",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.processQueuedExtraction",
+      "to": "effect:documents.completeExtraction",
+      "type": "calls",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.processQueuedExtraction",
+      "to": "effect:documents.recordProviderResponse",
+      "type": "calls",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "event:document.extraction_requested.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "event:document.stored_for_review.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "field:document.extraction",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.queueExtraction",
+      "to": "field:financial.requiredDocument.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.recordProviderResponse",
+      "to": "field:document.extractionAttempt.providerResponse",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.recoverReservedUpload",
+      "to": "effect:documents.queueExtraction",
+      "type": "calls",
+      "runtimeEvidence": false
+    },
+    {
       "from": "effect:documents.reserveUpload",
       "to": "event:document.upload_reserved.v1",
       "type": "emits",
@@ -772,12 +1283,42 @@
     },
     {
       "from": "effect:documents.reserveUpload",
+      "to": "field:document.processingMode",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.reserveUpload",
       "to": "field:document.requirementId",
       "type": "writes",
       "runtimeEvidence": false
     },
     {
       "from": "effect:documents.reserveUpload",
+      "to": "field:document.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.retryExtraction",
+      "to": "event:document.extraction_requested.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.retryExtraction",
+      "to": "event:document.extraction_retry_started.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:documents.retryExtraction",
+      "to": "field:document.extraction",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:documents.retryExtraction",
       "to": "field:document.status",
       "type": "writes",
       "runtimeEvidence": false
@@ -825,6 +1366,54 @@
       "runtimeEvidence": false
     },
     {
+      "from": "effect:identity.createSession",
+      "to": "event:identity.session_created.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:identity.createSession",
+      "to": "field:identity.account",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:identity.createSession",
+      "to": "field:identity.session",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:identity.registerCredential",
+      "to": "event:identity.account_registered.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:identity.registerCredential",
+      "to": "field:identity.account",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:identity.registerCredential",
+      "to": "field:identity.invitation",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:identity.registerCredential",
+      "to": "field:identity.session",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:identity.registerCredential",
+      "to": "field:identity.verification",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
       "from": "effect:onboarding.complete",
       "to": "event:student.onboarding_completed.v1",
       "type": "emits",
@@ -838,12 +1427,48 @@
     },
     {
       "from": "effect:onboarding.saveStep",
+      "to": "event:student.profile_updated.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:onboarding.saveStep",
       "to": "field:student.onboarding.currentStep",
       "type": "writes",
       "runtimeEvidence": false
     },
     {
       "from": "effect:onboarding.saveStep",
+      "to": "field:student.onboarding.payload",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.saveStep",
+      "to": "field:student.profile",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.updateHousingPlan",
+      "to": "event:student.housing_plan_updated.v1",
+      "type": "emits",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "effect:onboarding.updateHousingPlan",
+      "to": "field:enrollment.requirement.status",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.updateHousingPlan",
+      "to": "field:student.housing.plan",
+      "type": "writes",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "effect:onboarding.updateHousingPlan",
       "to": "field:student.onboarding.payload",
       "type": "writes",
       "runtimeEvidence": false
@@ -873,6 +1498,18 @@
       "runtimeEvidence": true
     },
     {
+      "from": "event:document.extraction_requested.v1",
+      "to": "effect:documents.processQueuedExtraction",
+      "type": "consumes",
+      "runtimeEvidence": true
+    },
+    {
+      "from": "event:document.upload_reserved.v1",
+      "to": "effect:documents.recoverReservedUpload",
+      "type": "consumes",
+      "runtimeEvidence": true
+    },
+    {
       "from": "field:admission.offer.status",
       "to": "effect:admissions.acceptOffer",
       "type": "reads",
@@ -891,8 +1528,50 @@
       "runtimeEvidence": false
     },
     {
+      "from": "field:document.category",
+      "to": "effect:documents.processQueuedExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.category",
+      "to": "effect:documents.retryExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
       "from": "field:document.extraction",
-      "to": "effect:academics.confirmTranscriptExtraction",
+      "to": "effect:documents.confirmExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.extraction",
+      "to": "effect:documents.processQueuedExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.extraction",
+      "to": "effect:documents.queueExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.extraction",
+      "to": "effect:documents.recoverReservedUpload",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.extraction",
+      "to": "effect:documents.retryExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.processingMode",
+      "to": "effect:documents.queueExtraction",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -903,8 +1582,44 @@
       "runtimeEvidence": false
     },
     {
+      "from": "field:document.requirementId",
+      "to": "effect:documents.retryExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
       "from": "field:document.status",
       "to": "effect:documents.completeExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.processQueuedExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.queueExtraction",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.recordProviderResponse",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.recoverReservedUpload",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:document.status",
+      "to": "effect:documents.retryExtraction",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -917,6 +1632,12 @@
     {
       "from": "field:enrollment.requirement.status",
       "to": "effect:documents.reserveUpload",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:enrollment.requirement.status",
+      "to": "effect:onboarding.updateHousingPlan",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -945,6 +1666,18 @@
       "runtimeEvidence": false
     },
     {
+      "from": "field:identity.account",
+      "to": "effect:identity.createSession",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:identity.invitation",
+      "to": "effect:identity.registerCredential",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
       "from": "field:student.onboarding.currentStep",
       "to": "effect:onboarding.complete",
       "type": "reads",
@@ -965,6 +1698,12 @@
     {
       "from": "field:student.onboarding.payload",
       "to": "effect:onboarding.saveStep",
+      "type": "reads",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "field:student.onboarding.payload",
+      "to": "effect:onboarding.updateHousingPlan",
       "type": "reads",
       "runtimeEvidence": false
     },
@@ -1007,6 +1746,18 @@
     {
       "from": "owner:documents",
       "to": "field:document.extraction",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
+      "to": "field:document.extractionAttempt.providerResponse",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:documents",
+      "to": "field:document.processingMode",
       "type": "owns",
       "runtimeEvidence": false
     },
@@ -1055,6 +1806,36 @@
     {
       "from": "owner:financials",
       "to": "field:financial.requiredDocument.status",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:identity",
+      "to": "field:identity.account",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:identity",
+      "to": "field:identity.invitation",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:identity",
+      "to": "field:identity.session",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:identity",
+      "to": "field:identity.verification",
+      "type": "owns",
+      "runtimeEvidence": false
+    },
+    {
+      "from": "owner:onboarding",
+      "to": "field:student.housing.plan",
       "type": "owns",
       "runtimeEvidence": false
     },

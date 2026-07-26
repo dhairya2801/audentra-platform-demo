@@ -5,6 +5,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/document-preprocessing/package.json packages/document-preprocessing/package.json
 RUN if [ -f package-lock.json ]; then \
       npm ci --workspaces --include-workspace-root; \
     else \

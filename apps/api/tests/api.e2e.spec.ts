@@ -14,6 +14,7 @@ const testConfig: AppConfig = {
   databaseUrl: "postgresql://unused/unused",
   webOrigins: ["http://localhost:3000"],
   authMode: "demo",
+  documentWorkerToken: "test-document-worker-token",
   demoIds: {
     tenantId: DEMO_IDS.tenantId,
     studentId: DEMO_IDS.studentId,

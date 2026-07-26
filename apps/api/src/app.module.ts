@@ -92,7 +92,16 @@ export class AppModule {
             }
           : {
               provide: STUDENT_AI_GATEWAY,
-              useFactory: () => new OpenRouterStudentAiGateway(config),
+              inject: [PLATFORM_STORE],
+              useFactory: (store: PlatformStore) =>
+                new OpenRouterStudentAiGateway(
+                  config,
+                  globalThis.fetch,
+                  undefined,
+                  config.openRouter?.storeResponses
+                    ? (response) => store.recordAiProviderResponse(response)
+                    : undefined,
+                ),
             },
         ...platformProviders,
       ],

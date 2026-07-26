@@ -43,7 +43,7 @@ async function api(baseUrl, path, options = {}) {
   const headers = {
     ...(options.authenticated === false
       ? {}
-      : { cookie: "vv_demo_session=demo-session" }),
+      : { cookie: "vv_demo_session=demo-session-v2" }),
     ...(options.body === undefined
       ? {}
       : { "content-type": "application/json" }),
@@ -62,6 +62,18 @@ async function api(baseUrl, path, options = {}) {
   return { response, payload };
 }
 
+async function waitForDocument(baseUrl, documentId, predicate) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const listed = await api(baseUrl, "/v1/student/documents");
+    const document = listed.payload.items.find(
+      (candidate) => candidate.id === documentId,
+    );
+    if (document && predicate(document)) return document;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`Document ${documentId} did not reach the expected state`);
+}
+
 async function putOnboarding(baseUrl, onboarding, data = {}) {
   return api(baseUrl, "/v1/student/onboarding", {
     method: "PUT",
@@ -73,7 +85,149 @@ async function putOnboarding(baseUrl, onboarding, data = {}) {
   });
 }
 
+async function completeProfilePrerequisite(baseUrl) {
+  const profile = await api(baseUrl, "/v1/student/profile");
+  const updated = await api(baseUrl, "/v1/student/profile", {
+    method: "PATCH",
+    body: {
+      expectedVersion: profile.payload.version,
+      preferredName: profile.payload.preferredName,
+      pronouns: profile.payload.pronouns,
+      mobilePhone: profile.payload.mobilePhone,
+      communicationPreference: profile.payload.communicationPreference,
+    },
+  });
+  assert.equal(updated.response.status, 200);
+}
+
 describe("contract-compatible development preview API", () => {
+  it("signs up credential students and isolates their portal records", async () => {
+    const { baseUrl } = await startPreview();
+    const firstSignup = await api(baseUrl, "/v1/auth/sign-up", {
+      authenticated: false,
+      method: "POST",
+      body: {
+        email: "first.student@example.com",
+        phone: "+15551230001",
+        password: "first-student-123",
+      },
+    });
+    assert.equal(firstSignup.response.status, 201);
+    assert.equal(firstSignup.payload.mode, "credentials");
+    assert.equal(firstSignup.payload.student.preferredName, null);
+    assert.equal(firstSignup.payload.student.emailVerified, false);
+    const firstCookie = firstSignup.response.headers
+      .get("set-cookie")
+      ?.split(";", 1)[0];
+    assert.match(firstCookie ?? "", /^vv_session=[A-Za-z0-9_-]+$/);
+
+    const firstBootstrap = await api(baseUrl, "/v1/student/bootstrap", {
+      authenticated: false,
+      headers: { cookie: firstCookie },
+    });
+    assert.equal(firstBootstrap.response.status, 200);
+    assert.equal(firstBootstrap.payload.initialRoute, "/onboarding");
+    assert.equal(firstBootstrap.payload.student.id, firstSignup.payload.student.id);
+
+    const secondSignup = await api(baseUrl, "/v1/auth/sign-up", {
+      authenticated: false,
+      method: "POST",
+      body: {
+        email: "second.student@example.com",
+        phone: "+15551230002",
+        password: "second-student-123",
+      },
+    });
+    assert.equal(secondSignup.response.status, 201);
+    assert.notEqual(
+      secondSignup.payload.student.id,
+      firstSignup.payload.student.id,
+    );
+    const secondCookie = secondSignup.response.headers
+      .get("set-cookie")
+      ?.split(";", 1)[0];
+
+    const firstProfile = await api(baseUrl, "/v1/student/profile", {
+      authenticated: false,
+      headers: { cookie: firstCookie },
+    });
+    const secondProfile = await api(baseUrl, "/v1/student/profile", {
+      authenticated: false,
+      headers: { cookie: secondCookie },
+    });
+    assert.equal(firstProfile.payload.email, "first.student@example.com");
+    assert.equal(secondProfile.payload.email, "second.student@example.com");
+    assert.notEqual(firstProfile.payload.studentId, secondProfile.payload.studentId);
+
+    const signedOut = await api(baseUrl, "/v1/auth/sign-out", {
+      authenticated: false,
+      method: "POST",
+      headers: { cookie: firstCookie },
+    });
+    assert.equal(signedOut.response.status, 200);
+    const afterSignOut = await api(baseUrl, "/v1/student/bootstrap", {
+      authenticated: false,
+      headers: { cookie: firstCookie },
+    });
+    assert.equal(afterSignOut.response.status, 401);
+  });
+
+  it("starts a clean guided onboarding journey only in the development preview", async () => {
+    const { baseUrl, store } = await startPreview();
+    const seededState = store.snapshot();
+
+    const accepted = await api(
+      baseUrl,
+      `/v1/admission-offers/${ids.offer}/accept`,
+      {
+        method: "POST",
+        body: {},
+        idempotencyKey: "guided-onboarding-offer-0001",
+      },
+    );
+    assert.equal(accepted.response.status, 200);
+    assert.equal(store.snapshot().offer.status, "accepted");
+
+    const guided = await api(
+      baseUrl,
+      "/v1/auth/demo/start-guided-onboarding",
+      {
+        authenticated: false,
+        method: "POST",
+        body: {},
+      },
+    );
+    assert.equal(guided.response.status, 200);
+    assert.equal(guided.payload.authenticated, true);
+    assert.equal(guided.payload.mode, "demo");
+    assert.match(
+      guided.response.headers.get("set-cookie"),
+      /^vv_demo_session=demo-session-v2;/,
+    );
+    assert.deepEqual(store.snapshot(), seededState);
+
+    const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
+    assert.equal(bootstrap.response.status, 200);
+    assert.equal(bootstrap.payload.initialRoute, "/onboarding");
+    assert.equal(bootstrap.payload.onboarding.required, true);
+    assert.equal(bootstrap.payload.onboarding.currentStep, "offer");
+
+    const disabledPreview = await startPreview({
+      enableGuidedOnboardingReset: false,
+    });
+    const disabled = await api(
+      disabledPreview.baseUrl,
+      "/v1/auth/demo/start-guided-onboarding",
+      {
+        authenticated: false,
+        method: "POST",
+        body: {},
+      },
+    );
+    assert.equal(disabled.response.status, 404);
+    assert.equal(disabled.payload.error.code, "DEMO_GUIDED_ONBOARDING_DISABLED");
+  });
+
   it("runs the frontend enrollment sequence with canonical contract shapes", async () => {
     const { baseUrl, store } = await startPreview();
 
@@ -92,7 +246,7 @@ describe("contract-compatible development preview API", () => {
     assert.equal(signIn.payload.authenticated, true);
     assert.match(
       signIn.response.headers.get("set-cookie"),
-      /^vv_demo_session=demo-session;/,
+      /^vv_demo_session=demo-session-v2;/,
     );
 
     const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
@@ -171,6 +325,10 @@ describe("contract-compatible development preview API", () => {
 
     const middleStepData = {
       about_you: {
+        firstName: "Alex",
+        lastName: "Morgan",
+        preferredName: "Alex",
+        mobilePhone: "+15550102027",
         legalNameConfirmed: true,
         contactInformationConfirmed: true,
         homeAddressConfirmed: true,
@@ -347,6 +505,8 @@ describe("contract-compatible development preview API", () => {
     const profile = await api(baseUrl, "/v1/student/profile");
     assert.deepEqual(Object.keys(profile.payload).sort(), [
       "communicationPreference",
+      "firstName",
+      "lastName",
       "mobilePhone",
       "preferredName",
       "pronouns",
@@ -364,7 +524,10 @@ describe("contract-compatible development preview API", () => {
         communicationPreference: "sms",
       },
     });
-    assert.equal(updatedProfile.payload.version, 2);
+    assert.equal(
+      updatedProfile.payload.version,
+      profile.payload.version + 1,
+    );
     assert.equal(updatedProfile.payload.communicationPreference, "sms");
     const requirementsAfterProfile = await api(
       baseUrl,
@@ -382,6 +545,31 @@ describe("contract-compatible development preview API", () => {
       ).status,
       "ready",
     );
+
+    const housingBefore = await api(baseUrl, "/v1/student/housing-plan");
+    assert.equal(housingBefore.response.status, 200);
+    assert.equal(housingBefore.payload.preference, "undecided");
+    const updatedHousing = await api(baseUrl, "/v1/student/housing-plan", {
+      method: "PATCH",
+      body: {
+        expectedVersion: housingBefore.payload.version,
+        preference: "on_campus",
+        residenceOption: "aster_apartments",
+      },
+    });
+    assert.equal(updatedHousing.response.status, 200);
+    assert.equal(updatedHousing.payload.preference, "on_campus");
+    assert.equal(updatedHousing.payload.residenceOption, "aster_apartments");
+    assert.equal(updatedHousing.payload.version, housingBefore.payload.version + 1);
+    const requirementsAfterHousing = await api(
+      baseUrl,
+      "/v1/student/requirements",
+    );
+    const housingRequirement = requirementsAfterHousing.payload.items.find(
+      (requirement) => requirement.code === "housing_preference",
+    );
+    assert.equal(housingRequirement.status, "completed");
+    assert.equal(housingRequirement.progressPercent, 100);
 
     const help = await api(baseUrl, "/v1/student/help");
     assert.ok(Array.isArray(help.payload.articles));
@@ -551,6 +739,23 @@ describe("contract-compatible development preview API", () => {
               value: "Fall 2026",
               confidence: 0.94,
             },
+            {
+              key: "preferred_name",
+              label: "Preferred name",
+              value: "Maya",
+              confidence: 0.92,
+            },
+          ],
+          courses: [
+            {
+              sourceCode: "AP Calculus AB",
+              title: "AP Calculus AB",
+              grade: null,
+              score: "5",
+              credits: null,
+              term: "Spring 2026",
+              confidence: 0.99,
+            },
           ],
           warnings: [],
           model: "test/document-parser",
@@ -581,6 +786,33 @@ describe("contract-compatible development preview API", () => {
       body: {},
       idempotencyKey: "upload-flow-offer-0001",
     });
+    const blockedForm = new FormData();
+    blockedForm.set(
+      "file",
+      new Blob(
+        [Buffer.from("%PDF-1.7\nBlocked transcript fixture\n%%EOF\n")],
+        { type: "application/pdf" },
+      ),
+      "blocked-transcript.pdf",
+    );
+    blockedForm.set("requirementId", ids.transcriptRequirement);
+    const blockedUpload = await fetch(
+      `${baseUrl}/v1/student/documents/upload`,
+      {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session-v2",
+          "idempotency-key": "document-upload-blocked-0001",
+        },
+        body: blockedForm,
+      },
+    );
+    assert.equal(blockedUpload.status, 409);
+    assert.equal(
+      (await blockedUpload.json()).error.code,
+      "DOCUMENT_REQUIREMENT_BLOCKED",
+    );
+    await completeProfilePrerequisite(baseUrl);
     const fileBytes = Buffer.from("%PDF-1.7\nAster transcript fixture\n%%EOF\n");
     const form = new FormData();
     form.set(
@@ -595,7 +827,7 @@ describe("contract-compatible development preview API", () => {
       {
         method: "POST",
         headers: {
-          cookie: "vv_demo_session=demo-session",
+          cookie: "vv_demo_session=demo-session-v2",
           "idempotency-key": "document-upload-0001",
         },
         body: form,
@@ -603,18 +835,25 @@ describe("contract-compatible development preview API", () => {
     );
     const uploaded = await uploadedResponse.json();
     assert.equal(uploadedResponse.status, 201);
-    assert.equal(uploaded.status, "needs_review");
+    assert.equal(uploaded.status, "processing");
     assert.equal(uploaded.fileName, "aster-transcript.pdf");
     assert.equal(uploaded.category, "transcript");
     assert.equal(uploaded.requirementId, ids.transcriptRequirement);
-    assert.equal(uploaded.extraction.status, "completed");
-    assert.equal(uploaded.extraction.fields.length, 2);
+    assert.equal(uploaded.extraction.status, "processing");
     assert.match(uploaded.sha256, /^[0-9a-f]{64}$/);
     assert.equal(
       uploaded.contentUrl,
       `/v1/student/documents/${uploaded.id}/content`,
     );
     assert.equal("storageKey" in uploaded, false);
+    const parsed = await waitForDocument(
+      baseUrl,
+      uploaded.id,
+      (document) => document.extraction?.status === "completed",
+    );
+    assert.equal(parsed.status, "under_review");
+    assert.equal(parsed.extraction.status, "completed");
+    assert.equal(parsed.extraction.fields.length, 3);
     assert.equal(extractionInputs[0].expectedDocumentType, "transcript");
 
     const transcriptRequirement = await api(
@@ -626,8 +865,8 @@ describe("contract-compatible development preview API", () => {
     assert.equal(transcriptRequirement.payload.progressPercent, 80);
 
     const contentResponse = await fetch(
-      `${baseUrl}${uploaded.contentUrl}`,
-      { headers: { cookie: "vv_demo_session=demo-session" } },
+      `${baseUrl}${parsed.contentUrl}`,
+      { headers: { cookie: "vv_demo_session=demo-session-v2" } },
     );
     assert.equal(contentResponse.status, 200);
     assert.equal(
@@ -639,23 +878,24 @@ describe("contract-compatible development preview API", () => {
       fileBytes,
     );
 
-    const confirmed = await api(
+    const profileAfterExtraction = await api(baseUrl, "/v1/student/profile");
+    assert.equal(profileAfterExtraction.payload.preferredName, "Alex");
+    assert.equal(profileAfterExtraction.payload.version, 2);
+
+    const academicsAfterExtraction = await api(
       baseUrl,
-      `/v1/student/documents/${uploaded.id}/confirm-extraction`,
-      {
-        method: "POST",
-        body: { acceptedFieldKeys: ["student_name"] },
-        idempotencyKey: "document-confirm-0001",
-      },
+      "/v1/student/academics",
     );
-    assert.equal(confirmed.response.status, 200);
-    assert.equal(confirmed.payload.status, "under_review");
-    assert.deepEqual(confirmed.payload.extraction.acceptedFieldKeys, [
-      "student_name",
-    ]);
+    const importedCredit = academicsAfterExtraction.payload.transcriptCredits.find(
+      (credit) => credit.sourceDocumentId === uploaded.id,
+    );
+    assert.equal(importedCredit.sourceCode, "AP Calculus AB");
     assert.equal(
-      confirmed.payload.extraction.verifiedAt,
-      fixedClock().toISOString(),
+      academicsAfterExtraction.payload.exemptionRecommendations.find(
+        (recommendation) =>
+          recommendation.transcriptCreditId === importedCredit.id,
+      ).targetCourseCode,
+      "MATH 151",
     );
 
     const listed = await api(baseUrl, "/v1/student/documents");
@@ -677,6 +917,16 @@ describe("contract-compatible development preview API", () => {
     assert.equal(assistant.response.status, 200);
     assert.equal(assistant.payload.provider, "openrouter");
     assert.equal(assistant.payload.usage.totalTokens, 92);
+    assert.deepEqual(assistant.payload.contextReceipts, [
+      { source: "dashboard" },
+      { source: "profile" },
+      { source: "documents" },
+      { source: "onboarding" },
+      { source: "payments" },
+      { source: "academics" },
+      { source: "financials" },
+      { source: "messages" },
+    ]);
   });
 
   it("does not advance a transcript requirement when content classification disagrees", async () => {
@@ -709,6 +959,7 @@ describe("contract-compatible development preview API", () => {
       body: {},
       idempotencyKey: "mismatch-flow-offer-0001",
     });
+    await completeProfilePrerequisite(baseUrl);
     const form = new FormData();
     form.set(
       "file",
@@ -725,7 +976,7 @@ describe("contract-compatible development preview API", () => {
       {
         method: "POST",
         headers: {
-          cookie: "vv_demo_session=demo-session",
+          cookie: "vv_demo_session=demo-session-v2",
           "idempotency-key": "document-mismatch-0001",
         },
         body: form,
@@ -733,9 +984,15 @@ describe("contract-compatible development preview API", () => {
     );
     const uploaded = await response.json();
     assert.equal(response.status, 201);
-    assert.equal(uploaded.extraction.documentType, "identity");
+    assert.equal(uploaded.extraction.status, "processing");
+    const parsed = await waitForDocument(
+      baseUrl,
+      uploaded.id,
+      (document) => document.extraction?.status === "completed",
+    );
+    assert.equal(parsed.extraction.documentType, "identity");
     assert.match(
-      uploaded.extraction.warnings[0],
+      parsed.extraction.warnings[0],
       /requirement was not advanced automatically/i,
     );
 
@@ -743,7 +1000,7 @@ describe("contract-compatible development preview API", () => {
       baseUrl,
       "/v1/student/requirements/transcript-upload",
     );
-    assert.equal(requirement.payload.status, "blocked");
+    assert.equal(requirement.payload.status, "ready");
     assert.equal(requirement.payload.progressPercent, 0);
   });
 
@@ -762,6 +1019,7 @@ describe("contract-compatible development preview API", () => {
       body: {},
       idempotencyKey: "failed-parse-offer-0001",
     });
+    await completeProfilePrerequisite(baseUrl);
     const form = new FormData();
     form.set(
       "file",
@@ -778,7 +1036,7 @@ describe("contract-compatible development preview API", () => {
       {
         method: "POST",
         headers: {
-          cookie: "vv_demo_session=demo-session",
+          cookie: "vv_demo_session=demo-session-v2",
           "idempotency-key": "failed-parse-upload-0001",
         },
         body: form,
@@ -786,14 +1044,274 @@ describe("contract-compatible development preview API", () => {
     );
     const uploaded = await response.json();
     assert.equal(response.status, 201);
-    assert.equal(uploaded.extraction.status, "failed");
+    assert.equal(uploaded.extraction.status, "processing");
+    const parsed = await waitForDocument(
+      baseUrl,
+      uploaded.id,
+      (document) => document.extraction?.status === "failed",
+    );
+    assert.equal(parsed.extraction.status, "failed");
 
     const requirement = await api(
       baseUrl,
       "/v1/student/requirements/transcript-upload",
     );
-    assert.equal(requirement.payload.status, "blocked");
+    assert.equal(requirement.payload.status, "ready");
     assert.equal(requirement.payload.progressPercent, 0);
+  });
+
+  it("persists the document record before storage failure and never parses an unstored file", async () => {
+    let parserCalls = 0;
+    const ai = {
+      async extractStudentDocument() {
+        parserCalls += 1;
+        return {
+          status: "completed",
+          documentType: "identity",
+          summary: "An identity document.",
+          studentName: "Maya Chen",
+          institutionName: null,
+          issueDate: null,
+          academicTerm: null,
+          fields: [],
+          courses: [],
+          warnings: [],
+          model: "test/document-parser",
+          provider: "openrouter",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl, store } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "durable-storage-offer-0001",
+    });
+    await completeProfilePrerequisite(baseUrl);
+    const originalWrite = store.writeUpload.bind(store);
+    store.writeUpload = async () => {
+      throw new Error("simulated object storage outage");
+    };
+
+    const upload = () => {
+      const form = new FormData();
+      form.set(
+        "file",
+        new Blob([Buffer.from("%PDF-1.7\nstored-last\n%%EOF\n")], {
+          type: "application/pdf",
+        }),
+        "identity.pdf",
+      );
+      form.set("requirementId", ids.identityRequirement);
+      return fetch(`${baseUrl}/v1/student/documents/upload`, {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session-v2",
+          "idempotency-key": "durable-storage-retry-0001",
+        },
+        body: form,
+      });
+    };
+
+    const failedResponse = await upload();
+    const failedPayload = await failedResponse.json();
+    assert.equal(failedResponse.status, 503);
+    assert.equal(failedPayload.error.code, "DOCUMENT_STORAGE_UNAVAILABLE");
+    assert.equal(parserCalls, 0);
+    assert.equal(store.snapshot().documents.length, 1);
+    assert.equal(store.snapshot().documents[0].status, "placeholder");
+    assert.equal(store.snapshot().documents[0].contentStored, false);
+
+    store.writeUpload = originalWrite;
+    const resumedResponse = await upload();
+    const resumed = await resumedResponse.json();
+    assert.equal(resumedResponse.status, 201);
+    assert.equal(resumed.status, "processing");
+    await waitForDocument(
+      baseUrl,
+      resumed.id,
+      (document) => document.extraction?.status === "completed",
+    );
+    assert.equal(parserCalls, 1);
+  });
+
+  it("accepts a requirement document bundle as separate strict uploads", async () => {
+    const extractionInputs = [];
+    const ai = {
+      async extractStudentDocument(input) {
+        extractionInputs.push(input);
+        return {
+          status: "completed",
+          documentType: "identity",
+          summary: "A government-issued identity document.",
+          studentName: "Maya Chen",
+          institutionName: null,
+          issueDate: "2026-07-20",
+          academicTerm: null,
+          fields: [],
+          courses: [],
+          warnings: [],
+          model: "test/document-parser",
+          provider: "openrouter",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "bundle-offer-0001",
+    });
+    await completeProfilePrerequisite(baseUrl);
+
+    const uploadSide = async (name, idempotencyKey) => {
+      const form = new FormData();
+      form.set(
+        "file",
+        new Blob(
+          [Buffer.from(`%PDF-1.7\n${name} identity fixture\n%%EOF\n`)],
+          { type: "application/pdf" },
+        ),
+        `${name}.pdf`,
+      );
+      form.set("requirementId", ids.identityRequirement);
+      const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
+        method: "POST",
+        headers: {
+          cookie: "vv_demo_session=demo-session-v2",
+          "idempotency-key": idempotencyKey,
+        },
+        body: form,
+      });
+      return { response, payload: await response.json() };
+    };
+
+    const front = await uploadSide("identity-front", "bundle-front-0001");
+    const back = await uploadSide("identity-back", "bundle-back-0001");
+
+    assert.equal(front.response.status, 201);
+    assert.equal(back.response.status, 201);
+    assert.equal(front.payload.requirementId, ids.identityRequirement);
+    assert.equal(back.payload.requirementId, ids.identityRequirement);
+    assert.equal(front.payload.category, "identity");
+    assert.equal(back.payload.category, "identity");
+    await Promise.all([
+      waitForDocument(
+        baseUrl,
+        front.payload.id,
+        (document) => document.extraction?.status === "completed",
+      ),
+      waitForDocument(
+        baseUrl,
+        back.payload.id,
+        (document) => document.extraction?.status === "completed",
+      ),
+    ]);
+    assert.equal(extractionInputs.length, 2);
+    assert.ok(
+      extractionInputs.every(
+        (input) => input.expectedDocumentType === "identity",
+      ),
+    );
+
+    const documents = await api(baseUrl, "/v1/student/documents");
+    assert.equal(documents.payload.total, 2);
+  });
+
+  it("stores parsing-disabled requirement documents directly for staff review", async () => {
+    let extractionCalls = 0;
+    const ai = {
+      async extractStudentDocument() {
+        extractionCalls += 1;
+        throw new Error("manual-review documents must not reach the parser");
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "manual-review-offer-0001",
+    });
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob(
+        [Buffer.from("%PDF-1.7\nFinancial verification fixture\n%%EOF\n")],
+        { type: "application/pdf" },
+      ),
+      "verification-worksheet.pdf",
+    );
+    // A modified browser cannot opt a requirement back into parsing.
+    form.set("category", "transcript");
+    form.set("requirementId", ids.financialRequirement);
+    const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
+      method: "POST",
+      headers: {
+        cookie: "vv_demo_session=demo-session-v2",
+        "idempotency-key": "manual-review-upload-0001",
+      },
+      body: form,
+    });
+    const document = await response.json();
+
+    assert.equal(response.status, 201);
+    assert.equal(document.category, "financial_aid");
+    assert.equal(document.processingMode, "manual_review");
+    assert.equal(document.status, "under_review");
+    assert.equal(document.extraction, undefined);
+    assert.equal(extractionCalls, 0);
+
+    const requirement = await api(
+      baseUrl,
+      "/v1/student/requirements/financial-aid-verification",
+    );
+    assert.equal(requirement.payload.status, "under_review");
+    assert.equal(requirement.payload.progressPercent, 80);
+  });
+
+  it("keeps the document endpoint strict when a multipart request contains multiple files", async () => {
+    const { baseUrl } = await startPreview();
+    const form = new FormData();
+    form.append(
+      "file",
+      new Blob([Buffer.from("%PDF-1.7\nfirst\n%%EOF\n")], {
+        type: "application/pdf",
+      }),
+      "first.pdf",
+    );
+    form.append(
+      "file",
+      new Blob([Buffer.from("%PDF-1.7\nsecond\n%%EOF\n")], {
+        type: "application/pdf",
+      }),
+      "second.pdf",
+    );
+
+    const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
+      method: "POST",
+      headers: {
+        cookie: "vv_demo_session=demo-session-v2",
+        "idempotency-key": "strict-bundle-0001",
+      },
+      body: form,
+    });
+    const payload = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(payload.error.code, "ONE_FILE_PER_UPLOAD");
   });
 
   it("rejects a file whose declared type does not match its signature", async () => {
@@ -809,7 +1327,7 @@ describe("contract-compatible development preview API", () => {
     const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
       method: "POST",
       headers: {
-        cookie: "vv_demo_session=demo-session",
+        cookie: "vv_demo_session=demo-session-v2",
         "idempotency-key": "document-invalid-signature-0001",
       },
       body: form,

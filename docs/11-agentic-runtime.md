@@ -16,12 +16,19 @@ Student browser
            v                               v
      Portal API                     bounded context builder
            |                               |
-           +-- stores original             |
-           +-- calculates SHA-256           |
-           +-- OpenRouter gateway <---------+
+           +-- reserves metadata            |
+           +-- stores immutable original    |
+           +-- selects server-owned policy  |
+           |       +-- staff review --------+-- no model call
+           |       +-- agentic extraction
+           +-- Python/PyMuPDF preprocessor
+           |       +-- bounded text extraction
+           |       +-- bounded rendered page images
            |       |
-           |       +-- file-parser for PDF
-           |       +-- strict JSON schema
+           +-- OpenRouter gateway <---------+
+           |       +-- multimodal text + page images
+           |       +-- JSON-only text extraction
+           |       +-- local normalization and validation
            |       +-- token usage response
            |
            v
@@ -48,11 +55,19 @@ details, government identifiers, audit logs, and staff-only notes.
 Controls:
 
 - At most six recent chat messages are forwarded.
-- User and history text have hard character bounds.
+- User and history text have hard character bounds. Browser-supplied history is
+  forwarded only as quoted, untrusted user context—never as assistant or system
+  instruction.
 - Replies have a 420-token ceiling and a 140-word instruction.
 - The model may explain or navigate, but may not approve, submit, pay, or mutate
   a record.
 - Suggested actions are server-generated allowlisted portal routes.
+- A deterministic intent router handles known navigation, document, profile,
+  appointment, and deposit intents with zero LLM tokens; open questions still
+  receive the bounded model context.
+- The API returns `contextReceipts` only for deterministic projections it
+  successfully collected for the reply. They are not model tool-call claims or
+  intent-regex matches.
 - The response exposes prompt, completion, and total token counts for cost
   monitoring.
 - With no API key, a deterministic guided mode answers common navigation
@@ -65,39 +80,108 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
 1. validates the multipart request and optional requirement context;
 2. calculates a SHA-256 digest and reserves an idempotent document row linked
    to that requirement;
-3. atomically claims parsing so replays do not spend LLM tokens twice;
-4. stores the original under an opaque server-generated object key;
-5. sends the file to the configured OpenRouter model, with the requirement type
-   as a non-authoritative hint;
-6. requires a strict structured-output schema and uses response healing for
-   malformed JSON;
-7. normalizes field counts and lengths;
-8. redacts values shaped like SSNs or payment-card numbers;
-9. classifies from content and refuses to advance a mismatched requirement;
-10. returns a `needs_review` document rather than updating the profile; and
-11. records only the fields explicitly accepted by the student for staff
+3. stores the original under an opaque server-generated object key before any
+   parsing work can begin;
+4. derives an authoritative processing mode from the server-side requirement:
+   transcript and identity documents use `agentic`, while financial-aid and
+   immunization documents use `manual_review` and move directly to the
+   responsible office's queue without an LLM call;
+5. for agentic documents, atomically claims parsing so replays do not spend LLM
+   tokens twice;
+6. for PDFs, invokes an isolated Python/PyMuPDF preprocessor that extracts at
+   most 40,000 text characters from 20 pages and renders at most six evenly
+   selected pages at a 1,400px edge; images are not stored in the CRM;
+7. first applies a conservative local heading check for unmistakable document
+   mismatches (for example a FERPA release uploaded to the transcript task),
+   preserving the original and keeping the requirement incomplete without an
+   LLM call;
+8. selects the transcript provider using `TRANSCRIPT_PARSING`: `openrouter`
+   sends bounded text plus rendered pages to the configured multimodal model,
+   while `groq` skips rendering and sends extracted text only to
+   `openai/gpt-oss-120b`; identity documents use the OpenRouter multimodal
+   path;
+9. treats the document text and page images as untrusted evidence, never as
+   executable instructions, and requires JSON-only text output;
+10. in development, records the exact provider response or transport failure in
+   a correlated extraction-attempt journal before parsing it;
+11. locally normalizes field counts and lengths, then rejects empty structured
+    results;
+12. for identity documents, accepts an optional `profile_photo` page region as
+    normalized coordinates, validates its bounds locally, and serves a
+    server-cropped JPEG preview without exposing the original object key;
+13. redacts values shaped like SSNs or payment-card numbers;
+14. classifies from content and refuses to advance a mismatched requirement;
+15. returns a `needs_review` document rather than updating the profile; and
+16. records only the fields explicitly accepted by the student for staff
     review.
 
-Failures do not destroy the upload. The original remains available and the
-document carries a retryable extraction status and warning.
+`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` is a suitable local/demo
+choice because it accepts page images and returns text. The request does not
+rely on a provider-specific PDF-file capability, tool-call endpoint, or
+provider structured-output feature. The Groq path uses
+`openai/gpt-oss-120b` in strict JSON Schema mode with low reasoning effort and
+no image input. The default Groq window is capped at 10,000 extracted
+characters and 4,000 output tokens to fit the currently observed 8,000 TPM
+on-demand limit. Long transcripts remain reviewable but carry an explicit
+incomplete-course-list warning; use OpenRouter when full multimodal coverage is
+more important than latency. A textless scan requires the OpenRouter path (or
+future OCR) rather than silently discarding its visual evidence. A free model
+can still be rate-limited or unavailable, so production must pin an evaluated
+model and retain the same safe retry/review boundary.
+
+### Failure and retry semantics
+
+Failures do not destroy the upload. The original remains available and a
+failed extraction preserves only a safe `failureCode` (`provider_unavailable`,
+`unsupported_capability`, `invalid_response`, `timeout`, or `unknown`) plus a
+`retryable` flag. The exact provider payload is never copied into the
+student-facing document record or shown to the browser. When
+`OPENROUTER_STORE_RESPONSES=true`, it is retained separately in the local
+`aiProviderResponses` attempt journal or PostgreSQL
+`ai_provider_response_attempt` table with document, request, attempt, model,
+provider (`openrouter` or `groq`), HTTP, finish-reason, usage, duration, and
+transport correlation.
+
+A completed response with no useful structured result is treated as a
+needs-attention failure rather than a successful parse. The API makes at most
+one immediate automatic retry for clearly transient provider outcomes (for
+example a timeout, rate limit, 5xx response, or an empty completion). It does
+not retry unsupported capabilities or malformed requests blindly.
+
+The student can retry a retryable failure without re-uploading through
+`POST /v1/student/documents/:id/retry-extraction` with an
+`Idempotency-Key`. `documents.retryExtraction` atomically queues the already
+stored original and publishes `document.extraction_requested.v1`; the worker
+then invokes `documents.processQueuedExtraction`. A replay after a terminal
+result returns the same document without another model call. The retry-start
+audit/outbox fact, extraction-request fact, completion fact, OpenTelemetry
+span, and response correlation ID provide the runtime lineage for an
+individual attempt.
+
+An earlier `document.upload_reserved.v1` event is also consumed by the worker
+as a reconciler. If an API pod stops after object storage succeeds but before
+the queue transaction commits, the worker verifies the immutable original and
+queues it. If storage has not completed, the event retries; it never starts a
+parser request against a missing original.
 
 ## Production migration
 
-The current preview and full-stack flows are deliberately synchronous so the
-portal is immediately functional and returns the review result in one request.
-The PostgreSQL implementation already writes audit and outbox records, uses an
-atomic processing claim, and stores originals in S3-compatible object storage.
-At higher volume, keep the API contract and move the heavy step behind the
-transactional outbox:
+The preview and full-stack flows use the same durability rule: they return as
+soon as the document record and immutable original are safe. The PostgreSQL
+implementation then writes an atomic processing claim and
+`document.extraction_requested.v1` outbox event; the worker performs the heavy
+step after that transaction commits:
 
 ```text
-upload API -> object storage -> document row + outbox event -> worker
-  -> malware scan -> text/OCR parse -> LLM extraction -> review projection
+upload API -> document reservation -> object storage -> processing row + outbox event -> worker
+  -> malware scan -> sandboxed text/OCR + page render -> LLM extraction
+  -> review projection
 ```
 
 The remaining production substitutions are:
 
-- synchronous parsing to a queue/outbox worker;
+- the local PyMuPDF dependency to an approved, sandboxed renderer after legal
+  review of its AGPL/commercial licensing terms;
 - the demo identity adapter to institutional OIDC;
 - development MinIO to managed S3-compatible storage;
 - console metrics to OpenTelemetry and cost dashboards.
@@ -111,14 +195,28 @@ frontend logic.
 
 ```text
 OPENROUTER_API_KEY=                 # server only
-OPENROUTER_MODEL=openai/gpt-4o-mini
+OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
 OPENROUTER_APP_URL=http://localhost:3000
 OPENROUTER_APP_NAME=Aster Student Portal
+OPENROUTER_STORE_RESPONSES=true
+OPENROUTER_DOCUMENT_TIMEOUT_MS=120000
+OPENROUTER_DOCUMENT_MAX_TOKENS=6000
+OPENROUTER_DOCUMENT_REASONING_TOKENS=256
+TRANSCRIPT_PARSING=openrouter        # openrouter (text + images) or groq (text only)
+GROQ_API_KEY=                        # server only
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_TRANSCRIPT_TIMEOUT_MS=60000
+GROQ_TRANSCRIPT_MAX_TOKENS=4000
+GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS=10000
+GROQ_TRANSCRIPT_REASONING_EFFORT=low
+DOCUMENT_PYTHON_BIN=python3
 DOCUMENT_UPLOAD_DIR=./tools/demo-api/.data/uploads
 OBJECT_STORAGE_ENDPOINT=http://localhost:9000
 OBJECT_STORAGE_BUCKET=vv-documents
 OBJECT_STORAGE_ACCESS_KEY=vv_minio
 OBJECT_STORAGE_SECRET_KEY=vv_minio_password
+API_INTERNAL_URL=http://localhost:4000
+DOCUMENT_WORKER_TOKEN=replace-with-a-long-shared-secret
 ```
 
 The default model is only a configurable starting point. Production should pin
