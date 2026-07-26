@@ -1,14 +1,14 @@
 FROM node:22.14.0-alpine AS dependencies
 WORKDIR /workspace
-COPY apps/web/package.json apps/web/package.json
+COPY apps/web/package.json apps/web/package-lock.json apps/web/
 COPY packages/contracts packages/contracts
 # Keep the deploy image scoped to the web application's graph. The full
 # workspace install is appropriate for CI, but unnecessarily resolves the API
 # and worker trees on a small preview VM.
-RUN npm install \
+RUN npm ci \
       --prefix apps/web \
       --include=dev \
-      --no-package-lock \
+      --workspaces=false \
       --no-audit \
       --no-fund
 

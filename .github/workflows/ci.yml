@@ -65,6 +65,12 @@ jobs:
       - name: Install workspace dependencies
         run: npm ci
 
+      # npm/cli#4828 can omit a platform-native optional package when one
+      # cross-platform lockfile installs a nested workspace. Rehydrating the
+      # web graph from its own lockfile makes the Linux binding deterministic.
+      - name: Install web platform bindings
+        run: npm --prefix apps/web ci --workspaces=false
+
       - name: Install stateful preview API
         run: npm --prefix tools/demo-api ci --workspaces=false
 
