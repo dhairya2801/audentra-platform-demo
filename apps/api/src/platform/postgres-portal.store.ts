@@ -211,7 +211,9 @@ function mapHousingPlan(row: OnboardingRow): StudentHousingPlan {
   const preference =
     row.payload.housingPreference === "on_campus" ||
     row.payload.housingPreference === "off_campus" ||
-    row.payload.housingPreference === "undecided"
+    row.payload.housingPreference === "commuting" ||
+    row.payload.housingPreference === "undecided" ||
+    row.payload.housingPreference === "family"
       ? row.payload.housingPreference
       : null;
   const residenceOption =
@@ -3174,6 +3176,9 @@ export class PostgresPortalStore {
         return;
       }
       case "deposit": {
+        if (data.depositChoice !== "pay_now") {
+          return;
+        }
         const result = await transaction.execute(sql`
           SELECT 1
           FROM payment_transaction

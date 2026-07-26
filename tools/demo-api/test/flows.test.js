@@ -328,22 +328,33 @@ describe("contract-compatible development preview API", () => {
         firstName: "Alex",
         lastName: "Morgan",
         preferredName: "Alex",
+        personalEmail: "alex.morgan@example.com",
         mobilePhone: "+15550102027",
-        legalNameConfirmed: true,
-        contactInformationConfirmed: true,
-        homeAddressConfirmed: true,
+        citizenshipStatus: "us_citizen",
         communicationPreference: "email",
         residencyStatus: "domestic",
+        streetAddress: "18 Willow Street",
+        city: "Cambridge",
+        stateOrProvince: "MA",
+        postalCode: "02139",
+        country: "United States",
       },
       housing: { housingPreference: "undecided" },
       campus_life: {
         campusInterests: ["Robotics", "Student radio"],
         supportNeeds: [],
       },
-      emergency_contacts: { emergencyContactConfirmed: true },
-      other_records: { recordsConfirmed: true },
-      family_permissions: { familyPermissionsReviewed: true },
-      review_and_sign: { signatureConfirmed: true },
+      emergency_contacts: {
+        emergencyContacts: [
+          {
+            fullName: "Jordan Morgan",
+            relationship: "parent",
+            mobilePhone: "+15550100300",
+          },
+        ],
+      },
+      family_permissions: { familyPermissions: [] },
+      review_and_sign: { signatureFullName: "Alex Morgan" },
     };
     for (const step of ONBOARDING_STEPS.slice(1, -1)) {
       assert.equal(onboarding.currentStep, step);
@@ -356,14 +367,14 @@ describe("contract-compatible development preview API", () => {
       onboarding = updated.payload;
     }
     assert.equal(onboarding.currentStep, "deposit");
-    assert.equal(onboarding.version, 9);
+    assert.equal(onboarding.version, 8);
 
     const blockedDepositStep = await putOnboarding(baseUrl, onboarding, {
-      depositAcknowledged: true,
+      depositChoice: "pay_now",
     });
     assert.equal(blockedDepositStep.response.status, 409);
     assert.equal(blockedDepositStep.payload.error.code, "DEPOSIT_REQUIRED");
-    assert.equal(store.snapshot().onboarding.version, 9);
+    assert.equal(store.snapshot().onboarding.version, 8);
 
     const paymentsBefore = await api(baseUrl, "/v1/student/payments");
     assert.deepEqual(paymentsBefore.payload, { items: [], total: 0 });
@@ -378,13 +389,13 @@ describe("contract-compatible development preview API", () => {
     assert.equal(payment.payload.status, "succeeded");
     assert.equal(payment.payload.processor, "dummy");
     assert.match(payment.payload.processorReference, /^dummy_/);
-    assert.equal(store.snapshot().onboarding.version, 9);
+    assert.equal(store.snapshot().onboarding.version, 8);
 
     const depositStep = await putOnboarding(baseUrl, onboarding, {
-      depositAcknowledged: true,
+      depositChoice: "pay_now",
     });
     onboarding = depositStep.payload;
-    assert.equal(onboarding.version, 10);
+    assert.equal(onboarding.version, 9);
     assert.equal(onboarding.status, "in_progress");
     assert.deepEqual(onboarding.completedSteps, ONBOARDING_STEPS);
 
@@ -398,7 +409,7 @@ describe("contract-compatible development preview API", () => {
       },
     );
     assert.equal(complete.payload.status, "completed");
-    assert.equal(complete.payload.version, 11);
+    assert.equal(complete.payload.version, 10);
     assert.ok(complete.payload.completedAt);
 
     const completedBootstrap = await api(

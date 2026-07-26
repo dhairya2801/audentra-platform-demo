@@ -10,7 +10,7 @@ preserving clear service boundaries for a later Kubernetes migration.
 
 ## What is implemented
 
-- One-time, server-persisted, nine-step onboarding with ordered validation,
+- One-time, server-persisted, eight-step onboarding with ordered validation,
   optimistic versions, resume behavior, and completion gating
 - Credential sign-up/sign-in with normalized unique contacts, scrypt password
   hashing, hashed opaque sessions, revocation, and account-scoped preview data

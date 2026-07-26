@@ -43,7 +43,8 @@ security, ownership, or deployment pressure justifies it.
 14. [Current implementation map](./14-current-implementation-map.md)
 15. [Domain model and object reference](./15-domain-model-reference.md)
 16. [Deployment, security, and CI/CD runbook](./16-deployment-security-and-cicd.md)
-17. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
+17. [Onboarding question alignment](./17-onboarding-question-alignment.md)
+18. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
 
 For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
 explain the architectural decisions, domain workflows, and longer-term design

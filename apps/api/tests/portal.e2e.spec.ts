@@ -198,7 +198,7 @@ describe("functional student portal API", () => {
       payload: {
         expectedVersion: 2,
         currentStep: "about_you",
-        data: { legalNameConfirmed: true },
+        data: { firstName: "Alex" },
       },
     });
     expect(invalidAboutYou.statusCode).toBe(400);
@@ -216,17 +216,21 @@ describe("functional student portal API", () => {
           firstName: "Alex",
           lastName: "Morgan",
           preferredName: "Alex",
+          personalEmail: "alex.morgan@example.com",
           mobilePhone: "+15550102027",
-          legalNameConfirmed: true,
-          contactInformationConfirmed: true,
-          homeAddressConfirmed: true,
+          citizenshipStatus: "us_citizen",
           communicationPreference: "email",
           residencyStatus: "domestic",
+          streetAddress: "18 Willow Street",
+          city: "Cambridge",
+          stateOrProvince: "MA",
+          postalCode: "02139",
+          country: "United States",
         },
       },
       {
         step: "housing",
-        data: { housingPreference: "on_campus" },
+        data: { housingPreference: "undecided" },
       },
       {
         step: "campus_life",
@@ -234,19 +238,23 @@ describe("functional student portal API", () => {
       },
       {
         step: "emergency_contacts",
-        data: { emergencyContactConfirmed: true },
-      },
-      {
-        step: "other_records",
-        data: { recordsConfirmed: true },
+        data: {
+          emergencyContacts: [
+            {
+              fullName: "Jordan Morgan",
+              relationship: "parent",
+              mobilePhone: "+15550100300",
+            },
+          ],
+        },
       },
       {
         step: "family_permissions",
-        data: { familyPermissionsReviewed: true },
+        data: { familyPermissions: [] },
       },
       {
         step: "review_and_sign",
-        data: { signatureConfirmed: true },
+        data: { signatureFullName: "Alex Morgan" },
       },
     ];
     let version = 2;
@@ -271,9 +279,9 @@ describe("functional student portal API", () => {
     expect(resumed.statusCode).toBe(200);
     expect(resumed.json()).toMatchObject({
       currentStep: "deposit",
-      version: 9,
+      version: 8,
     });
-    expect(resumed.json().completedSteps).toHaveLength(8);
+    expect(resumed.json().completedSteps).toHaveLength(7);
   });
 
   it("records a server-priced dummy deposit idempotently", async () => {
@@ -306,22 +314,22 @@ describe("functional student portal API", () => {
       method: "PUT",
       url: "/v1/student/onboarding",
       payload: {
-        expectedVersion: 9,
+        expectedVersion: 8,
         currentStep: "deposit",
-        data: { depositAcknowledged: true },
+        data: { depositChoice: "pay_now" },
       },
     });
     expect(depositStep.statusCode).toBe(200);
     expect(depositStep.json()).toMatchObject({
       completedSteps: expect.arrayContaining(["deposit"]),
-      version: 10,
+      version: 9,
     });
 
     const request = {
       method: "POST" as const,
       url: "/v1/student/onboarding/complete",
       headers: { "idempotency-key": "portal.onboarding.complete.0001" },
-      payload: { expectedVersion: 10 },
+      payload: { expectedVersion: 9 },
     };
     const completed = await app.inject(request);
     const replay = await app.inject(request);
@@ -334,7 +342,7 @@ describe("functional student portal API", () => {
     expect(replay.json()).toEqual(completed.json());
     expect(completed.json()).toMatchObject({
       status: "completed",
-      version: 11,
+      version: 10,
     });
     expect(bootstrap.json()).toMatchObject({
       onboarding: { required: false, status: "completed" },

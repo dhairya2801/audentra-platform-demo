@@ -10,7 +10,6 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
   "housing",
   "campus_life",
   "emergency_contacts",
-  "other_records",
   "family_permissions",
   "review_and_sign",
   "deposit",
@@ -19,6 +18,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
 const skippableOnboardingSteps = new Set<OnboardingStep>([
   "housing",
   "campus_life",
+  "deposit",
 ]);
 
 export function isSkippableOnboardingStep(step: OnboardingStep): boolean {
@@ -40,49 +40,69 @@ export function validateOnboardingStepData(
         !data.firstName ||
         !data.lastName ||
         !data.preferredName ||
+        !data.personalEmail ||
         !data.mobilePhone ||
-        data.legalNameConfirmed !== true ||
-        data.contactInformationConfirmed !== true ||
-        data.homeAddressConfirmed !== true ||
+        !data.citizenshipStatus ||
+        !data.streetAddress ||
+        !data.city ||
+        !data.stateOrProvince ||
+        !data.postalCode ||
+        !data.country ||
         !data.communicationPreference ||
         !data.residencyStatus
       ) {
         invalid(
-          "Enter your name and mobile phone, then confirm legal name, contact information, home address, communication preference, and residency status",
+          "Enter your legal and preferred name, personal contact details, citizenship status, and permanent home address",
         );
       }
       return;
     case "housing":
       if (!data.housingPreference) invalid("Choose a housing preference");
+      if (
+        data.housingPreference === "on_campus" &&
+        (!data.housingRoomType ||
+          !data.bathroomPreference ||
+          !data.roommateMatching ||
+          !data.sleepSchedule ||
+          !data.studyHabits ||
+          !data.roomNoise ||
+          !data.cleanliness ||
+          !data.guestPreference ||
+          !data.temperaturePreference ||
+          !data.smokeVapeCompatibility)
+      ) {
+        invalid("Complete the on-campus room and roommate preferences");
+      }
+      if (
+        data.housingPreference === "off_campus" &&
+        !data.offCampusStatus
+      ) {
+        invalid("Tell us where you are in your off-campus search");
+      }
+      if (
+        data.housingPreference === "commuting" &&
+        (!data.commuteMode || !data.commuteDuration)
+      ) {
+        invalid("Choose your main commute and one-way travel time");
+      }
       return;
     case "campus_life":
-      if (!data.campusInterests || data.campusInterests.length === 0) {
-        invalid("Choose at least one campus interest");
-      }
       return;
     case "emergency_contacts":
-      if (data.emergencyContactConfirmed !== true) {
-        invalid("Confirm the emergency contact information");
-      }
-      return;
-    case "other_records":
-      if (data.recordsConfirmed !== true) {
-        invalid("Confirm the identity, health, and accessibility records");
+      if (!data.emergencyContacts || data.emergencyContacts.length === 0) {
+        invalid("Add at least one emergency contact");
       }
       return;
     case "family_permissions":
-      if (data.familyPermissionsReviewed !== true) {
-        invalid("Review the family and FERPA permissions");
-      }
       return;
     case "review_and_sign":
-      if (data.signatureConfirmed !== true) {
-        invalid("Confirm the enrollment review and signature");
+      if (!data.signatureFullName) {
+        invalid("Type your full legal name to sign the onboarding packet");
       }
       return;
     case "deposit":
-      if (data.depositAcknowledged !== true) {
-        invalid("Acknowledge the completed enrollment deposit");
+      if (!data.depositChoice) {
+        invalid("Choose how you would like to handle the enrollment deposit");
       }
   }
 }

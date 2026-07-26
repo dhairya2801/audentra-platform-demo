@@ -123,9 +123,12 @@ describe("initial PostgreSQL migration", () => {
     expect(migration).toContain("'manual_review'");
   });
 
-  it("preserves the authoritative nine-step onboarding sequence", async () => {
+  it("migrates to the authoritative eight-step onboarding sequence", async () => {
     const migration = await readFile(
-      resolve(__dirname, "../migrations/0001_student_portal_core.sql"),
+      resolve(
+        __dirname,
+        "../migrations/0008_onboarding_question_alignment.sql",
+      ),
       "utf8",
     );
     for (const step of [
@@ -134,14 +137,18 @@ describe("initial PostgreSQL migration", () => {
       "housing",
       "campus_life",
       "emergency_contacts",
-      "other_records",
       "family_permissions",
       "review_and_sign",
       "deposit",
     ]) {
       expect(migration).toContain(`'${step}'`);
     }
-    expect(migration).toContain("completed_steps text[]");
+    expect(migration).toContain(
+      "array_remove(completed_steps, 'other_records')",
+    );
+    expect(migration).toContain(
+      "DROP CONSTRAINT IF EXISTS student_onboarding_current_step_check",
+    );
   });
 
   it("enforces append-only audit records and domain status constraints", async () => {

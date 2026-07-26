@@ -549,9 +549,13 @@ export function updateOnboarding(draft, input, now) {
 }
 
 export function housingPlanResponse(state) {
-  const preference = ["on_campus", "off_campus", "undecided"].includes(
-    state.onboarding.data.housingPreference,
-  )
+  const preference = [
+    "on_campus",
+    "off_campus",
+    "commuting",
+    "undecided",
+    "family",
+  ].includes(state.onboarding.data.housingPreference)
     ? state.onboarding.data.housingPreference
     : null;
   const residenceOption = [
@@ -587,7 +591,9 @@ export function updateHousingPlan(draft, input, now) {
   const preference = enumValue(body.preference, "preference", [
     "on_campus",
     "off_campus",
+    "commuting",
     "undecided",
+    "family",
   ]);
   const residenceOption =
     preference === "on_campus"
@@ -2013,7 +2019,11 @@ function validateCompletedStepSequence(state) {
 }
 
 function isSkippableOnboardingStep(step) {
-  return step === "housing" || step === "campus_life";
+  return (
+    step === "housing" ||
+    step === "campus_life" ||
+    step === "deposit"
+  );
 }
 
 function validateOnboardingData(input) {
@@ -2022,21 +2032,46 @@ function validateOnboardingData(input) {
     "firstName",
     "lastName",
     "preferredName",
+    "personalEmail",
     "mobilePhone",
-    "legalNameConfirmed",
-    "contactInformationConfirmed",
+    "citizenshipStatus",
     "communicationPreference",
     "residencyStatus",
+    "streetAddress",
+    "addressLine2",
+    "city",
+    "stateOrProvince",
+    "postalCode",
+    "country",
     "supportNeeds",
-    "homeAddressConfirmed",
     "housingPreference",
     "housingResidenceOption",
+    "housingRoomType",
+    "bathroomPreference",
+    "roommateMatching",
+    "sleepSchedule",
+    "studyHabits",
+    "roomNoise",
+    "cleanliness",
+    "guestPreference",
+    "temperaturePreference",
+    "smokeVapeCompatibility",
+    "substanceFreeHousing",
+    "genderInclusiveHousing",
+    "accessibleHousingInformation",
+    "livingLearningCommunities",
+    "offCampusStatus",
+    "offCampusResources",
+    "commuteMode",
+    "commuteDuration",
+    "commuterResources",
     "campusInterests",
-    "emergencyContactConfirmed",
-    "recordsConfirmed",
-    "familyPermissionsReviewed",
-    "signatureConfirmed",
-    "depositAcknowledged",
+    "socialComfort",
+    "firstMonthGoals",
+    "emergencyContacts",
+    "familyPermissions",
+    "signatureFullName",
+    "depositChoice",
   ];
   exactKeys(data, fields);
   const result = {};
@@ -2047,6 +2082,16 @@ function validateOnboardingData(input) {
         max: 120,
       });
     }
+  }
+  if (data.personalEmail !== undefined) {
+    const email = requiredString(data.personalEmail, "personalEmail", {
+      min: 3,
+      max: 254,
+    }).toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw badRequest("INVALID_FIELD", "personalEmail must be valid");
+    }
+    result.personalEmail = email;
   }
   if (data.mobilePhone !== undefined) {
     const mobilePhone = requiredString(data.mobilePhone, "mobilePhone", {
@@ -2065,18 +2110,25 @@ function validateOnboardingData(input) {
     result.mobilePhone = normalizedPhone;
   }
   for (const field of [
-    "legalNameConfirmed",
-    "contactInformationConfirmed",
-    "homeAddressConfirmed",
-    "emergencyContactConfirmed",
-    "recordsConfirmed",
-    "familyPermissionsReviewed",
-    "signatureConfirmed",
-    "depositAcknowledged",
+    "substanceFreeHousing",
+    "genderInclusiveHousing",
+    "accessibleHousingInformation",
   ]) {
     if (data[field] !== undefined) {
       result[field] = booleanValue(data[field], field);
     }
+  }
+  if (data.citizenshipStatus !== undefined) {
+    result.citizenshipStatus = enumValue(
+      data.citizenshipStatus,
+      "citizenshipStatus",
+      [
+        "us_citizen",
+        "permanent_resident",
+        "eligible_noncitizen",
+        "international",
+      ],
+    );
   }
   if (data.communicationPreference !== undefined) {
     result.communicationPreference = enumValue(
@@ -2096,7 +2148,7 @@ function validateOnboardingData(input) {
     result.housingPreference = enumValue(
       data.housingPreference,
       "housingPreference",
-      ["on_campus", "off_campus", "undecided"],
+      ["on_campus", "off_campus", "commuting", "undecided", "family"],
     );
   }
   if (data.housingResidenceOption !== undefined) {
@@ -2106,13 +2158,190 @@ function validateOnboardingData(input) {
       ["aster_residence_hall", "aster_apartments", "student_village"],
     );
   }
-  for (const field of ["supportNeeds", "campusInterests"]) {
+  const boundedStrings = {
+    streetAddress: 180,
+    addressLine2: 180,
+    city: 120,
+    stateOrProvince: 120,
+    postalCode: 32,
+    country: 120,
+    housingRoomType: 80,
+    bathroomPreference: 80,
+    roommateMatching: 80,
+    sleepSchedule: 80,
+    studyHabits: 80,
+    roomNoise: 80,
+    cleanliness: 80,
+    guestPreference: 80,
+    temperaturePreference: 80,
+    smokeVapeCompatibility: 80,
+    offCampusStatus: 80,
+    commuteMode: 80,
+    commuteDuration: 80,
+    socialComfort: 80,
+    signatureFullName: 240,
+  };
+  for (const [field, max] of Object.entries(boundedStrings)) {
+    if (data[field] !== undefined) {
+      result[field] = requiredString(data[field], field, { min: 1, max });
+    }
+  }
+  for (const field of [
+    "supportNeeds",
+    "livingLearningCommunities",
+    "offCampusResources",
+    "commuterResources",
+    "campusInterests",
+    "firstMonthGoals",
+  ]) {
     if (data[field] === undefined) continue;
     if (!Array.isArray(data[field])) {
       throw badRequest("INVALID_FIELD", `${field} must be an array`);
     }
+    if (data[field].length > 12) {
+      throw badRequest(
+        "INVALID_FIELD",
+        `${field} cannot contain more than 12 values`,
+      );
+    }
     result[field] = data[field].map((value, index) =>
       requiredString(value, `${field}[${index}]`, { min: 1, max: 80 }),
+    );
+  }
+  if (data.emergencyContacts !== undefined) {
+    if (
+      !Array.isArray(data.emergencyContacts) ||
+      data.emergencyContacts.length > 4
+    ) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "emergencyContacts must contain at most four contacts",
+      );
+    }
+    result.emergencyContacts = data.emergencyContacts.map(
+      (candidate, index) => {
+        const contact = objectBody(candidate);
+        exactKeys(contact, ["fullName", "relationship", "mobilePhone"]);
+        const phone = requiredString(
+          contact.mobilePhone,
+          `emergencyContacts[${index}].mobilePhone`,
+          { min: 8, max: 32 },
+        ).replace(/[ ()-]/g, "");
+        const normalizedPhone = phone.startsWith("+") ? phone : `+${phone}`;
+        if (!/^\+[1-9][0-9]{7,14}$/.test(normalizedPhone)) {
+          throw badRequest(
+            "INVALID_FIELD",
+            `emergencyContacts[${index}].mobilePhone must include a valid country code`,
+          );
+        }
+        return {
+          fullName: requiredString(
+            contact.fullName,
+            `emergencyContacts[${index}].fullName`,
+            { min: 1, max: 160 },
+          ),
+          relationship: enumValue(
+            contact.relationship,
+            `emergencyContacts[${index}].relationship`,
+            [
+              "parent",
+              "guardian",
+              "partner",
+              "sibling",
+              "relative",
+              "friend",
+              "other",
+            ],
+          ),
+          mobilePhone: normalizedPhone,
+        };
+      },
+    );
+  }
+  if (data.familyPermissions !== undefined) {
+    if (
+      !Array.isArray(data.familyPermissions) ||
+      data.familyPermissions.length > 4
+    ) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "familyPermissions must contain at most four people",
+      );
+    }
+    result.familyPermissions = data.familyPermissions.map(
+      (candidate, index) => {
+        const permission = objectBody(candidate);
+        exactKeys(permission, [
+          "fullName",
+          "relationship",
+          "email",
+          "scopes",
+          "purpose",
+          "expires",
+        ]);
+        const email = requiredString(
+          permission.email,
+          `familyPermissions[${index}].email`,
+          { min: 3, max: 254 },
+        ).toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+          throw badRequest(
+            "INVALID_FIELD",
+            `familyPermissions[${index}].email must be valid`,
+          );
+        }
+        if (
+          !Array.isArray(permission.scopes) ||
+          permission.scopes.length > 7
+        ) {
+          throw badRequest(
+            "INVALID_FIELD",
+            `familyPermissions[${index}].scopes must contain at most seven values`,
+          );
+        }
+        return {
+          fullName: requiredString(
+            permission.fullName,
+            `familyPermissions[${index}].fullName`,
+            { min: 1, max: 160 },
+          ),
+          relationship: enumValue(
+            permission.relationship,
+            `familyPermissions[${index}].relationship`,
+            ["parent", "guardian", "partner", "sponsor", "other"],
+          ),
+          email,
+          scopes: permission.scopes.map((value, scopeIndex) =>
+            requiredString(
+              value,
+              `familyPermissions[${index}].scopes[${scopeIndex}]`,
+              { min: 1, max: 80 },
+            ),
+          ),
+          purpose: enumValue(
+            permission.purpose,
+            `familyPermissions[${index}].purpose`,
+            [
+              "education_and_expenses",
+              "academic_planning",
+              "billing_and_aid",
+              "other",
+            ],
+          ),
+          expires: enumValue(
+            permission.expires,
+            `familyPermissions[${index}].expires`,
+            ["end_first_year", "end_enrollment", "registrar_date"],
+          ),
+        };
+      },
+    );
+  }
+  if (data.depositChoice !== undefined) {
+    result.depositChoice = enumValue(
+      data.depositChoice,
+      "depositChoice",
+      ["pay_now", "pay_later", "waiver_or_deferral"],
     );
   }
   return result;
@@ -2136,58 +2365,74 @@ function validateOnboardingStep(state, step, data) {
       !data.firstName ||
       !data.lastName ||
       !data.preferredName ||
+      !data.personalEmail ||
       !data.mobilePhone ||
-      data.legalNameConfirmed !== true ||
-      data.contactInformationConfirmed !== true ||
-      data.homeAddressConfirmed !== true ||
+      !data.citizenshipStatus ||
+      !data.streetAddress ||
+      !data.city ||
+      !data.stateOrProvince ||
+      !data.postalCode ||
+      !data.country ||
       !data.communicationPreference ||
       !data.residencyStatus
     ) {
       invalid(
-        "Enter your name and mobile phone, then confirm legal name, contact information, home address, communication preference, and residency status",
+        "Enter your legal and preferred name, personal contact details, citizenship status, and permanent home address",
       );
     }
     return;
   }
   if (step === "housing") {
     if (!data.housingPreference) invalid("Choose a housing preference");
-    return;
-  }
-  if (step === "campus_life") {
-    if (!data.campusInterests?.length) {
-      invalid("Choose at least one campus interest");
+    if (
+      data.housingPreference === "on_campus" &&
+      (!data.housingRoomType ||
+        !data.bathroomPreference ||
+        !data.roommateMatching ||
+        !data.sleepSchedule ||
+        !data.studyHabits ||
+        !data.roomNoise ||
+        !data.cleanliness ||
+        !data.guestPreference ||
+        !data.temperaturePreference ||
+        !data.smokeVapeCompatibility)
+    ) {
+      invalid("Complete the on-campus room and roommate preferences");
+    }
+    if (
+      data.housingPreference === "off_campus" &&
+      !data.offCampusStatus
+    ) {
+      invalid("Tell us where you are in your off-campus search");
+    }
+    if (
+      data.housingPreference === "commuting" &&
+      (!data.commuteMode || !data.commuteDuration)
+    ) {
+      invalid("Choose your main commute and one-way travel time");
     }
     return;
   }
+  if (step === "campus_life") return;
   if (step === "emergency_contacts") {
-    if (data.emergencyContactConfirmed !== true) {
-      invalid("Confirm the emergency contact information");
+    if (!data.emergencyContacts?.length) {
+      invalid("Add at least one emergency contact");
     }
     return;
   }
-  if (step === "other_records") {
-    if (data.recordsConfirmed !== true) {
-      invalid("Confirm the identity, health, and accessibility records");
-    }
-    return;
-  }
-  if (step === "family_permissions") {
-    if (data.familyPermissionsReviewed !== true) {
-      invalid("Review the family and FERPA permissions");
-    }
-    return;
-  }
+  if (step === "family_permissions") return;
   if (step === "review_and_sign") {
-    if (data.signatureConfirmed !== true) {
-      invalid("Confirm the enrollment review and signature");
+    if (!data.signatureFullName) {
+      invalid("Type your full legal name to sign the onboarding packet");
     }
     return;
   }
   if (step === "deposit") {
-    if (data.depositAcknowledged !== true) {
-      invalid("Acknowledge the completed enrollment deposit");
+    if (!data.depositChoice) {
+      invalid("Choose how you would like to handle the enrollment deposit");
     }
     if (
+      data.depositChoice === "pay_now" &&
       !state.payments.some(
         (payment) =>
           payment.type === "enrollment_deposit" &&

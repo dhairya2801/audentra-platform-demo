@@ -32,7 +32,9 @@ export class JsonStateStore {
   async initialize() {
     await mkdir(dirname(this.filePath), { recursive: true });
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, "utf8"));
+      const parsed = migratePersistedOnboarding(
+        JSON.parse(await readFile(this.filePath, "utf8")),
+      );
       validatePersistedState(parsed);
       this.#state = parsed;
     } catch (error) {
@@ -129,6 +131,42 @@ export class JsonStateStore {
     });
     await rename(temporaryFile, this.filePath);
   }
+}
+
+function migratePersistedOnboarding(value) {
+  if (!value?.onboarding || typeof value.onboarding !== "object") {
+    return value;
+  }
+  if (value.onboarding.currentStep === "other_records") {
+    value.onboarding.currentStep = "family_permissions";
+  }
+  if (Array.isArray(value.onboarding.completedSteps)) {
+    value.onboarding.completedSteps =
+      value.onboarding.completedSteps.filter(
+        (step) => step !== "other_records",
+      );
+  }
+  const data = value.onboarding.data;
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    if (Array.isArray(data.skippedSteps)) {
+      data.skippedSteps = data.skippedSteps.filter(
+        (step) => step !== "other_records",
+      );
+    }
+    for (const legacyField of [
+      "legalNameConfirmed",
+      "contactInformationConfirmed",
+      "homeAddressConfirmed",
+      "emergencyContactConfirmed",
+      "recordsConfirmed",
+      "familyPermissionsReviewed",
+      "signatureConfirmed",
+      "depositAcknowledged",
+    ]) {
+      delete data[legacyField];
+    }
+  }
+  return value;
 }
 
 function validateStorageKey(storageKey) {

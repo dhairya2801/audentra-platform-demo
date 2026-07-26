@@ -5,7 +5,6 @@ export const ONBOARDING_STEPS = Object.freeze([
   "housing",
   "campus_life",
   "emergency_contacts",
-  "other_records",
   "family_permissions",
   "review_and_sign",
   "deposit",

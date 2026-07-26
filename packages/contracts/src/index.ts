@@ -114,38 +114,105 @@ export type OnboardingStep =
   | "housing"
   | "campus_life"
   | "emergency_contacts"
-  | "other_records"
   | "family_permissions"
   | "review_and_sign"
   | "deposit";
 
-export type HousingPreference = "on_campus" | "off_campus" | "undecided";
+export type HousingPreference =
+  | "on_campus"
+  | "off_campus"
+  | "commuting"
+  | "undecided"
+  | "family";
 export type HousingResidenceOption =
   | "aster_residence_hall"
   | "aster_apartments"
   | "student_village"
   | null;
 
+export interface OnboardingEmergencyContact {
+  fullName: string;
+  relationship:
+    | "parent"
+    | "guardian"
+    | "partner"
+    | "sibling"
+    | "relative"
+    | "friend"
+    | "other";
+  mobilePhone: string;
+}
+
+export interface OnboardingFamilyPermission {
+  fullName: string;
+  relationship:
+    | "parent"
+    | "guardian"
+    | "partner"
+    | "sponsor"
+    | "other";
+  email: string;
+  scopes: string[];
+  purpose:
+    | "education_and_expenses"
+    | "academic_planning"
+    | "billing_and_aid"
+    | "other";
+  expires:
+    | "end_first_year"
+    | "end_enrollment"
+    | "registrar_date";
+}
+
 export interface StudentOnboardingData {
   firstName?: string;
   lastName?: string;
   preferredName?: string;
+  personalEmail?: string;
   mobilePhone?: string;
-  legalNameConfirmed?: boolean;
-  contactInformationConfirmed?: boolean;
+  citizenshipStatus?:
+    | "us_citizen"
+    | "permanent_resident"
+    | "eligible_noncitizen"
+    | "international";
   communicationPreference?: "email" | "sms";
   residencyStatus?: "domestic" | "international";
+  streetAddress?: string;
+  addressLine2?: string;
+  city?: string;
+  stateOrProvince?: string;
+  postalCode?: string;
+  country?: string;
   supportNeeds?: string[];
-  homeAddressConfirmed?: boolean;
   housingPreference?: HousingPreference;
   housingResidenceOption?: HousingResidenceOption;
+  housingRoomType?: string;
+  bathroomPreference?: string;
+  roommateMatching?: string;
+  sleepSchedule?: string;
+  studyHabits?: string;
+  roomNoise?: string;
+  cleanliness?: string;
+  guestPreference?: string;
+  temperaturePreference?: string;
+  smokeVapeCompatibility?: string;
+  substanceFreeHousing?: boolean;
+  genderInclusiveHousing?: boolean;
+  accessibleHousingInformation?: boolean;
+  livingLearningCommunities?: string[];
+  offCampusStatus?: string;
+  offCampusResources?: string[];
+  commuteMode?: string;
+  commuteDuration?: string;
+  commuterResources?: string[];
   skippedSteps?: OnboardingStep[];
   campusInterests?: string[];
-  emergencyContactConfirmed?: boolean;
-  recordsConfirmed?: boolean;
-  familyPermissionsReviewed?: boolean;
-  signatureConfirmed?: boolean;
-  depositAcknowledged?: boolean;
+  socialComfort?: string;
+  firstMonthGoals?: string[];
+  emergencyContacts?: OnboardingEmergencyContact[];
+  familyPermissions?: OnboardingFamilyPermission[];
+  signatureFullName?: string;
+  depositChoice?: "pay_now" | "pay_later" | "waiver_or_deferral";
 }
 
 export interface StudentOnboarding {

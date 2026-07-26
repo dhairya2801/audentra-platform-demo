@@ -50,6 +50,7 @@ import type {
 } from "../../src/platform/platform-store";
 import { validateActivityEventProperties } from "../../src/platform/postgres-platform.store";
 import {
+  isSkippableOnboardingStep,
   ONBOARDING_STEPS,
   validateOnboardingStepData,
 } from "../../src/portal/onboarding-policy";
@@ -418,7 +419,9 @@ export class InMemoryPlatformStore implements PlatformStore {
       preference:
         preference === "on_campus" ||
         preference === "off_campus" ||
-        preference === "undecided"
+        preference === "commuting" ||
+        preference === "undecided" ||
+        preference === "family"
           ? preference
           : null,
       residenceOption:
@@ -492,8 +495,30 @@ export class InMemoryPlatformStore implements PlatformStore {
         `The next required onboarding step is ${this.onboarding.currentStep}`,
       );
     }
-    const mergedData = { ...this.onboarding.data, ...input.update.data };
-    validateOnboardingStepData(input.update.currentStep, mergedData);
+    const skip = input.update.skip === true;
+    if (skip && !isSkippableOnboardingStep(input.update.currentStep)) {
+      throw new BadRequestError(
+        "ONBOARDING_STEP_REQUIRED",
+        "This onboarding step is required before you can continue",
+      );
+    }
+    const mergedData = {
+      ...this.onboarding.data,
+      ...input.update.data,
+      ...(skip
+        ? {
+            skippedSteps: [
+              ...new Set([
+                ...(this.onboarding.data.skippedSteps ?? []),
+                input.update.currentStep,
+              ]),
+            ],
+          }
+        : {}),
+    };
+    if (!skip) {
+      validateOnboardingStepData(input.update.currentStep, mergedData);
+    }
     if (input.update.currentStep === "offer" && !this.acceptedResponse) {
       throw new ConflictError(
         "ACCEPTED_OFFER_REQUIRED",
@@ -502,6 +527,7 @@ export class InMemoryPlatformStore implements PlatformStore {
     }
     if (
       input.update.currentStep === "deposit" &&
+      mergedData.depositChoice === "pay_now" &&
       this.payments.length === 0
     ) {
       throw new ConflictError(
@@ -544,7 +570,9 @@ export class InMemoryPlatformStore implements PlatformStore {
           "Onboarding changed in another session",
         );
       }
-      if (this.onboarding.completedSteps.length !== 9) {
+      if (
+        this.onboarding.completedSteps.length !== ONBOARDING_STEPS.length
+      ) {
         throw new ConflictError(
           "ONBOARDING_INCOMPLETE",
           "Every onboarding step must be completed in order",

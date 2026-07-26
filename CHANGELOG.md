@@ -7,6 +7,18 @@ compatibility.
 
 ## [Unreleased]
 
+### Changed
+
+- Aligned first-session onboarding with the product-owner reference questions
+  while keeping document collection in enrollment
+- Removed the redundant “Confirm your student record” block and the
+  ID/health/access onboarding step
+- Replaced emergency-contact and FERPA acknowledgement checkboxes with
+  structured student-entered records
+- Expanded housing and campus-life onboarding into the reference branches
+- Made housing, campus life, and deposit skippable for later completion
+- Deposit onboarding now pays only after an explicit `pay_now` selection
+
 ### Planned
 
 - Institutional OIDC and verified invitation delivery

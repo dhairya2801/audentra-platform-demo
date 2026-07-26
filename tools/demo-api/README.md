@@ -53,10 +53,9 @@ Progress is persisted and strictly ordered:
 3. `housing`
 4. `campus_life`
 5. `emergency_contacts`
-6. `other_records`
-7. `family_permissions`
-8. `review_and_sign`
-9. `deposit`
+6. `family_permissions`
+7. `review_and_sign`
+8. `deposit`
 
 Each step is completed with `PUT /v1/student/onboarding` using
 `{ "expectedVersion": 1, "currentStep": "offer", "data": {} }`. `PATCH`
@@ -64,10 +63,11 @@ is supported as a local compatibility alias with the same body.
 
 Offer acceptance and deposit payment create their domain records, but do not
 silently change onboarding. The versioned `PUT` for `offer` verifies that the
-offer was accepted; the `PUT` for `deposit` verifies that a successful deposit
-exists and that `depositAcknowledged` is true. Once all nine steps have been
-saved, `POST /v1/student/onboarding/complete` with
-`{ "expectedVersion": 10 }` finalizes onboarding. Bootstrap then changes
+offer was accepted. The deposit step records `pay_now`, `pay_later`, or
+`waiver_or_deferral`; only `pay_now` requires a successful payment. Housing,
+campus life, and deposit may be skipped for now. Once all eight steps have been
+saved, `POST /v1/student/onboarding/complete` with the latest
+`expectedVersion` finalizes onboarding. Bootstrap then changes
 `initialRoute` from `/onboarding` to `/dashboard`.
 
 ## Endpoints

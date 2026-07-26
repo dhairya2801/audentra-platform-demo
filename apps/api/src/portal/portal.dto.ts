@@ -3,6 +3,7 @@ import {
   IsArray,
   ArrayMaxSize,
   IsBoolean,
+  IsEmail,
   IsIn,
   IsInt,
   IsISO8601,
@@ -40,11 +41,72 @@ const onboardingSteps: OnboardingStep[] = [
   "housing",
   "campus_life",
   "emergency_contacts",
-  "other_records",
   "family_permissions",
   "review_and_sign",
   "deposit",
 ];
+
+export class OnboardingEmergencyContactDto {
+  @IsString()
+  @Length(1, 160)
+  fullName!: string;
+
+  @IsIn([
+    "parent",
+    "guardian",
+    "partner",
+    "sibling",
+    "relative",
+    "friend",
+    "other",
+  ])
+  relationship!:
+    | "parent"
+    | "guardian"
+    | "partner"
+    | "sibling"
+    | "relative"
+    | "friend"
+    | "other";
+
+  @IsString()
+  @Matches(/^\+[1-9][0-9]{7,14}$/)
+  mobilePhone!: string;
+}
+
+export class OnboardingFamilyPermissionDto {
+  @IsString()
+  @Length(1, 160)
+  fullName!: string;
+
+  @IsIn(["parent", "guardian", "partner", "sponsor", "other"])
+  relationship!: "parent" | "guardian" | "partner" | "sponsor" | "other";
+
+  @IsEmail()
+  @MaxLength(254)
+  email!: string;
+
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  scopes!: string[];
+
+  @IsIn([
+    "education_and_expenses",
+    "academic_planning",
+    "billing_and_aid",
+    "other",
+  ])
+  purpose!:
+    | "education_and_expenses"
+    | "academic_planning"
+    | "billing_and_aid"
+    | "other";
+
+  @IsIn(["end_first_year", "end_enrollment", "registrar_date"])
+  expires!: "end_first_year" | "end_enrollment" | "registrar_date";
+}
 
 export class StudentOnboardingDataDto implements StudentOnboardingData {
   @IsOptional()
@@ -63,17 +125,27 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   preferredName?: string;
 
   @IsOptional()
+  @IsEmail()
+  @MaxLength(254)
+  personalEmail?: string;
+
+  @IsOptional()
   @IsString()
   @Matches(/^\+[1-9][0-9]{7,14}$/)
   mobilePhone?: string;
 
   @IsOptional()
-  @IsBoolean()
-  legalNameConfirmed?: boolean;
-
-  @IsOptional()
-  @IsBoolean()
-  contactInformationConfirmed?: boolean;
+  @IsIn([
+    "us_citizen",
+    "permanent_resident",
+    "eligible_noncitizen",
+    "international",
+  ])
+  citizenshipStatus?:
+    | "us_citizen"
+    | "permanent_resident"
+    | "eligible_noncitizen"
+    | "international";
 
   @IsOptional()
   @IsIn(["email", "sms"])
@@ -84,45 +156,190 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   residencyStatus?: "domestic" | "international";
 
   @IsOptional()
+  @IsString()
+  @Length(1, 180)
+  streetAddress?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(180)
+  addressLine2?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 120)
+  stateOrProvince?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(1, 32)
+  postalCode?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(2, 120)
+  country?: string;
+
+  @IsOptional()
   @IsArray()
+  @ArrayMaxSize(12)
   @IsString({ each: true })
   @MaxLength(80, { each: true })
   supportNeeds?: string[];
 
   @IsOptional()
-  @IsBoolean()
-  homeAddressConfirmed?: boolean;
+  @IsIn(["on_campus", "off_campus", "commuting", "undecided", "family"])
+  housingPreference?:
+    | "on_campus"
+    | "off_campus"
+    | "commuting"
+    | "undecided"
+    | "family";
 
   @IsOptional()
-  @IsIn(["on_campus", "off_campus", "undecided"])
-  housingPreference?: "on_campus" | "off_campus" | "undecided";
+  @IsString()
+  @MaxLength(80)
+  housingRoomType?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  bathroomPreference?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  roommateMatching?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  sleepSchedule?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  studyHabits?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  roomNoise?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  cleanliness?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  guestPreference?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  temperaturePreference?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  smokeVapeCompatibility?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  substanceFreeHousing?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  genderInclusiveHousing?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  accessibleHousingInformation?: boolean;
 
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(6)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  livingLearningCommunities?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  offCampusStatus?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  offCampusResources?: string[];
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  commuteMode?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  commuteDuration?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  commuterResources?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
   @IsString({ each: true })
   @MaxLength(80, { each: true })
   campusInterests?: string[];
 
   @IsOptional()
-  @IsBoolean()
-  emergencyContactConfirmed?: boolean;
+  @IsString()
+  @MaxLength(80)
+  socialComfort?: string;
 
   @IsOptional()
-  @IsBoolean()
-  recordsConfirmed?: boolean;
+  @IsArray()
+  @ArrayMaxSize(7)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  firstMonthGoals?: string[];
 
   @IsOptional()
-  @IsBoolean()
-  familyPermissionsReviewed?: boolean;
+  @IsArray()
+  @ArrayMaxSize(4)
+  @ValidateNested({ each: true })
+  @Type(() => OnboardingEmergencyContactDto)
+  emergencyContacts?: OnboardingEmergencyContactDto[];
 
   @IsOptional()
-  @IsBoolean()
-  signatureConfirmed?: boolean;
+  @IsArray()
+  @ArrayMaxSize(4)
+  @ValidateNested({ each: true })
+  @Type(() => OnboardingFamilyPermissionDto)
+  familyPermissions?: OnboardingFamilyPermissionDto[];
 
   @IsOptional()
-  @IsBoolean()
-  depositAcknowledged?: boolean;
+  @IsString()
+  @Length(2, 240)
+  signatureFullName?: string;
 
+  @IsOptional()
+  @IsIn(["pay_now", "pay_later", "waiver_or_deferral"])
+  depositChoice?: "pay_now" | "pay_later" | "waiver_or_deferral";
 }
 
 export class UpdateStudentOnboardingDto
@@ -159,7 +376,7 @@ export class UpdateStudentHousingPlanDto
   @Min(1)
   expectedVersion!: number;
 
-  @IsIn(["on_campus", "off_campus", "undecided"])
+  @IsIn(["on_campus", "off_campus", "commuting", "undecided", "family"])
   preference!: HousingPreference;
 
   @IsOptional()
