@@ -29,6 +29,20 @@ const portalActionHrefs = new Set([
 
 const requirementPath = /^\/enrollment\/requirements\/[a-z0-9][a-z0-9-]{0,80}$/i;
 const fallbackPageContext = "/dashboard";
+const unsafeExecutionTarget =
+  /\b(?:python|shell|bash|zsh|powershell|terminal|command|script|node(?:\.js)?|curl|wget|reverse shell|remote code)\b/i;
+const unsafeExecutionVerb =
+  /\b(?:run|execute|launch|invoke|spawn|eval|install|upload and run|write and run)\b/i;
+const sensitiveOrDestructiveTarget =
+  /(?:\.env\b|environment variables?|\bapi[-_ ]?keys?\b|\bsecrets?\b|\bpasswords?\b|\bcredentials?\b|\bauth tokens?\b|169\.254\.169\.254|metadata service|instance metadata|read (?:a )?file|filesystem|exfiltrat|\bdelete\b|\bdrop (?:the )?(?:database|table)\b|\bransomware\b|\bmalware\b)/i;
+const authorityBypass =
+  /(?:ignore|override|bypass|disregard|reveal).{0,48}(?:system prompt|developer message|safety (?:rule|policy)|access control|authorization|hidden prompt)|(?:jailbreak|prompt injection)/i;
+const maliciousCodeRequest =
+  /(?:write|create|generate|provide|give me).{0,48}(?:python|shell|bash|powershell|code|script).{0,80}(?:hack|attack|exploit|steal|exfiltrat|bypass|reverse shell|malware|ransomware)|(?:hack|attack|exploit|steal|exfiltrat|bypass|reverse shell|malware|ransomware).{0,80}(?:python|shell|bash|powershell|code|script)/i;
+const forgedRecordMutation =
+  /(?:mark|set|change|make|pretend|forge).{0,48}(?:deposit|payment|requirement|application|record|course|grade|aid).{0,48}(?:paid|complete|completed|approved|verified|accepted|waived)|(?:paid|complete|completed|approved|verified|accepted|waived).{0,48}(?:without paying|without approval|without authorization)/i;
+const crossStudentAccess =
+  /(?:another|other|different|all).{0,24}students?.{0,48}(?:record|profile|document|payment|grade|email|phone|data)|(?:record|profile|document|payment|grade|email|phone|data).{0,48}(?:another|other|different|all).{0,24}students?/i;
 
 /**
  * The page is a routing hint for the prompt, never arbitrary model context.
@@ -59,12 +73,79 @@ export function normalizeEdwardActionHref(value) {
 }
 
 /**
+ * Reject capability-escalation requests before spending tokens. Edward has no
+ * executor, host access, arbitrary network tool, or cross-student data tool.
+ */
+export function guardedEdwardResponse(message) {
+  if (typeof message !== "string") return null;
+  const requestsCodeExecution =
+    unsafeExecutionVerb.test(message) &&
+    (unsafeExecutionTarget.test(message) ||
+      sensitiveOrDestructiveTarget.test(message));
+  const requestsSensitiveOperation =
+    sensitiveOrDestructiveTarget.test(message) &&
+    /\b(?:get|read|show|print|dump|steal|send|post|copy|expose|reveal|access|extract)\b/i.test(
+      message,
+    );
+
+  let reason = null;
+  if (crossStudentAccess.test(message)) {
+    reason =
+      "I can only use the signed-in student’s permission-scoped Aster record. I can’t access or reveal another student’s information.";
+  } else if (forgedRecordMutation.test(message)) {
+    reason =
+      "I can’t forge, approve, or mark payments and student records complete from chat. Use the authorized portal workflow so validation, idempotency, and the audit trail are preserved.";
+  } else if (
+    requestsCodeExecution ||
+    requestsSensitiveOperation ||
+    authorityBypass.test(message) ||
+    maliciousCodeRequest.test(message)
+  ) {
+    reason =
+      "I can’t run code or commands, access server files or secrets, bypass safeguards, or attack systems. Edward has no shell, Python, filesystem, or arbitrary network tools.";
+  }
+  if (!reason) return null;
+
+  return {
+    message: reason,
+    provider: "guided",
+    model: null,
+    usage: null,
+    suggestedActions: [],
+    contextReceipts: [],
+    widgets: [],
+  };
+}
+
+export function sanitizeEdwardProse(value) {
+  const text = typeof value === "string" ? value : "";
+  const normalized = text
+    .replace(/<\s*\/?\s*(?:script|style|iframe|object|embed|link|meta)\b[^>]*>/gi, "")
+    .replace(
+      /\[([^\]\r\n]{1,240})\]\(\s*(?:(?:[a-z][a-z0-9+.-]*:)|\/\/|\/)[^\s)]*\s*\)/gi,
+      "$1",
+    )
+    .replace(
+      /(?:https?:\/\/|www\.|\/\/|(?:javascript|vbscript|data|mailto|tel|file|blob):)[^\s<>()\]]+/gi,
+      "",
+    )
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+  return (
+    normalized.slice(0, 2_500) ||
+    "I prepared the relevant Aster portal action below."
+  );
+}
+
+/**
  * Actions are server-created UI controls. Filter them at the HTTP boundary so
  * an AI adapter (or a future provider) cannot turn its response into external
- * navigation. Deposit widgets do not have an href, so their payment flow is
- * intentionally left exactly as-is.
+ * navigation. State-changing widgets are rebuilt from authoritative record
+ * data instead of trusting provider-supplied IDs, amounts, status, or labels.
  */
-export function normalizeEdwardResponse(response) {
+export function normalizeEdwardResponse(response, authority) {
   const suggestedActions = Array.isArray(response?.suggestedActions)
     ? response.suggestedActions.flatMap((action) => {
         const href = normalizeEdwardActionHref(action?.href);
@@ -76,22 +157,62 @@ export function normalizeEdwardResponse(response) {
 
   return {
     ...response,
+    message: sanitizeEdwardProse(response?.message),
     suggestedActions: suggestedActions.slice(0, 4),
-    widgets: normalizeWidgets(response?.widgets),
+    widgets: normalizeWidgets(response?.widgets, authority),
   };
 }
 
-function normalizeWidgets(widgets) {
+function normalizeWidgets(widgets, authority) {
   if (!Array.isArray(widgets)) return [];
   return widgets
     .flatMap((widget) => {
       if (!widget || typeof widget !== "object") return [];
-      if (widget.type === "deposit_payment") return [widget];
-      if (widget.type !== "document_upload" && widget.type !== "appointment") {
-        return [];
+      if (widget.type === "deposit_payment") {
+        if (!authority?.allowDepositPayment) return [];
+        return [
+          {
+            type: "deposit_payment",
+            id: "edward-deposit-payment",
+            title: "Enrollment deposit",
+            description: authority.depositPaid
+              ? "Your enrollment deposit is recorded as paid."
+              : "Complete the simulated enrollment deposit securely here.",
+            offerId: authority.offerId,
+            amountCents: authority.depositAmountCents,
+            status: authority.depositPaid ? "completed" : "ready",
+          },
+        ];
       }
-      const href = normalizeEdwardActionHref(widget.href);
-      return href ? [{ ...widget, href }] : [];
+      if (widget.type === "document_upload") {
+        if (!authority?.documentUploadCategory) return [];
+        return [
+          {
+            type: "document_upload",
+            id: "edward-document-upload",
+            title: "Upload a document",
+            description:
+              "Add a PDF, JPEG, or PNG through the protected document workflow.",
+            category: authority.documentUploadCategory,
+            href: "/documents",
+          },
+        ];
+      }
+      if (widget.type === "appointment") {
+        if (!authority?.appointmentType) return [];
+        return [
+          {
+            type: "appointment",
+            id: "edward-advisor-appointment",
+            title: "Meet with a student advisor",
+            description:
+              "Choose a time with the team best suited to your question.",
+            appointmentType: authority.appointmentType,
+            href: "/appointments",
+          },
+        ];
+      }
+      return [];
     })
     .slice(0, 2);
 }

@@ -624,6 +624,24 @@ export function createSeedState(options = {}) {
     state.academics.transcriptCredits = [];
     state.academics.exemptions = [];
   }
+  if (options.completedOnboarding) {
+    const acceptedAt = "2026-07-24T12:00:00.000Z";
+    state.offer.status = "accepted";
+    state.offer.acceptedAt = acceptedAt;
+    state.offer.version = 2;
+    state.journey = createJourney(acceptedAt);
+    state.requirements = createRequirements(acceptedAt);
+    state.onboarding = {
+      status: "completed",
+      currentStep: "deposit",
+      completedAt: acceptedAt,
+      completedSteps: [...ONBOARDING_STEPS],
+      data: { skippedSteps: ["deposit"] },
+      version: 10,
+      updatedAt: acceptedAt,
+    };
+    state.portalProjectionVersion = 2;
+  }
   return state;
 }
 

@@ -116,6 +116,12 @@ jobs:
       - name: Validate stateful preview API
         run: npm --prefix tools/demo-api test
 
+      - name: Install browser runtime
+        run: npx playwright install --with-deps chromium
+
+      - name: Validate student journeys in a real browser
+        run: npm run test:e2e
+
       - name: Build API and worker
         run: |
           npm --prefix apps/api run build

@@ -1239,12 +1239,36 @@ describe("contract-compatible development preview API", () => {
     assert.equal(documents.payload.total, 2);
   });
 
-  it("stores parsing-disabled requirement documents directly for staff review", async () => {
+  it("classifies financial-aid documents without retaining extracted fields", async () => {
     let extractionCalls = 0;
     const ai = {
-      async extractStudentDocument() {
+      async extractStudentDocument(input) {
         extractionCalls += 1;
-        throw new Error("manual-review documents must not reach the parser");
+        assert.equal(input.expectedDocumentType, "financial_aid");
+        return {
+          status: "completed",
+          documentType: "financial_aid",
+          summary: "A financial-aid verification worksheet.",
+          studentName: "Synthetic Student",
+          institutionName: "Synthetic Academy",
+          issueDate: "2026-07-24",
+          academicTerm: "Fall 2026",
+          fields: [
+            {
+              key: "synthetic_sensitive_field",
+              label: "Synthetic sensitive field",
+              value: "must-not-be-retained",
+              confidence: 0.99,
+            },
+          ],
+          courses: [],
+          visualRegions: [],
+          warnings: [],
+          model: "test/document-classifier",
+          provider: "local",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
       },
       async askEdward() {
         throw new Error("not used");
@@ -1254,7 +1278,7 @@ describe("contract-compatible development preview API", () => {
     await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
       method: "POST",
       body: {},
-      idempotencyKey: "manual-review-offer-0001",
+      idempotencyKey: "financial-classification-offer-0001",
     });
     const form = new FormData();
     form.set(
@@ -1272,18 +1296,33 @@ describe("contract-compatible development preview API", () => {
       method: "POST",
       headers: {
         cookie: "vv_demo_session=demo-session-v2",
-        "idempotency-key": "manual-review-upload-0001",
+        "idempotency-key": "financial-classification-upload-0001",
       },
       body: form,
     });
-    const document = await response.json();
+    const uploaded = await response.json();
 
     assert.equal(response.status, 201);
+    assert.equal(uploaded.category, "financial_aid");
+    assert.equal(uploaded.processingMode, "classification_only");
+    assert.equal(uploaded.extraction.status, "processing");
+    const document = await waitForDocument(
+      baseUrl,
+      uploaded.id,
+      (candidate) => candidate.extraction?.status === "completed",
+    );
     assert.equal(document.category, "financial_aid");
-    assert.equal(document.processingMode, "manual_review");
-    assert.equal(document.status, "under_review");
-    assert.equal(document.extraction, undefined);
-    assert.equal(extractionCalls, 0);
+    assert.equal(document.processingMode, "classification_only");
+    assert.equal(document.status, "needs_review");
+    assert.equal(document.extraction.documentType, "financial_aid");
+    assert.equal(document.extraction.studentName, null);
+    assert.equal(document.extraction.institutionName, null);
+    assert.equal(document.extraction.issueDate, null);
+    assert.equal(document.extraction.academicTerm, null);
+    assert.deepEqual(document.extraction.fields, []);
+    assert.deepEqual(document.extraction.courses, []);
+    assert.deepEqual(document.extraction.visualRegions, []);
+    assert.equal(extractionCalls, 1);
 
     const requirement = await api(
       baseUrl,
@@ -1291,6 +1330,79 @@ describe("contract-compatible development preview API", () => {
     );
     assert.equal(requirement.payload.status, "under_review");
     assert.equal(requirement.payload.progressPercent, 80);
+  });
+
+  it("rejects a restaurant menu from the financial-aid review workflow", async () => {
+    const ai = {
+      async extractStudentDocument(input) {
+        assert.equal(input.expectedDocumentType, "financial_aid");
+        return {
+          status: "completed",
+          documentType: "other",
+          summary: "A restaurant menu with appetizers and desserts.",
+          studentName: null,
+          institutionName: null,
+          issueDate: null,
+          academicTerm: null,
+          fields: [],
+          courses: [],
+          visualRegions: [],
+          warnings: [],
+          model: "test/document-classifier",
+          provider: "local",
+          processedAt: fixedClock().toISOString(),
+          verifiedAt: null,
+        };
+      },
+      async askEdward() {
+        throw new Error("not used");
+      },
+    };
+    const { baseUrl } = await startPreview({ ai });
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "financial-mismatch-offer-0001",
+    });
+    const form = new FormData();
+    form.set(
+      "file",
+      new Blob(
+        [Buffer.from("%PDF-1.7\nRestaurant menu\nAppetizers\nDesserts\n%%EOF\n")],
+        { type: "application/pdf" },
+      ),
+      "restaurant-menu.pdf",
+    );
+    form.set("requirementId", ids.financialRequirement);
+    const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
+      method: "POST",
+      headers: {
+        cookie: "vv_demo_session=demo-session-v2",
+        "idempotency-key": "financial-mismatch-upload-0001",
+      },
+      body: form,
+    });
+    const uploaded = await response.json();
+
+    assert.equal(response.status, 201);
+    assert.equal(uploaded.processingMode, "classification_only");
+    const document = await waitForDocument(
+      baseUrl,
+      uploaded.id,
+      (candidate) => candidate.extraction?.status === "completed",
+    );
+    assert.equal(document.extraction.documentType, "other");
+    assert.match(
+      document.extraction.warnings[0],
+      /requirement was not advanced automatically/i,
+    );
+
+    const requirement = await api(
+      baseUrl,
+      "/v1/student/requirements/financial-aid-verification",
+    );
+    assert.equal(requirement.payload.status, "ready");
+    assert.equal(requirement.payload.progressPercent, 35);
   });
 
   it("keeps the document endpoint strict when a multipart request contains multiple files", async () => {

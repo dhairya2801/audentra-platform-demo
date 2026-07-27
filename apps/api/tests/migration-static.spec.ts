@@ -100,7 +100,11 @@ describe("initial PostgreSQL migration", () => {
   });
 
   it("persists opaque document content references and reviewable extraction data", async () => {
-    const [agenticMigration, processingPolicyMigration] = await Promise.all([
+    const [
+      agenticMigration,
+      processingPolicyMigration,
+      classificationPolicyMigration,
+    ] = await Promise.all([
       readFile(
         resolve(__dirname, "../migrations/0002_agentic_documents.sql"),
         "utf8",
@@ -109,8 +113,12 @@ describe("initial PostgreSQL migration", () => {
         resolve(__dirname, "../migrations/0007_document_processing_policy.sql"),
         "utf8",
       ),
+      readFile(
+        resolve(__dirname, "../migrations/0009_document_classification_policy.sql"),
+        "utf8",
+      ),
     ]);
-    const migration = `${agenticMigration}\n${processingPolicyMigration}`;
+    const migration = `${agenticMigration}\n${processingPolicyMigration}\n${classificationPolicyMigration}`;
 
     expect(migration).toContain("storage_key varchar(512)");
     expect(migration).toContain("sha256 char(64)");
@@ -121,6 +129,13 @@ describe("initial PostgreSQL migration", () => {
     expect(migration).toContain("document_record_storage_key_idx");
     expect(migration).toContain("processing_mode varchar(24)");
     expect(migration).toContain("'manual_review'");
+    expect(migration).toContain("'classification_only'");
+    expect(classificationPolicyMigration).toContain(
+      "SET processing_mode = 'classification_only'",
+    );
+    expect(classificationPolicyMigration).toContain(
+      "WHERE category = 'financial_aid'",
+    );
   });
 
   it("migrates to the authoritative eight-step onboarding sequence", async () => {

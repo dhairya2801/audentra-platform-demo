@@ -1273,9 +1273,9 @@ function documentTypeForCategory(category) {
 }
 
 function documentProcessingModeForCategory(category) {
-  return category === "identity" || category === "transcript"
-    ? "agentic"
-    : "manual_review";
+  if (category === "identity" || category === "transcript") return "agentic";
+  if (category === "financial_aid") return "classification_only";
+  return "manual_review";
 }
 
 export function confirmDocumentExtraction(draft, documentId, input, now) {

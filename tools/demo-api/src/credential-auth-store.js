@@ -245,6 +245,9 @@ function normalizeEmail(value) {
 }
 
 function normalizePhone(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw badRequest("INVALID_PHONE", "Enter your mobile phone number");
+  }
   const compact = requiredString(value, "phone", { min: 8, max: 32 }).replace(
     /[ ()-]/g,
     "",

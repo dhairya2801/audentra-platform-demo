@@ -26,6 +26,7 @@ import {
   type StudentAiGateway,
 } from "./student-ai.gateway";
 import {
+  guardedEdwardResponse,
   normalizeEdwardPageContext,
   normalizeEdwardResponse,
 } from "./edward-safety";
@@ -321,6 +322,12 @@ export class StudentAgentService {
         ...(expectedDocumentType ? { expectedDocumentType } : {}),
       });
       if (
+        input.category === "financial_aid" &&
+        extraction.status === "completed"
+      ) {
+        extraction = classificationOnlyExtraction(extraction);
+      }
+      if (
         expectedDocumentType &&
         extraction.status === "completed" &&
         extraction.documentType !== expectedDocumentType
@@ -383,6 +390,9 @@ export class StudentAgentService {
     auth: AuthContext;
     question: AskEdwardInput;
   }): Promise<AskEdwardResponse> {
+    const guarded = guardedEdwardResponse(input.question.message);
+    if (guarded) return guarded;
+    const normalizedQuestion = input.question.message.toLowerCase();
     const [dashboard, profile, documents, onboarding, payments] = await Promise.all([
       this.store.getStudentDashboard(input.auth),
       this.store.getStudentProfile(input.auth),
@@ -390,35 +400,56 @@ export class StudentAgentService {
       this.store.getStudentOnboarding(input.auth),
       this.store.getStudentPayments(input.auth),
     ]);
+    const studentContext = {
+      preferredName: profile.preferredName,
+      programName: dashboard.offer.programName,
+      termName: dashboard.offer.termName,
+      onboardingStatus: onboarding.status,
+      enrollmentCompletion: dashboard.journey.completionPercent,
+      nextAction: dashboard.journey.nextAction,
+      unreadMessages: dashboard.unreadMessageCount,
+      documentStatuses: documents.items.map((document) => ({
+        category: document.category,
+        status: document.status,
+      })),
+      offerId: dashboard.offer.id,
+      depositAmountCents: dashboard.offer.depositAmountCents,
+      depositPaid: payments.items.some(
+        (payment) =>
+          payment.type === "enrollment_deposit" &&
+          payment.status === "succeeded",
+      ),
+    };
     const response = await this.ai.askEdward({
       ...input.question,
       pageContext: normalizeEdwardPageContext(input.question.pageContext),
-      studentContext: {
-        preferredName: profile.preferredName,
-        programName: dashboard.offer.programName,
-        termName: dashboard.offer.termName,
-        onboardingStatus: onboarding.status,
-        enrollmentCompletion: dashboard.journey.completionPercent,
-        nextAction: dashboard.journey.nextAction,
-        unreadMessages: dashboard.unreadMessageCount,
-        documentStatuses: documents.items.map((document) => ({
-          category: document.category,
-          status: document.status,
-        })),
-        offerId: dashboard.offer.id,
-        depositAmountCents: dashboard.offer.depositAmountCents,
-        depositPaid: payments.items.some(
-          (payment) =>
-            payment.type === "enrollment_deposit" &&
-            payment.status === "succeeded",
-        ),
-      },
+      studentContext,
     });
     // These receipts are assembled only after all deterministic reads above
     // succeed. They deliberately describe data supplied to Edward, rather
     // than inferring imaginary tool calls from the student's wording.
     return {
-      ...normalizeEdwardResponse(response),
+      ...normalizeEdwardResponse(response, {
+        offerId: studentContext.offerId,
+        depositAmountCents: studentContext.depositAmountCents,
+        depositPaid: studentContext.depositPaid,
+        allowDepositPayment:
+          /(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/i.test(
+            input.question.message,
+          ),
+        documentUploadCategory:
+          /upload|transcript|fafsa|verification/.test(normalizedQuestion)
+            ? normalizedQuestion.includes("transcript")
+              ? "transcript"
+              : "financial_aid"
+            : null,
+        appointmentType:
+          /appointment|advisor|counselor|human/.test(normalizedQuestion)
+            ? /financial|aid|fafsa|loan/.test(normalizedQuestion)
+              ? "financial_aid"
+              : "enrollment_support"
+            : null,
+      }),
       contextReceipts: collectedEdwardContextReceipts,
     };
   }
@@ -481,6 +512,22 @@ function documentTypeForCategory(
     consent: "ferpa",
     other: "other",
   }[category] as StudentDocumentExtraction["documentType"];
+}
+
+function classificationOnlyExtraction(
+  extraction: StudentDocumentExtraction,
+): StudentDocumentExtraction {
+  return {
+    ...extraction,
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    courses: [],
+    visualRegions: [],
+    verifiedAt: null,
+  };
 }
 
 function validateFileBytes(

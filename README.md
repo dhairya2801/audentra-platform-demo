@@ -49,7 +49,8 @@ tools/       Stateful no-Docker preview API and local launch script
 
 ## Run the portal now, without Docker
 
-Requirements: Node.js 22.13 or newer and npm.
+Requirements: Node.js 22 LTS and npm. The repository pins `22.23.1` in
+`.nvmrc`; use that version for the same runtime as CI.
 
 ```bash
 npm run demo:reset
@@ -109,7 +110,8 @@ idempotent upload replay does not spend LLM tokens twice.
 
 ## Run the complete local stack
 
-Requirements: Docker Desktop with Compose, Node.js 22.13 or newer, and npm.
+Requirements: Docker Desktop with Compose, Node.js 22 LTS (see `.nvmrc`), and
+npm.
 
 ```bash
 cp .env.example .env
@@ -171,6 +173,19 @@ credential account; password and session tokens are never stored in plaintext;
 email/SMS verification delivery remains provider-adapted. Replacing the local
 JSON adapter with that service or institutional OIDC does not change student
 domain ownership or frontend API contracts.
+
+## Continue this project with Codex
+
+Start with the portable [Codex continuation handoff](CODEX_RESUME.md). It
+contains the current state, verified test boundary, known next issue, and a
+paste-ready prompt for a fresh Codex task. The
+[sanitized visible session history](docs/codex-session-visible-history.md) is
+available when an earlier product decision needs more context.
+
+The native Codex task database is machine-local, so a Git clone cannot make the
+original task appear in `codex resume`. The checked-in handoff provides the
+safe repository-based continuation path without committing secrets, internal
+reasoning, local student data, or raw session records.
 
 ## Deployed preview
 

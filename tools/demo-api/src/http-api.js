@@ -51,6 +51,7 @@ import { CredentialAuthStore } from "./credential-auth-store.js";
 import { StudentStoreRegistry } from "./student-store-registry.js";
 import { createOpenRouterGatewayFromEnv } from "./openrouter.js";
 import {
+  guardedEdwardResponse,
   normalizeEdwardPageContext,
   normalizeEdwardResponse,
 } from "./edward-safety.js";
@@ -847,6 +848,8 @@ async function route({
   if (method === "POST" && path === "/v1/student/assistant/messages") {
     const body = await readJson(request);
     const pageContext = validateEdwardInput(body);
+    const guarded = guardedEdwardResponse(body.message);
+    if (guarded) return { body: guarded };
     const state = store.snapshot();
     const studentContext = buildAssistantContext(state);
     const response = await ai.askEdward({
@@ -859,7 +862,27 @@ async function route({
       // The preview mirrors the production API: the orchestration layer—not
       // an intent regex—attaches receipts for projections it just collected.
       body: {
-        ...normalizeEdwardResponse(response),
+        ...normalizeEdwardResponse(response, {
+          offerId: studentContext.offerId,
+          depositAmountCents: studentContext.depositAmountCents,
+          depositPaid: studentContext.depositPaid,
+          allowDepositPayment:
+            /(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/i.test(
+              body.message,
+            ),
+          documentUploadCategory:
+            /upload|transcript|fafsa|verification/i.test(body.message)
+              ? /transcript/i.test(body.message)
+                ? "transcript"
+                : "financial_aid"
+              : null,
+          appointmentType:
+            /appointment|advisor|counselor|human/i.test(body.message)
+              ? /financial|aid|fafsa|loan/i.test(body.message)
+                ? "financial_aid"
+                : "enrollment_support"
+              : null,
+        }),
         contextReceipts: studentContext.contextReceipts,
       },
     };
@@ -1454,7 +1477,17 @@ async function extractStudentDocumentSafely({
         bytes,
         expectedDocumentType,
       });
-      extraction = failedExtractionForNoUsefulOutput(extraction, clock());
+      extraction = failedExtractionForNoUsefulOutput(
+        extraction,
+        clock(),
+        expectedDocumentType,
+      );
+      if (
+        category === "financial_aid" &&
+        extraction.status === "completed"
+      ) {
+        extraction = classificationOnlyExtraction(extraction);
+      }
       if (
         requirementId &&
         expectedDocumentType &&
@@ -1509,10 +1542,17 @@ function developmentResponseStorageEnabled(environment) {
   return environment.NODE_ENV !== "production";
 }
 
-function failedExtractionForNoUsefulOutput(extraction, now) {
+function failedExtractionForNoUsefulOutput(
+  extraction,
+  now,
+  expectedDocumentType,
+) {
   if (
     extraction?.status !== "completed" ||
-    hasUsefulStructuredOutput(extraction)
+    hasUsefulStructuredOutput(extraction) ||
+    (expectedDocumentType &&
+      extraction?.documentType &&
+      extraction.documentType !== expectedDocumentType)
   ) {
     return extraction;
   }
@@ -1562,6 +1602,20 @@ function hasUsefulStructuredOutput(extraction) {
     extraction.issueDate,
     extraction.academicTerm,
   ].some((value) => typeof value === "string" && value.trim());
+}
+
+function classificationOnlyExtraction(extraction) {
+  return {
+    ...extraction,
+    studentName: null,
+    institutionName: null,
+    issueDate: null,
+    academicTerm: null,
+    fields: [],
+    courses: [],
+    visualRegions: [],
+    verifiedAt: null,
+  };
 }
 
 function shouldAutomaticallyRetryExtraction(error, failure) {

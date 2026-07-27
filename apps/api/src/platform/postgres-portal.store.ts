@@ -1421,7 +1421,7 @@ export class PostgresPortalStore {
           AND id = ${input.documentId}
           AND status = 'uploaded'
           AND extraction IS NULL
-          AND processing_mode = 'agentic'
+          AND processing_mode IN ('agentic', 'classification_only')
         RETURNING id
       `);
       if (rows(result).length !== 1) return false;

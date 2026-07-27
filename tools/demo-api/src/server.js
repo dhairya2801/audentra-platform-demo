@@ -1,7 +1,27 @@
 import { createDemoApi } from "./http-api.js";
+import { createDeterministicE2eAi } from "./deterministic-e2e-ai.js";
+import { createSeedState } from "./seed.js";
 import { JsonStateStore, defaultDataFile } from "./store.js";
 
 const port = readPort(process.env.DEMO_API_PORT ?? process.env.PORT);
+const host = process.env.DEMO_API_HOST?.trim() || "0.0.0.0";
+const e2eDocumentAi = process.env.VV_E2E_DOCUMENT_AI?.trim().toLowerCase();
+const completedE2eStudent =
+  process.env.VV_E2E_COMPLETED_STUDENT?.trim().toLowerCase() === "true";
+if (e2eDocumentAi && process.env.NODE_ENV === "production") {
+  throw new Error("VV_E2E_DOCUMENT_AI cannot be enabled in production");
+}
+if (completedE2eStudent && process.env.NODE_ENV === "production") {
+  throw new Error("VV_E2E_COMPLETED_STUDENT cannot be enabled in production");
+}
+if (completedE2eStudent && e2eDocumentAi !== "deterministic") {
+  throw new Error(
+    "VV_E2E_COMPLETED_STUDENT requires the deterministic browser-test mode",
+  );
+}
+if (e2eDocumentAi && e2eDocumentAi !== "deterministic") {
+  throw new Error("VV_E2E_DOCUMENT_AI must be 'deterministic' when configured");
+}
 const dataFile = process.env.DEMO_API_DATA_FILE ?? defaultDataFile;
 const origins = (
   process.env.DEMO_API_ORIGINS ??
@@ -10,15 +30,25 @@ const origins = (
   .split(",")
   .map((origin) => origin.trim())
   .filter(Boolean);
-const store = new JsonStateStore(dataFile);
+const store = new JsonStateStore(
+  dataFile,
+  undefined,
+  undefined,
+  completedE2eStudent
+    ? () => createSeedState({ completedOnboarding: true })
+    : createSeedState,
+);
 const { server } = await createDemoApi({
   store,
   allowedOrigins: origins,
+  ...(e2eDocumentAi === "deterministic"
+    ? { ai: createDeterministicE2eAi() }
+    : {}),
 });
 
 await new Promise((resolve, reject) => {
   server.once("error", reject);
-  server.listen(port, "0.0.0.0", resolve);
+  server.listen(port, host, resolve);
 });
 process.stdout.write(
   `${JSON.stringify({
@@ -27,7 +57,11 @@ process.stdout.write(
     service: "vv-demo-api",
     message: "development_preview_started",
     port,
+    host,
     dataFile: store.filePath,
+    documentAiMode:
+      e2eDocumentAi === "deterministic" ? "deterministic-e2e" : "configured",
+    completedE2eStudent,
   })}\n`,
 );
 

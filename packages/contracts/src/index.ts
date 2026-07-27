@@ -343,7 +343,10 @@ export type StudentDocumentCategory =
   | "consent"
   | "other";
 
-export type StudentDocumentProcessingMode = "agentic" | "manual_review";
+export type StudentDocumentProcessingMode =
+  | "agentic"
+  | "classification_only"
+  | "manual_review";
 
 /**
  * Server-authored upload policy. The browser may suggest a category, but it
@@ -352,9 +355,9 @@ export type StudentDocumentProcessingMode = "agentic" | "manual_review";
 export function documentProcessingModeForCategory(
   category: StudentDocumentCategory,
 ): StudentDocumentProcessingMode {
-  return category === "identity" || category === "transcript"
-    ? "agentic"
-    : "manual_review";
+  if (category === "identity" || category === "transcript") return "agentic";
+  if (category === "financial_aid") return "classification_only";
+  return "manual_review";
 }
 
 export interface ExtractedDocumentField {

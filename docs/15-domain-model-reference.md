@@ -205,7 +205,10 @@ No React component or model response may directly assign these states.
 ## 7. Document model
 
 ```ts
-type StudentDocumentProcessingMode = "agentic" | "manual_review";
+type StudentDocumentProcessingMode =
+  | "agentic"
+  | "classification_only"
+  | "manual_review";
 
 interface StudentDocument {
   id: string;

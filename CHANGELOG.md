@@ -9,6 +9,19 @@ compatibility.
 
 ### Changed
 
+- Added browser-level misuse acceptance tests for authentication and document
+  workflows, with screenshots/videos/traces retained on failure
+- Added Edward adversarial browser tests for code-execution requests, prompt
+  injection, cross-student access, XSS, malicious provider links/actions,
+  forged payment widgets, and oversized prompts
+- Added persistent client-side authentication validation and password
+  confirmation without weakening API validation
+- Financial-aid uploads now use classification-only AI checks: unrelated files
+  cannot advance the requirement and extracted financial fields are discarded
+- Document-type mismatches now render as warnings and classification-only
+  uploads no longer show a field-confirmation panel
+- Pinned the supported local/CI runtime to Node.js 22 LTS to avoid a Node 26.5
+  native test-runner failure observed on macOS
 - Aligned first-session onboarding with the product-owner reference questions
   while keeping document collection in enrollment
 - Removed the redundant “Confirm your student record” block and the
@@ -18,6 +31,18 @@ compatibility.
 - Expanded housing and campus-life onboarding into the reference branches
 - Made housing, campus life, and deposit skippable for later completion
 - Deposit onboarding now pays only after an explicit `pay_now` selection
+
+### Security
+
+- High-risk Edward capability-escalation requests are rejected before student
+  context collection or an LLM call
+- Edward has an explicit tool boundary with no shell, Python, filesystem,
+  secret-store, raw-SQL, or arbitrary-network capability
+- Model prose is normalized at the HTTP boundary; active markup, unsafe URI
+  schemes, external navigation, and non-allowlisted routes are removed
+- Deposit widgets require explicit payment intent and are rebuilt from the
+  authoritative offer ID, amount, and payment status instead of trusting
+  provider-supplied fields
 
 ### Planned
 

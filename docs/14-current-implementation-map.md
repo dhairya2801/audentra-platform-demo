@@ -159,6 +159,7 @@ flowchart TD
   Store --> Policy{"Server processing policy"}
   Policy -->|manual_review| Staff["Under review"]
   Policy -->|agentic| Queue["Durable extraction request"]
+  Policy -->|classification_only| Queue
   Queue --> Preprocess["Extract PDF text + render bounded page images"]
   Preprocess --> Provider{"Configured provider"}
   Provider -->|Groq transcript| Text["Text-only strict JSON schema"]
@@ -166,6 +167,7 @@ flowchart TD
   Text --> Normalize["Validate and normalize"]
   Multi --> Normalize
   Normalize --> Result["Reviewable extraction"]
+  Result --> Financial["Financial-aid type check; extracted fields discarded"]
   Result --> Transcript["Advisory transcript credits and exemption insights"]
   Result --> Identity["Safe identity fields + optional cropped photo region"]
 ```
@@ -175,7 +177,8 @@ Important invariants:
 - metadata is committed before file processing;
 - the original is retained if parsing fails;
 - identity and transcript are agentic today;
-- financial-aid and immunization uploads go directly to manual review;
+- financial-aid uploads use document-type-only classification before staff
+  review, while immunization uploads go directly to manual review;
 - provider responses and normalized results are separate records;
 - transcript course matching is advisory, never an official exemption;
 - duplicate worker delivery cannot spend model tokens twice after a terminal

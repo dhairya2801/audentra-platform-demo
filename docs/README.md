@@ -44,11 +44,21 @@ security, ownership, or deployment pressure justifies it.
 15. [Domain model and object reference](./15-domain-model-reference.md)
 16. [Deployment, security, and CI/CD runbook](./16-deployment-security-and-cicd.md)
 17. [Onboarding question alignment](./17-onboarding-question-alignment.md)
-18. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
+18. [Browser misuse and edge testing](./18-browser-misuse-and-edge-testing.md)
+19. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
 
 For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
 explain the architectural decisions, domain workflows, and longer-term design
 in greater depth.
+
+## Codex continuation artifacts
+
+- [Portable continuation handoff](../CODEX_RESUME.md)
+- [Sanitized visible session history](./codex-session-visible-history.md)
+
+Use the handoff first on another computer. The history is a reference for
+earlier product discussions; it is not a replacement for the current code and
+architecture documents.
 
 ## Non-negotiable engineering principles
 

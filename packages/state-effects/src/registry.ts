@@ -85,7 +85,7 @@ export const stateFieldOwnership = [
   {
     field: "document.processingMode",
     owner: "documents",
-    description: "Server-authored policy deciding whether a stored original enters agentic extraction or direct staff review.",
+    description: "Server-authored policy selecting full agentic extraction, document-type-only classification, or direct staff review.",
     classification: "internal",
   },
   {
@@ -344,7 +344,7 @@ export const stateEffects = [
     owner: "documents",
     kind: "command",
     handler: "PostgresPortalStore.claimStudentDocumentProcessing",
-    description: "After object storage succeeds, atomically routes agentic categories to extraction and disabled categories directly to staff review.",
+    description: "After object storage succeeds, atomically routes full-extraction and classification-only categories to durable processing, and disabled categories directly to staff review.",
     reads: [
       "document.status",
       "document.processingMode",
