@@ -395,10 +395,7 @@ export class InMemoryPlatformStore implements PlatformStore {
         "The authenticated student was not found",
       );
     }
-    const offerDeferred =
-      this.onboarding.data.skippedSteps?.includes("offer") === true;
-    const required =
-      this.onboarding.status !== "completed" && !offerDeferred;
+    const required = this.onboarding.status !== "completed";
     return {
       authenticated: true,
       student: {
@@ -600,11 +597,14 @@ export class InMemoryPlatformStore implements PlatformStore {
         );
       }
       if (
-        this.onboarding.completedSteps.length !== ONBOARDING_STEPS.length
+        this.onboarding.completedSteps.length !== ONBOARDING_STEPS.length ||
+        (this.onboarding.data.skippedSteps ?? []).some(
+          (step) => !isSkippableOnboardingStep(step),
+        )
       ) {
         throw new ConflictError(
           "ONBOARDING_INCOMPLETE",
-          "Every onboarding step must be completed in order",
+          "Every required onboarding step must be completed in order",
         );
       }
       this.onboarding = {

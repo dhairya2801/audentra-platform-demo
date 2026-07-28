@@ -476,17 +476,17 @@ describe("OpenRouterStudentAiGateway", () => {
     expect(calls).toBe(0);
   });
 
-  it("routes transcript text to Groq without rendering or sending images", async () => {
+  it("routes transcript text and rendered pages to Groq vision", async () => {
     const groqConfig: AppConfig = {
       ...config,
       transcriptParsing: "groq",
       groq: {
         apiKey: "groq-key",
-        model: "openai/gpt-oss-120b",
+        model: "qwen/qwen3.6-27b",
         documentTimeoutMs: 60_000,
-        documentMaxTokens: 4_000,
-        documentMaxTextCharacters: 10_000,
-        reasoningEffort: "low",
+        documentMaxTokens: 1_400,
+        documentMaxTextCharacters: 40_000,
+        reasoningEffort: "none",
       },
     };
     const requests: Array<{
@@ -506,7 +506,7 @@ describe("OpenRouterStudentAiGateway", () => {
         return new Response(
           JSON.stringify({
             id: "groq-generation-1",
-            model: "openai/gpt-oss-120b",
+            model: "qwen/qwen3.6-27b",
             choices: [
               {
                 finish_reason: "stop",
@@ -542,11 +542,19 @@ describe("OpenRouterStudentAiGateway", () => {
       async (_input, options) => {
         preprocessingOptions.push(options);
         return {
-          extractedText: "Official Transcript\nMATH 201 Calculus II A",
+          extractedText: "",
           pageCount: 1,
           renderedPageNumbers: [],
           textTruncated: true,
-          images: [],
+          images: [
+            {
+              pageNumber: 1,
+              mimeType: "image/jpeg",
+              dataBase64: "aW1hZ2U=",
+              width: 900,
+              height: 1200,
+            },
+          ],
         };
       },
     );
@@ -560,9 +568,13 @@ describe("OpenRouterStudentAiGateway", () => {
 
     expect(extraction.provider).toBe("groq");
     expect(extraction.courses).toHaveLength(1);
-    expect(extraction.warnings[0]).toContain("course list may be incomplete");
+    expect(extraction.warnings.join(" ")).toContain("rendered page images");
     expect(preprocessingOptions).toEqual([
-      { maxImagePages: 0, maxTextCharacters: 10_000 },
+      {
+        maxImagePages: 8,
+        maxImageDimension: 1_024,
+        maxTextCharacters: 40_000,
+      },
     ]);
     expect(requests[0]?.url).toBe(
       "https://api.groq.com/openai/v1/chat/completions",
@@ -570,17 +582,16 @@ describe("OpenRouterStudentAiGateway", () => {
     expect(requests[0]?.headers.Authorization).toBe("Bearer groq-key");
     expect(requests[0]?.headers).not.toHaveProperty("HTTP-Referer");
     expect(requests[0]?.body).toMatchObject({
-      model: "openai/gpt-oss-120b",
-      max_completion_tokens: 4_000,
-      reasoning_effort: "low",
+      model: "qwen/qwen3.6-27b",
+      max_completion_tokens: 1_400,
+      reasoning_effort: "none",
       include_reasoning: false,
       response_format: {
-        type: "json_schema",
-        json_schema: { strict: true },
+        type: "json_object",
       },
     });
     expect(requests[0]?.body).not.toHaveProperty("max_tokens");
-    expect(JSON.stringify(requests[0]?.body)).not.toContain("image_url");
+    expect(JSON.stringify(requests[0]?.body)).toContain("image_url");
   });
 
   it("keeps provider diagnostics private while preserving status for parsing retry", async () => {

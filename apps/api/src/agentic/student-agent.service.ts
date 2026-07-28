@@ -719,6 +719,19 @@ function classifyExtractionFailure(
     };
   }
   if (
+    /(?:\b413\b|tokens per minute|rate_limit_exceeded|request too large)/.test(
+      detail,
+    )
+  ) {
+    return {
+      failureCode: "provider_unavailable",
+      retryable: true,
+      automaticRetryable: false,
+      warning:
+        "The parsing request exceeded the provider's current token allowance. You can retry the stored file after the parsing configuration is adjusted.",
+    };
+  }
+  if (
     /(?:\b429\b|\b5\d\d\b|network|fetch failed|econn|enotfound|temporar(?:y|ily)|unavailable)/.test(
       detail,
     )
@@ -753,7 +766,7 @@ function classifyExtractionFailure(
     };
   }
   if (
-    /(?:\b400\b|\b404\b|\b413\b|\b415\b|\b422\b|unsupported|not supported|capability|file-parser)/.test(
+    /(?:\b400\b|\b404\b|\b415\b|\b422\b|unsupported|not supported|capability|file-parser)/.test(
       detail,
     )
   ) {

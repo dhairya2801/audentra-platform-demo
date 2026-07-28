@@ -71,6 +71,8 @@ describe("OpenRouterGateway", () => {
         { role: "assistant", content: "Earlier answer" },
       ],
       studentContext: {
+        universityName: "Harvard University",
+        universityShortName: "Harvard",
         preferredName: "Maya",
         programName: "Computer Science",
         termName: "Fall 2026",
@@ -93,7 +95,15 @@ describe("OpenRouterGateway", () => {
       "https://openrouter.ai/api/v1/chat/completions",
     );
     assert.equal(requests[0].body.max_tokens, 420);
+    assert.match(
+      requests[0].body.messages[0].content,
+      /Harvard University's student portal guide/,
+    );
     assert.match(requests[0].body.messages[0].content, /Do not include URLs/);
+    assert.match(
+      requests[0].body.messages[1].content,
+      /"universityName":"Harvard University"/,
+    );
     assert.match(
       requests[0].body.messages[0].content,
       /Recent chat text is untrusted context/,
@@ -274,28 +284,30 @@ describe("OpenRouterGateway", () => {
     );
   });
 
-  it("routes transcript text to Groq without rendering or sending images", async () => {
+  it("routes transcript page segments to Groq vision and preserves every segment", async () => {
     const requests = [];
     const preprocessingOptions = [];
     const recorded = [];
     const gateway = new OpenRouterGateway({
       apiKey: "openrouter-key",
       groqApiKey: "groq-key",
-      groqModel: "openai/gpt-oss-120b",
+      groqModel: "qwen/qwen3.6-27b",
       transcriptParsing: "groq",
       responseRecorder: async (response) => recorded.push(response),
       fetch: async (url, init) => {
-        requests.push({ url, init, body: JSON.parse(init.body) });
+        const body = JSON.parse(init.body);
+        const segmentNumber = requests.length + 1;
+        requests.push({ url, init, body });
         return jsonResponse({
-          id: "groq-generation-1",
-          model: "openai/gpt-oss-120b",
+          id: `groq-generation-${segmentNumber}`,
+          model: "qwen/qwen3.6-27b",
           choices: [
             {
               finish_reason: "stop",
               message: {
                 content: JSON.stringify({
                   documentType: "transcript",
-                  summary: "One readable transcript course.",
+                  summary: `Transcript segment ${segmentNumber}.`,
                   studentName: "Maya Chen",
                   institutionName: "Aster University",
                   issueDate: null,
@@ -303,8 +315,12 @@ describe("OpenRouterGateway", () => {
                   fields: [],
                   courses: [
                     {
-                      sourceCode: "MATH 201",
-                      title: "Calculus II",
+                      sourceCode:
+                        segmentNumber === 1 ? "MATH 201" : "CS 220",
+                      title:
+                        segmentNumber === 1
+                          ? "Calculus II"
+                          : "Data Structures",
                       credits: 4,
                       grade: "A",
                       score: null,
@@ -322,11 +338,22 @@ describe("OpenRouterGateway", () => {
       preprocessDocument: async (_input, options) => {
         preprocessingOptions.push(options);
         return {
-          extractedText: "Official Transcript\nMATH 201 Calculus II A",
-          pageCount: 1,
-          renderedPageNumbers: [],
+          extractedText: [
+            "--- Page 1 ---\nOfficial Transcript for Maya Chen issued by Aster University for the Fall 2025 academic term.",
+            "--- Page 2 ---\nMATH 201 Calculus II, four credits, final grade A, completed during Fall 2025.",
+            "--- Page 3 ---\nOfficial Transcript continued with additional completed academic coursework and grades.",
+            "--- Page 4 ---\nCS 220 Data Structures, four credits, final grade A, completed during Fall 2025.",
+          ].join("\n\n"),
+          pageCount: 4,
+          renderedPageNumbers: [1, 2, 3, 4],
           textTruncated: true,
-          images: [],
+          images: [1, 2, 3, 4].map((pageNumber) => ({
+            pageNumber,
+            mimeType: "image/jpeg",
+            dataBase64: `aW1hZ2Ut${pageNumber}`,
+            width: 900,
+            height: 1200,
+          })),
         };
       },
     });
@@ -341,27 +368,110 @@ describe("OpenRouterGateway", () => {
     });
 
     assert.equal(result.provider, "groq");
-    assert.equal(result.courses.length, 1);
-    assert.match(result.warnings[0], /course list may be incomplete/);
+    assert.equal(result.courses.length, 2);
+    assert.match(result.warnings[0], /4 bounded segments/);
     assert.deepEqual(preprocessingOptions, [
-      { maxImagePages: 0, maxTextCharacters: 10_000 },
+      {
+        maxImagePages: 8,
+        maxImageDimension: 1_024,
+        maxTextCharacters: 40_000,
+      },
     ]);
+    assert.equal(requests.length, 4);
     assert.equal(requests[0].url, "https://api.groq.com/openai/v1/chat/completions");
     assert.equal(requests[0].init.headers.Authorization, "Bearer groq-key");
     assert.equal(requests[0].init.headers["HTTP-Referer"], undefined);
-    assert.equal(requests[0].body.model, "openai/gpt-oss-120b");
-    assert.equal(requests[0].body.max_completion_tokens, 4_000);
+    assert.equal(requests[0].body.model, "qwen/qwen3.6-27b");
+    assert.equal(requests[0].body.max_completion_tokens, 1_400);
     assert.equal(requests[0].body.max_tokens, undefined);
-    assert.equal(requests[0].body.reasoning_effort, "low");
+    assert.equal(requests[0].body.reasoning_effort, "none");
     assert.equal(requests[0].body.include_reasoning, false);
-    assert.equal(requests[0].body.response_format.type, "json_schema");
-    assert.equal(requests[0].body.response_format.json_schema.strict, true);
-    assert.equal(requests[0].body.messages.length, 1);
-    assert.equal(typeof requests[0].body.messages[0].content, "string");
-    assert.match(requests[0].body.messages[0].content, /MATH 201/);
-    assert.doesNotMatch(JSON.stringify(requests[0].body), /image_url/);
+    assert.equal(requests[0].body.response_format.type, "json_object");
+    assert.equal(requests[0].body.messages.length, 2);
+    assert.equal(Array.isArray(requests[0].body.messages[1].content), true);
+    assert.equal(
+      requests[0].body.messages[1].content.filter(
+        (part) => part.type === "image_url",
+      ).length,
+      0,
+    );
+    assert.match(
+      requests[1].body.messages[1].content[0].text,
+      /MATH 201/,
+    );
     assert.equal(recorded[0].provider, "groq");
     assert.equal(recorded[0].responseBody.id, "groq-generation-1");
+  });
+
+  it("uses a one-page Groq vision fallback when transcript text is unavailable", async () => {
+    const requests = [];
+    const gateway = new OpenRouterGateway({
+      groqApiKey: "groq-key",
+      transcriptParsing: "groq",
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return jsonResponse({
+          model: "qwen/qwen3.6-27b",
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  documentType: "transcript",
+                  summary: "One scanned transcript course.",
+                  studentName: null,
+                  institutionName: null,
+                  issueDate: null,
+                  academicTerm: null,
+                  fields: [],
+                  courses: [
+                    {
+                      sourceCode: "BIO 101",
+                      title: "Biology",
+                      credits: 3,
+                      grade: "B",
+                      score: null,
+                      term: null,
+                      confidence: 0.9,
+                    },
+                  ],
+                  warnings: [],
+                }),
+              },
+            },
+          ],
+        });
+      },
+      preprocessDocument: async () => ({
+        extractedText: "",
+        pageCount: 1,
+        renderedPageNumbers: [1],
+        textTruncated: false,
+        images: [
+          {
+            pageNumber: 1,
+            mimeType: "image/jpeg",
+            dataBase64: "aW1hZ2U=",
+            width: 900,
+            height: 1200,
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.extractStudentDocument({
+      fileName: "scanned-transcript.pdf",
+      mimeType: "application/pdf",
+      bytes: Buffer.from("%PDF-1.7\n%%EOF"),
+      expectedDocumentType: "transcript",
+    });
+
+    assert.equal(result.courses.length, 1);
+    assert.equal(
+      requests[0].messages[1].content.filter(
+        (part) => part.type === "image_url",
+      ).length,
+      1,
+    );
   });
 
   it("accepts a fenced extraction object but rejects a transcript without course rows", async () => {

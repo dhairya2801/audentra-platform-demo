@@ -101,6 +101,65 @@ async function completeProfilePrerequisite(baseUrl) {
 }
 
 describe("contract-compatible development preview API", () => {
+  it("resolves two university tenants and isolates their demo records", async () => {
+    const { baseUrl } = await startPreview();
+    const asterHeaders = { "x-tenant-slug": "aster" };
+    const harvardHeaders = { "x-tenant-slug": "harvard" };
+
+    const asterContext = await api(baseUrl, "/v1/tenant/context", {
+      authenticated: false,
+      headers: asterHeaders,
+    });
+    const harvardContext = await api(baseUrl, "/v1/tenant/context", {
+      authenticated: false,
+      headers: harvardHeaders,
+    });
+    assert.equal(asterContext.payload.name, "Aster University");
+    assert.equal(harvardContext.payload.name, "Harvard University");
+
+    const asterBootstrap = await api(baseUrl, "/v1/student/bootstrap", {
+      headers: asterHeaders,
+    });
+    const harvardBootstrap = await api(baseUrl, "/v1/student/bootstrap", {
+      headers: harvardHeaders,
+    });
+    assert.equal(asterBootstrap.payload.tenant.slug, "aster");
+    assert.equal(harvardBootstrap.payload.tenant.slug, "harvard");
+    assert.notEqual(
+      asterBootstrap.payload.tenant.id,
+      harvardBootstrap.payload.tenant.id,
+    );
+
+    const harvardProfile = await api(baseUrl, "/v1/student/profile", {
+      headers: harvardHeaders,
+    });
+    const updatedHarvardProfile = await api(baseUrl, "/v1/student/profile", {
+      method: "PATCH",
+      headers: harvardHeaders,
+      body: {
+        expectedVersion: harvardProfile.payload.version,
+        preferredName: "Harvard Student",
+        pronouns: harvardProfile.payload.pronouns,
+        mobilePhone: harvardProfile.payload.mobilePhone,
+        communicationPreference:
+          harvardProfile.payload.communicationPreference,
+      },
+    });
+    assert.equal(updatedHarvardProfile.payload.preferredName, "Harvard Student");
+
+    const unchangedAsterProfile = await api(baseUrl, "/v1/student/profile", {
+      headers: asterHeaders,
+    });
+    assert.equal(unchangedAsterProfile.payload.preferredName, "Alex");
+
+    const unknownTenant = await api(baseUrl, "/v1/tenant/context", {
+      authenticated: false,
+      headers: { "x-tenant-slug": "unknown" },
+    });
+    assert.equal(unknownTenant.response.status, 400);
+    assert.equal(unknownTenant.payload.error.code, "UNKNOWN_TENANT");
+  });
+
   it("signs up credential students and isolates their portal records", async () => {
     const { baseUrl } = await startPreview();
     const firstSignup = await api(baseUrl, "/v1/auth/sign-up", {
@@ -228,9 +287,9 @@ describe("contract-compatible development preview API", () => {
     assert.equal(disabled.payload.error.code, "DEMO_GUIDED_ONBOARDING_DISABLED");
   });
 
-  it("defers an offer without blocking portal access and keeps prior stages editable", async () => {
+  it("keeps onboarding and portal access locked until the offer is accepted", async () => {
     const { baseUrl } = await startPreview();
-    let onboarding = (
+    const onboarding = (
       await api(baseUrl, "/v1/student/onboarding")
     ).payload;
 
@@ -243,22 +302,23 @@ describe("contract-compatible development preview API", () => {
         skip: true,
       },
     });
-    assert.equal(deferred.response.status, 200);
-    onboarding = deferred.payload;
-    assert.equal(onboarding.currentStep, "about_you");
-    assert.deepEqual(onboarding.completedSteps, ["offer"]);
-    assert.deepEqual(onboarding.data.skippedSteps, ["offer"]);
+    assert.equal(deferred.response.status, 400);
+    assert.equal(
+      deferred.payload.error.code,
+      "ONBOARDING_STEP_REQUIRED",
+    );
 
     const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
-    assert.equal(bootstrap.payload.onboarding.required, false);
-    assert.equal(bootstrap.payload.initialRoute, "/dashboard");
+    assert.equal(bootstrap.payload.onboarding.required, true);
+    assert.equal(bootstrap.payload.onboarding.status, "in_progress");
+    assert.equal(bootstrap.payload.initialRoute, "/onboarding");
 
     await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
       method: "POST",
       body: {},
-      idempotencyKey: "deferred-offer-accept-0001",
+      idempotencyKey: "required-offer-accept-0001",
     });
-    const revised = await api(baseUrl, "/v1/student/onboarding", {
+    const accepted = await api(baseUrl, "/v1/student/onboarding", {
       method: "PUT",
       body: {
         expectedVersion: onboarding.version,
@@ -266,10 +326,10 @@ describe("contract-compatible development preview API", () => {
         data: {},
       },
     });
-    assert.equal(revised.response.status, 200);
-    assert.equal(revised.payload.currentStep, "about_you");
-    assert.deepEqual(revised.payload.completedSteps, ["offer"]);
-    assert.deepEqual(revised.payload.data.skippedSteps, []);
+    assert.equal(accepted.response.status, 200);
+    assert.equal(accepted.payload.currentStep, "about_you");
+    assert.deepEqual(accepted.payload.completedSteps, ["offer"]);
+    assert.deepEqual(accepted.payload.data.skippedSteps, []);
   });
 
   it("runs the frontend enrollment sequence with canonical contract shapes", async () => {
@@ -300,6 +360,7 @@ describe("contract-compatible development preview API", () => {
       "initialRoute",
       "onboarding",
       "student",
+      "tenant",
     ]);
     assert.equal(bootstrap.payload.authenticated, true);
     assert.equal(bootstrap.payload.initialRoute, "/onboarding");
@@ -1235,6 +1296,7 @@ describe("contract-compatible development preview API", () => {
       idempotencyKey: "bundle-offer-0001",
     });
     await completeProfilePrerequisite(baseUrl);
+    const uploadBundleId = "00000000-0000-7000-8000-000000000777";
 
     const uploadSide = async (name, idempotencyKey) => {
       const form = new FormData();
@@ -1247,6 +1309,7 @@ describe("contract-compatible development preview API", () => {
         `${name}.pdf`,
       );
       form.set("requirementId", ids.identityRequirement);
+      form.set("uploadBundleId", uploadBundleId);
       const response = await fetch(`${baseUrl}/v1/student/documents/upload`, {
         method: "POST",
         headers: {

@@ -1,3 +1,5 @@
+import { demoTenants, publicTenantContext, tenantConfigForSlug } from "./tenant-config.js";
+
 export const FIXTURE_VERSION = "vv-demo-v4";
 export const ONBOARDING_STEPS = Object.freeze([
   "offer",
@@ -280,6 +282,8 @@ const programs = [
 ];
 
 export function createSeedState(options = {}) {
+  const tenant =
+    tenantConfigForSlug(options.tenantSlug) ?? demoTenants.aster;
   const state = {
     schemaVersion: 4,
     fixture: {
@@ -288,11 +292,12 @@ export function createSeedState(options = {}) {
       updatedAt: seedTimestamp,
       revision: 1,
     },
+    tenant: publicTenantContext(tenant),
     auth: {
       demoIdentity: {
         actorId: ids.actor,
         studentId: ids.student,
-        tenantId: ids.tenant,
+        tenantId: tenant.id,
         displayName: "Alex Morgan",
       },
     },
@@ -644,7 +649,7 @@ export function createSeedState(options = {}) {
     state.profile.firstName = "";
     state.profile.lastName = "";
     state.messages[0].body =
-      "Welcome to Aster. Complete onboarding to create your student profile.";
+      `Welcome to ${tenant.shortName}. Complete onboarding to create your student profile.`;
     state.academics.transcriptCredits = [];
     state.academics.exemptions = [];
   }
@@ -666,7 +671,68 @@ export function createSeedState(options = {}) {
     };
     state.portalProjectionVersion = 2;
   }
+  customizeSeedForTenant(state, tenant);
   return state;
+}
+
+function customizeSeedForTenant(state, tenant) {
+  if (tenant.slug === "aster") return;
+
+  state.offer.campusName = "Cambridge Campus";
+  state.messages[0].subject = `Welcome to ${tenant.name}`;
+  state.messages[0].body = state.messages[0].body.replaceAll(
+    "Aster",
+    tenant.shortName,
+  );
+  for (const message of state.messages) {
+    message.senderName = `${tenant.shortName} Enrollment Team`;
+  }
+
+  const institutionalAward = state.financials.awards.find(
+    (award) => award.source === "institutional",
+  );
+  if (institutionalAward) {
+    institutionalAward.name = `${tenant.shortName} Achievement Scholarship`;
+  }
+  for (const document of state.financials.requiredDocuments) {
+    document.description = document.description.replaceAll(
+      "Aster",
+      tenant.shortName,
+    );
+  }
+
+  const [welcomeWeek, researchShowcase, internshipLab] =
+    state.campusLife.events;
+  if (welcomeWeek) welcomeWeek.location = "Harvard Yard";
+  if (researchShowcase) researchShowcase.location = "Science Center";
+  if (internshipLab) internshipLab.location = "Mignone Center";
+
+  const [robotics, codeCollective, womenInBusiness, outdoors] =
+    state.campusLife.clubs;
+  if (robotics) {
+    robotics.name = "Harvard Undergraduate Robotics Club";
+    robotics.contactChannel = "robotics@harvard.edu";
+  }
+  if (codeCollective) {
+    codeCollective.name = "Harvard Computer Society";
+    codeCollective.contactChannel = "computersociety@harvard.edu";
+  }
+  if (womenInBusiness) {
+    womenInBusiness.name = "Harvard Undergraduate Women in Business";
+    womenInBusiness.contactChannel = "womeninbusiness@harvard.edu";
+  }
+  if (outdoors) {
+    outdoors.name = "Harvard Outing Club";
+    outdoors.contactChannel = "outingclub@harvard.edu";
+  }
+
+  for (const requirement of state.requirements) {
+    requirement.title = requirement.title.replaceAll("Aster", tenant.shortName);
+    requirement.description = requirement.description.replaceAll(
+      "Aster",
+      tenant.shortName,
+    );
+  }
 }
 
 export function createJourney(acceptedAt) {

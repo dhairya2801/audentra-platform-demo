@@ -71,6 +71,30 @@ describe("CredentialAuthStore", () => {
         error?.message === "Email or password is incorrect",
     );
   });
+
+  it("scopes duplicate credentials and sessions to a university tenant", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vv-credential-auth-"));
+    const store = new CredentialAuthStore(join(directory, "auth.json"));
+    await store.initialize();
+    const input = {
+      email: "student@example.com",
+      phone: "+15551234567",
+      password: "correct-horse-123",
+    };
+
+    const aster = await store.signUp(input, "aster");
+    const harvard = await store.signUp(input, "harvard");
+
+    assert.equal(aster.account.tenantSlug, "aster");
+    assert.equal(harvard.account.tenantSlug, "harvard");
+    assert.notEqual(aster.account.id, harvard.account.id);
+    assert.equal(store.getSession(aster.sessionToken, "harvard"), null);
+    assert.equal(store.getSession(harvard.sessionToken, "aster"), null);
+    assert.equal(
+      store.getSession(aster.sessionToken, "aster")?.account.id,
+      aster.account.id,
+    );
+  });
 });
 
 describe("StudentStoreRegistry", () => {

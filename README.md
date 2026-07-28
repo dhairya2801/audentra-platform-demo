@@ -57,7 +57,8 @@ npm run demo:reset
 npm run dev:portal
 ```
 
-Open <http://localhost:3000>, create an account with an email, international
+Open <http://localhost:3000/aster> or <http://localhost:3000/harvard>, create
+an account with an email, international
 phone number, and password, then complete onboarding. Protected routes require
 the HTTP-only credential session cookie; the dashboard remains gated until
 onboarding is complete. Each account receives its own student state file and
@@ -71,6 +72,17 @@ prints `document_extraction_started`, any bounded retry/failure, and
 `document_extraction_completed` with the same document/request IDs, provider,
 model, course count, terminal status, and duration. Do not redirect this command
 to a file when you want to watch parsing live.
+
+For a detached local process with captured logs, use:
+
+```bash
+npm run portal:start
+npm run portal:status
+npm run portal:stop
+```
+
+`portal:start` returns immediately. The PID file and captured logs are local
+runtime artifacts and are not committed.
 
 Use `npm run demo:reset` while the server is stopped to restore the deterministic
 first-visit scenario. This remains a development fixture; do not enter real
@@ -96,12 +108,12 @@ the server normalizes, bounds, and review-gates the result.
 Extracted fields must be selected by the student before they enter the review
 state.
 
-For faster text-only transcript extraction, also set `GROQ_API_KEY` and
-`TRANSCRIPT_PARSING=groq`. That path uses `GROQ_MODEL` (default
-`openai/gpt-oss-120b`), extracts PDF text without rendering pages, and requests
-strict JSON-schema output. Set `TRANSCRIPT_PARSING=openrouter` to restore
-text-plus-image transcript evidence. Non-transcript documents remain on the
-OpenRouter multimodal path.
+For faster transcript extraction, also set `GROQ_API_KEY` and
+`TRANSCRIPT_PARSING=groq`. That path uses `GROQ_MODEL` (currently
+`qwen/qwen3.6-27b` by default), prefers extracted page text, and falls back to
+bounded single-page vision for scans. Set `TRANSCRIPT_PARSING=openrouter` to
+use the configured OpenRouter multimodal model instead. Non-transcript
+documents remain on the OpenRouter multimodal path.
 
 The complete Compose stack exposes the same routes through the Nest API. It
 stores document metadata and review state in PostgreSQL, stores originals in
@@ -165,6 +177,9 @@ Start with [the documentation index](docs/README.md), then read the
 longer-term design. The
 [agentic runtime guide](docs/11-agentic-runtime.md) covers Edward, document
 extraction, cost controls, and the path from the local adapter to production.
+The
+[multi-tenant student portal architecture](docs/architecture/multi-tenant-student-portal.md)
+documents local path-based tenants and the verified-hostname Kubernetes target.
 
 The no-Docker credential adapter is intentionally isolated from domain logic.
 The PostgreSQL migrations define the production identity boundary: a

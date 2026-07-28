@@ -18,7 +18,9 @@ From this directory:
 npm start
 ```
 
-The service listens on `http://localhost:4000` by default. Override settings
+The service listens on `http://localhost:4000` by default. The paired web
+preview exposes Aster under `/aster/*` and Harvard under `/harvard/*`; the web
+runtime sends the resolved tenant slug to the preview API. Override settings
 with:
 
 ```sh
@@ -64,9 +66,10 @@ is supported as a local compatibility alias with the same body.
 Offer acceptance and deposit payment create their domain records, but do not
 silently change onboarding. The versioned `PUT` for `offer` verifies that the
 offer was accepted. The deposit step records `pay_now`, `pay_later`, or
-`waiver_or_deferral`; only `pay_now` requires a successful payment. Housing,
-campus life, and deposit may be skipped for now. Once all eight steps have been
-saved, `POST /v1/student/onboarding/complete` with the latest
+`waiver_or_deferral`; only `pay_now` requires a successful payment. Campus life
+and deposit may be skipped for now. Offer acceptance, about-you details, the
+top-level housing path, emergency contacts, and review/sign are required. Once
+all eight steps have been saved, `POST /v1/student/onboarding/complete` with the latest
 `expectedVersion` finalizes onboarding. Bootstrap then changes
 `initialRoute` from `/onboarding` to `/dashboard`.
 
@@ -94,7 +97,9 @@ does not require the header.
 | GET | `/v1/student/requirements/:requirementId` | Requirement detail |
 | GET | `/v1/student/messages` | Fictional enrollment messages |
 | POST | `/v1/student/messages/:messageId/read` | Mark message read |
-| GET/POST | `/v1/student/documents` | Metadata-only document records |
+| GET | `/v1/student/documents` | Student document records and extraction state |
+| POST | `/v1/student/documents/upload` | Strict single-file PDF/JPEG/PNG upload |
+| POST | `/v1/student/documents/:id/retry-extraction` | Retry the stored original |
 | GET/POST | `/v1/student/appointments` | Enrollment appointments |
 | GET | `/v1/student/payments` | Simulated payment records |
 | POST | `/v1/student/payments/deposit` | Simulated deposit; no card data |
@@ -102,11 +107,14 @@ does not require the header.
 | GET | `/v1/student/help` | Help articles and support contact |
 | POST | `/v1/demo/help-requests` | Optional local-only help request fixture |
 
-Document endpoints never accept file bytes. Payment endpoints reject payment
-details and record only a dummy processor result. Profile fields are fictional
-local fixture data; do not enter real contact information. Activity event
-properties reject email, phone, address, government identifiers, payment
-details, and other sensitive keys.
+Uploads store the original before extraction begins, reject MIME/signature
+mismatches, and lock competing uploads for the same requirement while parsing
+is active. Processing leases expire into a retryable failure so clients do not
+poll indefinitely. Payment endpoints reject payment details and record only a
+dummy processor result. Profile fields are fictional local fixture data; do
+not enter real contact information. Activity event properties reject email,
+phone, address, government identifiers, payment details, and other sensitive
+keys.
 
 ## Test
 

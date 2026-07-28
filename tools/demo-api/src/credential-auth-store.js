@@ -52,11 +52,12 @@ export class CredentialAuthStore {
     return structuredClone(this.#requireState().accounts);
   }
 
-  async signUp(input) {
+  async signUp(input, tenantSlug = "aster") {
     const body = validateSignUp(input);
     const now = this.clock();
     const account = {
       id: randomUUID(),
+      tenantSlug,
       actorId: randomUUID(),
       studentId: randomUUID(),
       email: body.email,
@@ -69,13 +70,25 @@ export class CredentialAuthStore {
       updatedAt: now.toISOString(),
     };
     return this.#mutate((draft) => {
-      if (draft.accounts.some((candidate) => candidate.email === account.email)) {
+      if (
+        draft.accounts.some(
+          (candidate) =>
+            (candidate.tenantSlug ?? "aster") === tenantSlug &&
+            candidate.email === account.email,
+        )
+      ) {
         throw conflict(
           "AUTH_EMAIL_EXISTS",
           "An account already exists for this email address",
         );
       }
-      if (draft.accounts.some((candidate) => candidate.phone === account.phone)) {
+      if (
+        draft.accounts.some(
+          (candidate) =>
+            (candidate.tenantSlug ?? "aster") === tenantSlug &&
+            candidate.phone === account.phone,
+        )
+      ) {
         throw conflict(
           "AUTH_PHONE_EXISTS",
           "An account already exists for this phone number",
@@ -92,11 +105,13 @@ export class CredentialAuthStore {
     });
   }
 
-  async signIn(input) {
+  async signIn(input, tenantSlug = "aster") {
     const body = validateSignIn(input);
     const state = this.#requireState();
     const account = state.accounts.find(
-      (candidate) => candidate.email === body.email,
+      (candidate) =>
+        (candidate.tenantSlug ?? "aster") === tenantSlug &&
+        candidate.email === body.email,
     );
     if (
       !account ||
@@ -135,7 +150,7 @@ export class CredentialAuthStore {
     });
   }
 
-  getSession(token) {
+  getSession(token, tenantSlug = "aster") {
     if (typeof token !== "string" || token.length < 32) return null;
     const now = this.clock();
     const tokenHash = hashSessionToken(token);
@@ -149,7 +164,9 @@ export class CredentialAuthStore {
     if (!session) return null;
     const account = state.accounts.find(
       (candidate) =>
-        candidate.id === session.accountId && candidate.status === "active",
+        candidate.id === session.accountId &&
+        candidate.status === "active" &&
+        (candidate.tenantSlug ?? "aster") === tenantSlug,
     );
     return account
       ? {
@@ -311,6 +328,7 @@ function hashSessionToken(token) {
 function publicAccount(account) {
   return {
     id: account.id,
+    tenantSlug: account.tenantSlug ?? "aster",
     actorId: account.actorId,
     studentId: account.studentId,
     email: account.email,

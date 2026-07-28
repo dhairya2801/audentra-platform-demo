@@ -13,3 +13,4 @@ coverage/
 tmp/
 playwright-report/
 test-results/
+.portal-dev.pid

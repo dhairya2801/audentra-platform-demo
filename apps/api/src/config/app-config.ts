@@ -60,7 +60,7 @@ export interface AppConfig {
     documentTimeoutMs: number;
     documentMaxTokens: number;
     documentMaxTextCharacters: number;
-    reasoningEffort: "low" | "medium" | "high";
+    reasoningEffort: "none" | "low" | "medium" | "high";
   };
   objectStorage?: {
     endpoint: string;
@@ -116,11 +116,13 @@ function parseTranscriptParsing(
 
 function parseGroqReasoningEffort(
   value: string | undefined,
-): "low" | "medium" | "high" {
+): "none" | "low" | "medium" | "high" {
   const normalized = value?.trim().toLowerCase();
-  return normalized === "medium" || normalized === "high"
+  return normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high"
     ? normalized
-    : "low";
+    : "none";
 }
 
 export function loadAppConfig(
@@ -190,7 +192,7 @@ export function loadAppConfig(
     groq: {
       apiKey: environment.GROQ_API_KEY?.trim() ?? "",
       model:
-        environment.GROQ_MODEL?.trim() || "openai/gpt-oss-120b",
+        environment.GROQ_MODEL?.trim() || "qwen/qwen3.6-27b",
       documentTimeoutMs: parseBoundedInteger(
         environment.GROQ_TRANSCRIPT_TIMEOUT_MS,
         60_000,
@@ -199,15 +201,15 @@ export function loadAppConfig(
       ),
       documentMaxTokens: parseBoundedInteger(
         environment.GROQ_TRANSCRIPT_MAX_TOKENS,
-        4_000,
-        1_200,
-        7_000,
+        1_400,
+        600,
+        16_384,
       ),
       documentMaxTextCharacters: parseBoundedInteger(
         environment.GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS,
-        10_000,
+        40_000,
         2_000,
-        20_000,
+        100_000,
       ),
       reasoningEffort: parseGroqReasoningEffort(
         environment.GROQ_TRANSCRIPT_REASONING_EFFORT,

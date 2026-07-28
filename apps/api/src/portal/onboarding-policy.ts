@@ -16,7 +16,6 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
 ];
 
 const skippableOnboardingSteps = new Set<OnboardingStep>([
-  "offer",
   "campus_life",
   "deposit",
 ]);

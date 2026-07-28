@@ -7,8 +7,32 @@ compatibility.
 
 ## [Unreleased]
 
+### Added
+
+- Added path-based Aster and Harvard preview tenants with tenant-prefixed
+  routing, tenant-scoped credential/state stores, tenant-aware branding, and a
+  documented hostname-based Kubernetes production target
+- Added persistent transcript-processing leases, bounded polling, stale-job
+  expiration, upload-bundle locking, and retryable timeout recovery
+- Added background portal process commands for starting, stopping, and
+  inspecting the local web/API pair without blocking the terminal
+- Added My Documents to the primary portal navigation and requirement-specific
+  checklist actions such as Upload transcript, Select housing, and Pay deposit
+
 ### Changed
 
+- Onboarding now gates every portal route until final completion; admission
+  offer acceptance, identity/contact details, housing path, emergency contact,
+  and document signing cannot be skipped
+- Campus-life preferences and the deposit step remain deferrable without
+  allowing the student to leave incomplete onboarding
+- Transcript parsing can route independently through OpenRouter or Groq, uses
+  provider-specific multimodal segmentation, and deterministically conserves
+  course rows across segment merges
+- The local tenant preview now persists parsing state across navigation and
+  prevents competing uploads while extraction is active
+- Enrollment checklist buttons now describe the concrete action instead of
+  using the generic “Open task” label
 - Added browser-level misuse acceptance tests for authentication and document
   workflows, with screenshots/videos/traces retained on failure
 - Added Edward adversarial browser tests for code-execution requests, prompt
@@ -29,7 +53,8 @@ compatibility.
 - Replaced emergency-contact and FERPA acknowledgement checkboxes with
   structured student-entered records
 - Expanded housing and campus-life onboarding into the reference branches
-- Made housing, campus life, and deposit skippable for later completion
+- Made campus life and deposit skippable for later completion while keeping the
+  top-level housing decision required
 - Deposit onboarding now pays only after an explicit `pay_now` selection
 
 ### Security

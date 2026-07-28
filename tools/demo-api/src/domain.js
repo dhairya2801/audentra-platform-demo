@@ -199,12 +199,10 @@ export function buildOnboarding(state) {
 }
 
 export function buildBootstrap(state, clock) {
-  const offerDeferred =
-    state.onboarding.data.skippedSteps?.includes("offer") === true;
-  const onboardingRequired =
-    state.onboarding.status !== "completed" && !offerDeferred;
+  const onboardingRequired = state.onboarding.status !== "completed";
   return {
     authenticated: true,
+    tenant: structuredClone(state.tenant),
     student: {
       id: state.profile.studentId,
       preferredName: state.profile.preferredName,
@@ -567,6 +565,7 @@ export function updateOnboarding(draft, input, now) {
 }
 
 export function housingPlanResponse(state) {
+  const isHarvard = state.tenant?.slug === "harvard";
   const preference = [
     "on_campus",
     "off_campus",
@@ -590,7 +589,7 @@ export function housingPlanResponse(state) {
       {
         id: "71000000-0000-7000-8000-000000000101",
         value: "aster_residence_hall",
-        name: "Aster Residence Hall",
+        name: isHarvard ? "Harvard Yard Residence" : "Aster Residence Hall",
         description:
           "Classic first-year community with shared lounges and peer mentors.",
         amenities: ["Shared lounges", "Community kitchen", "Laundry"],
@@ -604,7 +603,7 @@ export function housingPlanResponse(state) {
       {
         id: "71000000-0000-7000-8000-000000000102",
         value: "aster_apartments",
-        name: "Aster Apartments",
+        name: isHarvard ? "Harvard Houses" : "Aster Apartments",
         description:
           "Apartment-style rooms with smaller communities and shared kitchens.",
         amenities: ["Shared kitchen", "Study room", "In-unit living space"],
@@ -617,7 +616,7 @@ export function housingPlanResponse(state) {
       {
         id: "71000000-0000-7000-8000-000000000103",
         value: "student_village",
-        name: "Student Village",
+        name: isHarvard ? "Cambridge Student Village" : "Student Village",
         description:
           "A social residential neighborhood close to recreation and dining.",
         amenities: ["Dining nearby", "Recreation access", "Community events"],
@@ -700,11 +699,14 @@ export function completeOnboarding(draft, input, now) {
     draft.onboarding.completedSteps.length !== ONBOARDING_STEPS.length ||
     draft.onboarding.completedSteps.some(
       (step, index) => step !== ONBOARDING_STEPS[index],
+    ) ||
+    (draft.onboarding.data.skippedSteps ?? []).some(
+      (step) => !isSkippableOnboardingStep(step),
     )
   ) {
     throw conflict(
       "ONBOARDING_INCOMPLETE",
-      "Every onboarding step must be completed in order",
+      "Every required onboarding step must be completed in order",
     );
   }
   draft.onboarding.status = "completed";
@@ -830,7 +832,9 @@ export function profileResponse(state) {
 }
 
 export function listRequirements(state) {
-  const items = state.requirements.map(requirementDetailResponse);
+  const items = state.requirements.map((requirement) =>
+    requirementDetailResponse(requirement, state),
+  );
   return {
     items,
     total: items.length,
@@ -850,7 +854,7 @@ export function requirementDetail(state, identifier) {
       "The enrollment requirement was not found",
     );
   }
-  return requirementDetailResponse(requirement);
+  return requirementDetailResponse(requirement, state);
 }
 
 export function listMessages(state) {
@@ -1029,6 +1033,7 @@ export function reserveDocumentUpload(draft, input, now) {
     "sizeBytes",
     "category",
     "requirementId",
+    "uploadBundleId",
     "sha256",
     "storageKey",
   ]);
@@ -1063,6 +1068,10 @@ export function reserveDocumentUpload(draft, input, now) {
     body.requirementId === undefined
       ? undefined
       : uuidValue(body.requirementId, "requirementId");
+  const uploadBundleId =
+    body.uploadBundleId === undefined
+      ? undefined
+      : uuidValue(body.uploadBundleId, "uploadBundleId");
   if (requirementId) {
     const requirement = draft.requirements.find(
       (candidate) =>
@@ -1076,6 +1085,23 @@ export function reserveDocumentUpload(draft, input, now) {
       );
     }
     category = documentCategoryForRequirement(requirement.code) ?? category;
+    const activeExtraction = draft.documents.find((candidate) => {
+      const belongsToSameBundle =
+        uploadBundleId &&
+        candidate.uploadBundleId === uploadBundleId;
+      return (
+        candidate.requirementId === requirementId &&
+        candidate.status === "processing" &&
+        candidate.extraction?.status === "processing" &&
+        !belongsToSameBundle
+      );
+    });
+    if (activeExtraction) {
+      throw conflict(
+        "DOCUMENT_EXTRACTION_IN_PROGRESS",
+        "This requirement already has a document being parsed. Wait for it to finish or fail before uploading another document.",
+      );
+    }
   }
   const sha256 = requiredString(body.sha256, "sha256", { min: 64, max: 64 });
   if (!/^[0-9a-f]{64}$/.test(sha256)) {
@@ -1092,6 +1118,7 @@ export function reserveDocumentUpload(draft, input, now) {
   const document = {
     id,
     ...(requirementId ? { requirementId } : {}),
+    ...(uploadBundleId ? { uploadBundleId } : {}),
     fileName,
     mimeType,
     sizeBytes,
@@ -1148,6 +1175,7 @@ export function queueDocumentExtraction(draft, documentId, now) {
     return documentResponse(document);
   }
   document.status = "processing";
+  const processingStartedAt = now.toISOString();
   document.extraction = {
     status: "processing",
     documentType: documentTypeForCategory(document.category),
@@ -1162,6 +1190,8 @@ export function queueDocumentExtraction(draft, documentId, now) {
     warnings: [],
     model: null,
     provider: "local",
+    processingStartedAt,
+    processingDeadlineAt: new Date(now.getTime() + 90_000).toISOString(),
     processedAt: null,
     verifiedAt: null,
   };
@@ -1176,6 +1206,7 @@ export function queueDocumentExtractionRetry(draft, documentId, now) {
     (candidate) => candidate.id === reference.id,
   );
   document.status = "processing";
+  const processingStartedAt = now.toISOString();
   document.extraction = {
     status: "processing",
     documentType: documentTypeForCategory(document.category),
@@ -1190,11 +1221,68 @@ export function queueDocumentExtractionRetry(draft, documentId, now) {
     warnings: [],
     model: null,
     provider: "local",
+    processingStartedAt,
+    processingDeadlineAt: new Date(now.getTime() + 90_000).toISOString(),
     processedAt: null,
     verifiedAt: null,
   };
   draft.portalProjectionVersion += 1;
   return { document: documentResponse(document), reference };
+}
+
+/**
+ * Converts abandoned processing leases into a retryable terminal state.
+ * Reads call this before returning document state, so a crashed worker cannot
+ * make browsers poll forever.
+ */
+export function expireStaleDocumentExtractions(draft, now) {
+  const nowMs = now.getTime();
+  let expired = 0;
+  for (const document of draft.documents) {
+    if (
+      document.status !== "processing" ||
+      document.extraction?.status !== "processing"
+    ) {
+      continue;
+    }
+    const explicitDeadlineMs = Date.parse(
+      document.extraction.processingDeadlineAt ?? "",
+    );
+    const processingStartedMs = Date.parse(
+      document.extraction.processingStartedAt ?? document.createdAt ?? "",
+    );
+    const deadlineMs = Number.isFinite(explicitDeadlineMs)
+      ? explicitDeadlineMs
+      : processingStartedMs + 90_000;
+    if (!Number.isFinite(deadlineMs) || deadlineMs > nowMs) continue;
+
+    document.status = "uploaded";
+    document.extraction = {
+      status: "failed",
+      documentType: document.extraction.documentType,
+      summary:
+        "The file is safely stored, but the parsing attempt did not finish before its processing deadline.",
+      studentName: null,
+      institutionName: null,
+      issueDate: null,
+      academicTerm: null,
+      fields: [],
+      courses: [],
+      visualRegions: [],
+      warnings: [
+        "Parsing timed out. Retry the stored document without uploading it again.",
+      ],
+      model: null,
+      provider: "local",
+      processedAt: now.toISOString(),
+      verifiedAt: null,
+      failureCode: "timeout",
+      retryable: true,
+    };
+    expired += 1;
+  }
+  if (expired > 0) draft.portalProjectionVersion += 1;
+  return expired;
 }
 
 /**
@@ -1846,6 +1934,7 @@ function documentResponse(document) {
   const {
     storageKey: _storageKey,
     contentStored: _contentStored,
+    uploadBundleId: _uploadBundleId,
     sha256,
     extraction,
     ...publicDocument
@@ -1974,7 +2063,7 @@ function requirementSummary(requirement) {
   };
 }
 
-function requirementDetailResponse(requirement) {
+function requirementDetailResponse(requirement, state) {
   return {
     ...requirementSummary(requirement),
     slug: requirementSlug(requirement.code),
@@ -1984,17 +2073,20 @@ function requirementDetailResponse(requirement) {
     responsibleOffice: requirement.responsibleOffice,
     dependencyCodes: [...requirement.dependsOnCodes],
     ...(requirement.code === "immunization_record"
-      ? { immunizationPolicy: demoImmunizationPolicy() }
+      ? { immunizationPolicy: demoImmunizationPolicy(state) }
       : {}),
   };
 }
 
-function demoImmunizationPolicy() {
+function demoImmunizationPolicy(state) {
+  const tenantName = state.tenant?.name ?? "Aster University";
+  const tenantShortName = state.tenant?.shortName ?? "Aster";
+  const tenantCode = state.tenant?.slug === "harvard" ? "HARVARD" : "ASTER";
   return {
     id: "70000000-0000-7000-8000-000000000001",
-    code: "ASTER-HEALTH-2027",
+    code: `${tenantCode}-HEALTH-2027`,
     version: 1,
-    name: "Aster 2027 student immunization requirements",
+    name: `${tenantName} 2027 student immunization requirements`,
     effectiveFrom: "2027-01-01",
     effectiveUntil: null,
     requirements: [
@@ -2021,7 +2113,7 @@ function demoImmunizationPolicy() {
         code: "covid_19",
         name: "COVID-19",
         description:
-          "A documented COVID-19 vaccination is required by this demo tenant policy.",
+          `A documented COVID-19 vaccination is required by the ${tenantShortName} demo tenant policy.`,
         required: true,
         doseCount: 1,
         validityDays: null,
@@ -2132,11 +2224,7 @@ function validateCompletedStepSequence(state) {
 }
 
 function isSkippableOnboardingStep(step) {
-  return (
-    step === "offer" ||
-    step === "campus_life" ||
-    step === "deposit"
-  );
+  return step === "campus_life" || step === "deposit";
 }
 
 function validateOnboardingData(input) {

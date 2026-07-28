@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSeedState, FIXTURE_VERSION } from "./seed.js";
+import { demoTenants, publicTenantContext } from "./tenant-config.js";
 
 export const defaultDataFile = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -134,6 +135,9 @@ export class JsonStateStore {
 }
 
 function migratePersistedOnboarding(value) {
+  if (value && typeof value === "object" && !value.tenant) {
+    value.tenant = publicTenantContext(demoTenants.aster);
+  }
   if (!value?.onboarding || typeof value.onboarding !== "object") {
     return value;
   }

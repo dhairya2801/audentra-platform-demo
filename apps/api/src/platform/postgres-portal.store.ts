@@ -389,8 +389,7 @@ export class PostgresPortalStore {
         "The authenticated student was not found",
       );
     }
-    const offerDeferred = row.payload.skippedSteps?.includes("offer") === true;
-    const required = row.status !== "completed" && !offerDeferred;
+    const required = row.status !== "completed";
     return {
       authenticated: true,
       student: {
@@ -879,11 +878,14 @@ export class PostgresPortalStore {
           current.completed_steps.length !== ONBOARDING_STEPS.length ||
           current.completed_steps.some(
             (step, index) => step !== ONBOARDING_STEPS[index],
+          ) ||
+          (current.payload.skippedSteps ?? []).some(
+            (step) => !isSkippableOnboardingStep(step),
           )
         ) {
           throw new ConflictError(
             "ONBOARDING_INCOMPLETE",
-            "Every onboarding step must be completed in order",
+            "Every required onboarding step must be completed in order",
           );
         }
         const now = new Date();

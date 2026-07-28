@@ -147,6 +147,21 @@ describe("functional student portal API", () => {
   });
 
   it("requires offer acceptance before advancing and rejects step skipping", async () => {
+    const deferred = await app.inject({
+      method: "PUT",
+      url: "/v1/student/onboarding",
+      payload: {
+        expectedVersion: 1,
+        currentStep: "offer",
+        data: {},
+        skip: true,
+      },
+    });
+    expect(deferred.statusCode).toBe(400);
+    expect(deferred.json()).toMatchObject({
+      error: { code: "ONBOARDING_STEP_REQUIRED" },
+    });
+
     const blocked = await app.inject({
       method: "PUT",
       url: "/v1/student/onboarding",

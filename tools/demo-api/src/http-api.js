@@ -18,6 +18,7 @@ import {
   createDocumentMetadata,
   confirmDocumentExtraction,
   createHelpRequest,
+  expireStaleDocumentExtractions,
   findDocumentForDownload,
   fixtureSummary,
   getHelpTopics,
@@ -49,6 +50,12 @@ import {
 import { JsonStateStore } from "./store.js";
 import { CredentialAuthStore } from "./credential-auth-store.js";
 import { StudentStoreRegistry } from "./student-store-registry.js";
+import { TenantStoreRegistry } from "./tenant-store-registry.js";
+import {
+  demoTenants,
+  publicTenantContext,
+  tenantConfigForSlug,
+} from "./tenant-config.js";
 import { createOpenRouterGatewayFromEnv } from "./openrouter.js";
 import {
   guardedEdwardResponse,
@@ -79,7 +86,12 @@ export async function createDemoApi(options = {}) {
       clock,
     );
   await store.initialize();
-  await reconcileCompletedTranscripts(store, clock);
+  const tenantStores =
+    options.tenantStores ?? new TenantStoreRegistry(store, clock);
+  await tenantStores.initialize();
+  for (const [, tenantStore] of tenantStores.entries()) {
+    await reconcileCompletedTranscripts(tenantStore, clock);
+  }
   const logger = options.logger === undefined ? console : options.logger;
   const authStore =
     options.authStore ??
@@ -251,7 +263,12 @@ export async function createDemoApi(options = {}) {
 
   // Recovery covers a process stop after object storage succeeds but before
   // the queued-state transaction or local worker scheduling has run.
-  const recoverDocumentJobs = (studentStore) => {
+  const recoverDocumentJobs = async (studentStore) => {
+    await studentStore.transact((draft, transaction) => {
+      const expired = expireStaleDocumentExtractions(draft, clock());
+      if (expired === 0) transaction.skipWrite();
+      return expired;
+    });
     for (const document of studentStore.snapshot().documents) {
       if (document.status === "processing" && document.extraction?.status === "processing") {
         enqueueDocumentExtraction(
@@ -286,9 +303,11 @@ export async function createDemoApi(options = {}) {
   // schedules only the jobs that actually exist; avoiding a wrapper immediate
   // also prevents a server from closing while an empty startup callback is
   // still pending.
-  recoverDocumentJobs(store);
+  for (const [, tenantStore] of tenantStores.entries()) {
+    await recoverDocumentJobs(tenantStore);
+  }
   for (const studentStore of studentStores.cachedStores()) {
-    recoverDocumentJobs(studentStore);
+    await recoverDocumentJobs(studentStore);
   }
 
   const server = createServer(async (request, response) => {
@@ -306,9 +325,15 @@ export async function createDemoApi(options = {}) {
         return;
       }
 
+      const tenant = resolveRequestTenant(request);
+      const requestStore = tenantStores.get(tenant.slug);
+      if (!requestStore) {
+        throw badRequest("UNKNOWN_TENANT", "The requested university is not configured");
+      }
       const result = await route({
         request,
-        store,
+        store: requestStore,
+        tenant,
         clock,
         ai,
         logger,
@@ -340,6 +365,7 @@ export async function createDemoApi(options = {}) {
           requestId,
           method: request.method,
           path: new URL(request.url ?? "/", "http://localhost").pathname,
+          tenant: request.headers["x-tenant-slug"] ?? demoTenants.aster.slug,
           status: response.statusCode,
           durationMs: Math.round(performance.now() - startedAt),
         }),
@@ -347,7 +373,7 @@ export async function createDemoApi(options = {}) {
     }
   });
 
-  return { server, store, authStore, studentStores };
+  return { server, store, authStore, studentStores, tenantStores };
 }
 
 async function reconcileCompletedTranscripts(store, clock) {
@@ -361,6 +387,7 @@ async function reconcileCompletedTranscripts(store, clock) {
 async function route({
   request,
   store,
+  tenant,
   clock,
   ai,
   logger,
@@ -385,6 +412,9 @@ async function route({
       },
     };
   }
+  if (method === "GET" && path === "/v1/tenant/context") {
+    return { body: publicTenantContext(tenant) };
+  }
   if (method === "GET" && path === "/health/ready") {
     const state = store.snapshot();
     return {
@@ -401,7 +431,11 @@ async function route({
     return { body: fixtureSummary(store.snapshot()) };
   }
   if (method === "GET" && path === "/v1/auth/session") {
-    const credentialSession = credentialSessionFor(request, authStore);
+    const credentialSession = credentialSessionFor(
+      request,
+      authStore,
+      tenant.slug,
+    );
     if (credentialSession) {
       const studentStore = await studentStores.get(credentialSession.account);
       return {
@@ -420,9 +454,9 @@ async function route({
   }
   if (method === "POST" && path === "/v1/auth/sign-up") {
     const body = await readJson(request);
-    const created = await authStore.signUp(body);
+    const created = await authStore.signUp(body, tenant.slug);
     const studentStore = await studentStores.get(created.account);
-    recoverDocumentJobs(studentStore);
+    await recoverDocumentJobs(studentStore);
     return {
       status: 201,
       body: credentialSessionResponse(
@@ -439,9 +473,9 @@ async function route({
   }
   if (method === "POST" && path === "/v1/auth/sign-in") {
     const body = await readJson(request);
-    const signedIn = await authStore.signIn(body);
+    const signedIn = await authStore.signIn(body, tenant.slug);
     const studentStore = await studentStores.get(signedIn.account);
-    recoverDocumentJobs(studentStore);
+    await recoverDocumentJobs(studentStore);
     return {
       body: credentialSessionResponse(
         signedIn.account,
@@ -505,7 +539,11 @@ async function route({
     };
   }
 
-  const credentialSession = credentialSessionFor(request, authStore);
+  const credentialSession = credentialSessionFor(
+    request,
+    authStore,
+    tenant.slug,
+  );
   if (credentialSession) {
     store = await studentStores.get(credentialSession.account);
   } else {
@@ -649,6 +687,11 @@ async function route({
   }
 
   if (method === "GET" && path === "/v1/student/documents") {
+    await store.transact((draft, transaction) => {
+      const expired = expireStaleDocumentExtractions(draft, clock());
+      if (expired === 0) transaction.skipWrite();
+      return expired;
+    });
     return { body: listDocuments(store.snapshot()) };
   }
   if (method === "POST" && path === "/v1/student/documents") {
@@ -678,6 +721,7 @@ async function route({
         sizeBytes: upload.bytes.length,
         category: upload.category,
         requirementId: upload.requirementId,
+        uploadBundleId: upload.uploadBundleId,
         sha256: digest,
       },
       mutate: (draft) => {
@@ -711,6 +755,7 @@ async function route({
             sizeBytes: upload.bytes.length,
             category: upload.category,
             requirementId: upload.requirementId,
+            uploadBundleId: upload.uploadBundleId,
             sha256: digest,
             storageKey,
           },
@@ -848,10 +893,10 @@ async function route({
   if (method === "POST" && path === "/v1/student/assistant/messages") {
     const body = await readJson(request);
     const pageContext = validateEdwardInput(body);
-    const guarded = guardedEdwardResponse(body.message);
-    if (guarded) return { body: guarded };
     const state = store.snapshot();
     const studentContext = buildAssistantContext(state);
+    const guarded = guardedEdwardResponse(body.message, studentContext);
+    if (guarded) return { body: guarded };
     const response = await ai.askEdward({
       message: body.message,
       pageContext,
@@ -1021,7 +1066,12 @@ async function readDocumentUpload(request) {
   if (!form) {
     throw badRequest("INVALID_MULTIPART", "The upload form could not be read");
   }
-  const allowedFields = new Set(["file", "category", "requirementId"]);
+  const allowedFields = new Set([
+    "file",
+    "category",
+    "requirementId",
+    "uploadBundleId",
+  ]);
   for (const field of form.keys()) {
     if (!allowedFields.has(field)) {
       throw badRequest(
@@ -1033,22 +1083,29 @@ async function readDocumentUpload(request) {
   const files = form.getAll("file");
   const categories = form.getAll("category");
   const requirementIds = form.getAll("requirementId");
+  const uploadBundleIds = form.getAll("uploadBundleId");
   if (files.length !== 1) {
     throw badRequest(
       "ONE_FILE_PER_UPLOAD",
       "Upload exactly one document per request",
     );
   }
-  if (categories.length > 1 || requirementIds.length > 1) {
+  if (
+    categories.length > 1 ||
+    requirementIds.length > 1 ||
+    uploadBundleIds.length > 1
+  ) {
     throw badRequest(
       "DUPLICATE_MULTIPART_FIELD",
-      "Category and requirement context may only be provided once",
+      "Category, requirement, and upload bundle context may only be provided once",
     );
   }
   const [file] = files;
   const category = categories.length === 1 ? categories[0] : null;
   const requirementId =
     requirementIds.length === 1 ? requirementIds[0] : null;
+  const uploadBundleId =
+    uploadBundleIds.length === 1 ? uploadBundleIds[0] : null;
   if (!(file instanceof File)) {
     throw badRequest("FILE_REQUIRED", "Choose a document file to upload");
   }
@@ -1098,6 +1155,15 @@ async function readDocumentUpload(request) {
   ) {
     throw badRequest("INVALID_REQUIREMENT_ID", "The document requirement is invalid");
   }
+  if (
+    uploadBundleId !== null &&
+    (typeof uploadBundleId !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        uploadBundleId,
+      ))
+  ) {
+    throw badRequest("INVALID_UPLOAD_BUNDLE_ID", "The upload bundle is invalid");
+  }
   const fileName = safeDownloadName(file.name);
   const requestedCategory =
     typeof requirementId === "string"
@@ -1117,6 +1183,8 @@ async function readDocumentUpload(request) {
       (typeof category === "string" ? category : "other"),
     requirementId:
       typeof requirementId === "string" ? requirementId : undefined,
+    uploadBundleId:
+      typeof uploadBundleId === "string" ? uploadBundleId : undefined,
     bytes: fileBytes,
   };
 }
@@ -1176,9 +1244,23 @@ function hasDemoSession(request) {
   return cookies.vv_demo_session === demoSessionToken;
 }
 
-function credentialSessionFor(request, authStore) {
+function credentialSessionFor(request, authStore, tenantSlug) {
   const cookies = parseCookies(request.headers.cookie);
-  return authStore.getSession(cookies.vv_session);
+  return authStore.getSession(cookies.vv_session, tenantSlug);
+}
+
+function resolveRequestTenant(request) {
+  const rawSlug = request.headers["x-tenant-slug"];
+  const slug = Array.isArray(rawSlug) ? rawSlug[0] : rawSlug;
+  if (slug === undefined || slug === "") return demoTenants.aster;
+  const tenant = tenantConfigForSlug(slug);
+  if (!tenant) {
+    throw badRequest(
+      "UNKNOWN_TENANT",
+      "The requested university is not configured",
+    );
+  }
+  return tenant;
 }
 
 function credentialSessionCookie(token, expiresAt) {
@@ -1255,7 +1337,7 @@ function applyCors(request, response, allowedOrigins) {
   );
   response.setHeader(
     "access-control-allow-headers",
-    "Content-Type, Idempotency-Key, X-Request-Id",
+    "Content-Type, Idempotency-Key, X-Request-Id, X-Tenant-Slug",
   );
   response.setHeader(
     "access-control-expose-headers",
@@ -1347,6 +1429,8 @@ function buildAssistantContext(state) {
   const academics = buildStudentAcademics(state);
   const financials = buildStudentFinancials(state);
   return {
+    universityName: state.tenant?.name ?? "the university",
+    universityShortName: state.tenant?.shortName ?? "the university",
     contextReceipts: [
       { source: "dashboard" },
       { source: "profile" },
@@ -1620,14 +1704,12 @@ function classificationOnlyExtraction(extraction) {
 
 function shouldAutomaticallyRetryExtraction(error, failure) {
   if (!failure.retryable) return false;
-  const status = Number(error?.status);
   const message = String(error?.message ?? "").toLowerCase();
   return (
-    failure.failureCode === "provider_unavailable" ||
-    failure.failureCode === "timeout" ||
-    /empty completion|no readable content/.test(message) ||
-    status === 429 ||
-    status >= 500
+    failure.failureCode === "provider_unavailable" &&
+    Number(error?.status) !== 413 &&
+    !/tokens per minute|request too large|rate_limit_exceeded/.test(message) &&
+    !/invalid json|incomplete json|no valid json/.test(message)
   );
 }
 
@@ -1655,8 +1737,9 @@ function classifyExtractionFailure(error) {
   }
   if (
     status === 429 ||
+    status === 413 ||
     status >= 500 ||
-    /rate limit|provider returned error|temporar(?:y|ily)|unavailable|fetch failed|econn|enotfound/.test(
+    /rate limit|rate_limit_exceeded|tokens per minute|request too large|provider returned error|temporar(?:y|ily)|unavailable|fetch failed|econn|enotfound/.test(
       message,
     )
   ) {

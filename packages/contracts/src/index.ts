@@ -271,6 +271,16 @@ export interface UpdateStudentHousingPlanInput {
 
 export interface StudentBootstrap {
   authenticated: true;
+  tenant?: {
+    id: string;
+    slug: string;
+    name: string;
+    shortName: string;
+    mark: string;
+    supportEmail: string;
+    admissionsEmail: string;
+    registrarEmail: string;
+  };
   student: {
     id: string;
     preferredName: string;
@@ -498,6 +508,8 @@ export interface StudentDocumentExtraction {
   warnings: string[];
   model: string | null;
   provider: "openrouter" | "groq" | "local";
+  processingStartedAt?: string;
+  processingDeadlineAt?: string;
   processedAt: string | null;
   verifiedAt: string | null;
   failureCode?: StudentDocumentExtractionFailureCode;

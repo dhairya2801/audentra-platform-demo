@@ -6,7 +6,7 @@ import {
 
 describe("onboarding policy", () => {
   it("allows optional life-planning and deposit steps to be deferred", () => {
-    expect(isSkippableOnboardingStep("offer")).toBe(true);
+    expect(isSkippableOnboardingStep("offer")).toBe(false);
     expect(isSkippableOnboardingStep("housing")).toBe(false);
     expect(isSkippableOnboardingStep("campus_life")).toBe(true);
     expect(isSkippableOnboardingStep("deposit")).toBe(true);

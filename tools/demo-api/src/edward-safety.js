@@ -76,8 +76,13 @@ export function normalizeEdwardActionHref(value) {
  * Reject capability-escalation requests before spending tokens. Edward has no
  * executor, host access, arbitrary network tool, or cross-student data tool.
  */
-export function guardedEdwardResponse(message) {
+export function guardedEdwardResponse(message, studentContext = {}) {
   if (typeof message !== "string") return null;
+  const universityName =
+    typeof studentContext.universityName === "string" &&
+    studentContext.universityName.trim()
+      ? studentContext.universityName.trim().slice(0, 120)
+      : "the university";
   const requestsCodeExecution =
     unsafeExecutionVerb.test(message) &&
     (unsafeExecutionTarget.test(message) ||
@@ -91,7 +96,7 @@ export function guardedEdwardResponse(message) {
   let reason = null;
   if (crossStudentAccess.test(message)) {
     reason =
-      "I can only use the signed-in student’s permission-scoped Aster record. I can’t access or reveal another student’s information.";
+      `I can only use the signed-in student’s permission-scoped ${universityName} record. I can’t access or reveal another student’s information.`;
   } else if (forgedRecordMutation.test(message)) {
     reason =
       "I can’t forge, approve, or mark payments and student records complete from chat. Use the authorized portal workflow so validation, idempotency, and the audit trail are preserved.";
@@ -135,7 +140,7 @@ export function sanitizeEdwardProse(value) {
     .trim();
   return (
     normalized.slice(0, 2_500) ||
-    "I prepared the relevant Aster portal action below."
+    "I prepared the relevant student portal action below."
   );
 }
 

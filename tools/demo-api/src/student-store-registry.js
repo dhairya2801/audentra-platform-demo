@@ -16,12 +16,14 @@ export class StudentStoreRegistry {
   }
 
   async get(account) {
-    const existing = this.#stores.get(account.id);
+    const tenantSlug = account.tenantSlug ?? "aster";
+    const cacheKey = `${tenantSlug}:${account.id}`;
+    const existing = this.#stores.get(cacheKey);
     if (existing) return existing;
     const store = new JsonStateStore(
-      join(this.directory, `${account.studentId}.json`),
+      join(this.directory, tenantSlug, `${account.studentId}.json`),
       this.clock,
-      join(this.directory, "uploads", account.studentId),
+      join(this.directory, tenantSlug, "uploads", account.studentId),
       () =>
         createSeedState({
           actorId: account.actorId,
@@ -29,10 +31,11 @@ export class StudentStoreRegistry {
           email: account.email,
           phone: account.phone,
           freshStudent: true,
+          tenantSlug,
         }),
     );
     await store.initialize();
-    this.#stores.set(account.id, store);
+    this.#stores.set(cacheKey, store);
     return store;
   }
 
