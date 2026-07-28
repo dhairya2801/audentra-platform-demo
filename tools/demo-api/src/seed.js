@@ -553,6 +553,12 @@ export function createSeedState(options = {}) {
           contactChannel: "robotics@aster.edu",
           latestUpdate: "New-member build teams open this week.",
           nextActivity: "Open Lab · Sep 4, 6:00 PM",
+          imageUrl: "/media/clubs/robotics.jpg",
+          imageAlt:
+            "Students collaborating on a robotics project in a workshop",
+          imageAttribution: "Photo by Vanessa Loring via Pexels",
+          imageSourceUrl:
+            "https://www.pexels.com/photo/young-students-doing-robotics-together-7869041/",
         },
         {
           id: "51000000-0000-7000-8000-000000000102",
@@ -565,6 +571,12 @@ export function createSeedState(options = {}) {
           contactChannel: "codecollective@aster.edu",
           latestUpdate: "Fall project pitches are now posted.",
           nextActivity: "Hack Night · Sep 6, 7:00 PM",
+          imageUrl: "/media/clubs/code-collective.jpg",
+          imageAlt:
+            "College students researching together around a library table",
+          imageAttribution: "Photo by Tima Miroshnichenko via Pexels",
+          imageSourceUrl:
+            "https://www.pexels.com/photo/college-students-studying-and-researching-6549913/",
         },
         {
           id: "51000000-0000-7000-8000-000000000103",
@@ -577,6 +589,12 @@ export function createSeedState(options = {}) {
           contactChannel: "wib@aster.edu",
           latestUpdate: "Peer mentor matching closes Friday.",
           nextActivity: "Coffee & Careers · Sep 7, 4:30 PM",
+          imageUrl: "/media/clubs/women-in-business.jpg",
+          imageAlt:
+            "Women collaborating around documents during a business workshop",
+          imageAttribution: "Photo by RDNE Stock project via Pexels",
+          imageSourceUrl:
+            "https://www.pexels.com/photo/businesswomen-in-a-meeting-7648511/",
         },
         {
           id: "51000000-0000-7000-8000-000000000104",
@@ -589,6 +607,12 @@ export function createSeedState(options = {}) {
           contactChannel: "outdoors@aster.edu",
           latestUpdate: "Beginner hike registration is open.",
           nextActivity: "Trail Basics · Sep 9, 9:00 AM",
+          imageUrl: "/media/clubs/outdoor-aster.jpg",
+          imageAlt:
+            "A group of friends hiking together on a forest trail",
+          imageAttribution: "Photo by Gustavo Denuncio via Pexels",
+          imageSourceUrl:
+            "https://www.pexels.com/photo/group-of-friends-hiking-in-forest-trail-30273507/",
         },
       ],
     },

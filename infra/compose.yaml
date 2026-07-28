@@ -94,6 +94,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     healthcheck:
       test:
         [
@@ -171,6 +173,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     networks:
       - vv-local
 
@@ -210,6 +214,8 @@ services:
     environment:
       NODE_ENV: development
       DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
+      API_INTERNAL_URL: http://api:4000
+      DOCUMENT_WORKER_TOKEN: ${DOCUMENT_WORKER_TOKEN:-local-development-document-worker-token}
       WORKER_ID: compose-worker
       WORKER_HEALTH_PORT: 3002
       WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
@@ -220,8 +226,8 @@ services:
     ports:
       - "${WORKER_HEALTH_PORT:-3002}:3002"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      api:
+        condition: service_healthy
     healthcheck:
       test:
         [

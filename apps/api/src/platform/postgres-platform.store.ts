@@ -32,6 +32,14 @@ function resultRows<T>(result: unknown): T[] {
   return (result as RowResult<T>).rows;
 }
 
+function isoTimestamp(value: Date | string): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Database returned an invalid timestamp");
+  }
+  return parsed.toISOString();
+}
+
 interface DashboardBaseRow {
   student_id: string;
   preferred_name: string | null;
@@ -217,7 +225,13 @@ export class PostgresPlatformStore
         response_body,
         transport_error,
         duration_ms,
-        recorded_at
+        recorded_at,
+        prompt_template_version_id,
+        context_policy_version_id,
+        output_schema_version_id,
+        config_revision,
+        context_sha256,
+        prompt_cache_status
       )
       VALUES (
         ${input.id},
@@ -239,7 +253,13 @@ export class PostgresPlatformStore
         ${JSON.stringify(input.responseBody ?? null)}::jsonb,
         ${JSON.stringify(input.transportError)}::jsonb,
         ${input.durationMs},
-        ${new Date(input.recordedAt)}
+        ${new Date(input.recordedAt)},
+        ${input.promptTemplateVersionId},
+        ${input.contextPolicyVersionId},
+        ${input.outputSchemaVersionId},
+        ${input.configRevision},
+        ${input.contextSha256},
+        ${input.promptCacheStatus}
       )
       ON CONFLICT (
         tenant_id,
@@ -339,7 +359,10 @@ export class PostgresPlatformStore
           description: requirement.description,
           status: requirement.status,
           blocking: requirement.blocking === 1,
-          dueAt: requirement.due_at?.toISOString() ?? null,
+          dueAt:
+            requirement.due_at === null
+              ? null
+              : isoTimestamp(requirement.due_at),
           progressPercent: requirement.progress_percent,
         }),
       );
@@ -509,7 +532,7 @@ export class PostgresPlatformStore
           journeyId: journey.id,
           journeyStatus: "in_progress",
           projectionVersion: Math.max(offer.version, 2),
-          acceptedAt: offer.accepted_at.toISOString(),
+          acceptedAt: isoTimestamp(offer.accepted_at),
         };
         await this.storeIdempotentResponse(
           transaction,

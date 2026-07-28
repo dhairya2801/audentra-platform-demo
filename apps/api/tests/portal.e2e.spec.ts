@@ -50,6 +50,14 @@ describe("functional student portal API", () => {
     },
   };
   const studentAiGateway: StudentAiGateway = {
+    async evaluateCourseExemptions() {
+      throw new Error("No tenant exemption context is configured in this test");
+    },
+    async evaluateImmunizationCompliance() {
+      throw new Error(
+        "No tenant immunization context is configured in this test",
+      );
+    },
     async extractStudentDocument(): Promise<StudentDocumentExtraction> {
       extractionCalls += 1;
       const queued = queuedExtractionOutcomes.shift();
@@ -254,7 +262,15 @@ describe("functional student portal API", () => {
       },
       {
         step: "review_and_sign",
-        data: { signatureFullName: "Alex Morgan" },
+        data: {
+          signatureFullName: "Alex Morgan",
+          signatureMethod: "typed",
+          signatureConsent: true,
+          signedDocumentIds: [
+            "ferpa_release",
+            "enrollment_acknowledgment",
+          ],
+        },
       },
     ];
     let version = 2;

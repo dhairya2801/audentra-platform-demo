@@ -228,6 +228,50 @@ describe("contract-compatible development preview API", () => {
     assert.equal(disabled.payload.error.code, "DEMO_GUIDED_ONBOARDING_DISABLED");
   });
 
+  it("defers an offer without blocking portal access and keeps prior stages editable", async () => {
+    const { baseUrl } = await startPreview();
+    let onboarding = (
+      await api(baseUrl, "/v1/student/onboarding")
+    ).payload;
+
+    const deferred = await api(baseUrl, "/v1/student/onboarding", {
+      method: "PUT",
+      body: {
+        expectedVersion: onboarding.version,
+        currentStep: "offer",
+        data: {},
+        skip: true,
+      },
+    });
+    assert.equal(deferred.response.status, 200);
+    onboarding = deferred.payload;
+    assert.equal(onboarding.currentStep, "about_you");
+    assert.deepEqual(onboarding.completedSteps, ["offer"]);
+    assert.deepEqual(onboarding.data.skippedSteps, ["offer"]);
+
+    const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
+    assert.equal(bootstrap.payload.onboarding.required, false);
+    assert.equal(bootstrap.payload.initialRoute, "/dashboard");
+
+    await api(baseUrl, `/v1/admission-offers/${ids.offer}/accept`, {
+      method: "POST",
+      body: {},
+      idempotencyKey: "deferred-offer-accept-0001",
+    });
+    const revised = await api(baseUrl, "/v1/student/onboarding", {
+      method: "PUT",
+      body: {
+        expectedVersion: onboarding.version,
+        currentStep: "offer",
+        data: {},
+      },
+    });
+    assert.equal(revised.response.status, 200);
+    assert.equal(revised.payload.currentStep, "about_you");
+    assert.deepEqual(revised.payload.completedSteps, ["offer"]);
+    assert.deepEqual(revised.payload.data.skippedSteps, []);
+  });
+
   it("runs the frontend enrollment sequence with canonical contract shapes", async () => {
     const { baseUrl, store } = await startPreview();
 
@@ -354,7 +398,15 @@ describe("contract-compatible development preview API", () => {
         ],
       },
       family_permissions: { familyPermissions: [] },
-      review_and_sign: { signatureFullName: "Alex Morgan" },
+      review_and_sign: {
+        signatureFullName: "Alex Morgan",
+        signatureMethod: "typed",
+        signatureConsent: true,
+        signedDocumentIds: [
+          "ferpa_release",
+          "enrollment_acknowledgment",
+        ],
+      },
     };
     for (const step of ONBOARDING_STEPS.slice(1, -1)) {
       assert.equal(onboarding.currentStep, step);
@@ -565,12 +617,11 @@ describe("contract-compatible development preview API", () => {
       body: {
         expectedVersion: housingBefore.payload.version,
         preference: "on_campus",
-        residenceOption: "aster_apartments",
       },
     });
     assert.equal(updatedHousing.response.status, 200);
     assert.equal(updatedHousing.payload.preference, "on_campus");
-    assert.equal(updatedHousing.payload.residenceOption, "aster_apartments");
+    assert.equal(updatedHousing.payload.residenceOption, null);
     assert.equal(updatedHousing.payload.version, housingBefore.payload.version + 1);
     const requirementsAfterHousing = await api(
       baseUrl,

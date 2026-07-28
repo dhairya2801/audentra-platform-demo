@@ -139,6 +139,14 @@ export class InMemoryPlatformStore implements PlatformStore {
     this.aiProviderResponses.push(structuredClone(input));
   }
 
+  async getCourseExemptionContext(): Promise<null> {
+    return null;
+  }
+
+  async getImmunizationPolicyContext(): Promise<null> {
+    return null;
+  }
+
   private readonly dashboard: StudentDashboard = {
     student: {
       id: DEMO_IDS.studentId,
@@ -387,7 +395,10 @@ export class InMemoryPlatformStore implements PlatformStore {
         "The authenticated student was not found",
       );
     }
-    const required = this.onboarding.status !== "completed";
+    const offerDeferred =
+      this.onboarding.data.skippedSteps?.includes("offer") === true;
+    const required =
+      this.onboarding.status !== "completed" && !offerDeferred;
     return {
       authenticated: true,
       student: {
@@ -430,6 +441,7 @@ export class InMemoryPlatformStore implements PlatformStore {
         residenceOption === "student_village"
           ? residenceOption
           : null,
+      residences: [],
       version: this.onboarding.version,
       updatedAt: this.onboarding.updatedAt,
     };
@@ -449,7 +461,7 @@ export class InMemoryPlatformStore implements PlatformStore {
     }
     const residenceOption =
       input.update.preference === "on_campus"
-        ? input.update.residenceOption ?? "aster_residence_hall"
+        ? input.update.residenceOption ?? null
         : null;
     this.onboarding = {
       ...this.onboarding,
@@ -489,7 +501,20 @@ export class InMemoryPlatformStore implements PlatformStore {
         "Onboarding changed in another session",
       );
     }
-    if (input.update.currentStep !== this.onboarding.currentStep) {
+    const targetStep = input.update.currentStep;
+    const targetIndex = ONBOARDING_STEPS.indexOf(targetStep);
+    const activeIndex = ONBOARDING_STEPS.indexOf(
+      this.onboarding.currentStep,
+    );
+    const editingCompletedStep =
+      this.onboarding.completedSteps.includes(targetStep);
+    if (
+      targetIndex < 0 ||
+      activeIndex < 0 ||
+      (targetStep !== this.onboarding.currentStep &&
+        !editingCompletedStep) ||
+      targetIndex > activeIndex
+    ) {
       throw new ConflictError(
         "ONBOARDING_STEP_OUT_OF_ORDER",
         `The next required onboarding step is ${this.onboarding.currentStep}`,
@@ -505,21 +530,21 @@ export class InMemoryPlatformStore implements PlatformStore {
     const mergedData = {
       ...this.onboarding.data,
       ...input.update.data,
-      ...(skip
-        ? {
-            skippedSteps: [
-              ...new Set([
-                ...(this.onboarding.data.skippedSteps ?? []),
-                input.update.currentStep,
-              ]),
-            ],
-          }
-        : {}),
+      skippedSteps: skip
+        ? [
+            ...new Set([
+              ...(this.onboarding.data.skippedSteps ?? []),
+              targetStep,
+            ]),
+          ]
+        : (this.onboarding.data.skippedSteps ?? []).filter(
+            (step) => step !== targetStep,
+          ),
     };
     if (!skip) {
       validateOnboardingStepData(input.update.currentStep, mergedData);
     }
-    if (input.update.currentStep === "offer" && !this.acceptedResponse) {
+    if (targetStep === "offer" && !skip && !this.acceptedResponse) {
       throw new ConflictError(
         "ACCEPTED_OFFER_REQUIRED",
         "Accept the admission offer before completing this step",
@@ -535,15 +560,19 @@ export class InMemoryPlatformStore implements PlatformStore {
         "Complete the enrollment deposit before saving this step",
       );
     }
-    const index = ONBOARDING_STEPS.indexOf(this.onboarding.currentStep);
+    const advancingCurrentStep = targetStep === this.onboarding.currentStep;
     this.onboarding = {
       ...this.onboarding,
       status: "in_progress",
-      currentStep: ONBOARDING_STEPS[index + 1] ?? "deposit",
-      completedSteps: [
-        ...this.onboarding.completedSteps,
-        this.onboarding.currentStep,
-      ],
+      currentStep: advancingCurrentStep
+        ? (ONBOARDING_STEPS[activeIndex + 1] ?? "deposit")
+        : this.onboarding.currentStep,
+      completedSteps: advancingCurrentStep
+        ? [
+            ...this.onboarding.completedSteps,
+            this.onboarding.currentStep,
+          ]
+        : this.onboarding.completedSteps,
       data: mergedData,
       version: this.onboarding.version + 1,
       updatedAt: "2026-07-24T12:00:00.000Z",

@@ -202,6 +202,18 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
     | "family";
 
   @IsOptional()
+  @IsIn([
+    "aster_residence_hall",
+    "aster_apartments",
+    "student_village",
+  ])
+  housingResidenceOption?:
+    | "aster_residence_hall"
+    | "aster_apartments"
+    | "student_village"
+    | null;
+
+  @IsOptional()
   @IsString()
   @MaxLength(80)
   housingRoomType?: string;
@@ -215,6 +227,16 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   @IsString()
   @MaxLength(80)
   roommateMatching?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(2, 160)
+  knownRoommateName?: string;
+
+  @IsOptional()
+  @IsEmail()
+  @MaxLength(254)
+  knownRoommateEmail?: string;
 
   @IsOptional()
   @IsString()
@@ -336,6 +358,26 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   @IsString()
   @Length(2, 240)
   signatureFullName?: string;
+
+  @IsOptional()
+  @IsIn(["typed", "drawn"])
+  signatureMethod?: "typed" | "drawn";
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(100_000)
+  signatureImageData?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  signatureConsent?: boolean;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  signedDocumentIds?: string[];
 
   @IsOptional()
   @IsIn(["pay_now", "pay_later", "waiver_or_deferral"])

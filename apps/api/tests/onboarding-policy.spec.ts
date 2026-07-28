@@ -6,11 +6,25 @@ import {
 
 describe("onboarding policy", () => {
   it("allows optional life-planning and deposit steps to be deferred", () => {
-    expect(isSkippableOnboardingStep("housing")).toBe(true);
+    expect(isSkippableOnboardingStep("offer")).toBe(true);
+    expect(isSkippableOnboardingStep("housing")).toBe(false);
     expect(isSkippableOnboardingStep("campus_life")).toBe(true);
     expect(isSkippableOnboardingStep("deposit")).toBe(true);
     expect(isSkippableOnboardingStep("about_you")).toBe(false);
     expect(isSkippableOnboardingStep("emergency_contacts")).toBe(false);
+  });
+
+  it("requires only the top-level housing path", () => {
+    expect(() =>
+      validateOnboardingStepData("housing", {}),
+    ).toThrow(/housing preference/i);
+
+    expect(() =>
+      validateOnboardingStepData("housing", {
+        housingPreference: "on_campus",
+        roommateMatching: "known_roommate",
+      }),
+    ).not.toThrow();
   });
 
   it("requires the student to enter an emergency contact", () => {

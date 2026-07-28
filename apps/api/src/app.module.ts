@@ -3,6 +3,11 @@ import { APP_GUARD } from "@nestjs/core";
 import { ActivityController } from "./activity/activity.controller";
 import { StudentAgentService } from "./agentic/student-agent.service";
 import {
+  AI_PROMPT_RUNTIME,
+  PostgresAiPromptRuntimeRepository,
+  VersionedAiPromptRuntime,
+} from "./agentic/ai-prompt-runtime";
+import {
   OpenRouterStudentAiGateway,
   STUDENT_AI_GATEWAY,
   type StudentAiGateway,
@@ -53,6 +58,17 @@ export class AppModule {
             useExisting: PostgresPlatformStore,
           },
         ];
+    const promptRuntimeProviders = platformStoreOverride
+      ? [{ provide: AI_PROMPT_RUNTIME, useValue: undefined }]
+      : [
+          PostgresAiPromptRuntimeRepository,
+          {
+            provide: AI_PROMPT_RUNTIME,
+            inject: [PostgresAiPromptRuntimeRepository],
+            useFactory: (repository: PostgresAiPromptRuntimeRepository) =>
+              new VersionedAiPromptRuntime(repository),
+          },
+        ];
 
     return {
       module: AppModule,
@@ -92,8 +108,13 @@ export class AppModule {
             }
           : {
               provide: STUDENT_AI_GATEWAY,
-              inject: [PLATFORM_STORE],
-              useFactory: (store: PlatformStore) =>
+              inject: [PLATFORM_STORE, AI_PROMPT_RUNTIME],
+              useFactory: (
+                store: PlatformStore,
+                promptRuntime:
+                  | InstanceType<typeof VersionedAiPromptRuntime>
+                  | undefined,
+              ) =>
                 new OpenRouterStudentAiGateway(
                   config,
                   globalThis.fetch,
@@ -101,9 +122,11 @@ export class AppModule {
                   config.openRouter?.storeResponses
                     ? (response) => store.recordAiProviderResponse(response)
                     : undefined,
+                  promptRuntime,
                 ),
             },
         ...platformProviders,
+        ...promptRuntimeProviders,
       ],
     };
   }

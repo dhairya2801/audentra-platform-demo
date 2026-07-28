@@ -422,8 +422,13 @@ export class PortalController {
   askEdward(
     @CurrentAuth() auth: AuthContext,
     @Body() question: AskEdwardDto,
+    @Req() request: FastifyRequest,
   ): Promise<AskEdwardResponse> {
-    return this.studentAgent.askEdward({ auth, question });
+    return this.studentAgent.askEdward({
+      auth,
+      question,
+      requestId: request.id,
+    });
   }
 
   @Get("appointments")

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createSeedState, FIXTURE_VERSION } from "./seed.js";
 
@@ -179,7 +179,14 @@ function validateStorageKey(storageKey) {
 }
 
 function assertInsideDirectory(filePath, directory) {
-  if (!filePath.startsWith(`${directory}/`)) {
+  const relativePath = relative(directory, filePath);
+  if (
+    relativePath.length === 0 ||
+    isAbsolute(relativePath) ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..\\`) ||
+    relativePath.startsWith("../")
+  ) {
     throw new Error("Document storage path escaped its upload directory");
   }
 }

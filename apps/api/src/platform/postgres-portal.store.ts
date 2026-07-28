@@ -51,6 +51,10 @@ import {
   validateOnboardingStepData,
 } from "../portal/onboarding-policy";
 import { getRuntimeLineage } from "../observability/runtime-lineage";
+import type {
+  CourseExemptionContext,
+  ImmunizationPolicyContext,
+} from "./platform-store";
 
 type Transaction = Parameters<
   Parameters<DatabaseService["db"]["transaction"]>[0]
@@ -59,6 +63,20 @@ type RowResult<T> = { rows: T[] };
 
 function rows<T>(result: unknown): T[] {
   return (result as RowResult<T>).rows;
+}
+
+function isoTimestamp(value: Date | string): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error("Database returned an invalid timestamp");
+  }
+  return parsed.toISOString();
+}
+
+function nullableIsoTimestamp(
+  value: Date | string | null,
+): string | null {
+  return value === null ? null : isoTimestamp(value);
 }
 
 interface OnboardingRow {
@@ -132,6 +150,11 @@ interface PaymentRow {
 interface ProfileRow {
   student_id: string;
   preferred_name: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string | null;
+  email_verified?: boolean | null;
+  phone_verified?: boolean | null;
   pronouns: string | null;
   mobile_phone: string | null;
   communication_preference: StudentProfile["communicationPreference"];
@@ -202,12 +225,15 @@ function mapOnboarding(row: OnboardingRow): StudentOnboarding {
     completedSteps: row.completed_steps,
     data: row.payload,
     version: row.version,
-    completedAt: row.completed_at?.toISOString() ?? null,
-    updatedAt: row.updated_at.toISOString(),
+    completedAt: nullableIsoTimestamp(row.completed_at),
+    updatedAt: isoTimestamp(row.updated_at),
   };
 }
 
-function mapHousingPlan(row: OnboardingRow): StudentHousingPlan {
+function mapHousingPlan(
+  row: OnboardingRow,
+  residences: StudentHousingPlan["residences"] = [],
+): StudentHousingPlan {
   const preference =
     row.payload.housingPreference === "on_campus" ||
     row.payload.housingPreference === "off_campus" ||
@@ -225,8 +251,9 @@ function mapHousingPlan(row: OnboardingRow): StudentHousingPlan {
   return {
     preference,
     residenceOption,
+    residences,
     version: row.version,
-    updatedAt: row.updated_at.toISOString(),
+    updatedAt: isoTimestamp(row.updated_at),
   };
 }
 
@@ -240,7 +267,7 @@ function mapRequirement(row: RequirementRow): StudentRequirementDetail {
     description: row.description,
     status: row.status,
     blocking: row.blocking === 1,
-    dueAt: row.due_at?.toISOString() ?? null,
+    dueAt: nullableIsoTimestamp(row.due_at),
     progressPercent: row.progress_percent,
     submissionType: row.submission_type,
     documentCategory: documentCategoryForRequirement(row.code),
@@ -255,8 +282,8 @@ function mapMessage(row: MessageRow): StudentMessage {
     subject: row.subject,
     body: row.body,
     senderName: row.sender_name,
-    sentAt: row.sent_at.toISOString(),
-    readAt: row.read_at?.toISOString() ?? null,
+    sentAt: isoTimestamp(row.sent_at),
+    readAt: nullableIsoTimestamp(row.read_at),
   };
 }
 
@@ -275,7 +302,7 @@ function mapDocument(row: DocumentRow): StudentDocument {
       : {}),
     ...(row.sha256 ? { sha256: row.sha256 } : {}),
     ...(row.extraction ? { extraction: row.extraction } : {}),
-    createdAt: row.created_at.toISOString(),
+    createdAt: isoTimestamp(row.created_at),
   };
 }
 
@@ -283,10 +310,10 @@ function mapAppointment(row: AppointmentRow): StudentAppointment {
   return {
     id: row.id,
     type: row.type,
-    startsAt: row.starts_at.toISOString(),
+    startsAt: isoTimestamp(row.starts_at),
     notes: row.notes,
     status: row.status,
-    createdAt: row.created_at.toISOString(),
+    createdAt: isoTimestamp(row.created_at),
   };
 }
 
@@ -299,7 +326,7 @@ function mapPayment(row: PaymentRow): StudentPayment {
     status: row.status,
     processor: "dummy",
     processorReference: row.processor_reference,
-    createdAt: row.created_at.toISOString(),
+    createdAt: isoTimestamp(row.created_at),
   };
 }
 
@@ -307,11 +334,20 @@ function mapProfile(row: ProfileRow): StudentProfile {
   return {
     studentId: row.student_id,
     preferredName: row.preferred_name,
+    ...(row.first_name ? { firstName: row.first_name } : {}),
+    ...(row.last_name ? { lastName: row.last_name } : {}),
+    ...(row.email
+      ? {
+          email: row.email,
+          emailVerified: row.email_verified === true,
+          phoneVerified: row.phone_verified === true,
+        }
+      : {}),
     pronouns: row.pronouns,
     mobilePhone: row.mobile_phone,
     communicationPreference: row.communication_preference,
     version: row.version,
-    updatedAt: row.updated_at.toISOString(),
+    updatedAt: isoTimestamp(row.updated_at),
   };
 }
 
@@ -327,6 +363,7 @@ export class PostgresPortalStore {
         p.first_name || ' ' || p.last_name AS full_name,
         so.status,
         so.current_step,
+        so.payload,
         so.version
       FROM student s
       JOIN person p ON p.id = s.person_id AND p.tenant_id = s.tenant_id
@@ -343,6 +380,7 @@ export class PostgresPortalStore {
       full_name: string;
       status: StudentOnboarding["status"];
       current_step: OnboardingStep;
+      payload: StudentOnboardingData;
       version: number;
     }>(result)[0];
     if (!row) {
@@ -351,7 +389,8 @@ export class PostgresPortalStore {
         "The authenticated student was not found",
       );
     }
-    const required = row.status !== "completed";
+    const offerDeferred = row.payload.skippedSteps?.includes("offer") === true;
+    const required = row.status !== "completed" && !offerDeferred;
     return {
       authenticated: true,
       student: {
@@ -396,7 +435,8 @@ export class PostgresPortalStore {
   }
 
   async getStudentHousingPlan(auth: AuthContext): Promise<StudentHousingPlan> {
-    const result = await this.database.db.execute(sql`
+    const [result, residenceResult] = await Promise.all([
+      this.database.db.execute(sql`
       SELECT
         student_id,
         status,
@@ -410,7 +450,28 @@ export class PostgresPortalStore {
       WHERE tenant_id = ${auth.tenantId}
         AND student_id = ${auth.studentId}
       LIMIT 1
-    `);
+      `),
+      this.database.db.execute(sql`
+        SELECT
+          residence.id,
+          residence.code,
+          residence.name,
+          residence.description,
+          residence.amenities,
+          media.public_path,
+          media.alt_text,
+          media.attribution,
+          media.source_url
+        FROM housing_residence_option residence
+        JOIN media_asset media
+          ON media.id = residence.media_asset_id
+         AND media.tenant_id = residence.tenant_id
+         AND media.active = true
+        WHERE residence.tenant_id = ${auth.tenantId}
+          AND residence.active = true
+        ORDER BY residence.display_order, residence.id
+      `),
+    ]);
     const row = rows<OnboardingRow>(result)[0];
     if (!row) {
       throw new NotFoundError(
@@ -418,7 +479,28 @@ export class PostgresPortalStore {
         "Student onboarding was not found",
       );
     }
-    return mapHousingPlan(row);
+    const residences = rows<{
+      id: string;
+      code: NonNullable<StudentHousingPlan["residenceOption"]>;
+      name: string;
+      description: string;
+      amenities: string[];
+      public_path: string;
+      alt_text: string;
+      attribution: string;
+      source_url: string;
+    }>(residenceResult).map((residence) => ({
+      id: residence.id,
+      value: residence.code,
+      name: residence.name,
+      description: residence.description,
+      amenities: residence.amenities,
+      imageUrl: residence.public_path,
+      imageAlt: residence.alt_text,
+      attribution: residence.attribution,
+      sourceUrl: residence.source_url,
+    }));
+    return mapHousingPlan(row, residences);
   }
 
   async updateStudentHousingPlan(input: {
@@ -458,7 +540,7 @@ export class PostgresPortalStore {
 
       const residenceOption =
         input.update.preference === "on_campus"
-          ? input.update.residenceOption ?? "aster_residence_hall"
+          ? input.update.residenceOption ?? null
           : null;
       const payload: StudentOnboardingData = {
         ...current.payload,
@@ -565,14 +647,22 @@ export class PostgresPortalStore {
           "Onboarding changed in another session",
         );
       }
-      if (current.current_step !== input.update.currentStep) {
+      const targetStep = input.update.currentStep;
+      const targetStepIndex = ONBOARDING_STEPS.indexOf(targetStep);
+      const currentStepIndex = ONBOARDING_STEPS.indexOf(current.current_step);
+      const editingCompletedStep = current.completed_steps.includes(targetStep);
+      if (
+        targetStepIndex < 0 ||
+        currentStepIndex < 0 ||
+        (targetStep !== current.current_step && !editingCompletedStep) ||
+        targetStepIndex > currentStepIndex
+      ) {
         throw new ConflictError(
           "ONBOARDING_STEP_OUT_OF_ORDER",
           `The next required onboarding step is ${current.current_step}`,
         );
       }
-      const stepIndex = ONBOARDING_STEPS.indexOf(current.current_step);
-      const expectedPriorSteps = ONBOARDING_STEPS.slice(0, stepIndex);
+      const expectedPriorSteps = ONBOARDING_STEPS.slice(0, currentStepIndex);
       if (
         current.completed_steps.length !== expectedPriorSteps.length ||
         current.completed_steps.some(
@@ -586,7 +676,7 @@ export class PostgresPortalStore {
         );
       }
       const skip = input.update.skip === true;
-      if (skip && !isSkippableOnboardingStep(current.current_step)) {
+      if (skip && !isSkippableOnboardingStep(targetStep)) {
         throw new BadRequestError(
           "ONBOARDING_STEP_REQUIRED",
           "This onboarding step is required before you can continue",
@@ -597,28 +687,28 @@ export class PostgresPortalStore {
       const mergedData: StudentOnboardingData = {
         ...current.payload,
         ...submittedData,
-        ...(skip
-          ? {
-              skippedSteps: [
-                ...new Set([
-                  ...(current.payload.skippedSteps ?? []),
-                  current.current_step,
-                ]),
-              ],
-            }
-          : {}),
+        skippedSteps: skip
+          ? [
+              ...new Set([
+                ...(current.payload.skippedSteps ?? []),
+                targetStep,
+              ]),
+            ]
+          : (current.payload.skippedSteps ?? []).filter(
+              (step) => step !== targetStep,
+            ),
       };
       if (!skip) {
         await this.validateOnboardingStep(
           transaction,
           input.auth,
-          current.current_step,
+          targetStep,
           mergedData,
         );
       }
       let synchronizedProfileVersion: number | null = null;
       if (
-        current.current_step === "about_you" &&
+        targetStep === "about_you" &&
         mergedData.firstName &&
         mergedData.lastName &&
         mergedData.preferredName &&
@@ -656,9 +746,14 @@ export class PostgresPortalStore {
           "profile_verification",
         );
       }
-      const completedSteps = [...current.completed_steps, current.current_step];
-      const nextStep =
-        ONBOARDING_STEPS[stepIndex + 1] ?? ONBOARDING_STEPS[stepIndex];
+      const advancingCurrentStep = targetStep === current.current_step;
+      const completedSteps = advancingCurrentStep
+        ? [...current.completed_steps, current.current_step]
+        : current.completed_steps;
+      const nextStep = advancingCurrentStep
+        ? (ONBOARDING_STEPS[currentStepIndex + 1] ??
+          ONBOARDING_STEPS[currentStepIndex])
+        : current.current_step;
       if (!nextStep) {
         throw new ApiError(
           500,
@@ -671,7 +766,11 @@ export class PostgresPortalStore {
         UPDATE student_onboarding
         SET status = 'in_progress',
             current_step = ${nextStep},
-            completed_steps = ${completedSteps},
+            completed_steps = ARRAY(
+              SELECT jsonb_array_elements_text(
+                ${JSON.stringify(completedSteps)}::jsonb
+              )
+            ),
             payload = ${JSON.stringify(mergedData)}::jsonb,
             version = version + 1,
             updated_at = ${now}
@@ -697,12 +796,14 @@ export class PostgresPortalStore {
       }
       await this.insertAudit(transaction, {
         auth: input.auth,
-        action: "student_onboarding.step_completed",
+        action: advancingCurrentStep
+          ? "student_onboarding.step_completed"
+          : "student_onboarding.step_updated",
         resourceType: "student_onboarding",
         resourceId: input.auth.studentId,
         requestId: input.requestId,
         metadata: {
-          step: current.current_step,
+          step: targetStep,
           skipped: skip,
           version: updated.version,
           profileSynchronized: synchronizedProfileVersion !== null,
@@ -906,7 +1007,30 @@ export class PostgresPortalStore {
         "The requirement was not found",
       );
     }
-    return mapRequirement(requirement);
+    const mapped = mapRequirement(requirement);
+    if (requirement.code !== "immunization_record") return mapped;
+    const policy = await this.getImmunizationPolicyContext(auth);
+    if (!policy) return mapped;
+    return {
+      ...mapped,
+      immunizationPolicy: {
+        id: policy.policyVersion.id,
+        code: policy.policyVersion.code,
+        version: policy.policyVersion.version,
+        name: policy.policyVersion.name,
+        effectiveFrom: policy.policyVersion.effectiveFrom,
+        effectiveUntil: policy.policyVersion.effectiveUntil,
+        requirements: policy.requirements.map((requirement) => ({
+          id: requirement.id,
+          code: requirement.code,
+          name: requirement.name,
+          description: requirement.description,
+          required: requirement.required,
+          doseCount: requirement.doseCount,
+          validityDays: requirement.validityDays,
+        })),
+      },
+    };
   }
 
   async getStudentMessages(auth: AuthContext): Promise<StudentMessageList> {
@@ -984,6 +1108,232 @@ export class PostgresPortalStore {
     `);
     const items = rows<DocumentRow>(result).map(mapDocument);
     return { items, total: items.length };
+  }
+
+  async getCourseExemptionContext(input: {
+    auth: AuthContext;
+    courses: NonNullable<StudentDocumentExtraction["courses"]>;
+  }): Promise<CourseExemptionContext | null> {
+    const baseResult = await this.database.db.execute(sql`
+      SELECT
+        p.id AS program_id,
+        p.code AS program_code,
+        p.name AS program_name,
+        ccv.id AS catalog_version_id,
+        ccv.code AS catalog_code,
+        ccv.effective_from,
+        ccv.updated_at
+      FROM admission_offer ao
+      JOIN program p
+        ON p.id = ao.program_id
+       AND p.tenant_id = ao.tenant_id
+      JOIN course_catalog_version ccv
+        ON ccv.tenant_id = ao.tenant_id
+       AND ccv.status = 'active'
+      WHERE ao.tenant_id = ${input.auth.tenantId}
+        AND ao.student_id = ${input.auth.studentId}
+      ORDER BY ccv.effective_from DESC, ccv.updated_at DESC
+      LIMIT 1
+    `);
+    const base = rows<{
+      program_id: string;
+      program_code: string;
+      program_name: string;
+      catalog_version_id: string;
+      catalog_code: string;
+      effective_from: string;
+      updated_at: Date;
+    }>(baseResult)[0];
+    if (!base) return null;
+
+    const [
+      courseResult,
+      requirementResult,
+      prerequisiteResult,
+      ruleResult,
+    ] = await Promise.all([
+      this.database.db.execute(sql`
+        SELECT id, code, title, credits
+        FROM catalog_course
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND catalog_version_id = ${base.catalog_version_id}
+          AND active = true
+        ORDER BY code
+      `),
+      this.database.db.execute(sql`
+        SELECT id, course_id, category, required, recommended_term
+        FROM program_requirement
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND program_id = ${base.program_id}
+          AND catalog_version_id = ${base.catalog_version_id}
+        ORDER BY recommended_term, id
+      `),
+      this.database.db.execute(sql`
+        SELECT course_id, prerequisite_course_id, minimum_grade
+        FROM course_prerequisite
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND catalog_version_id = ${base.catalog_version_id}
+        ORDER BY course_id, prerequisite_course_id
+      `),
+      this.database.db.execute(sql`
+        SELECT
+          id, code, version, source_type, source_code, minimum_score,
+          minimum_grade, minimum_credits, target_course_id, confidence
+        FROM course_equivalency_rule
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND catalog_version_id = ${base.catalog_version_id}
+          AND active = true
+        ORDER BY code, version DESC
+      `),
+    ]);
+    const ruleRows = rows<{
+      id: string;
+      code: string;
+      version: number;
+      source_type: string;
+      source_code: string;
+      minimum_score: string | number | null;
+      minimum_grade: string | null;
+      minimum_credits: string | number | null;
+      target_course_id: string;
+      confidence: string | number;
+    }>(ruleResult);
+    const highestRuleVersion = Math.max(
+      0,
+      ...ruleRows.map((rule) => Number(rule.version)),
+    );
+    return {
+      program: {
+        id: base.program_id,
+        code: base.program_code,
+        name: base.program_name,
+      },
+      catalogVersion: {
+        id: base.catalog_version_id,
+        code: base.catalog_code,
+        effectiveFrom: String(base.effective_from),
+        updatedAt: isoTimestamp(base.updated_at),
+      },
+      policyVersion: `${base.catalog_code}:rules-v${highestRuleVersion}`,
+      catalogCourses: rows<{
+        id: string;
+        code: string;
+        title: string;
+        credits: string | number;
+      }>(courseResult).map((course) => ({
+        id: course.id,
+        code: course.code,
+        title: course.title,
+        credits: Number(course.credits),
+      })),
+      programRequirements: rows<{
+        id: string;
+        course_id: string;
+        category: string;
+        required: boolean;
+        recommended_term: number;
+      }>(requirementResult).map((requirement) => ({
+        id: requirement.id,
+        courseId: requirement.course_id,
+        category: requirement.category,
+        required: requirement.required,
+        recommendedTerm: requirement.recommended_term,
+      })),
+      prerequisites: rows<{
+        course_id: string;
+        prerequisite_course_id: string;
+        minimum_grade: string | null;
+      }>(prerequisiteResult).map((prerequisite) => ({
+        courseId: prerequisite.course_id,
+        prerequisiteCourseId: prerequisite.prerequisite_course_id,
+        minimumGrade: prerequisite.minimum_grade,
+      })),
+      equivalencyRules: ruleRows.map((rule) => ({
+        id: rule.id,
+        code: rule.code,
+        version: rule.version,
+        sourceType: rule.source_type,
+        sourceCode: rule.source_code,
+        minimumScore:
+          rule.minimum_score === null ? null : Number(rule.minimum_score),
+        minimumGrade: rule.minimum_grade,
+        minimumCredits:
+          rule.minimum_credits === null ? null : Number(rule.minimum_credits),
+        targetCourseId: rule.target_course_id,
+        confidence: Number(rule.confidence),
+      })),
+    };
+  }
+
+  async getImmunizationPolicyContext(
+    auth: AuthContext,
+  ): Promise<ImmunizationPolicyContext | null> {
+    const policyResult = await this.database.db.execute(sql`
+      SELECT
+        id, code, version, name, effective_from, effective_until, updated_at
+      FROM immunization_policy_version
+      WHERE tenant_id = ${auth.tenantId}
+        AND status = 'published'
+        AND effective_from <= CURRENT_DATE
+        AND (effective_until IS NULL OR effective_until >= CURRENT_DATE)
+      ORDER BY version DESC
+      LIMIT 1
+    `);
+    const policy = rows<{
+      id: string;
+      code: string;
+      version: number;
+      name: string;
+      effective_from: string;
+      effective_until: string | null;
+      updated_at: Date;
+    }>(policyResult)[0];
+    if (!policy) return null;
+    const requirementResult = await this.database.db.execute(sql`
+      SELECT
+        id, code, name, description, required, dose_count, validity_days,
+        applies_when, evidence_criteria
+      FROM immunization_requirement_rule
+      WHERE tenant_id = ${auth.tenantId}
+        AND policy_version_id = ${policy.id}
+        AND active = true
+      ORDER BY display_order, code
+    `);
+    return {
+      policyVersion: {
+        id: policy.id,
+        code: policy.code,
+        version: policy.version,
+        name: policy.name,
+        effectiveFrom: String(policy.effective_from),
+        effectiveUntil:
+          policy.effective_until === null
+            ? null
+            : String(policy.effective_until),
+        updatedAt: isoTimestamp(policy.updated_at),
+      },
+      requirements: rows<{
+        id: string;
+        code: string;
+        name: string;
+        description: string;
+        required: boolean;
+        dose_count: number | null;
+        validity_days: number | null;
+        applies_when: Record<string, unknown>;
+        evidence_criteria: Record<string, unknown>;
+      }>(requirementResult).map((requirement) => ({
+        id: requirement.id,
+        code: requirement.code,
+        name: requirement.name,
+        description: requirement.description,
+        required: requirement.required,
+        doseCount: requirement.dose_count,
+        validityDays: requirement.validity_days,
+        appliesWhen: requirement.applies_when,
+        evidenceCriteria: requirement.evidence_criteria,
+      })),
+    };
   }
 
   async createStudentDocument(input: {
@@ -1642,51 +1992,11 @@ export class PostgresPortalStore {
             )
           `);
         }
-        await transaction.execute(sql`
-          INSERT INTO course_exemption_recommendation (
-            id,
-            tenant_id,
-            student_id,
-            program_id,
-            catalog_version_id,
-            transcript_credit_id,
-            target_course_id,
-            equivalency_rule_id,
-            status,
-            confidence,
-            rationale
-          )
-          SELECT
-            md5(stc.id::text || rule.id::text)::uuid,
-            stc.tenant_id,
-            stc.student_id,
-            ao.program_id,
-            rule.catalog_version_id,
-            stc.id,
-            rule.target_course_id,
-            rule.id,
-            'suggested',
-            rule.confidence,
-            COALESCE(stc.source_code, stc.title) || ' score ' ||
-              COALESCE(stc.grade_or_score, 'not provided') ||
-              ' meets stored rule ' || rule.code || '.'
-          FROM student_transcript_credit stc
-          JOIN admission_offer ao
-            ON ao.tenant_id = stc.tenant_id
-           AND ao.student_id = stc.student_id
-          JOIN course_equivalency_rule rule
-            ON rule.tenant_id = stc.tenant_id
-           AND rule.active = true
-           AND lower(rule.source_code) = lower(stc.source_code)
-          WHERE stc.tenant_id = ${input.auth.tenantId}
-            AND stc.student_id = ${input.auth.studentId}
-            AND stc.source_document_id = ${input.documentId}
-            AND NULLIF(
-              regexp_replace(stc.grade_or_score, '[^0-9.]', '', 'g'),
-              ''
-            )::numeric >= rule.minimum_score
-          ON CONFLICT DO NOTHING
-        `);
+        await this.projectCourseExemptionEvaluation(transaction, {
+          auth: input.auth,
+          documentId: input.documentId,
+          extraction: input.extraction,
+        });
         await this.insertOutbox(transaction, {
           auth: input.auth,
           eventName: "student.transcript_credits_imported.v1",
@@ -1699,6 +2009,13 @@ export class PostgresPortalStore {
             courseCount: input.extraction.courses?.length ?? 0,
             projection: "automatic",
           },
+        });
+      }
+      if (input.extraction.immunizationCompliance) {
+        await this.persistImmunizationEvaluation(transaction, {
+          auth: input.auth,
+          documentId: input.documentId,
+          extraction: input.extraction,
         });
       }
       if (
@@ -2022,50 +2339,11 @@ export class PostgresPortalStore {
               )
             `);
           }
-          await transaction.execute(sql`
-            INSERT INTO course_exemption_recommendation (
-              id,
-              tenant_id,
-              student_id,
-              program_id,
-              catalog_version_id,
-              transcript_credit_id,
-              target_course_id,
-              equivalency_rule_id,
-              status,
-              confidence,
-              rationale
-            )
-            SELECT
-              md5(stc.id::text || rule.id::text)::uuid,
-              stc.tenant_id,
-              stc.student_id,
-              ao.program_id,
-              rule.catalog_version_id,
-              stc.id,
-              rule.target_course_id,
-              rule.id,
-              'suggested',
-              rule.confidence,
-              stc.source_code || ' score ' || stc.grade_or_score ||
-                ' meets stored rule ' || rule.code || '.'
-            FROM student_transcript_credit stc
-            JOIN admission_offer ao
-              ON ao.tenant_id = stc.tenant_id
-             AND ao.student_id = stc.student_id
-            JOIN course_equivalency_rule rule
-              ON rule.tenant_id = stc.tenant_id
-             AND rule.active = true
-             AND lower(rule.source_code) = lower(stc.source_code)
-            WHERE stc.tenant_id = ${input.auth.tenantId}
-              AND stc.student_id = ${input.auth.studentId}
-              AND stc.source_document_id = ${input.documentId}
-              AND NULLIF(
-                regexp_replace(stc.grade_or_score, '[^0-9.]', '', 'g'),
-                ''
-              )::numeric >= rule.minimum_score
-            ON CONFLICT DO NOTHING
-          `);
+          await this.projectCourseExemptionEvaluation(transaction, {
+            auth: input.auth,
+            documentId: input.documentId,
+            extraction,
+          });
           await this.insertOutbox(transaction, {
             auth: input.auth,
             eventName: "student.transcript_credits_imported.v1",
@@ -2299,16 +2577,31 @@ export class PostgresPortalStore {
   async getStudentProfile(auth: AuthContext): Promise<StudentProfile> {
     const result = await this.database.db.execute(sql`
       SELECT
-        student_id,
-        preferred_name,
-        pronouns,
-        mobile_phone,
-        communication_preference,
-        version,
-        updated_at
-      FROM student_profile
-      WHERE tenant_id = ${auth.tenantId}
-        AND student_id = ${auth.studentId}
+        sp.student_id,
+        sp.preferred_name,
+        p.first_name,
+        p.last_name,
+        ca.email_normalized AS email,
+        ca.email_verified_at IS NOT NULL AS email_verified,
+        ca.phone_verified_at IS NOT NULL AS phone_verified,
+        sp.pronouns,
+        sp.mobile_phone,
+        sp.communication_preference,
+        sp.version,
+        sp.updated_at
+      FROM student_profile sp
+      JOIN student s
+        ON s.id = sp.student_id
+       AND s.tenant_id = sp.tenant_id
+      JOIN person p
+        ON p.id = s.person_id
+       AND p.tenant_id = s.tenant_id
+      LEFT JOIN credential_account ca
+        ON ca.student_id = sp.student_id
+       AND ca.tenant_id = sp.tenant_id
+       AND ca.status = 'active'
+      WHERE sp.tenant_id = ${auth.tenantId}
+        AND sp.student_id = ${auth.studentId}
     `);
     const profile = rows<ProfileRow>(result)[0];
     if (!profile) {
@@ -2766,7 +3059,7 @@ export class PostgresPortalStore {
         title: document.title,
         description: document.description,
         status: document.status,
-        dueAt: document.due_at?.toISOString() ?? null,
+        dueAt: nullableIsoTimestamp(document.due_at),
         href: document.code === "award_acceptance" ? "/financials" : "/documents",
       })),
       paymentPlans: rows<{
@@ -2875,12 +3168,24 @@ export class PostgresPortalStore {
       `),
       this.database.db.execute(sql`
         SELECT
-          id, name, category, description, contact_name, contact_role,
-          contact_channel, latest_update, next_activity
-        FROM student_club
-        WHERE tenant_id = ${auth.tenantId}
-          AND active = true
-        ORDER BY name
+          club.id, club.name, club.category, club.description,
+          club.contact_name, club.contact_role, club.contact_channel,
+          club.latest_update, club.next_activity,
+          COALESCE(media.public_path, '/media/clubs/code-collective.jpg')
+            AS image_url,
+          COALESCE(media.alt_text, 'Students collaborating in a campus club')
+            AS image_alt,
+          COALESCE(media.attribution, 'Default Aster club image')
+            AS image_attribution,
+          COALESCE(media.source_url, '') AS image_source_url
+        FROM student_club club
+        LEFT JOIN media_asset media
+          ON media.id = club.media_asset_id
+         AND media.tenant_id = club.tenant_id
+         AND media.active = true
+        WHERE club.tenant_id = ${auth.tenantId}
+          AND club.active = true
+        ORDER BY club.name
         LIMIT 100
       `),
     ]);
@@ -2899,8 +3204,8 @@ export class PostgresPortalStore {
         id: event.id,
         title: event.title,
         description: event.description,
-        startsAt: event.starts_at.toISOString(),
-        endsAt: event.ends_at.toISOString(),
+        startsAt: isoTimestamp(event.starts_at),
+        endsAt: isoTimestamp(event.ends_at),
         location: event.location,
         category: event.category,
         featured: event.featured,
@@ -2916,6 +3221,10 @@ export class PostgresPortalStore {
         contact_channel: string;
         latest_update: string;
         next_activity: string | null;
+        image_url: string;
+        image_alt: string;
+        image_attribution: string;
+        image_source_url: string;
       }>(clubResult).map((club) => ({
         id: club.id,
         name: club.name,
@@ -2926,6 +3235,10 @@ export class PostgresPortalStore {
         contactChannel: club.contact_channel,
         latestUpdate: club.latest_update,
         nextActivity: club.next_activity,
+        imageUrl: club.image_url,
+        imageAlt: club.image_alt,
+        imageAttribution: club.image_attribution,
+        imageSourceUrl: club.image_source_url,
       })),
       generatedAt: new Date().toISOString(),
     };
@@ -3150,6 +3463,135 @@ export class PostgresPortalStore {
     });
   }
 
+  private async projectCourseExemptionEvaluation(
+    transaction: Transaction,
+    input: {
+      auth: AuthContext;
+      documentId: string;
+      extraction: StudentDocumentExtraction;
+    },
+  ): Promise<void> {
+    const evaluation = input.extraction.courseExemptionEvaluation;
+    if (!evaluation) return;
+    for (const decision of evaluation.decisions) {
+      if (
+        (decision.status !== "matched" &&
+          decision.status !== "needs_review") ||
+        !decision.targetCourseId ||
+        !decision.equivalencyRuleId
+      ) {
+        continue;
+      }
+      const recommendationStatus =
+        decision.status === "matched" ? "suggested" : "needs_review";
+      await transaction.execute(sql`
+        INSERT INTO course_exemption_recommendation (
+          id,
+          tenant_id,
+          student_id,
+          program_id,
+          catalog_version_id,
+          transcript_credit_id,
+          target_course_id,
+          equivalency_rule_id,
+          status,
+          confidence,
+          rationale
+        )
+        SELECT
+          ${randomUUID()},
+          stc.tenant_id,
+          stc.student_id,
+          ao.program_id,
+          rule.catalog_version_id,
+          stc.id,
+          rule.target_course_id,
+          rule.id,
+          ${recommendationStatus},
+          ${decision.confidence},
+          ${decision.rationale}
+        FROM student_transcript_credit stc
+        JOIN admission_offer ao
+          ON ao.tenant_id = stc.tenant_id
+         AND ao.student_id = stc.student_id
+        JOIN course_equivalency_rule rule
+          ON rule.tenant_id = stc.tenant_id
+         AND rule.id = ${decision.equivalencyRuleId}
+         AND rule.target_course_id = ${decision.targetCourseId}
+         AND rule.catalog_version_id = ${evaluation.catalogVersionId}
+         AND rule.active = true
+        WHERE stc.tenant_id = ${input.auth.tenantId}
+          AND stc.student_id = ${input.auth.studentId}
+          AND stc.source_document_id = ${input.documentId}
+          AND COALESCE(stc.source_code, '') =
+              COALESCE(${decision.sourceCode}, '')
+          AND stc.title = ${decision.sourceTitle}
+        ON CONFLICT (
+          tenant_id,
+          student_id,
+          transcript_credit_id,
+          target_course_id,
+          equivalency_rule_id
+        ) DO UPDATE SET
+          status = CASE
+            WHEN course_exemption_recommendation.status IN (
+              'approved',
+              'denied'
+            )
+              THEN course_exemption_recommendation.status
+            ELSE EXCLUDED.status
+          END,
+          confidence = EXCLUDED.confidence,
+          rationale = EXCLUDED.rationale,
+          version = course_exemption_recommendation.version + 1,
+          updated_at = NOW()
+      `);
+    }
+  }
+
+  private async persistImmunizationEvaluation(
+    transaction: Transaction,
+    input: {
+      auth: AuthContext;
+      documentId: string;
+      extraction: StudentDocumentExtraction;
+    },
+  ): Promise<void> {
+    const evaluation = input.extraction.immunizationCompliance;
+    if (!evaluation) return;
+    await transaction.execute(sql`
+      INSERT INTO student_immunization_evaluation (
+        id,
+        tenant_id,
+        student_id,
+        source_document_id,
+        policy_version_id,
+        result,
+        generated_at
+      )
+      SELECT
+        ${randomUUID()},
+        ${input.auth.tenantId},
+        ${input.auth.studentId},
+        ${input.documentId},
+        policy.id,
+        ${JSON.stringify(evaluation)}::jsonb,
+        ${new Date(evaluation.generatedAt)}
+      FROM immunization_policy_version policy
+      WHERE policy.id = ${evaluation.policyVersionId}
+        AND policy.tenant_id = ${input.auth.tenantId}
+        AND policy.status = 'published'
+      ON CONFLICT (
+        tenant_id,
+        student_id,
+        source_document_id,
+        policy_version_id
+      ) DO UPDATE SET
+        result = EXCLUDED.result,
+        generated_at = EXCLUDED.generated_at
+    `);
+  }
+
   private async validateOnboardingStep(
     transaction: Transaction,
     auth: AuthContext,
@@ -3305,7 +3747,7 @@ export class PostgresPortalStore {
     await transaction.execute(sql`
       UPDATE student_portal_projection
       SET projection_version = projection_version + 1,
-          generated_at = NOW()
+          source_updated_at = NOW()
       WHERE tenant_id = ${auth.tenantId}
         AND student_id = ${auth.studentId}
     `);

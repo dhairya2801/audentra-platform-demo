@@ -199,7 +199,10 @@ export function buildOnboarding(state) {
 }
 
 export function buildBootstrap(state, clock) {
-  const onboardingRequired = state.onboarding.status !== "completed";
+  const offerDeferred =
+    state.onboarding.data.skippedSteps?.includes("offer") === true;
+  const onboardingRequired =
+    state.onboarding.status !== "completed" && !offerDeferred;
   return {
     authenticated: true,
     student: {
@@ -480,7 +483,19 @@ export function updateOnboarding(draft, input, now) {
       "Onboarding changed in another session",
     );
   }
-  if (draft.onboarding.currentStep !== currentStep) {
+  const targetIndex = ONBOARDING_STEPS.indexOf(currentStep);
+  const activeIndex = ONBOARDING_STEPS.indexOf(
+    draft.onboarding.currentStep,
+  );
+  const editingCompletedStep =
+    draft.onboarding.completedSteps.includes(currentStep);
+  if (
+    targetIndex < 0 ||
+    activeIndex < 0 ||
+    (draft.onboarding.currentStep !== currentStep &&
+      !editingCompletedStep) ||
+    targetIndex > activeIndex
+  ) {
     throw conflict(
       "ONBOARDING_STEP_OUT_OF_ORDER",
       `The next required onboarding step is ${draft.onboarding.currentStep}`,
@@ -501,16 +516,16 @@ export function updateOnboarding(draft, input, now) {
   const mergedData = {
     ...draft.onboarding.data,
     ...suppliedData,
-    ...(skip
-      ? {
-          skippedSteps: [
-            ...new Set([
-              ...(draft.onboarding.data.skippedSteps ?? []),
-              currentStep,
-            ]),
-          ],
-        }
-      : {}),
+    skippedSteps: skip
+      ? [
+          ...new Set([
+            ...(draft.onboarding.data.skippedSteps ?? []),
+            currentStep,
+          ]),
+        ]
+      : (draft.onboarding.data.skippedSteps ?? []).filter(
+          (step) => step !== currentStep,
+        ),
   };
   if (!skip) {
     validateOnboardingStep(draft, currentStep, mergedData);
@@ -538,10 +553,13 @@ export function updateOnboarding(draft, input, now) {
     );
     draft.portalProjectionVersion += 1;
   }
-  draft.onboarding.completedSteps.push(currentStep);
-  const currentIndex = ONBOARDING_STEPS.indexOf(currentStep);
-  draft.onboarding.currentStep =
-    ONBOARDING_STEPS[currentIndex + 1] ?? currentStep;
+  const advancingCurrentStep =
+    draft.onboarding.currentStep === currentStep;
+  if (advancingCurrentStep) {
+    draft.onboarding.completedSteps.push(currentStep);
+    draft.onboarding.currentStep =
+      ONBOARDING_STEPS[targetIndex + 1] ?? currentStep;
+  }
   draft.onboarding.status = "in_progress";
   draft.onboarding.version += 1;
   draft.onboarding.updatedAt = now.toISOString();
@@ -568,6 +586,48 @@ export function housingPlanResponse(state) {
   return {
     preference,
     residenceOption,
+    residences: [
+      {
+        id: "71000000-0000-7000-8000-000000000101",
+        value: "aster_residence_hall",
+        name: "Aster Residence Hall",
+        description:
+          "Classic first-year community with shared lounges and peer mentors.",
+        amenities: ["Shared lounges", "Community kitchen", "Laundry"],
+        imageUrl: "/media/housing/aster-residence-hall-room.jpg",
+        imageAlt:
+          "Bright shared room with two beds, wardrobes, and a window desk",
+        attribution: "Photo by deno wang via Pexels",
+        sourceUrl:
+          "https://www.pexels.com/photo/two-beds-in-a-bedroom-11671086/",
+      },
+      {
+        id: "71000000-0000-7000-8000-000000000102",
+        value: "aster_apartments",
+        name: "Aster Apartments",
+        description:
+          "Apartment-style rooms with smaller communities and shared kitchens.",
+        amenities: ["Shared kitchen", "Study room", "In-unit living space"],
+        imageUrl: "/media/housing/aster-apartments-room.jpg",
+        imageAlt: "Modern shared bedroom with twin beds and a large window",
+        attribution: "Photo by Alan Antony via Pexels",
+        sourceUrl:
+          "https://www.pexels.com/photo/modern-bedroom-interior-18470955/",
+      },
+      {
+        id: "71000000-0000-7000-8000-000000000103",
+        value: "student_village",
+        name: "Student Village",
+        description:
+          "A social residential neighborhood close to recreation and dining.",
+        amenities: ["Dining nearby", "Recreation access", "Community events"],
+        imageUrl: "/media/housing/student-village-room.jpg",
+        imageAlt: "Warm shared room with two beds, lamps, and neutral bedding",
+        attribution: "Photo by Luis Zambrano via Pexels",
+        sourceUrl:
+          "https://www.pexels.com/photo/two-beds-in-bedroom-16436954/",
+      },
+    ],
     version: state.onboarding.version,
     updatedAt: state.onboarding.updatedAt,
   };
@@ -598,7 +658,7 @@ export function updateHousingPlan(draft, input, now) {
   const residenceOption =
     preference === "on_campus"
       ? body.residenceOption === undefined
-        ? "aster_residence_hall"
+        ? null
         : enumValue(body.residenceOption, "residenceOption", [
             "aster_residence_hall",
             "aster_apartments",
@@ -1923,6 +1983,59 @@ function requirementDetailResponse(requirement) {
     documentCategory: documentCategoryForRequirement(requirement.code),
     responsibleOffice: requirement.responsibleOffice,
     dependencyCodes: [...requirement.dependsOnCodes],
+    ...(requirement.code === "immunization_record"
+      ? { immunizationPolicy: demoImmunizationPolicy() }
+      : {}),
+  };
+}
+
+function demoImmunizationPolicy() {
+  return {
+    id: "70000000-0000-7000-8000-000000000001",
+    code: "ASTER-HEALTH-2027",
+    version: 1,
+    name: "Aster 2027 student immunization requirements",
+    effectiveFrom: "2027-01-01",
+    effectiveUntil: null,
+    requirements: [
+      {
+        id: "71000000-0000-7000-8000-000000000001",
+        code: "mmr",
+        name: "MMR",
+        description: "Two documented MMR doses or qualifying evidence.",
+        required: true,
+        doseCount: 2,
+        validityDays: null,
+      },
+      {
+        id: "71000000-0000-7000-8000-000000000002",
+        code: "meningococcal",
+        name: "Meningococcal",
+        description: "One documented meningococcal dose.",
+        required: true,
+        doseCount: 1,
+        validityDays: null,
+      },
+      {
+        id: "71000000-0000-7000-8000-000000000003",
+        code: "covid_19",
+        name: "COVID-19",
+        description:
+          "A documented COVID-19 vaccination is required by this demo tenant policy.",
+        required: true,
+        doseCount: 1,
+        validityDays: null,
+      },
+      {
+        id: "71000000-0000-7000-8000-000000000004",
+        code: "tb_screening",
+        name: "Tuberculosis screening",
+        description: "A documented tuberculosis screening result.",
+        required: true,
+        doseCount: null,
+        validityDays: null,
+      },
+    ],
   };
 }
 
@@ -2020,7 +2133,7 @@ function validateCompletedStepSequence(state) {
 
 function isSkippableOnboardingStep(step) {
   return (
-    step === "housing" ||
+    step === "offer" ||
     step === "campus_life" ||
     step === "deposit"
   );
@@ -2049,6 +2162,8 @@ function validateOnboardingData(input) {
     "housingRoomType",
     "bathroomPreference",
     "roommateMatching",
+    "knownRoommateName",
+    "knownRoommateEmail",
     "sleepSchedule",
     "studyHabits",
     "roomNoise",
@@ -2071,6 +2186,10 @@ function validateOnboardingData(input) {
     "emergencyContacts",
     "familyPermissions",
     "signatureFullName",
+    "signatureMethod",
+    "signatureImageData",
+    "signatureConsent",
+    "signedDocumentIds",
     "depositChoice",
   ];
   exactKeys(data, fields);
@@ -2113,6 +2232,7 @@ function validateOnboardingData(input) {
     "substanceFreeHousing",
     "genderInclusiveHousing",
     "accessibleHousingInformation",
+    "signatureConsent",
   ]) {
     if (data[field] !== undefined) {
       result[field] = booleanValue(data[field], field);
@@ -2152,11 +2272,14 @@ function validateOnboardingData(input) {
     );
   }
   if (data.housingResidenceOption !== undefined) {
-    result.housingResidenceOption = enumValue(
-      data.housingResidenceOption,
-      "housingResidenceOption",
-      ["aster_residence_hall", "aster_apartments", "student_village"],
-    );
+    result.housingResidenceOption =
+      data.housingResidenceOption === null
+        ? null
+        : enumValue(
+            data.housingResidenceOption,
+            "housingResidenceOption",
+            ["aster_residence_hall", "aster_apartments", "student_village"],
+          );
   }
   const boundedStrings = {
     streetAddress: 180,
@@ -2168,6 +2291,7 @@ function validateOnboardingData(input) {
     housingRoomType: 80,
     bathroomPreference: 80,
     roommateMatching: 80,
+    knownRoommateName: 160,
     sleepSchedule: 80,
     studyHabits: 80,
     roomNoise: 80,
@@ -2180,11 +2304,33 @@ function validateOnboardingData(input) {
     commuteDuration: 80,
     socialComfort: 80,
     signatureFullName: 240,
+    signatureImageData: 100000,
   };
   for (const [field, max] of Object.entries(boundedStrings)) {
     if (data[field] !== undefined) {
       result[field] = requiredString(data[field], field, { min: 1, max });
     }
+  }
+  if (data.signatureMethod !== undefined) {
+    result.signatureMethod = enumValue(
+      data.signatureMethod,
+      "signatureMethod",
+      ["typed", "drawn"],
+    );
+  }
+  if (data.knownRoommateEmail !== undefined) {
+    const email = requiredString(
+      data.knownRoommateEmail,
+      "knownRoommateEmail",
+      { min: 3, max: 254 },
+    ).toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "knownRoommateEmail must be valid",
+      );
+    }
+    result.knownRoommateEmail = email;
   }
   for (const field of [
     "supportNeeds",
@@ -2193,6 +2339,7 @@ function validateOnboardingData(input) {
     "commuterResources",
     "campusInterests",
     "firstMonthGoals",
+    "signedDocumentIds",
   ]) {
     if (data[field] === undefined) continue;
     if (!Array.isArray(data[field])) {
@@ -2384,33 +2531,6 @@ function validateOnboardingStep(state, step, data) {
   }
   if (step === "housing") {
     if (!data.housingPreference) invalid("Choose a housing preference");
-    if (
-      data.housingPreference === "on_campus" &&
-      (!data.housingRoomType ||
-        !data.bathroomPreference ||
-        !data.roommateMatching ||
-        !data.sleepSchedule ||
-        !data.studyHabits ||
-        !data.roomNoise ||
-        !data.cleanliness ||
-        !data.guestPreference ||
-        !data.temperaturePreference ||
-        !data.smokeVapeCompatibility)
-    ) {
-      invalid("Complete the on-campus room and roommate preferences");
-    }
-    if (
-      data.housingPreference === "off_campus" &&
-      !data.offCampusStatus
-    ) {
-      invalid("Tell us where you are in your off-campus search");
-    }
-    if (
-      data.housingPreference === "commuting" &&
-      (!data.commuteMode || !data.commuteDuration)
-    ) {
-      invalid("Choose your main commute and one-way travel time");
-    }
     return;
   }
   if (step === "campus_life") return;
@@ -2422,8 +2542,17 @@ function validateOnboardingStep(state, step, data) {
   }
   if (step === "family_permissions") return;
   if (step === "review_and_sign") {
-    if (!data.signatureFullName) {
-      invalid("Type your full legal name to sign the onboarding packet");
+    if (
+      !data.signatureFullName ||
+      !["typed", "drawn"].includes(data.signatureMethod) ||
+      !data.signatureConsent ||
+      !Array.isArray(data.signedDocumentIds) ||
+      data.signedDocumentIds.length === 0 ||
+      (data.signatureMethod === "drawn" && !data.signatureImageData)
+    ) {
+      invalid(
+        "Review the document packet, choose a signature method, and provide your electronic signature",
+      );
     }
     return;
   }

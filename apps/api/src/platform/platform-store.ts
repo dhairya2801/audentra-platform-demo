@@ -6,6 +6,7 @@ import type {
   CreateDepositPaymentInput,
   CreateStudentAppointmentInput,
   CreateStudentDocumentInput,
+  ExtractedTranscriptCourse,
   CampusLifeFeed,
   CatalogCourse,
   StudentAcademics,
@@ -44,10 +45,19 @@ export interface AiProviderResponseAttempt {
   id: string;
   tenantId: string;
   studentId: string;
-  documentId: string;
+  documentId: string | null;
   requestId: string;
   attempt: number;
-  operation: "document_extraction";
+  operation:
+    | "edward_chat"
+    | "document_classification"
+    | "document_extraction"
+    | "transcript_segment_extraction"
+    | "transcript_merge"
+    | "course_label_normalization"
+    | "course_exemption_mapping"
+    | "immunization_extraction"
+    | "immunization_compliance";
   provider: "openrouter" | "groq";
   requestedModel: string | null;
   responseModel: string | null;
@@ -61,6 +71,80 @@ export interface AiProviderResponseAttempt {
   transportError: { name: string; message: string } | null;
   durationMs: number;
   recordedAt: string;
+  promptTemplateVersionId: string | null;
+  contextPolicyVersionId: string | null;
+  outputSchemaVersionId: string | null;
+  configRevision: number | null;
+  contextSha256: string | null;
+  promptCacheStatus: "hit" | "miss" | "reloaded" | "fallback";
+}
+
+export interface CourseExemptionContext {
+  program: {
+    id: string;
+    code: string;
+    name: string;
+  };
+  catalogVersion: {
+    id: string;
+    code: string;
+    effectiveFrom: string;
+    updatedAt: string;
+  };
+  policyVersion: string;
+  catalogCourses: Array<{
+    id: string;
+    code: string;
+    title: string;
+    credits: number;
+  }>;
+  programRequirements: Array<{
+    id: string;
+    courseId: string;
+    category: string;
+    required: boolean;
+    recommendedTerm: number;
+  }>;
+  prerequisites: Array<{
+    courseId: string;
+    prerequisiteCourseId: string;
+    minimumGrade: string | null;
+  }>;
+  equivalencyRules: Array<{
+    id: string;
+    code: string;
+    version: number;
+    sourceType: string;
+    sourceCode: string;
+    minimumScore: number | null;
+    minimumGrade: string | null;
+    minimumCredits: number | null;
+    targetCourseId: string;
+    confidence: number;
+  }>;
+}
+
+export interface ImmunizationPolicyContext {
+  policyVersion: {
+    id: string;
+    code: string;
+    version: number;
+    name: string;
+    effectiveFrom: string;
+    effectiveUntil: string | null;
+    updatedAt: string;
+  };
+  requirements: Array<{
+    id: string;
+    code: string;
+    name: string;
+    description: string;
+    required: boolean;
+    doseCount: number | null;
+    validityDays: number | null;
+    appliesWhen: Record<string, unknown>;
+    evidenceCriteria: Record<string, unknown>;
+  }>;
 }
 
 export interface PlatformStore {
@@ -160,6 +244,13 @@ export interface PlatformStore {
     /** Finalizes the retry idempotency record once the parse result is stored. */
     retryIdempotencyKey?: string;
   }): Promise<StudentDocument>;
+  getCourseExemptionContext(input: {
+    auth: AuthContext;
+    courses: ExtractedTranscriptCourse[];
+  }): Promise<CourseExemptionContext | null>;
+  getImmunizationPolicyContext(
+    auth: AuthContext,
+  ): Promise<ImmunizationPolicyContext | null>;
   getStudentDocument(input: {
     auth: AuthContext;
     documentId: string;

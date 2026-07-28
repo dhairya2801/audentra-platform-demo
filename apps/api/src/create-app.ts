@@ -71,8 +71,8 @@ export async function createApiApplication(
     limits: {
       fileSize: 10_485_760,
       files: 1,
-      fields: 1,
-      parts: 2,
+      fields: 2,
+      parts: 3,
     },
   });
 

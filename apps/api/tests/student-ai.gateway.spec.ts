@@ -198,6 +198,224 @@ describe("OpenRouterStudentAiGateway", () => {
     ]);
   });
 
+  it("maps exemptions from supplied tenant context and rejects invented identifiers", async () => {
+    const gateway = new OpenRouterStudentAiGateway(config, async () =>
+      new Response(
+        JSON.stringify({
+          model: "test/mapper",
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  policyVersion: "CAT-2027:rules-v3",
+                  decisions: [
+                    {
+                      sourceCourseId: "course:1",
+                      status: "matched",
+                      targetCourseId: "course-target",
+                      equivalencyRuleId: "rule-1",
+                      confidence: 0.94,
+                      rationale: "The supplied AP score meets rule-1.",
+                      contextIds: ["rule-1", "course-target"],
+                    },
+                    {
+                      sourceCourseId: "course:2",
+                      status: "matched",
+                      targetCourseId: "invented-course",
+                      equivalencyRuleId: "invented-rule",
+                      confidence: 0.99,
+                      rationale: "Invented.",
+                      contextIds: ["invented-rule"],
+                    },
+                  ],
+                  warnings: [],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const evaluation = await gateway.evaluateCourseExemptions({
+      tenantId: config.demoIds.tenantId,
+      studentId: config.demoIds.studentId,
+      documentId: "document-1",
+      requestId: "request-1",
+      courses: [
+        {
+          sourceCode: "AP-CALC-AB",
+          title: "AP Calculus AB",
+          credits: null,
+          grade: null,
+          score: "4",
+          term: null,
+          confidence: 0.98,
+        },
+        {
+          sourceCode: "ART 101",
+          title: "Studio Art",
+          credits: 3,
+          grade: "A",
+          score: null,
+          term: "Fall 2025",
+          confidence: 0.97,
+        },
+      ],
+      context: {
+        program: { id: "program-1", code: "BS-CS", name: "Computer Science" },
+        catalogVersion: {
+          id: "catalog-1",
+          code: "CAT-2027",
+          effectiveFrom: "2027-01-01",
+          updatedAt: "2026-07-27T00:00:00.000Z",
+        },
+        policyVersion: "CAT-2027:rules-v3",
+        catalogCourses: [
+          {
+            id: "course-target",
+            code: "MATH 151",
+            title: "Calculus I",
+            credits: 4,
+          },
+        ],
+        programRequirements: [
+          {
+            id: "requirement-1",
+            courseId: "course-target",
+            category: "math_science",
+            required: true,
+            recommendedTerm: 1,
+          },
+        ],
+        prerequisites: [],
+        equivalencyRules: [
+          {
+            id: "rule-1",
+            code: "AP-CALC-AB-4",
+            version: 3,
+            sourceType: "ap",
+            sourceCode: "AP-CALC-AB",
+            minimumScore: 4,
+            minimumGrade: null,
+            minimumCredits: null,
+            targetCourseId: "course-target",
+            confidence: 0.95,
+          },
+        ],
+      },
+    });
+
+    expect(evaluation.decisions[0]).toMatchObject({
+      status: "matched",
+      targetCourseId: "course-target",
+      equivalencyRuleId: "rule-1",
+    });
+    expect(evaluation.decisions[1]).toMatchObject({
+      status: "policy_gap",
+      targetCourseId: null,
+      equivalencyRuleId: null,
+    });
+  });
+
+  it("returns one validated immunization result for every active tenant rule", async () => {
+    const gateway = new OpenRouterStudentAiGateway(config, async () =>
+      new Response(
+        JSON.stringify({
+          model: "test/health-policy",
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  policyVersion: "ASTER-HEALTH-2027:v1",
+                  requirements: [
+                    {
+                      ruleId: "rule-covid",
+                      code: "covid_19",
+                      status: "missing",
+                      rationale: "No COVID-19 evidence was extracted.",
+                      evidenceKeys: [],
+                    },
+                  ],
+                  warnings: [],
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const evaluation = await gateway.evaluateImmunizationCompliance({
+      tenantId: config.demoIds.tenantId,
+      studentId: config.demoIds.studentId,
+      documentId: "document-health",
+      requestId: "request-health",
+      extraction: {
+        status: "completed",
+        documentType: "immunization",
+        summary: "One MMR dose.",
+        studentName: "Maya Chen",
+        institutionName: null,
+        issueDate: null,
+        academicTerm: null,
+        fields: [
+          {
+            key: "mmr_dose_1",
+            label: "MMR dose 1",
+            value: "2026-01-10",
+            confidence: 0.98,
+          },
+        ],
+        warnings: [],
+        model: "test/parser",
+        provider: "openrouter",
+        processedAt: "2026-07-27T00:00:00.000Z",
+        verifiedAt: null,
+      },
+      context: {
+        policyVersion: {
+          id: "policy-1",
+          code: "ASTER-HEALTH-2027",
+          version: 1,
+          name: "Aster health policy",
+          effectiveFrom: "2027-01-01",
+          effectiveUntil: null,
+          updatedAt: "2026-07-27T00:00:00.000Z",
+        },
+        requirements: [
+          {
+            id: "rule-mmr",
+            code: "mmr",
+            name: "MMR",
+            description: "Two doses.",
+            required: true,
+            doseCount: 2,
+            validityDays: null,
+            appliesWhen: {},
+            evidenceCriteria: {},
+          },
+          {
+            id: "rule-covid",
+            code: "covid_19",
+            name: "COVID-19",
+            description: "One dose.",
+            required: true,
+            doseCount: 1,
+            validityDays: null,
+            appliesWhen: {},
+            evidenceCriteria: {},
+          },
+        ],
+      },
+    });
+
+    expect(evaluation.requirements).toEqual([
+      expect.objectContaining({ ruleId: "rule-mmr", status: "uncertain" }),
+      expect.objectContaining({ ruleId: "rule-covid", status: "missing" }),
+    ]);
+  });
+
   it("uses unequivocal FERPA evidence when a provider returns an empty other classification", async () => {
     let calls = 0;
     const gateway = new OpenRouterStudentAiGateway(
@@ -506,6 +724,103 @@ describe("OpenRouterStudentAiGateway", () => {
     );
     expect(messages[1]?.content?.[1]?.image_url?.url).toBe(
       "data:image/jpeg;base64,aW1hZ2U=",
+    );
+  });
+
+  it("extracts long transcripts by page segment and conserves every distinct course", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const course = (
+      sourceCode: string,
+      title: string,
+      term: string,
+    ) => ({
+      sourceCode,
+      title,
+      credits: 3,
+      grade: "A",
+      score: null,
+      term,
+      confidence: 0.97,
+    });
+    const segmentCourses = [
+      [
+        course("MATH 101", "Calculus I", "Fall 2024"),
+        course("CS 101", "Programming I", "Fall 2024"),
+      ],
+      [
+        course("MATH 201", "Calculus II", "Spring 2025"),
+        course("CS 201", "Data Structures", "Spring 2025"),
+      ],
+    ];
+    const gateway = new OpenRouterStudentAiGateway(
+      config,
+      async (_url, init) => {
+        requests.push(
+          JSON.parse(String(init?.body)) as Record<string, unknown>,
+        );
+        const requestIndex = requests.length - 1;
+        const courses =
+          requestIndex < segmentCourses.length
+            ? segmentCourses[requestIndex]
+            : [segmentCourses[0]![0]];
+        return new Response(
+          JSON.stringify({
+            model: "test/parser",
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    documentType: "transcript",
+                    summary: "Transcript rows.",
+                    studentName: "Maya Chen",
+                    institutionName: "Aster University",
+                    issueDate: null,
+                    academicTerm: null,
+                    fields: [],
+                    courses,
+                    warnings: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      },
+      async () => ({
+        extractedText: [
+          "--- Page 1 ---\nOfficial Transcript\nFall 2024",
+          "--- Page 2 ---\nMATH 101 Calculus I\nCS 101 Programming I",
+          "--- Page 3 ---\nOfficial Transcript\nSpring 2025",
+          "--- Page 4 ---\nMATH 201 Calculus II\nCS 201 Data Structures",
+        ].join("\n\n"),
+        pageCount: 4,
+        renderedPageNumbers: [1, 2, 3, 4],
+        textTruncated: false,
+        images: [],
+      }),
+    );
+
+    const extraction = await gateway.extractStudentDocument({
+      fileName: "complete-transcript.pdf",
+      mimeType: "application/pdf",
+      bytes: Buffer.from("%PDF-1.7\n%%EOF"),
+      expectedDocumentType: "transcript",
+    });
+
+    expect(requests).toHaveLength(3);
+    expect(extraction.courses).toHaveLength(4);
+    expect(extraction.courses?.map((item) => item.sourceCode)).toEqual([
+      "MATH 101",
+      "CS 101",
+      "MATH 201",
+      "CS 201",
+    ]);
+    expect(extraction.warnings.join(" ")).toContain(
+      "conservation guard retained all 4",
+    );
+    expect(extraction.warnings[0]).toContain(
+      "4 pages in 2 page-aware segments",
     );
   });
 

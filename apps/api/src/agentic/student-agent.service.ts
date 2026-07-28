@@ -321,6 +321,12 @@ export class StudentAgentService {
         bytes: input.bytes,
         ...(expectedDocumentType ? { expectedDocumentType } : {}),
       });
+      extraction = await this.enrichExtractionWithTenantPolicy({
+        auth: input.auth,
+        documentId: input.documentId,
+        requestId: input.requestId,
+        extraction,
+      });
       if (
         input.category === "financial_aid" &&
         extraction.status === "completed"
@@ -358,6 +364,94 @@ export class StudentAgentService {
     });
   }
 
+  private async enrichExtractionWithTenantPolicy(input: {
+    auth: AuthContext;
+    documentId: string;
+    requestId: string;
+    extraction: StudentDocumentExtraction;
+  }): Promise<StudentDocumentExtraction> {
+    if (input.extraction.status !== "completed") return input.extraction;
+    if (
+      input.extraction.documentType === "transcript" &&
+      input.extraction.courses?.length
+    ) {
+      try {
+        const context = await this.store.getCourseExemptionContext({
+          auth: input.auth,
+          courses: input.extraction.courses,
+        });
+        if (!context) {
+          return {
+            ...input.extraction,
+            warnings: [
+              "No active tenant catalog and exemption policy context was available, so course mappings require staff review.",
+              ...input.extraction.warnings,
+            ].slice(0, 12),
+          };
+        }
+        const courseExemptionEvaluation =
+          await this.ai.evaluateCourseExemptions({
+            tenantId: input.auth.tenantId,
+            studentId: input.auth.studentId,
+            documentId: input.documentId,
+            requestId: input.requestId,
+            courses: input.extraction.courses,
+            context,
+          });
+        return {
+          ...input.extraction,
+          courseExemptionEvaluation,
+        };
+      } catch {
+        return {
+          ...input.extraction,
+          warnings: [
+            "The transcript was parsed, but automatic exemption mapping could not be completed with the active tenant policy. The extracted courses remain available for staff review.",
+            ...input.extraction.warnings,
+          ].slice(0, 12),
+        };
+      }
+    }
+    if (input.extraction.documentType === "immunization") {
+      try {
+        const context = await this.store.getImmunizationPolicyContext(
+          input.auth,
+        );
+        if (!context) {
+          return {
+            ...input.extraction,
+            warnings: [
+              "No published tenant immunization policy was available, so compliance was not inferred.",
+              ...input.extraction.warnings,
+            ].slice(0, 12),
+          };
+        }
+        const immunizationCompliance =
+          await this.ai.evaluateImmunizationCompliance({
+            tenantId: input.auth.tenantId,
+            studentId: input.auth.studentId,
+            documentId: input.documentId,
+            requestId: input.requestId,
+            extraction: input.extraction,
+            context,
+          });
+        return {
+          ...input.extraction,
+          immunizationCompliance,
+        };
+      } catch {
+        return {
+          ...input.extraction,
+          warnings: [
+            "The immunization record was extracted, but compliance could not be evaluated with the active tenant policy. Health Services review is required.",
+            ...input.extraction.warnings,
+          ].slice(0, 12),
+        };
+      }
+    }
+    return input.extraction;
+  }
+
   /**
    * A transient provider error should not immediately become a student-facing
    * failure. Retry once, immediately, and only for errors classified as a
@@ -389,6 +483,7 @@ export class StudentAgentService {
   async askEdward(input: {
     auth: AuthContext;
     question: AskEdwardInput;
+    requestId?: string;
   }): Promise<AskEdwardResponse> {
     const guarded = guardedEdwardResponse(input.question.message);
     if (guarded) return guarded;
@@ -424,6 +519,9 @@ export class StudentAgentService {
       ...input.question,
       pageContext: normalizeEdwardPageContext(input.question.pageContext),
       studentContext,
+      tenantId: input.auth.tenantId,
+      studentId: input.auth.studentId,
+      ...(input.requestId ? { requestId: input.requestId } : {}),
     });
     // These receipts are assembled only after all deterministic reads above
     // succeed. They deliberately describe data supplied to Edward, rather

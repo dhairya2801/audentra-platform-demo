@@ -28,4 +28,7 @@ RUN apk add --no-cache python3 py3-pip \
 COPY --from=build --chown=node:node /workspace /workspace
 USER node
 EXPOSE 4000
-CMD ["node", "apps/api/dist/main.js"]
+# The API itself is compiled so Nest decorator metadata is retained. The tsx
+# loader is still registered because shared workspace packages intentionally
+# export TypeScript source during development.
+CMD ["node", "--import", "tsx", "apps/api/dist/main.js"]

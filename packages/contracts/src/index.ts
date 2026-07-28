@@ -189,6 +189,8 @@ export interface StudentOnboardingData {
   housingRoomType?: string;
   bathroomPreference?: string;
   roommateMatching?: string;
+  knownRoommateName?: string;
+  knownRoommateEmail?: string;
   sleepSchedule?: string;
   studyHabits?: string;
   roomNoise?: string;
@@ -212,6 +214,10 @@ export interface StudentOnboardingData {
   emergencyContacts?: OnboardingEmergencyContact[];
   familyPermissions?: OnboardingFamilyPermission[];
   signatureFullName?: string;
+  signatureMethod?: "typed" | "drawn";
+  signatureImageData?: string;
+  signatureConsent?: boolean;
+  signedDocumentIds?: string[];
   depositChoice?: "pay_now" | "pay_later" | "waiver_or_deferral";
 }
 
@@ -240,8 +246,21 @@ export interface CompleteStudentOnboardingInput {
 export interface StudentHousingPlan {
   preference: HousingPreference | null;
   residenceOption: HousingResidenceOption;
+  residences: StudentHousingResidence[];
   version: number;
   updatedAt: string;
+}
+
+export interface StudentHousingResidence {
+  id: string;
+  value: Exclude<HousingResidenceOption, null>;
+  name: string;
+  description: string;
+  amenities: string[];
+  imageUrl: string;
+  imageAlt: string;
+  attribution: string;
+  sourceUrl: string;
 }
 
 export interface UpdateStudentHousingPlanInput {
@@ -275,6 +294,23 @@ export interface StudentRequirementDetail
   documentCategory: StudentDocumentCategory | null;
   responsibleOffice: string;
   dependencyCodes: string[];
+  immunizationPolicy?: {
+    id: string;
+    code: string;
+    version: number;
+    name: string;
+    effectiveFrom: string;
+    effectiveUntil: string | null;
+    requirements: Array<{
+      id: string;
+      code: string;
+      name: string;
+      description: string;
+      required: boolean;
+      doseCount: number | null;
+      validityDays: number | null;
+    }>;
+  };
 }
 
 const requirementSlugByCode = {
@@ -388,6 +424,44 @@ export interface ExtractedDocumentVisualRegion {
   confidence: number;
 }
 
+export interface CourseExemptionDecision {
+  sourceCourseKey: string;
+  sourceCode: string | null;
+  sourceTitle: string;
+  status: "matched" | "needs_review" | "no_match" | "policy_gap";
+  targetCourseId: string | null;
+  equivalencyRuleId: string | null;
+  confidence: number;
+  rationale: string;
+  contextIds: string[];
+}
+
+export interface CourseExemptionEvaluation {
+  catalogVersionId: string;
+  policyVersion: string;
+  evaluatedCourseCount: number;
+  decisions: CourseExemptionDecision[];
+  warnings: string[];
+  generatedAt: string;
+}
+
+export interface ImmunizationRequirementResult {
+  ruleId: string;
+  code: string;
+  name: string;
+  status: "met" | "missing" | "uncertain" | "not_applicable" | "expired";
+  rationale: string;
+  evidenceKeys: string[];
+}
+
+export interface ImmunizationComplianceEvaluation {
+  policyVersionId: string;
+  policyVersion: string;
+  requirements: ImmunizationRequirementResult[];
+  warnings: string[];
+  generatedAt: string;
+}
+
 /**
  * A deliberately small, student-safe description of why an extraction could
  * not finish. Provider response bodies are never persisted in this contract.
@@ -429,6 +503,8 @@ export interface StudentDocumentExtraction {
   failureCode?: StudentDocumentExtractionFailureCode;
   retryable?: boolean;
   acceptedFieldKeys?: string[];
+  courseExemptionEvaluation?: CourseExemptionEvaluation;
+  immunizationCompliance?: ImmunizationComplianceEvaluation;
 }
 
 export interface StudentDocument {
@@ -692,6 +768,10 @@ export interface StudentClub {
   contactChannel: string;
   latestUpdate: string;
   nextActivity: string | null;
+  imageUrl: string;
+  imageAlt: string;
+  imageAttribution: string;
+  imageSourceUrl: string;
 }
 
 export interface CampusLifeFeed {

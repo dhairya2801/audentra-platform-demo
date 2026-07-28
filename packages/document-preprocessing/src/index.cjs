@@ -44,9 +44,7 @@ async function preprocessStudentDocument(input, options = {}) {
   try {
     await writeFile(inputPath, input.bytes, { flag: "wx", mode: 0o600 });
     const { stdout } = await execFileAsync(
-      options.pythonExecutable?.trim() ||
-        process.env.DOCUMENT_PYTHON_BIN?.trim() ||
-        "python3",
+      resolvePythonExecutable(options.pythonExecutable),
       [
         pythonScript,
         "--input",
@@ -252,7 +250,9 @@ function mapPreprocessingError(error) {
   if (
     error &&
     typeof error === "object" &&
-    (error.code === "ENOENT" || error.code === "EACCES")
+    (error.code === "ENOENT" ||
+      error.code === "EACCES" ||
+      (process.platform === "win32" && error.code === "UNKNOWN"))
   ) {
     return new DocumentPreprocessingError(
       "PDF_PREPROCESSOR_UNAVAILABLE",
@@ -263,6 +263,17 @@ function mapPreprocessingError(error) {
     "PDF_PREPROCESSING_FAILED",
     "The PDF could not be preprocessed safely",
   );
+}
+
+function resolvePythonExecutable(optionValue) {
+  const configured =
+    optionValue?.trim() || process.env.DOCUMENT_PYTHON_BIN?.trim();
+  if (configured) {
+    return process.platform === "win32" && configured === "python3"
+      ? "python"
+      : configured;
+  }
+  return process.platform === "win32" ? "python" : "python3";
 }
 
 function parseSafeDiagnostic(stderr) {

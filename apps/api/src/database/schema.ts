@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -29,6 +30,65 @@ export const tenant = pgTable("tenant", {
   name: varchar("name", { length: 180 }).notNull(),
   ...timestamps,
 });
+
+export const mediaAsset = pgTable(
+  "media_asset",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    purpose: varchar("purpose", { length: 80 }).notNull(),
+    storageProvider: varchar("storage_provider", { length: 40 }).notNull(),
+    storageKey: varchar("storage_key", { length: 512 }).notNull(),
+    publicPath: varchar("public_path", { length: 512 }).notNull(),
+    mimeType: varchar("mime_type", { length: 100 }).notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    altText: varchar("alt_text", { length: 500 }).notNull(),
+    attribution: varchar("attribution", { length: 300 }).notNull(),
+    sourceUrl: varchar("source_url", { length: 1000 }).notNull(),
+    licenseName: varchar("license_name", { length: 120 }).notNull(),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("media_asset_tenant_storage_uidx").on(
+      table.tenantId,
+      table.storageKey,
+    ),
+    index("media_asset_tenant_purpose_idx").on(
+      table.tenantId,
+      table.purpose,
+      table.active,
+    ),
+  ],
+);
+
+export const housingResidenceOption = pgTable(
+  "housing_residence_option",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    code: varchar("code", { length: 80 }).notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    description: text("description").notNull(),
+    amenities: jsonb("amenities").$type<string[]>().notNull(),
+    mediaAssetId: uuid("media_asset_id")
+      .notNull()
+      .references(() => mediaAsset.id),
+    displayOrder: integer("display_order").notNull(),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("housing_residence_option_tenant_code_uidx").on(
+      table.tenantId,
+      table.code,
+    ),
+  ],
+);
 
 export const person = pgTable(
   "person",
@@ -649,15 +709,161 @@ export const documentRecord = pgTable(
   ],
 );
 
+export const aiPromptTemplateVersion = pgTable(
+  "ai_prompt_template_version",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    version: integer("version").notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    systemPrompt: text("system_prompt").notNull(),
+    userPromptTemplate: text("user_prompt_template"),
+    templateVariables: jsonb("template_variables").$type<string[]>().notNull(),
+    status: varchar("status", { length: 24 }).notNull(),
+    createdBy: uuid("created_by"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ai_prompt_template_version_uidx").on(
+      table.tenantId,
+      table.operation,
+      table.version,
+    ),
+  ],
+);
+
+export const aiContextPolicyVersion = pgTable(
+  "ai_context_policy_version",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    version: integer("version").notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    contextPolicy: jsonb("context_policy")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    status: varchar("status", { length: 24 }).notNull(),
+    createdBy: uuid("created_by"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ai_context_policy_version_uidx").on(
+      table.tenantId,
+      table.operation,
+      table.version,
+    ),
+  ],
+);
+
+export const aiOutputSchemaVersion = pgTable(
+  "ai_output_schema_version",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    version: integer("version").notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    outputSchema: jsonb("output_schema")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    status: varchar("status", { length: 24 }).notNull(),
+    createdBy: uuid("created_by"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ai_output_schema_version_uidx").on(
+      table.tenantId,
+      table.operation,
+      table.version,
+    ),
+  ],
+);
+
+export const aiOperationConfig = pgTable(
+  "ai_operation_config",
+  {
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    promptTemplateVersionId: uuid("prompt_template_version_id")
+      .notNull()
+      .references(() => aiPromptTemplateVersion.id),
+    contextPolicyVersionId: uuid("context_policy_version_id")
+      .notNull()
+      .references(() => aiContextPolicyVersion.id),
+    outputSchemaVersionId: uuid("output_schema_version_id").references(
+      () => aiOutputSchemaVersion.id,
+    ),
+    provider: varchar("provider", { length: 40 }).notNull(),
+    model: varchar("model", { length: 200 }).notNull(),
+    maxOutputTokens: integer("max_output_tokens").notNull(),
+    temperatureMilli: integer("temperature_milli").notNull().default(0),
+    configRevision: bigint("config_revision", { mode: "number" })
+      .notNull()
+      .default(1),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tenantId, table.operation] }),
+    index("ai_operation_config_updated_idx").on(
+      table.tenantId,
+      table.updatedAt,
+    ),
+  ],
+);
+
+export const aiRuntimeConfigCheckpoint = pgTable(
+  "ai_runtime_config_checkpoint",
+  {
+    instanceId: varchar("instance_id", { length: 180 }).notNull(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    operation: varchar("operation", { length: 80 }).notNull(),
+    lastSeenRevision: bigint("last_seen_revision", { mode: "number" }).notNull(),
+    lastCheckedAt: timestamp("last_checked_at", {
+      withTimezone: true,
+    }).notNull(),
+    lastLoadedAt: timestamp("last_loaded_at", {
+      withTimezone: true,
+    }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.instanceId, table.tenantId, table.operation],
+    }),
+  ],
+);
+
 export const aiProviderResponseAttempt = pgTable(
   "ai_provider_response_attempt",
   {
     id: uuid("id").primaryKey(),
     tenantId: uuid("tenant_id").notNull(),
     studentId: uuid("student_id").notNull(),
-    documentId: uuid("document_id")
-      .notNull()
-      .references(() => documentRecord.id, { onDelete: "cascade" }),
+    documentId: uuid("document_id").references(() => documentRecord.id, {
+      onDelete: "cascade",
+    }),
     requestId: varchar("request_id", { length: 128 }).notNull(),
     attemptNumber: smallint("attempt_number").notNull(),
     operation: varchar("operation", { length: 80 }).notNull(),
@@ -676,6 +882,18 @@ export const aiProviderResponseAttempt = pgTable(
       message: string;
     }>(),
     durationMs: integer("duration_ms").notNull(),
+    promptTemplateVersionId: uuid("prompt_template_version_id").references(
+      () => aiPromptTemplateVersion.id,
+    ),
+    contextPolicyVersionId: uuid("context_policy_version_id").references(
+      () => aiContextPolicyVersion.id,
+    ),
+    outputSchemaVersionId: uuid("output_schema_version_id").references(
+      () => aiOutputSchemaVersion.id,
+    ),
+    configRevision: bigint("config_revision", { mode: "number" }),
+    contextSha256: varchar("context_sha256", { length: 64 }),
+    promptCacheStatus: varchar("prompt_cache_status", { length: 16 }),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -693,6 +911,112 @@ export const aiProviderResponseAttempt = pgTable(
       table.documentId,
       table.requestId,
       table.attemptNumber,
+    ),
+  ],
+);
+
+export const immunizationPolicyVersion = pgTable(
+  "immunization_policy_version",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    code: varchar("code", { length: 80 }).notNull(),
+    version: integer("version").notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull(),
+    effectiveFrom: date("effective_from").notNull(),
+    effectiveUntil: date("effective_until"),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("immunization_policy_version_code_uidx").on(
+      table.tenantId,
+      table.code,
+      table.version,
+    ),
+    uniqueIndex("immunization_policy_one_published_idx")
+      .on(table.tenantId)
+      .where(sql`${table.status} = 'published'`),
+  ],
+);
+
+export const immunizationRequirementRule = pgTable(
+  "immunization_requirement_rule",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    policyVersionId: uuid("policy_version_id")
+      .notNull()
+      .references(() => immunizationPolicyVersion.id),
+    code: varchar("code", { length: 80 }).notNull(),
+    name: varchar("name", { length: 180 }).notNull(),
+    description: text("description").notNull(),
+    required: boolean("required").notNull().default(true),
+    doseCount: smallint("dose_count"),
+    validityDays: integer("validity_days"),
+    appliesWhen: jsonb("applies_when")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    evidenceCriteria: jsonb("evidence_criteria")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    displayOrder: smallint("display_order").notNull().default(0),
+    active: boolean("active").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("immunization_requirement_rule_code_uidx").on(
+      table.policyVersionId,
+      table.code,
+    ),
+    index("immunization_requirement_rule_policy_idx").on(
+      table.tenantId,
+      table.policyVersionId,
+      table.displayOrder,
+    ),
+  ],
+);
+
+export const studentImmunizationEvaluation = pgTable(
+  "student_immunization_evaluation",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => student.id),
+    sourceDocumentId: uuid("source_document_id")
+      .notNull()
+      .references(() => documentRecord.id),
+    policyVersionId: uuid("policy_version_id")
+      .notNull()
+      .references(() => immunizationPolicyVersion.id),
+    result: jsonb("result").notNull(),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("student_immunization_evaluation_document_policy_uidx").on(
+      table.tenantId,
+      table.studentId,
+      table.sourceDocumentId,
+      table.policyVersionId,
+    ),
+    index("student_immunization_evaluation_student_idx").on(
+      table.tenantId,
+      table.studentId,
+      table.generatedAt,
     ),
   ],
 );

@@ -16,7 +16,7 @@ export const ONBOARDING_STEPS: readonly OnboardingStep[] = [
 ];
 
 const skippableOnboardingSteps = new Set<OnboardingStep>([
-  "housing",
+  "offer",
   "campus_life",
   "deposit",
 ]);
@@ -58,33 +58,6 @@ export function validateOnboardingStepData(
       return;
     case "housing":
       if (!data.housingPreference) invalid("Choose a housing preference");
-      if (
-        data.housingPreference === "on_campus" &&
-        (!data.housingRoomType ||
-          !data.bathroomPreference ||
-          !data.roommateMatching ||
-          !data.sleepSchedule ||
-          !data.studyHabits ||
-          !data.roomNoise ||
-          !data.cleanliness ||
-          !data.guestPreference ||
-          !data.temperaturePreference ||
-          !data.smokeVapeCompatibility)
-      ) {
-        invalid("Complete the on-campus room and roommate preferences");
-      }
-      if (
-        data.housingPreference === "off_campus" &&
-        !data.offCampusStatus
-      ) {
-        invalid("Tell us where you are in your off-campus search");
-      }
-      if (
-        data.housingPreference === "commuting" &&
-        (!data.commuteMode || !data.commuteDuration)
-      ) {
-        invalid("Choose your main commute and one-way travel time");
-      }
       return;
     case "campus_life":
       return;
@@ -96,8 +69,17 @@ export function validateOnboardingStepData(
     case "family_permissions":
       return;
     case "review_and_sign":
-      if (!data.signatureFullName) {
-        invalid("Type your full legal name to sign the onboarding packet");
+      if (
+        !data.signatureFullName ||
+        !data.signatureMethod ||
+        !data.signatureConsent ||
+        !data.signedDocumentIds ||
+        data.signedDocumentIds.length === 0 ||
+        (data.signatureMethod === "drawn" && !data.signatureImageData)
+      ) {
+        invalid(
+          "Review the document packet, choose a signature method, and provide your electronic signature",
+        );
       }
       return;
     case "deposit":

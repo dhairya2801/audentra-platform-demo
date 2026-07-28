@@ -14,7 +14,8 @@ const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 
 const pythonExecutable =
-  process.env.DOCUMENT_PYTHON_BIN?.trim() || "python3";
+  process.env.DOCUMENT_PYTHON_BIN?.trim() ||
+  (process.platform === "win32" ? "python" : "python3");
 
 describe("document preprocessing", () => {
   it("passes a source image through as a bounded multimodal input", async () => {
