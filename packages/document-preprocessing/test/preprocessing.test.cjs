@@ -103,4 +103,46 @@ describe("document preprocessing", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+
+  it("renders every page of a six-page transcript as its own 2048px image", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "vv-preprocess-test-"));
+    const pdfPath = join(directory, "six-page-transcript.pdf");
+    try {
+      execFileSync(pythonExecutable, [
+        "-c",
+        [
+          "import fitz, sys",
+          "doc = fitz.open()",
+          "[(doc.new_page().insert_text((72, 72), f'Official Transcript page {page + 1}')) for page in range(6)]",
+          "doc.save(sys.argv[1])",
+        ].join(";"),
+        pdfPath,
+      ]);
+      const prepared = await preprocessStudentDocument(
+        {
+          mimeType: "application/pdf",
+          bytes: readFileSync(pdfPath),
+        },
+        {
+          maxImagePages: 8,
+          maxImageDimension: 2_048,
+          jpegQuality: 88,
+        },
+      );
+
+      assert.equal(prepared.pageCount, 6);
+      assert.deepEqual(prepared.renderedPageNumbers, [1, 2, 3, 4, 5, 6]);
+      assert.equal(prepared.images.length, 6);
+      assert.deepEqual(
+        prepared.images.map((image) => image.pageNumber),
+        [1, 2, 3, 4, 5, 6],
+      );
+      for (const image of prepared.images) {
+        assert.equal(Math.max(image.width, image.height), 2_048);
+        assert.equal(image.mimeType, "image/jpeg");
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });

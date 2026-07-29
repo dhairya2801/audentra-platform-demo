@@ -39,6 +39,9 @@ compatibility.
 
 ### Changed
 
+- Transcript PDFs now render every supported page as its own high-resolution
+  2,048px, quality-88 JPEG and send exactly one page image per parallel vision
+  request for both Groq and OpenRouter
 - Transcript page segments now parse concurrently, header-only pages no longer
   abort an otherwise valid transcript, and merged results suppress misleading
   segment-local “no courses” warnings

@@ -442,11 +442,14 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
         mimeType: input.mimeType,
         bytes: input.bytes,
       },
-      provider === "groq"
+      input.expectedDocumentType === "transcript"
         ? {
             maxImagePages: 8,
-            maxImageDimension: 1_024,
-            maxTextCharacters: this.groqDocumentMaxTextCharacters,
+            maxImageDimension: 2_048,
+            jpegQuality: 88,
+            ...(provider === "groq"
+              ? { maxTextCharacters: this.groqDocumentMaxTextCharacters }
+              : {}),
           }
         : undefined,
     );
@@ -465,7 +468,7 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
     }
     const transcriptSegments =
       input.expectedDocumentType === "transcript"
-        ? transcriptPageSegments(prepared, provider)
+        ? transcriptPageSegments(prepared)
         : [];
     if (
       transcriptSegments.length > 1 ||
@@ -1307,7 +1310,6 @@ function composeDecisionPrompt(runtime: AiPromptRuntimeConfig): string {
 
 function transcriptPageSegments(
   prepared: PreparedStudentDocument,
-  provider: DocumentExtractionProvider = "openrouter",
 ): PreparedStudentDocument[] {
   const textByPage = new Map<number, string>();
   const pattern =
@@ -1328,39 +1330,16 @@ function transcriptPageSegments(
       ),
     ]),
   ).sort((left, right) => left - right);
-  if (
-    pageNumbers.length === 0 ||
-    (provider !== "groq" && pageNumbers.length <= 2)
-  ) {
+  if (pageNumbers.length === 0) {
     return [prepared];
   }
-  const segments: PreparedStudentDocument[] = [];
-  const pagesPerSegment = provider === "groq" ? 1 : 2;
-  for (let index = 0; index < pageNumbers.length; index += pagesPerSegment) {
-    const group = pageNumbers.slice(index, index + pagesPerSegment);
-    const selectedPages = new Set(group);
-    const extractedText = group
-      .map((pageNumber) => textByPage.get(pageNumber) ?? "")
-      .filter(Boolean)
-      .join("\n\n");
-    const hasReadableText =
-      extractedText.replace(/--- Page \d+ ---/g, "").trim().length >= 80;
-    segments.push({
-      extractedText,
-      pageCount: group.length,
-      renderedPageNumbers: group,
-      textTruncated: prepared.textTruncated,
-      images:
-        provider === "groq" && hasReadableText
-          ? []
-          : prepared.images.filter(
-              (image) =>
-                image.pageNumber !== null &&
-                selectedPages.has(image.pageNumber),
-            ),
-    });
-  }
-  return segments;
+  return pageNumbers.map((pageNumber) => ({
+    extractedText: textByPage.get(pageNumber) ?? "",
+    pageCount: 1,
+    renderedPageNumbers: [pageNumber],
+    textTruncated: prepared.textTruncated,
+    images: prepared.images.filter((image) => image.pageNumber === pageNumber),
+  }));
 }
 
 function mergeTranscriptExtractions(

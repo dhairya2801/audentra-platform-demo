@@ -572,7 +572,8 @@ describe("OpenRouterStudentAiGateway", () => {
     expect(preprocessingOptions).toEqual([
       {
         maxImagePages: 8,
-        maxImageDimension: 1_024,
+        maxImageDimension: 2_048,
+        jpegQuality: 88,
         maxTextCharacters: 40_000,
       },
     ]);
@@ -740,6 +741,7 @@ describe("OpenRouterStudentAiGateway", () => {
 
   it("extracts long transcripts by page segment and conserves every distinct course", async () => {
     const requests: Array<Record<string, unknown>> = [];
+    const preprocessingOptions: unknown[] = [];
     let activeRequests = 0;
     let maximumConcurrentRequests = 0;
     const course = (
@@ -807,18 +809,29 @@ describe("OpenRouterStudentAiGateway", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       },
-      async () => ({
-        extractedText: [
-          "--- Page 1 ---\nOfficial Transcript\nFall 2024",
-          "--- Page 2 ---\nMATH 101 Calculus I\nCS 101 Programming I",
-          "--- Page 3 ---\nOfficial Transcript\nSpring 2025",
-          "--- Page 4 ---\nMATH 201 Calculus II\nCS 201 Data Structures",
-        ].join("\n\n"),
-        pageCount: 4,
-        renderedPageNumbers: [1, 2, 3, 4],
-        textTruncated: false,
-        images: [],
-      }),
+      async (_input, options) => {
+        preprocessingOptions.push(options);
+        return {
+          extractedText: [
+            "--- Page 1 ---\nOfficial Transcript\nFall 2024",
+            "--- Page 2 ---\nMATH 101 Calculus I\nCS 101 Programming I",
+            "--- Page 3 ---\nOfficial Transcript\nSpring 2025",
+            "--- Page 4 ---\nMATH 201 Calculus II\nCS 201 Data Structures",
+            "--- Page 5 ---\nAcademic standing and transfer totals",
+            "--- Page 6 ---\nRegistrar certification and degree totals",
+          ].join("\n\n"),
+          pageCount: 6,
+          renderedPageNumbers: [1, 2, 3, 4, 5, 6],
+          textTruncated: false,
+          images: [1, 2, 3, 4, 5, 6].map((pageNumber) => ({
+            pageNumber,
+            mimeType: "image/jpeg",
+            dataBase64: `aW1hZ2Ut${pageNumber}`,
+            width: 1_448,
+            height: 2_048,
+          })),
+        };
+      },
     );
 
     const extraction = await gateway.extractStudentDocument({
@@ -828,8 +841,23 @@ describe("OpenRouterStudentAiGateway", () => {
       expectedDocumentType: "transcript",
     });
 
-    expect(requests).toHaveLength(3);
-    expect(maximumConcurrentRequests).toBe(2);
+    expect(preprocessingOptions).toEqual([
+      {
+        maxImagePages: 8,
+        maxImageDimension: 2_048,
+        jpegQuality: 88,
+      },
+    ]);
+    expect(requests).toHaveLength(7);
+    expect(maximumConcurrentRequests).toBe(6);
+    for (const request of requests.slice(0, 6)) {
+      const messages = request.messages as Array<{
+        content?: Array<{ type?: string }>;
+      }>;
+      expect(
+        messages[1]?.content?.filter((part) => part.type === "image_url"),
+      ).toHaveLength(1);
+    }
     expect(extraction.courses).toHaveLength(4);
     expect(extraction.courses?.map((item) => item.sourceCode)).toEqual([
       "MATH 101",
@@ -841,7 +869,7 @@ describe("OpenRouterStudentAiGateway", () => {
       "conservation guard retained all 4",
     );
     expect(extraction.warnings[0]).toContain(
-      "4 pages in 2 page-aware segments",
+      "6 pages in 6 page-aware segments",
     );
   });
 

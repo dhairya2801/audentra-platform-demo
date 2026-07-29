@@ -110,10 +110,12 @@ state.
 
 For faster transcript extraction, also set `GROQ_API_KEY` and
 `TRANSCRIPT_PARSING=groq`. That path uses `GROQ_MODEL` (currently
-`qwen/qwen3.6-27b` by default), prefers extracted page text, and falls back to
-bounded single-page vision for scans. Set `TRANSCRIPT_PARSING=openrouter` to
-use the configured OpenRouter multimodal model instead. Non-transcript
-documents remain on the OpenRouter multimodal path.
+`qwen/qwen3.6-27b` by default). Both transcript providers receive one 2,048px
+JPEG per PDF page, together with that page's extracted text; a six-page
+transcript therefore produces six independent vision requests. Set
+`TRANSCRIPT_PARSING=openrouter` to use the configured OpenRouter multimodal
+model instead. Non-transcript documents remain on the OpenRouter multimodal
+path.
 
 The complete Compose stack exposes the same routes through the Nest API. It
 stores document metadata and review state in PostgreSQL, stores originals in

@@ -99,18 +99,18 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
    metadata while discarding every extracted student/financial field;
 5. for agentic and classification-only documents, atomically claims processing
    so replays do not spend LLM tokens twice;
-6. for PDFs, invokes an isolated Python/PyMuPDF preprocessor that extracts at
-   most 40,000 text characters from 20 pages and renders at most six evenly
-   selected pages at a 1,400px edge; images are not stored in the CRM;
+6. for PDFs, invokes an isolated Python/PyMuPDF preprocessor that extracts
+   bounded text and renders page images locally; transcript PDFs render every
+   supported page (up to eight) as an independent 2,048px, quality-88 JPEG,
+   while the images remain ephemeral and are not stored in the CRM;
 7. first applies a conservative local heading check for unmistakable document
    mismatches (for example a FERPA release uploaded to the transcript task),
    preserving the original and keeping the requirement incomplete without an
    LLM call;
-8. selects the transcript provider using `TRANSCRIPT_PARSING`: `openrouter`
-   sends bounded text plus rendered pages to the configured multimodal model,
-   while `groq` skips rendering and sends extracted text only to
-   `openai/gpt-oss-120b`; identity documents use the OpenRouter multimodal
-   path;
+8. selects the transcript provider using `TRANSCRIPT_PARSING`; both
+   `openrouter` and `groq` send one rendered page image plus that page's
+   bounded text per independent multimodal request, then conservatively merge
+   every page result; identity documents use the OpenRouter multimodal path;
 9. treats the document text and page images as untrusted evidence, never as
    executable instructions, and requires JSON-only text output;
 10. in development, records the exact provider response or transport failure in
@@ -218,7 +218,7 @@ OPENROUTER_STORE_RESPONSES=true
 OPENROUTER_DOCUMENT_TIMEOUT_MS=120000
 OPENROUTER_DOCUMENT_MAX_TOKENS=6000
 OPENROUTER_DOCUMENT_REASONING_TOKENS=256
-TRANSCRIPT_PARSING=openrouter        # openrouter (text + images) or groq (text only)
+TRANSCRIPT_PARSING=openrouter        # both providers receive one image per transcript page
 GROQ_API_KEY=                        # server only
 GROQ_MODEL=openai/gpt-oss-120b
 GROQ_TRANSCRIPT_TIMEOUT_MS=60000

@@ -358,16 +358,18 @@ describe("OpenRouterGateway", () => {
             "--- Page 2 ---\nMATH 201 Calculus II, four credits, final grade A, completed during Fall 2025.",
             "--- Page 3 ---\nOfficial Transcript continued with additional completed academic coursework and grades.",
             "--- Page 4 ---\nCS 220 Data Structures, four credits, final grade A, completed during Fall 2025.",
+            "--- Page 5 ---\nOfficial Transcript continued with academic standing and transfer totals.",
+            "--- Page 6 ---\nEnd of transcript with registrar certification and degree totals.",
           ].join("\n\n"),
-          pageCount: 4,
-          renderedPageNumbers: [1, 2, 3, 4],
+          pageCount: 6,
+          renderedPageNumbers: [1, 2, 3, 4, 5, 6],
           textTruncated: true,
-          images: [1, 2, 3, 4].map((pageNumber) => ({
+          images: [1, 2, 3, 4, 5, 6].map((pageNumber) => ({
             pageNumber,
             mimeType: "image/jpeg",
             dataBase64: `aW1hZ2Ut${pageNumber}`,
-            width: 900,
-            height: 1200,
+            width: 1_448,
+            height: 2_048,
           })),
         };
       },
@@ -388,16 +390,17 @@ describe("OpenRouterGateway", () => {
       result.warnings.some((warning) => /no course rows/i.test(warning)),
       false,
     );
-    assert.match(result.warnings[0], /4 bounded segments/);
+    assert.match(result.warnings[0], /6 bounded segments/);
     assert.deepEqual(preprocessingOptions, [
       {
         maxImagePages: 8,
-        maxImageDimension: 1_024,
+        maxImageDimension: 2_048,
+        jpegQuality: 88,
         maxTextCharacters: 40_000,
       },
     ]);
-    assert.equal(requests.length, 4);
-    assert.equal(maximumConcurrentRequests, 4);
+    assert.equal(requests.length, 6);
+    assert.equal(maximumConcurrentRequests, 6);
     assert.equal(requests[0].url, "https://api.groq.com/openai/v1/chat/completions");
     assert.equal(requests[0].init.headers.Authorization, "Bearer groq-key");
     assert.equal(requests[0].init.headers["HTTP-Referer"], undefined);
@@ -409,12 +412,16 @@ describe("OpenRouterGateway", () => {
     assert.equal(requests[0].body.response_format.type, "json_object");
     assert.equal(requests[0].body.messages.length, 2);
     assert.equal(Array.isArray(requests[0].body.messages[1].content), true);
-    assert.equal(
-      requests[0].body.messages[1].content.filter(
+    for (const [index, request] of requests.entries()) {
+      const imageParts = request.body.messages[1].content.filter(
         (part) => part.type === "image_url",
-      ).length,
-      0,
-    );
+      );
+      assert.equal(imageParts.length, 1);
+      assert.equal(
+        imageParts[0].image_url.url,
+        `data:image/jpeg;base64,aW1hZ2Ut${index + 1}`,
+      );
+    }
     assert.match(
       requests[1].body.messages[1].content[0].text,
       /MATH 201/,

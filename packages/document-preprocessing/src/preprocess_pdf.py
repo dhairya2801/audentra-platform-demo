@@ -51,7 +51,10 @@ def render_page(
     jpeg_quality: int,
 ) -> dict[str, object]:
     source = page.rect
-    scale = min(max_dimension / max(source.width, source.height), 2.0)
+    # Most PDFs use 72-point page coordinates. Permit enough supersampling for a
+    # standard page to reach the configured 2,048px edge instead of stopping at
+    # the previous 2x (~1,684px for A4) ceiling.
+    scale = min(max_dimension / max(source.width, source.height), 4.0)
     scale = max(scale, 0.5)
     pixmap = page.get_pixmap(
         matrix=fitz.Matrix(scale, scale),
