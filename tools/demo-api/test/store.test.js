@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { createSeedState } from "../src/seed.js";
 import { JsonStateStore } from "../src/store.js";
 
 const fixedClock = () => new Date("2026-07-24T12:00:00.000Z");
@@ -94,5 +95,21 @@ describe("JsonStateStore", () => {
 
     const reset = await store.reset();
     assert.deepEqual(reset, original);
+  });
+
+  it("adds reward configuration to current-version persisted state without a reset", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vv-demo-reward-migration-"));
+    const dataFile = join(directory, "state.json");
+    const persisted = createSeedState();
+    delete persisted.rewards;
+    await writeFile(dataFile, `${JSON.stringify(persisted)}\n`, "utf8");
+
+    const store = new JsonStateStore(dataFile, fixedClock);
+    const restored = await store.initialize();
+
+    assert.equal(restored.rewards.program.pointName, "Aster Points");
+    assert.equal(restored.rewards.program.pointsPerUsd, 100);
+    assert.ok(restored.rewards.rules.length > 0);
+    assert.deepEqual(restored.rewards.ledger, []);
   });
 });

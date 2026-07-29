@@ -32,6 +32,7 @@ import {
   type StudentProfile,
   type StudentRequirementDetail,
   type StudentRequirementList,
+  type StudentRewardSummary,
   type UpdateStudentOnboardingInput,
   type UpdateStudentHousingPlanInput,
   type UpdateStudentProfileInput,
@@ -103,6 +104,8 @@ interface RequirementRow {
   submission_type: StudentRequirementDetail["submissionType"];
   responsible_office: string;
   depends_on_codes: string[];
+  reward_points?: string | number;
+  reward_earned?: boolean;
 }
 
 interface MessageRow {
@@ -258,6 +261,7 @@ function mapHousingPlan(
 }
 
 function mapRequirement(row: RequirementRow): StudentRequirementDetail {
+  const rewardPoints = Number(row.reward_points ?? 0);
   return {
     id: row.id,
     slug: studentRequirementSlug(row.code),
@@ -273,6 +277,14 @@ function mapRequirement(row: RequirementRow): StudentRequirementDetail {
     documentCategory: documentCategoryForRequirement(row.code),
     responsibleOffice: row.responsible_office,
     dependencyCodes: row.depends_on_codes,
+    ...(rewardPoints > 0
+      ? {
+          reward: {
+            points: rewardPoints,
+            earned: row.reward_earned === true,
+          },
+        }
+      : {}),
   };
 }
 
@@ -355,6 +367,9 @@ export class PostgresPortalStore {
   constructor(protected readonly database: DatabaseService) {}
 
   async getStudentBootstrap(auth: AuthContext): Promise<StudentBootstrap> {
+    await this.database.db.transaction((transaction) =>
+      this.reconcileAuthoritativeRewards(transaction, auth),
+    );
     const result = await this.database.db.execute(sql`
       SELECT
         s.id AS student_id,
@@ -390,6 +405,7 @@ export class PostgresPortalStore {
       );
     }
     const required = row.status !== "completed";
+    const rewards = await this.getStudentRewardSummary(auth);
     return {
       authenticated: true,
       student: {
@@ -403,6 +419,7 @@ export class PostgresPortalStore {
         currentStep: row.current_step,
         version: row.version,
       },
+      ...(rewards ? { rewards } : {}),
       initialRoute: required ? "/onboarding" : "/dashboard",
       generatedAt: new Date().toISOString(),
     };
@@ -915,6 +932,14 @@ export class PostgresPortalStore {
             "Onboarding could not be completed",
           );
         }
+        await this.awardMatchingRewards(
+          transaction,
+          input.auth,
+          "onboarding_completed",
+          "onboarding",
+          input.auth.studentId,
+          {},
+        );
         await this.insertAudit(transaction, {
           auth: input.auth,
           action: "student_onboarding.completed",
@@ -953,13 +978,39 @@ export class PostgresPortalStore {
         sr.progress_percent,
         rdv.submission_type,
         rdv.responsible_office,
-        rdv.depends_on_codes
+        rdv.depends_on_codes,
+        reward.reward_points,
+        reward.reward_earned
       FROM student_requirement sr
       JOIN enrollment_journey j
         ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
       JOIN requirement_definition_version rdv
         ON rdv.id = sr.requirement_definition_version_id
        AND rdv.tenant_id = sr.tenant_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(rr.points), 0)::integer AS reward_points,
+          CASE
+            WHEN COUNT(rr.id) = 0 THEN false
+            ELSE BOOL_AND(
+              EXISTS (
+                SELECT 1
+                FROM student_reward_ledger ledger
+                WHERE ledger.tenant_id = sr.tenant_id
+                  AND ledger.student_id = ${auth.studentId}
+                  AND ledger.reward_rule_id = rr.id
+                  AND ledger.source_key = sr.id::text
+              )
+            )
+          END AS reward_earned
+        FROM tenant_reward_rule rr
+        WHERE rr.tenant_id = sr.tenant_id
+          AND rr.trigger_type = 'requirement_completed'
+          AND rr.trigger_key = rdv.code
+          AND rr.enabled = true
+          AND (rr.starts_at IS NULL OR rr.starts_at <= NOW())
+          AND (rr.ends_at IS NULL OR rr.ends_at > NOW())
+      ) reward ON true
       WHERE sr.tenant_id = ${auth.tenantId}
         AND j.student_id = ${auth.studentId}
       ORDER BY rdv.display_order, sr.created_at
@@ -988,13 +1039,39 @@ export class PostgresPortalStore {
         sr.progress_percent,
         rdv.submission_type,
         rdv.responsible_office,
-        rdv.depends_on_codes
+        rdv.depends_on_codes,
+        reward.reward_points,
+        reward.reward_earned
       FROM student_requirement sr
       JOIN enrollment_journey j
         ON j.id = sr.journey_id AND j.tenant_id = sr.tenant_id
       JOIN requirement_definition_version rdv
         ON rdv.id = sr.requirement_definition_version_id
        AND rdv.tenant_id = sr.tenant_id
+      LEFT JOIN LATERAL (
+        SELECT
+          COALESCE(SUM(rr.points), 0)::integer AS reward_points,
+          CASE
+            WHEN COUNT(rr.id) = 0 THEN false
+            ELSE BOOL_AND(
+              EXISTS (
+                SELECT 1
+                FROM student_reward_ledger ledger
+                WHERE ledger.tenant_id = sr.tenant_id
+                  AND ledger.student_id = ${auth.studentId}
+                  AND ledger.reward_rule_id = rr.id
+                  AND ledger.source_key = sr.id::text
+              )
+            )
+          END AS reward_earned
+        FROM tenant_reward_rule rr
+        WHERE rr.tenant_id = sr.tenant_id
+          AND rr.trigger_type = 'requirement_completed'
+          AND rr.trigger_key = rdv.code
+          AND rr.enabled = true
+          AND (rr.starts_at IS NULL OR rr.starts_at <= NOW())
+          AND (rr.ends_at IS NULL OR rr.ends_at > NOW())
+      ) reward ON true
       WHERE sr.tenant_id = ${auth.tenantId}
         AND j.student_id = ${auth.studentId}
         AND (
@@ -3814,7 +3891,7 @@ export class PostgresPortalStore {
     auth: AuthContext,
     requirementCode: string,
   ): Promise<void> {
-    await transaction.execute(sql`
+    const completionResult = await transaction.execute(sql`
       UPDATE student_requirement sr
       SET status = 'completed',
           progress_percent = 100,
@@ -3827,7 +3904,18 @@ export class PostgresPortalStore {
         AND sr.requirement_definition_version_id = rdv.id
         AND rdv.code = ${requirementCode}
         AND sr.status NOT IN ('completed', 'waived', 'not_applicable')
+      RETURNING sr.id
     `);
+    for (const completed of rows<{ id: string }>(completionResult)) {
+      await this.awardMatchingRewards(
+        transaction,
+        auth,
+        "requirement_completed",
+        requirementCode,
+        completed.id,
+        {},
+      );
+    }
     await transaction.execute(sql`
       UPDATE student_requirement candidate
       SET status = 'ready',
@@ -3870,6 +3958,166 @@ export class PostgresPortalStore {
       WHERE tenant_id = ${auth.tenantId}
         AND student_id = ${auth.studentId}
     `);
+  }
+
+  protected async awardMatchingRewards(
+    transaction: Transaction,
+    auth: AuthContext,
+    triggerType:
+      | "onboarding_completed"
+      | "requirement_completed"
+      | "activity_event",
+    triggerKey: string,
+    sourceKey: string,
+    properties: Record<string, string | number | boolean | null>,
+  ): Promise<number> {
+    const ruleResult = await transaction.execute(sql`
+      SELECT id, points, max_awards_per_student
+      FROM tenant_reward_rule
+      WHERE tenant_id = ${auth.tenantId}
+        AND trigger_type = ${triggerType}
+        AND trigger_key = ${triggerKey}
+        AND enabled = true
+        AND (starts_at IS NULL OR starts_at <= NOW())
+        AND (ends_at IS NULL OR ends_at > NOW())
+        AND ${JSON.stringify(properties)}::jsonb @> trigger_properties
+      ORDER BY display_order, id
+      FOR UPDATE
+    `);
+    let awarded = 0;
+    for (const rule of rows<{
+      id: string;
+      points: number;
+      max_awards_per_student: number;
+    }>(ruleResult)) {
+      const insertResult = await transaction.execute(sql`
+        INSERT INTO student_reward_ledger (
+          id,
+          tenant_id,
+          student_id,
+          reward_rule_id,
+          source_type,
+          source_key,
+          points,
+          metadata,
+          awarded_at
+        )
+        SELECT
+          ${randomUUID()},
+          ${auth.tenantId},
+          ${auth.studentId},
+          ${rule.id},
+          ${triggerType},
+          ${sourceKey},
+          ${rule.points},
+          ${JSON.stringify({ triggerKey, properties })}::jsonb,
+          NOW()
+        WHERE (
+          SELECT COUNT(*)
+          FROM student_reward_ledger existing
+          WHERE existing.tenant_id = ${auth.tenantId}
+            AND existing.student_id = ${auth.studentId}
+            AND existing.reward_rule_id = ${rule.id}
+        ) < ${rule.max_awards_per_student}
+        ON CONFLICT (
+          tenant_id,
+          student_id,
+          reward_rule_id,
+          source_key
+        ) DO NOTHING
+        RETURNING points
+      `);
+      awarded += rows<{ points: number }>(insertResult).reduce(
+        (total, item) => total + Number(item.points),
+        0,
+      );
+    }
+    return awarded;
+  }
+
+  private async reconcileAuthoritativeRewards(
+    transaction: Transaction,
+    auth: AuthContext,
+  ): Promise<void> {
+    const onboardingResult = await transaction.execute(sql`
+      SELECT status
+      FROM student_onboarding
+      WHERE tenant_id = ${auth.tenantId}
+        AND student_id = ${auth.studentId}
+    `);
+    if (
+      rows<{ status: StudentOnboarding["status"] }>(onboardingResult)[0]
+        ?.status === "completed"
+    ) {
+      await this.awardMatchingRewards(
+        transaction,
+        auth,
+        "onboarding_completed",
+        "onboarding",
+        auth.studentId,
+        {},
+      );
+    }
+
+    const requirementResult = await transaction.execute(sql`
+      SELECT sr.id, rdv.code
+      FROM student_requirement sr
+      JOIN enrollment_journey journey
+        ON journey.id = sr.journey_id
+       AND journey.tenant_id = sr.tenant_id
+      JOIN requirement_definition_version rdv
+        ON rdv.id = sr.requirement_definition_version_id
+       AND rdv.tenant_id = sr.tenant_id
+      WHERE sr.tenant_id = ${auth.tenantId}
+        AND journey.student_id = ${auth.studentId}
+        AND sr.status = 'completed'
+    `);
+    for (const requirement of rows<{ id: string; code: string }>(
+      requirementResult,
+    )) {
+      await this.awardMatchingRewards(
+        transaction,
+        auth,
+        "requirement_completed",
+        requirement.code,
+        requirement.id,
+        {},
+      );
+    }
+  }
+
+  private async getStudentRewardSummary(
+    auth: AuthContext,
+  ): Promise<StudentRewardSummary | null> {
+    const result = await this.database.db.execute(sql`
+      SELECT
+        program.point_name,
+        program.points_per_usd,
+        COALESCE(SUM(ledger.points), 0)::bigint AS lifetime_points
+      FROM tenant_reward_program program
+      LEFT JOIN student_reward_ledger ledger
+        ON ledger.tenant_id = program.tenant_id
+       AND ledger.student_id = ${auth.studentId}
+      WHERE program.tenant_id = ${auth.tenantId}
+        AND program.enabled = true
+      GROUP BY program.point_name, program.points_per_usd
+    `);
+    const reward = rows<{
+      point_name: string;
+      points_per_usd: number;
+      lifetime_points: string | number;
+    }>(result)[0];
+    if (!reward) return null;
+    const lifetimePoints = Number(reward.lifetime_points);
+    const pointsPerUsd = Number(reward.points_per_usd);
+    return {
+      pointName: reward.point_name,
+      pointsPerUsd,
+      lifetimePoints,
+      bookstoreCreditCents: Math.floor(
+        (lifetimePoints * 100) / pointsPerUsd,
+      ),
+    };
   }
 
   private async insertOutbox(

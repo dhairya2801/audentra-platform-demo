@@ -45,8 +45,9 @@ security, ownership, or deployment pressure justifies it.
 16. [Deployment, security, and CI/CD runbook](./16-deployment-security-and-cicd.md)
 17. [Onboarding question alignment](./17-onboarding-question-alignment.md)
 18. [Browser misuse and edge testing](./18-browser-misuse-and-edge-testing.md)
-19. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
-20. [Multi-tenant student portal deployment](./architecture/multi-tenant-student-portal.md)
+19. [Tenant-managed student rewards](./19-tenant-rewards.md)
+20. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
+21. [Multi-tenant student portal deployment](./architecture/multi-tenant-student-portal.md)
 
 For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
 explain the architectural decisions, domain workflows, and longer-term design

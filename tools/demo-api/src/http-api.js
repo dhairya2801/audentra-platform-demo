@@ -34,6 +34,7 @@ import {
   profileResponse,
   queueDocumentExtraction,
   queueDocumentExtractionRetry,
+  reconcileAuthoritativeRewards,
   reserveDocumentUpload,
   requirementDetail,
   selectFinancialPaymentPlan,
@@ -555,7 +556,12 @@ async function route({
     method === "GET" &&
     (path === "/v1/bootstrap" || path === "/v1/student/bootstrap")
   ) {
-    return { body: buildBootstrap(store.snapshot(), clock) };
+    const body = await store.transact((draft, transaction) => {
+      const awarded = reconcileAuthoritativeRewards(draft, clock());
+      if (awarded === 0) transaction.skipWrite();
+      return buildBootstrap(draft, clock);
+    });
+    return { body };
   }
   if (method === "GET" && path === "/v1/student/dashboard") {
     return { body: buildDashboard(store.snapshot(), clock) };

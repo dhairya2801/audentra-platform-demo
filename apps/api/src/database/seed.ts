@@ -881,6 +881,18 @@ async function main(): Promise<void> {
       );
     }
     await seedHarvardTenantContent(client);
+    await seedTenantRewards(
+      client,
+      DEMO_IDS.tenantId,
+      "Aster Points",
+      "90000000",
+    );
+    await seedTenantRewards(
+      client,
+      "00000000-0000-7000-8000-000000000002",
+      "Harvard Points",
+      "91000000",
+    );
     await seedAcademicResourcesAndClubEvents(client);
     await seedPortalMediaMetadata(client);
     await seedImmunizationPolicy(client);
@@ -2115,6 +2127,152 @@ async function seedAiPromptRuntime(
         config.openRouter?.model ?? "openai/gpt-4o-mini",
         definition.maxOutputTokens,
         definition.temperatureMilli,
+      ],
+    );
+  }
+}
+
+const rewardRuleTemplates = [
+  {
+    code: "complete_onboarding",
+    title: "Complete onboarding",
+    description: "Finish every required onboarding stage.",
+    triggerType: "onboarding_completed",
+    triggerKey: "onboarding",
+    triggerProperties: {},
+    points: 100,
+  },
+  {
+    code: "complete_profile",
+    title: "Verify your profile",
+    description: "Complete the enrollment profile requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "profile_verification",
+    triggerProperties: {},
+    points: 30,
+  },
+  {
+    code: "complete_identity",
+    title: "Provide identity documentation",
+    description: "Complete the identity-document requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "identity_document",
+    triggerProperties: {},
+    points: 40,
+  },
+  {
+    code: "complete_transcript",
+    title: "Submit an official transcript",
+    description: "Complete transcript review.",
+    triggerType: "requirement_completed",
+    triggerKey: "official_transcript",
+    triggerProperties: {},
+    points: 80,
+  },
+  {
+    code: "complete_financial_aid",
+    title: "Complete financial-aid verification",
+    description: "Complete the financial-aid document requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "financial_aid_verification",
+    triggerProperties: {},
+    points: 50,
+  },
+  {
+    code: "complete_immunization",
+    title: "Provide immunization records",
+    description: "Complete the student-health clearance requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "immunization_record",
+    triggerProperties: {},
+    points: 60,
+  },
+  {
+    code: "complete_housing",
+    title: "Confirm housing plans",
+    description: "Complete the housing-preference requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "housing_preference",
+    triggerProperties: {},
+    points: 25,
+  },
+  {
+    code: "complete_deposit",
+    title: "Complete the enrollment deposit",
+    description: "Complete the enrollment-deposit requirement.",
+    triggerType: "requirement_completed",
+    triggerKey: "enrollment_deposit",
+    triggerProperties: {},
+    points: 50,
+  },
+  {
+    code: "complete_orientation",
+    title: "Register for orientation",
+    description: "Complete orientation registration.",
+    triggerType: "requirement_completed",
+    triggerKey: "orientation_registration",
+    triggerProperties: {},
+    points: 40,
+  },
+  ...[
+    ["dashboard", 5],
+    ["enrollment", 5],
+    ["financials", 10],
+    ["classrooms", 15],
+    ["campus_life", 15],
+    ["edward", 10],
+    ["documents", 10],
+    ["profile", 5],
+  ].map(([section, points]) => ({
+    code: `explore_${section}`,
+    title: `Explore ${String(section).replaceAll("_", " ")}`,
+    description: "Visit this student-portal section for the first time.",
+    triggerType: "activity_event",
+    triggerKey: "ui.portal_section_viewed.v1",
+    triggerProperties: { section },
+    points,
+  })),
+] as const;
+
+async function seedTenantRewards(
+  client: PoolClient,
+  tenantId: string,
+  pointName: string,
+  idNamespace: string,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO tenant_reward_program (
+       tenant_id, point_name, points_per_usd, enabled
+     )
+     VALUES ($1, $2, 100, true)
+     ON CONFLICT (tenant_id) DO NOTHING`,
+    [tenantId, pointName],
+  );
+
+  for (const [index, rule] of rewardRuleTemplates.entries()) {
+    const id =
+      `${idNamespace}-0000-7000-8000-${String(index + 1).padStart(12, "0")}`;
+    await client.query(
+      `INSERT INTO tenant_reward_rule (
+         id, tenant_id, code, title, description, trigger_type, trigger_key,
+         trigger_properties, points, max_awards_per_student, display_order,
+         enabled
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 1, $10, true
+       )
+       ON CONFLICT (tenant_id, code) DO NOTHING`,
+      [
+        id,
+        tenantId,
+        rule.code,
+        rule.title,
+        rule.description,
+        rule.triggerType,
+        rule.triggerKey,
+        JSON.stringify(rule.triggerProperties),
+        rule.points,
+        index,
       ],
     );
   }

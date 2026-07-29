@@ -9,6 +9,9 @@ compatibility.
 
 ### Added
 
+- Added tenant-managed Aster and Harvard point programs, editable completion
+  and exploration reward rules, an idempotent student ledger, bookstore-credit
+  conversion, and visible balance/task reward UI
 - Added tenant-owned course-resource libraries and student-club event calendars,
   including licensed open PDF textbooks and dedicated tenant-prefixed club pages
 - Added club membership, meeting-schedule, contact, social, and upcoming-event

@@ -5,7 +5,7 @@ import {
 } from "./tenant-content.js";
 
 export const FIXTURE_VERSION = "vv-demo-v4";
-export const TENANT_CONTENT_VERSION = "tenant-content-v5";
+export const TENANT_CONTENT_VERSION = "tenant-content-v6";
 export const ONBOARDING_STEPS = Object.freeze([
   "offer",
   "about_you",
@@ -401,6 +401,7 @@ export function createSeedState(options = {}) {
     portalProjectionVersion: 1,
     journey: null,
     requirements: [],
+    rewards: createRewardState(tenant),
     messages: [
       {
         id: ids.welcomeMessage,
@@ -1008,4 +1009,71 @@ export function createRequirements(acceptedAt) {
       responsibleOffice: "New Student Programs",
     },
   ];
+}
+
+function createRewardState(tenant) {
+  const pageRewards = [
+    ["dashboard", 5],
+    ["enrollment", 5],
+    ["financials", 10],
+    ["classrooms", 15],
+    ["campus_life", 15],
+    ["edward", 10],
+    ["documents", 10],
+    ["profile", 5],
+  ];
+  const taskRewards = [
+    ["profile_verification", "Verify your profile", 30],
+    ["identity_document", "Provide identity documentation", 40],
+    ["official_transcript", "Submit an official transcript", 80],
+    ["financial_aid_verification", "Complete financial-aid verification", 50],
+    ["immunization_record", "Provide immunization records", 60],
+    ["housing_preference", "Confirm housing plans", 25],
+    ["enrollment_deposit", "Complete the enrollment deposit", 50],
+    ["orientation_registration", "Register for orientation", 40],
+  ];
+  const rules = [
+    {
+      code: "complete_onboarding",
+      title: "Complete onboarding",
+      description: "Finish every required onboarding stage.",
+      triggerType: "onboarding_completed",
+      triggerKey: "onboarding",
+      triggerProperties: {},
+      points: 100,
+    },
+    ...taskRewards.map(([triggerKey, title, points]) => ({
+      code: `complete_${triggerKey}`,
+      title,
+      description: `Complete ${String(title).toLowerCase()}.`,
+      triggerType: "requirement_completed",
+      triggerKey,
+      triggerProperties: {},
+      points,
+    })),
+    ...pageRewards.map(([section, points]) => ({
+      code: `explore_${section}`,
+      title: `Explore ${String(section).replaceAll("_", " ")}`,
+      description: "Visit this student-portal section for the first time.",
+      triggerType: "activity_event",
+      triggerKey: "ui.portal_section_viewed.v1",
+      triggerProperties: { section },
+      points,
+    })),
+  ].map((rule, index) => ({
+    id: `reward-rule:${tenant.slug}:${rule.code}`,
+    ...rule,
+    maxAwardsPerStudent: 1,
+    displayOrder: index,
+    enabled: true,
+  }));
+  return {
+    program: {
+      pointName: `${tenant.shortName} Points`,
+      pointsPerUsd: 100,
+      enabled: true,
+    },
+    rules,
+    ledger: [],
+  };
 }

@@ -125,6 +125,8 @@ describe("contract-compatible development preview API", () => {
     });
     assert.equal(asterBootstrap.payload.tenant.slug, "aster");
     assert.equal(harvardBootstrap.payload.tenant.slug, "harvard");
+    assert.equal(asterBootstrap.payload.rewards.pointName, "Aster Points");
+    assert.equal(harvardBootstrap.payload.rewards.pointName, "Harvard Points");
     assert.notEqual(
       asterBootstrap.payload.tenant.id,
       harvardBootstrap.payload.tenant.id,
@@ -454,6 +456,7 @@ describe("contract-compatible development preview API", () => {
       "generatedAt",
       "initialRoute",
       "onboarding",
+      "rewards",
       "student",
       "tenant",
     ]);
@@ -464,6 +467,12 @@ describe("contract-compatible development preview API", () => {
       status: "in_progress",
       currentStep: "offer",
       version: 1,
+    });
+    assert.deepEqual(bootstrap.payload.rewards, {
+      pointName: "Aster Points",
+      pointsPerUsd: 100,
+      lifetimePoints: 0,
+      bookstoreCreditCents: 0,
     });
 
     let onboarding = (await api(
@@ -626,6 +635,8 @@ describe("contract-compatible development preview API", () => {
     );
     assert.equal(completedBootstrap.payload.initialRoute, "/dashboard");
     assert.equal(completedBootstrap.payload.onboarding.required, false);
+    assert.equal(completedBootstrap.payload.rewards.lifetimePoints, 180);
+    assert.equal(completedBootstrap.payload.rewards.bookstoreCreditCents, 180);
 
     const requirements = await api(baseUrl, "/v1/student/requirements");
     assert.equal(requirements.payload.total, 8);
@@ -638,6 +649,7 @@ describe("contract-compatible development preview API", () => {
     assert.equal(identity.documentCategory, "identity");
     assert.equal(identity.responsibleOffice, "Enrollment Documentation");
     assert.deepEqual(identity.dependencyCodes, ["profile_verification"]);
+    assert.deepEqual(identity.reward, { points: 40, earned: false });
     const detail = await api(
       baseUrl,
       `/v1/student/requirements/${identity.id}`,
@@ -788,6 +800,19 @@ describe("contract-compatible development preview API", () => {
     );
     assert.equal(housingRequirement.status, "completed");
     assert.equal(housingRequirement.progressPercent, 100);
+    assert.deepEqual(housingRequirement.reward, {
+      points: 25,
+      earned: true,
+    });
+    const rewardsAfterHousing = await api(
+      baseUrl,
+      "/v1/student/bootstrap",
+    );
+    assert.equal(rewardsAfterHousing.payload.rewards.lifetimePoints, 205);
+    assert.equal(
+      rewardsAfterHousing.payload.rewards.bookstoreCreditCents,
+      205,
+    );
 
     const help = await api(baseUrl, "/v1/student/help");
     assert.ok(Array.isArray(help.payload.articles));
@@ -929,6 +954,40 @@ describe("contract-compatible development preview API", () => {
     assert.equal(restored.snapshot().onboarding.currentStep, "offer");
     assert.equal(restored.snapshot().onboarding.version, 1);
     assert.equal(restored.snapshot().activities.length, 1);
+  });
+
+  it("awards a tenant page reward once and prevents refresh farming", async () => {
+    const { baseUrl, store } = await startPreview();
+    const event = (eventId) => ({
+      eventId,
+      eventName: "ui.portal_section_viewed.v1",
+      occurredAt: fixedClock().toISOString(),
+      sessionId: "session-reward-0001",
+      pageInstanceId: `page-${eventId.slice(-8)}`,
+      properties: {
+        section: "classrooms",
+        entry_point: "portal_navigation",
+      },
+    });
+    const activity = await api(baseUrl, "/v1/activity-events/batch", {
+      method: "POST",
+      body: {
+        events: [
+          event("00000000-0000-7000-8000-000000000911"),
+          event("00000000-0000-7000-8000-000000000912"),
+        ],
+      },
+    });
+    assert.deepEqual(activity.payload, { accepted: 2, duplicates: 0 });
+
+    const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
+    assert.equal(bootstrap.payload.rewards.lifetimePoints, 15);
+    assert.equal(bootstrap.payload.rewards.bookstoreCreditCents, 15);
+    assert.equal(store.snapshot().rewards.ledger.length, 1);
+    assert.equal(
+      store.snapshot().rewards.ledger[0].sourceKey,
+      "ui.portal_section_viewed.v1:classrooms",
+    );
   });
 
   it("stores uploaded content, exposes reviewed extraction, and keeps raw storage private", async () => {

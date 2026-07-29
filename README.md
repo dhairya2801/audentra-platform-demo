@@ -108,6 +108,11 @@ the server normalizes, bounds, and review-gates the result.
 Extracted fields must be selected by the student before they enter the review
 state.
 
+Student gamification is tenant-owned. Each university can configure its point
+name, task/page reward rules, enabled state, and bookstore conversion; awarded
+values are preserved in an idempotent ledger. See
+[`docs/19-tenant-rewards.md`](docs/19-tenant-rewards.md).
+
 For faster transcript extraction, also set `GROQ_API_KEY` and
 `TRANSCRIPT_PARSING=groq`. That path uses `GROQ_MODEL` (currently
 `qwen/qwen3.6-27b` by default). Both transcript providers receive one 2,048px

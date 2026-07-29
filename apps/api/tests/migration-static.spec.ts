@@ -183,4 +183,26 @@ describe("initial PostgreSQL migration", () => {
       "PRIMARY KEY (tenant_id, actor_id, operation, idempotency_key)",
     );
   });
+
+  it("stores tenant-editable reward rules and an idempotent student ledger", async () => {
+    const migration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0016_tenant_student_rewards.sql",
+      ),
+      "utf8",
+    );
+
+    expect(migration).toContain("CREATE TABLE tenant_reward_program");
+    expect(migration).toContain("points_per_usd integer NOT NULL DEFAULT 100");
+    expect(migration).toContain("CREATE TABLE tenant_reward_rule");
+    expect(migration).toContain("trigger_properties jsonb");
+    expect(migration).toContain("max_awards_per_student integer");
+    expect(migration).toContain("CREATE TABLE student_reward_ledger");
+    expect(migration).toContain(
+      "UNIQUE (tenant_id, student_id, reward_rule_id, source_key)",
+    );
+    expect(migration).toContain("student_reward_ledger_append_only");
+    expect(migration).toContain("BEFORE UPDATE OR DELETE");
+  });
 });

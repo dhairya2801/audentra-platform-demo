@@ -209,6 +209,23 @@ describe("API vertical slice", () => {
       url: "/v1/activity-events/batch",
       payload,
     });
+    const sectionView = await app.inject({
+      method: "POST",
+      url: "/v1/activity-events/batch",
+      payload: {
+        events: [
+          {
+            ...payload.events[0],
+            eventId: randomUUID(),
+            eventName: "ui.portal_section_viewed.v1",
+            properties: {
+              section: "classrooms",
+              entry_point: "portal_navigation",
+            },
+          },
+        ],
+      },
+    });
     const prohibited = await app.inject({
       method: "POST",
       url: "/v1/activity-events/batch",
@@ -227,6 +244,8 @@ describe("API vertical slice", () => {
     expect(first.json()).toEqual({ accepted: 1, duplicates: 0 });
     expect(replay.statusCode).toBe(202);
     expect(replay.json()).toEqual({ accepted: 0, duplicates: 1 });
+    expect(sectionView.statusCode).toBe(202);
+    expect(sectionView.json()).toEqual({ accepted: 1, duplicates: 0 });
     expect(prohibited.statusCode).toBe(400);
     expect(prohibited.json()).toMatchObject({
       error: { code: "PROHIBITED_ACTIVITY_PROPERTY" },

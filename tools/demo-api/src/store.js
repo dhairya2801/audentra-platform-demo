@@ -183,7 +183,25 @@ function migratePersistedState(value, seededState) {
     value.academics.selectedProgramCode =
       seededState.academics.selectedProgramCode;
     value.academics.exemptionRecommendations ??= [];
+    value.rewards = {
+      ...structuredClone(seededState.rewards),
+      ledger: Array.isArray(value.rewards?.ledger)
+        ? value.rewards.ledger
+        : [],
+    };
     value.fixture.contentVersion = TENANT_CONTENT_VERSION;
+  }
+  if (
+    !value.rewards?.program ||
+    !Array.isArray(value.rewards?.rules) ||
+    !Array.isArray(value.rewards?.ledger)
+  ) {
+    value.rewards = {
+      ...structuredClone(seededState.rewards),
+      ledger: Array.isArray(value.rewards?.ledger)
+        ? value.rewards.ledger
+        : [],
+    };
   }
   return value;
 }

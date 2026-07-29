@@ -69,6 +69,8 @@ interface RequirementRow {
   blocking: number;
   due_at: Date | null;
   progress_percent: number;
+  reward_points?: string | number;
+  reward_earned?: boolean;
 }
 
 interface OfferLockRow {
@@ -342,11 +344,37 @@ export class PostgresPlatformStore
           sr.status,
           rdv.blocking,
           sr.due_at,
-          sr.progress_percent
+          sr.progress_percent,
+          reward.reward_points,
+          reward.reward_earned
         FROM student_requirement sr
         JOIN requirement_definition_version rdv
           ON rdv.id = sr.requirement_definition_version_id
          AND rdv.tenant_id = sr.tenant_id
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(rr.points), 0)::integer AS reward_points,
+            CASE
+              WHEN COUNT(rr.id) = 0 THEN false
+              ELSE BOOL_AND(
+                EXISTS (
+                  SELECT 1
+                  FROM student_reward_ledger ledger
+                  WHERE ledger.tenant_id = sr.tenant_id
+                    AND ledger.student_id = ${auth.studentId}
+                    AND ledger.reward_rule_id = rr.id
+                    AND ledger.source_key = sr.id::text
+                )
+              )
+            END AS reward_earned
+          FROM tenant_reward_rule rr
+          WHERE rr.tenant_id = sr.tenant_id
+            AND rr.trigger_type = 'requirement_completed'
+            AND rr.trigger_key = rdv.code
+            AND rr.enabled = true
+            AND (rr.starts_at IS NULL OR rr.starts_at <= NOW())
+            AND (rr.ends_at IS NULL OR rr.ends_at > NOW())
+        ) reward ON true
         WHERE sr.tenant_id = ${auth.tenantId}
           AND sr.journey_id = ${base.journey_id}
         ORDER BY rdv.display_order, sr.id
@@ -364,6 +392,14 @@ export class PostgresPlatformStore
               ? null
               : isoTimestamp(requirement.due_at),
           progressPercent: requirement.progress_percent,
+          ...(Number(requirement.reward_points ?? 0) > 0
+            ? {
+                reward: {
+                  points: Number(requirement.reward_points),
+                  earned: requirement.reward_earned === true,
+                },
+              }
+            : {}),
         }),
       );
     }
@@ -818,6 +854,17 @@ export class PostgresPlatformStore
         `);
         if (resultRows<{ event_id: string }>(insertResult).length === 1) {
           accepted += 1;
+          const section = event.properties.section;
+          await this.awardMatchingRewards(
+            transaction,
+            input.auth,
+            "activity_event",
+            event.eventName,
+            typeof section === "string"
+              ? `${event.eventName}:${section}`
+              : event.eventId,
+            event.properties,
+          );
         }
       }
       return {

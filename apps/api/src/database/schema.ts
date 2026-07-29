@@ -571,6 +571,97 @@ export const activityEvent = pgTable(
   ],
 );
 
+export const tenantRewardProgram = pgTable("tenant_reward_program", {
+  tenantId: uuid("tenant_id")
+    .primaryKey()
+    .references(() => tenant.id, { onDelete: "cascade" }),
+  pointName: varchar("point_name", { length: 80 }).notNull(),
+  pointsPerUsd: integer("points_per_usd").notNull().default(100),
+  enabled: boolean("enabled").notNull().default(true),
+  ...timestamps,
+});
+
+export const tenantRewardRule = pgTable(
+  "tenant_reward_rule",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id, { onDelete: "cascade" }),
+    code: varchar("code", { length: 100 }).notNull(),
+    title: varchar("title", { length: 180 }).notNull(),
+    description: text("description").notNull(),
+    triggerType: varchar("trigger_type", { length: 40 }).notNull(),
+    triggerKey: varchar("trigger_key", { length: 160 }).notNull(),
+    triggerProperties: jsonb("trigger_properties")
+      .$type<Record<string, string | number | boolean | null>>()
+      .notNull()
+      .default({}),
+    points: integer("points").notNull(),
+    maxAwardsPerStudent: integer("max_awards_per_student").notNull().default(1),
+    displayOrder: integer("display_order").notNull().default(0),
+    enabled: boolean("enabled").notNull().default(true),
+    startsAt: timestamp("starts_at", { withTimezone: true }),
+    endsAt: timestamp("ends_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("tenant_reward_rule_tenant_code_uidx").on(
+      table.tenantId,
+      table.code,
+    ),
+    index("tenant_reward_rule_trigger_idx").on(
+      table.tenantId,
+      table.triggerType,
+      table.triggerKey,
+      table.enabled,
+      table.displayOrder,
+    ),
+  ],
+);
+
+export const studentRewardLedger = pgTable(
+  "student_reward_ledger",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id, { onDelete: "cascade" }),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => student.id, { onDelete: "cascade" }),
+    rewardRuleId: uuid("reward_rule_id")
+      .notNull()
+      .references(() => tenantRewardRule.id),
+    sourceType: varchar("source_type", { length: 40 }).notNull(),
+    sourceKey: varchar("source_key", { length: 200 }).notNull(),
+    points: integer("points").notNull(),
+    metadata: jsonb("metadata")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    awardedAt: timestamp("awarded_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("student_reward_ledger_source_uidx").on(
+      table.tenantId,
+      table.studentId,
+      table.rewardRuleId,
+      table.sourceKey,
+    ),
+    index("student_reward_ledger_balance_idx").on(
+      table.tenantId,
+      table.studentId,
+      table.awardedAt,
+    ),
+  ],
+);
+
 export const idempotencyRecord = pgTable(
   "idempotency_record",
   {

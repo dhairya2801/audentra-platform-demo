@@ -31,6 +31,17 @@ export interface StudentRequirementSummary {
   blocking: boolean;
   dueAt: string | null;
   progressPercent: number;
+  reward?: {
+    points: number;
+    earned: boolean;
+  };
+}
+
+export interface StudentRewardSummary {
+  pointName: string;
+  pointsPerUsd: number;
+  lifetimePoints: number;
+  bookstoreCreditCents: number;
 }
 
 export interface StudentDashboard {
@@ -292,6 +303,7 @@ export interface StudentBootstrap {
     currentStep: OnboardingStep;
     version: number;
   };
+  rewards?: StudentRewardSummary;
   initialRoute: "/onboarding" | "/dashboard";
   generatedAt: string;
 }

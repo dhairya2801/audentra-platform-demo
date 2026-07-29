@@ -214,6 +214,9 @@ export function buildBootstrap(state, clock) {
       currentStep: state.onboarding.currentStep,
       version: state.onboarding.version,
     },
+    ...(state.rewards?.program?.enabled
+      ? { rewards: rewardSummary(state) }
+      : {}),
     initialRoute: onboardingRequired ? "/onboarding" : "/dashboard",
     generatedAt: clock().toISOString(),
   };
@@ -548,6 +551,7 @@ export function updateOnboarding(draft, input, now) {
     completeRequirementAndRefreshDependencies(
       draft,
       "profile_verification",
+      now,
     );
     draft.portalProjectionVersion += 1;
   }
@@ -672,7 +676,7 @@ export function updateHousingPlan(draft, input, now) {
   };
   draft.onboarding.version += 1;
   draft.onboarding.updatedAt = now.toISOString();
-  completeRequirementAndRefreshDependencies(draft, "housing_preference");
+  completeRequirementAndRefreshDependencies(draft, "housing_preference", now);
   draft.portalProjectionVersion += 1;
   return housingPlanResponse(draft);
 }
@@ -713,6 +717,14 @@ export function completeOnboarding(draft, input, now) {
   draft.onboarding.completedAt = now.toISOString();
   draft.onboarding.version += 1;
   draft.onboarding.updatedAt = now.toISOString();
+  awardMatchingRewards(
+    draft,
+    "onboarding_completed",
+    "onboarding",
+    draft.profile.studentId,
+    {},
+    now,
+  );
   return buildOnboarding(draft);
 }
 
@@ -805,7 +817,11 @@ export function patchProfile(draft, input, now) {
   }
   draft.profile.version += 1;
   draft.profile.updatedAt = now.toISOString();
-  completeRequirementAndRefreshDependencies(draft, "profile_verification");
+  completeRequirementAndRefreshDependencies(
+    draft,
+    "profile_verification",
+    now,
+  );
   draft.portalProjectionVersion += 1;
   return profileResponse(draft);
 }
@@ -1604,6 +1620,7 @@ export function createDepositPayment(draft, input, now) {
     completeRequirementAndRefreshDependencies(
       draft,
       "enrollment_deposit",
+      now,
     );
   }
   draft.portalProjectionVersion += 1;
@@ -1665,6 +1682,17 @@ export function ingestActivities(draft, input, now) {
       ...event,
       receivedAt: now.toISOString(),
     });
+    const section = event.properties.section;
+    awardMatchingRewards(
+      draft,
+      "activity_event",
+      event.eventName,
+      typeof section === "string"
+        ? `${event.eventName}:${section}`
+        : event.eventId,
+      event.properties,
+      now,
+    );
     accepted += 1;
   }
   if (draft.activities.length > 1_000) {
@@ -2051,7 +2079,8 @@ function safeTrackingId(value, name) {
   return text;
 }
 
-function requirementSummary(requirement) {
+function requirementSummary(requirement, state) {
+  const reward = state ? rewardForRequirement(state, requirement) : null;
   return {
     id: requirement.id,
     code: requirement.code,
@@ -2061,12 +2090,13 @@ function requirementSummary(requirement) {
     blocking: requirement.blocking,
     dueAt: requirement.dueAt,
     progressPercent: requirement.progressPercent,
+    ...(reward ? { reward } : {}),
   };
 }
 
 function requirementDetailResponse(requirement, state) {
   return {
-    ...requirementSummary(requirement),
+    ...requirementSummary(requirement, state),
     slug: requirementSlug(requirement.code),
     journeyId: requirement.journeyId ?? ids.journey,
     submissionType: requirement.submissionType,
@@ -2182,13 +2212,28 @@ function updateJourneyStatus(state) {
   state.journey.version += 1;
 }
 
-function completeRequirementAndRefreshDependencies(state, code) {
+function completeRequirementAndRefreshDependencies(
+  state,
+  code,
+  now = new Date(),
+) {
   const requirement = state.requirements.find(
     (candidate) => candidate.code === code,
   );
   if (!requirement) return;
+  const newlyCompleted = !terminalRequirementStatuses.has(requirement.status);
   requirement.status = "completed";
   requirement.progressPercent = 100;
+  if (newlyCompleted) {
+    awardMatchingRewards(
+      state,
+      "requirement_completed",
+      code,
+      requirement.id,
+      {},
+      now,
+    );
+  }
   const terminalCodes = new Set(
     state.requirements
       .filter((candidate) =>
@@ -2207,6 +2252,110 @@ function completeRequirementAndRefreshDependencies(state, code) {
     }
   }
   updateJourneyStatus(state);
+}
+
+export function reconcileAuthoritativeRewards(state, now) {
+  let awarded = 0;
+  if (state.onboarding.status === "completed") {
+    awarded += awardMatchingRewards(
+      state,
+      "onboarding_completed",
+      "onboarding",
+      state.profile.studentId,
+      {},
+      now,
+    );
+  }
+  for (const requirement of state.requirements) {
+    if (requirement.status !== "completed") continue;
+    awarded += awardMatchingRewards(
+      state,
+      "requirement_completed",
+      requirement.code,
+      requirement.id,
+      {},
+      now,
+    );
+  }
+  return awarded;
+}
+
+function awardMatchingRewards(
+  state,
+  triggerType,
+  triggerKey,
+  sourceKey,
+  properties,
+  now,
+) {
+  if (!state.rewards?.program?.enabled) return 0;
+  let awarded = 0;
+  for (const rule of state.rewards.rules) {
+    if (
+      !rule.enabled ||
+      rule.triggerType !== triggerType ||
+      rule.triggerKey !== triggerKey ||
+      !Object.entries(rule.triggerProperties ?? {}).every(
+        ([key, value]) => properties[key] === value,
+      )
+    ) {
+      continue;
+    }
+    const priorAwards = state.rewards.ledger.filter(
+      (entry) => entry.ruleId === rule.id,
+    );
+    if (
+      priorAwards.length >= rule.maxAwardsPerStudent ||
+      priorAwards.some((entry) => entry.sourceKey === sourceKey)
+    ) {
+      continue;
+    }
+    state.rewards.ledger.push({
+      id: randomUUID(),
+      ruleId: rule.id,
+      sourceType: triggerType,
+      sourceKey,
+      points: rule.points,
+      awardedAt: now.toISOString(),
+    });
+    awarded += rule.points;
+  }
+  return awarded;
+}
+
+function rewardSummary(state) {
+  const lifetimePoints = state.rewards.ledger.reduce(
+    (total, entry) => total + entry.points,
+    0,
+  );
+  const pointsPerUsd = state.rewards.program.pointsPerUsd;
+  return {
+    pointName: state.rewards.program.pointName,
+    pointsPerUsd,
+    lifetimePoints,
+    bookstoreCreditCents: Math.floor(
+      (lifetimePoints * 100) / pointsPerUsd,
+    ),
+  };
+}
+
+function rewardForRequirement(state, requirement) {
+  const rules = state.rewards?.rules?.filter(
+    (rule) =>
+      rule.enabled &&
+      rule.triggerType === "requirement_completed" &&
+      rule.triggerKey === requirement.code,
+  );
+  if (!rules?.length) return null;
+  return {
+    points: rules.reduce((total, rule) => total + rule.points, 0),
+    earned: rules.every((rule) =>
+      state.rewards.ledger.some(
+        (entry) =>
+          entry.ruleId === rule.id && entry.sourceKey === requirement.id,
+      ),
+    ),
+  };
 }
 
 function validateCompletedStepSequence(state) {
