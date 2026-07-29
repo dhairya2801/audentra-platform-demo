@@ -152,6 +152,101 @@ describe("contract-compatible development preview API", () => {
     });
     assert.equal(unchangedAsterProfile.payload.preferredName, "Alex");
 
+    const [asterAcademics, harvardAcademics, asterCampus, harvardCampus] =
+      await Promise.all([
+        api(baseUrl, "/v1/student/academics", { headers: asterHeaders }),
+        api(baseUrl, "/v1/student/academics", { headers: harvardHeaders }),
+        api(baseUrl, "/v1/student/campus-life", { headers: asterHeaders }),
+        api(baseUrl, "/v1/student/campus-life", { headers: harvardHeaders }),
+      ]);
+    assert.equal(asterAcademics.payload.selectedProgram.code, "BS-CS");
+    assert.equal(harvardAcademics.payload.selectedProgram.code, "AB-CS");
+    assert.equal(
+      harvardAcademics.payload.selectedProgram.source.dataStatus,
+      "official_source",
+    );
+    assert.ok(
+      harvardAcademics.payload.plan.some(
+        (item) => item.course.code === "COMPSCI 50",
+      ),
+    );
+    assert.ok(
+      harvardCampus.payload.clubs.some(
+        (club) => club.name === "Women in Computer Science",
+      ),
+    );
+    assert.ok(
+      harvardCampus.payload.events.every(
+        (event) => event.source.dataStatus === "synthetic_preview",
+      ),
+    );
+    assert.deepEqual(
+      asterCampus.payload.events.map((event) => event.visualTheme),
+      ["festival", "discovery", "career"],
+    );
+    assert.equal(
+      new Set(
+        asterCampus.payload.events.map((event) => event.imageUrl),
+      ).size,
+      asterCampus.payload.events.length,
+    );
+    assert.ok(
+      asterCampus.payload.events.every(
+        (event) =>
+          event.imageUrl?.startsWith("/media/events/") &&
+          event.imageAlt?.length > 20 &&
+          event.imageAttribution?.length > 0,
+      ),
+    );
+    assert.deepEqual(
+      harvardCampus.payload.events.map((event) => event.visualTheme),
+      ["festival", "discovery", "community"],
+    );
+
+    const academicEdward = await api(
+      baseUrl,
+      "/v1/student/assistant/messages",
+      {
+        method: "POST",
+        headers: harvardHeaders,
+        body: {
+          message: "Which computer science classes are in my plan?",
+          pageContext: "/classrooms",
+          history: [],
+        },
+      },
+    );
+    assert.ok(
+      academicEdward.payload.contextReceipts.some(
+        (receipt) => receipt.source === "academics",
+      ),
+    );
+    assert.deepEqual(academicEdward.payload.suggestedActions, [
+      { label: "Open My Classrooms", href: "/classrooms" },
+    ]);
+
+    const campusEdward = await api(
+      baseUrl,
+      "/v1/student/assistant/messages",
+      {
+        method: "POST",
+        headers: harvardHeaders,
+        body: {
+          message: "What clubs and campus events can I join?",
+          pageContext: "/campus-life",
+          history: [],
+        },
+      },
+    );
+    assert.ok(
+      campusEdward.payload.contextReceipts.some(
+        (receipt) => receipt.source === "campus_life",
+      ),
+    );
+    assert.deepEqual(campusEdward.payload.suggestedActions, [
+      { label: "Open My Campus Life", href: "/campus-life" },
+    ]);
+
     const unknownTenant = await api(baseUrl, "/v1/tenant/context", {
       authenticated: false,
       headers: { "x-tenant-slug": "unknown" },
@@ -1044,11 +1139,6 @@ describe("contract-compatible development preview API", () => {
       { source: "dashboard" },
       { source: "profile" },
       { source: "documents" },
-      { source: "onboarding" },
-      { source: "payments" },
-      { source: "academics" },
-      { source: "financials" },
-      { source: "messages" },
     ]);
   });
 

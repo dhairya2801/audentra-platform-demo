@@ -199,12 +199,14 @@ export class OpenRouterGateway {
       programName: studentContext.programName,
       termName: studentContext.termName,
       onboardingStatus: studentContext.onboardingStatus,
-      enrollmentCompletion: studentContext.enrollmentCompletion,
+      enrollmentChecklistCompletionPercent:
+        studentContext.enrollmentChecklistCompletionPercent,
       nextAction: studentContext.nextAction,
       unreadMessages: studentContext.unreadMessages,
       documentStatuses: studentContext.documentStatuses,
       academicSummary: studentContext.academicSummary,
       financialSummary: studentContext.financialSummary,
+      campusLifeSummary: studentContext.campusLifeSummary,
       pageContext: normalizeEdwardPageContext(pageContext),
     };
 
@@ -1275,6 +1277,12 @@ function guidedEdwardResponse(message, studentContext = {}) {
     /(?:what (?:should|do) i do next|next (?:step|action)|what'?s next)/,
   )
     ? nextActionGuidance(studentContext.nextAction)
+    : text.match(
+          /class|classroom|course|catalog|major|program|prerequisite|academic/,
+        )
+      ? academicGuidance(studentContext)
+      : text.match(/campus|club|event|activity|organization|social life/)
+        ? campusLifeGuidance(studentContext)
     : text.match(/document|upload|transcript|fafsa|ferpa/)
     ? `Open Documents to upload a PDF, JPEG, or PNG. ${universityName} stores the original file and prepares structured fields for your review. Nothing extracted is treated as verified until you approve it.`
     : text.match(/deadline|due|when/)
@@ -1285,7 +1293,7 @@ function guidedEdwardResponse(message, studentContext = {}) {
           ? "You can update changeable contact preferences from Profile. Legal identity changes may require supporting documentation and staff review."
           : text.match(/appointment|advisor|person|human/)
             ? "Open Appointments to schedule enrollment, admissions, or financial-aid support with a staff member."
-            : "I can help you find enrollment steps, documents, deadlines, payments, appointments, and profile settings. Ask one specific question and I’ll point you to the right place.";
+            : "I can help with enrollment, documents, academics, classes, financial aid, campus life, appointments, and profile settings. Ask one specific question and I’ll use only the relevant part of your university record.";
   return {
     message: response,
     provider: "guided",
@@ -1334,8 +1342,51 @@ function nextActionGuidance(nextAction) {
     : `Your next step is ${title}. Open Enrollment to continue.`;
 }
 
+function academicGuidance(studentContext) {
+  const academics = studentContext.academicSummary;
+  if (!academics) {
+    return "Open My Classrooms to review your academic plan and searchable course catalog.";
+  }
+  const nextCourses = (academics.plan ?? [])
+    .filter((item) =>
+      ["eligible", "required", "in_progress"].includes(item.status),
+    )
+    .slice(0, 3)
+    .map((item) => `${item.code} ${item.title}`);
+  const suffix = nextCourses.length
+    ? ` Your next available plan options include ${nextCourses.join(", ")}.`
+    : "";
+  return `Your ${academics.selectedProgram} plan is using catalog ${academics.catalogVersion}.${suffix} Open My Classrooms for requirement status, prerequisites, and official source details.`;
+}
+
+function campusLifeGuidance(studentContext) {
+  const campus = studentContext.campusLifeSummary;
+  if (!campus) {
+    return "Open My Campus Life to explore upcoming events and student organizations.";
+  }
+  const events = (campus.upcomingEvents ?? [])
+    .slice(0, 2)
+    .map((event) => event.title);
+  const clubs = (campus.clubs ?? []).slice(0, 3).map((club) => club.name);
+  const eventText = events.length ? ` Upcoming: ${events.join(" and ")}.` : "";
+  const clubText = clubs.length
+    ? ` Featured groups include ${clubs.join(", ")}.`
+    : "";
+  return `${eventText}${clubText} Open My Campus Life to search the full tenant-managed directory.`.trim();
+}
+
 function suggestedActionsFor(message) {
   const text = String(message).toLowerCase();
+  if (
+    text.match(
+      /class|classroom|course|catalog|major|program|prerequisite|academic/,
+    )
+  ) {
+    return [{ label: "Open My Classrooms", href: "/classrooms" }];
+  }
+  if (text.match(/campus|club|event|activity|organization|social life/)) {
+    return [{ label: "Open My Campus Life", href: "/campus-life" }];
+  }
   if (text.match(/document|upload|transcript|fafsa|ferpa/)) {
     return [{ label: "Open documents", href: "/documents" }];
   }

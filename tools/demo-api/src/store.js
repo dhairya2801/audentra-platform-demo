@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSeedState, FIXTURE_VERSION } from "./seed.js";
+import {
+  createSeedState,
+  FIXTURE_VERSION,
+  TENANT_CONTENT_VERSION,
+} from "./seed.js";
 import { demoTenants, publicTenantContext } from "./tenant-config.js";
 
 export const defaultDataFile = resolve(
@@ -33,11 +37,13 @@ export class JsonStateStore {
   async initialize() {
     await mkdir(dirname(this.filePath), { recursive: true });
     try {
-      const parsed = migratePersistedOnboarding(
+      const parsed = migratePersistedState(
         JSON.parse(await readFile(this.filePath, "utf8")),
+        this.stateFactory(),
       );
       validatePersistedState(parsed);
       this.#state = parsed;
+      await this.#write(parsed);
     } catch (error) {
       if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
         throw error;
@@ -134,7 +140,7 @@ export class JsonStateStore {
   }
 }
 
-function migratePersistedOnboarding(value) {
+function migratePersistedState(value, seededState) {
   if (value && typeof value === "object" && !value.tenant) {
     value.tenant = publicTenantContext(demoTenants.aster);
   }
@@ -169,6 +175,15 @@ function migratePersistedOnboarding(value) {
     ]) {
       delete data[legacyField];
     }
+  }
+  if (value.fixture?.contentVersion !== TENANT_CONTENT_VERSION) {
+    value.academicCatalog = structuredClone(seededState.academicCatalog);
+    value.campusLife = structuredClone(seededState.campusLife);
+    value.academics ??= {};
+    value.academics.selectedProgramCode =
+      seededState.academics.selectedProgramCode;
+    value.academics.exemptionRecommendations ??= [];
+    value.fixture.contentVersion = TENANT_CONTENT_VERSION;
   }
   return value;
 }

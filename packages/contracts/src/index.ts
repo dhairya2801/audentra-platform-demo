@@ -582,7 +582,8 @@ export interface EdwardContextReceipt {
     | "payments"
     | "academics"
     | "financials"
-    | "messages";
+    | "messages"
+    | "campus_life";
 }
 
 export type EdwardActionWidget =
@@ -636,10 +637,31 @@ export interface CatalogCourse {
   description: string;
   credits: number;
   level: number;
+  availabilityLabel?: string | null;
+  instructorNames?: string[];
+  meetingPattern?: string | null;
+  source?: PortalContentSource | null;
+  resources?: CourseResource[];
   prerequisites: {
     courseCode: string;
     minimumGrade: string | null;
   }[];
+}
+
+export interface CourseResource {
+  id: string;
+  title: string;
+  description: string;
+  url: string;
+  format: "pdf";
+  provider: string;
+  licenseLabel: string;
+}
+
+export interface PortalContentSource {
+  label: string;
+  url: string;
+  dataStatus: "official_source" | "synthetic_preview" | "tenant_authored";
 }
 
 export interface AcademicProgram {
@@ -649,6 +671,7 @@ export interface AcademicProgram {
   degree: string;
   totalCredits: number;
   description: string;
+  source?: PortalContentSource | null;
 }
 
 export type AcademicPlanItemStatus =
@@ -768,6 +791,29 @@ export interface CampusEvent {
   category: "academic" | "social" | "career" | "wellness" | "athletics";
   featured: boolean;
   accent: "gold" | "navy" | "blue" | "coral";
+  visualTheme?: "festival" | "discovery" | "career" | "community";
+  imageUrl?: string | null;
+  imageAlt?: string | null;
+  imageAttribution?: string | null;
+  imageSourceUrl?: string | null;
+  source?: PortalContentSource | null;
+  registrationUrl?: string | null;
+}
+
+export interface StudentClubSocialLink {
+  label: string;
+  url: string;
+}
+
+export interface StudentClubEvent {
+  id: string;
+  title: string;
+  description: string;
+  startsAt: string;
+  endsAt: string;
+  location: string;
+  category: "meeting" | "workshop" | "social" | "competition" | "service";
+  registrationUrl?: string | null;
 }
 
 export interface StudentClub {
@@ -784,6 +830,12 @@ export interface StudentClub {
   imageAlt: string;
   imageAttribution: string;
   imageSourceUrl: string;
+  source?: PortalContentSource | null;
+  socialLinks?: StudentClubSocialLink[];
+  longDescription?: string | null;
+  meetingSchedule?: string | null;
+  membershipOpen?: boolean;
+  events?: StudentClubEvent[];
 }
 
 export interface CampusLifeFeed {

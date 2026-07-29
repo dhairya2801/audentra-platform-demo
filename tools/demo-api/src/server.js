@@ -41,6 +41,9 @@ const store = new JsonStateStore(
 const { server } = await createDemoApi({
   store,
   allowedOrigins: origins,
+  ...(completedE2eStudent
+    ? { tenantSeedStateOptions: { completedOnboarding: true } }
+    : {}),
   ...(e2eDocumentAi === "deterministic"
     ? { ai: createDeterministicE2eAi() }
     : {}),

@@ -819,6 +819,39 @@ async function main(): Promise<void> {
         ],
       );
     }
+    const campusEventVisuals = [
+      [
+        "50000000-0000-7000-8000-000000000101",
+        "festival",
+        "/media/events/welcome-week-block-party.webp",
+        "Students enjoying music, food stalls, and conversation at a welcome-week block party on a campus lawn",
+      ],
+      [
+        "50000000-0000-7000-8000-000000000102",
+        "discovery",
+        "/media/events/first-year-research-showcase.webp",
+        "Students presenting robotics projects and research posters in a university innovation hall",
+      ],
+      [
+        "50000000-0000-7000-8000-000000000103",
+        "career",
+        "/media/events/internship-ready-lab.webp",
+        "Students working with career coaches on resumes and interview practice in a campus career commons",
+      ],
+    ] as const;
+    for (const visual of campusEventVisuals) {
+      await client.query(
+        `UPDATE campus_event
+         SET visual_theme = $2,
+             image_url = $3,
+             image_alt = $4,
+             image_attribution = 'Original portal artwork generated with OpenAI',
+             image_source_url = NULL,
+             updated_at = now()
+         WHERE id = $1 AND tenant_id = $5`,
+        [visual[0], visual[1], visual[2], visual[3], DEMO_IDS.tenantId],
+      );
+    }
     const clubs = [
       ["51000000-0000-7000-8000-000000000101", "Aster Robotics", "Engineering & Technology", "Design, build, and compete with autonomous robots in multidisciplinary teams.", "Maya Chen", "Club President", "robotics@aster.edu", "New-member build teams open this week.", "Open Lab · Sep 4, 6:00 PM"],
       ["51000000-0000-7000-8000-000000000102", "Code Collective", "Computing", "Peer learning, hack nights, open-source projects, and conversations with alumni.", "Noah Williams", "Community Lead", "codecollective@aster.edu", "Fall project pitches are now posted.", "Hack Night · Sep 6, 7:00 PM"],
@@ -847,6 +880,8 @@ async function main(): Promise<void> {
         ],
       );
     }
+    await seedHarvardTenantContent(client);
+    await seedAcademicResourcesAndClubEvents(client);
     await seedPortalMediaMetadata(client);
     await seedImmunizationPolicy(client);
     await seedAiPromptRuntime(client, config);
@@ -858,6 +893,733 @@ async function main(): Promise<void> {
   } finally {
     client.release();
     await pool.end();
+  }
+}
+
+async function seedAcademicResourcesAndClubEvents(
+  client: PoolClient,
+): Promise<void> {
+  const programming = [
+    {
+      id: "think-python-2e",
+      title: "Think Python, 2nd Edition",
+      description:
+        "A beginner-friendly guide to programming and problem solving with Python.",
+      url: "https://greenteapress.com/thinkpython2/thinkpython2.pdf",
+      format: "pdf",
+      provider: "Green Tea Press",
+      licenseLabel: "CC BY-NC 3.0",
+    },
+  ];
+  const discreteMath = [
+    {
+      id: "mit-mathematics-for-computer-science",
+      title: "Mathematics for Computer Science",
+      description:
+        "MIT's open undergraduate text on proofs, graphs, counting, and probability.",
+      url: "https://ocw.mit.edu/courses/6-042j-mathematics-for-computer-science-spring-2015/mit6_042js15_textbook.pdf",
+      format: "pdf",
+      provider: "MIT OpenCourseWare",
+      licenseLabel: "Creative Commons",
+    },
+  ];
+  const algorithms = [
+    {
+      id: "erickson-algorithms",
+      title: "Algorithms",
+      description:
+        "A rigorous open text covering recursion, dynamic programming, graphs, and complexity.",
+      url: "https://jeffe.cs.illinois.edu/teaching/algorithms/book/Algorithms-JeffE.pdf",
+      format: "pdf",
+      provider: "Jeff Erickson · UIUC",
+      licenseLabel: "CC BY 4.0",
+    },
+  ];
+  const linearAlgebra = [
+    {
+      id: "hefferon-linear-algebra",
+      title: "Linear Algebra",
+      description:
+        "A free first-course text with worked examples, exercises, and applications.",
+      url: "https://hefferon.net/linearalgebra/book.pdf",
+      format: "pdf",
+      provider: "Jim Hefferon",
+      licenseLabel: "CC BY-SA 4.0",
+    },
+  ];
+  const resourcesByCourse = [
+    [DEMO_IDS.tenantId, "CS 101", programming],
+    [DEMO_IDS.tenantId, "CS 201", algorithms],
+    [DEMO_IDS.tenantId, "MATH 251", linearAlgebra],
+    ["00000000-0000-7000-8000-000000000002", "COMPSCI 20", discreteMath],
+    ["00000000-0000-7000-8000-000000000002", "COMPSCI 32", programming],
+    ["00000000-0000-7000-8000-000000000002", "COMPSCI 50", programming],
+    [
+      "00000000-0000-7000-8000-000000000002",
+      "COMPSCI 1200",
+      [...discreteMath, ...algorithms],
+    ],
+    ["00000000-0000-7000-8000-000000000002", "COMPSCI 1240", algorithms],
+    ["00000000-0000-7000-8000-000000000002", "MATH 21B", linearAlgebra],
+  ] as const;
+  for (const [tenantId, courseCode, resources] of resourcesByCourse) {
+    await client.query(
+      `UPDATE catalog_course
+       SET resources = $3::jsonb, updated_at = now()
+       WHERE tenant_id = $1 AND code = $2`,
+      [tenantId, courseCode, JSON.stringify(resources)],
+    );
+  }
+
+  const clubs = [
+    [
+      DEMO_IDS.tenantId,
+      "51000000-0000-7000-8000-000000000101",
+      "Aster Robotics",
+      "Weekly · Thursdays at 6:00 PM",
+    ],
+    [
+      DEMO_IDS.tenantId,
+      "51000000-0000-7000-8000-000000000102",
+      "Code Collective",
+      "Every other week · Tuesdays at 7:00 PM",
+    ],
+    [
+      DEMO_IDS.tenantId,
+      "51000000-0000-7000-8000-000000000103",
+      "Women in Business",
+      "Weekly · Thursdays at 6:00 PM",
+    ],
+    [
+      DEMO_IDS.tenantId,
+      "51000000-0000-7000-8000-000000000104",
+      "Outdoor Aster",
+      "Every other week · Tuesdays at 7:00 PM",
+    ],
+    [
+      "00000000-0000-7000-8000-000000000002",
+      "86000000-0000-7000-8000-000000000101",
+      "Harvard Computer Society",
+      "Weekly · Thursdays at 6:00 PM",
+    ],
+    [
+      "00000000-0000-7000-8000-000000000002",
+      "86000000-0000-7000-8000-000000000102",
+      "Women in Computer Science",
+      "Every other week · Tuesdays at 7:00 PM",
+    ],
+    [
+      "00000000-0000-7000-8000-000000000002",
+      "86000000-0000-7000-8000-000000000103",
+      "Harvard Undergraduate Robotics Club",
+      "Weekly · Thursdays at 6:00 PM",
+    ],
+    [
+      "00000000-0000-7000-8000-000000000002",
+      "86000000-0000-7000-8000-000000000104",
+      "Harvard Open Data Project",
+      "Every other week · Tuesdays at 7:00 PM",
+    ],
+  ] as const;
+  for (const [clubIndex, [tenantId, clubId, clubName, schedule]] of clubs.entries()) {
+    await client.query(
+      `UPDATE student_club
+       SET long_description = description ||
+             ' New members can meet the team, explore current projects, and take part at their own pace.',
+           meeting_schedule = $3,
+           membership_open = true,
+           updated_at = now()
+       WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, clubId, schedule],
+    );
+    const day = 4 + (clubIndex % 4);
+    const eventRows = [
+      {
+        id: `87000000-0000-7000-8000-${String(clubIndex * 3 + 1).padStart(12, "0")}`,
+        title: `${clubName} welcome meetup`,
+        description:
+          "Meet student leaders, hear what the club is working on, and find a comfortable first way to participate.",
+        startsAt: `2027-09-${String(day).padStart(2, "0")}T22:00:00.000Z`,
+        endsAt: `2027-09-${String(day).padStart(2, "0")}T23:30:00.000Z`,
+        location: "Student Commons · Studio A",
+        category: "social",
+      },
+      {
+        id: `87000000-0000-7000-8000-${String(clubIndex * 3 + 2).padStart(12, "0")}`,
+        title: `${clubName} hands-on session`,
+        description:
+          "A guided, beginner-friendly session led by returning members. Materials and support are provided.",
+        startsAt: `2027-09-${String(day + 8).padStart(2, "0")}T21:00:00.000Z`,
+        endsAt: `2027-09-${String(day + 8).padStart(2, "0")}T23:00:00.000Z`,
+        location: "Innovation Hall · Collaboration Lab",
+        category: "workshop",
+      },
+      {
+        id: `87000000-0000-7000-8000-${String(clubIndex * 3 + 3).padStart(12, "0")}`,
+        title: "Open community night",
+        description:
+          "Bring a friend, meet other members, and preview the club's projects and calendar for the semester.",
+        startsAt: `2027-09-${String(day + 16).padStart(2, "0")}T23:00:00.000Z`,
+        endsAt: `2027-09-${String(day + 17).padStart(2, "0")}T00:30:00.000Z`,
+        location: "University Green",
+        category: clubIndex % 4 === 3 ? "service" : "meeting",
+      },
+    ];
+    for (const event of eventRows) {
+      await client.query(
+        `INSERT INTO student_club_event (
+           id, tenant_id, club_id, title, description, starts_at, ends_at,
+           location, category
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (tenant_id, club_id, title, starts_at) DO UPDATE
+         SET description = EXCLUDED.description,
+             ends_at = EXCLUDED.ends_at,
+             location = EXCLUDED.location,
+             category = EXCLUDED.category,
+             active = true,
+             updated_at = now()`,
+        [
+          event.id,
+          tenantId,
+          clubId,
+          event.title,
+          event.description,
+          event.startsAt,
+          event.endsAt,
+          event.location,
+          event.category,
+        ],
+      );
+    }
+  }
+}
+
+async function seedHarvardTenantContent(client: PoolClient): Promise<void> {
+  const tenantId = "00000000-0000-7000-8000-000000000002";
+  const programId = "80000000-0000-7000-8000-000000000101";
+  const catalogId = "81000000-0000-7000-8000-000000000101";
+  const programSource =
+    "https://seas.harvard.edu/computer-science/bachelors-degree-computer-science";
+  const courseSource = "https://seas.harvard.edu/computer-science/courses";
+  const requirementSource =
+    "https://csadvising.seas.harvard.edu/concentration/requirements/";
+  const clubSource =
+    "https://csadvising.seas.harvard.edu/opportunities/clubs/";
+
+  await client.query(
+    `INSERT INTO tenant (id, name)
+     VALUES ($1, 'Harvard University')
+     ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+    [tenantId],
+  );
+  await client.query(
+    `INSERT INTO program (
+       id, tenant_id, code, name, degree, total_credits, description,
+       source_label, source_url, source_status
+     )
+     VALUES (
+       $1, $2, 'AB-CS', 'Computer Science Concentration',
+       'Bachelor of Arts', 128,
+       'A liberal-arts computer science pathway combining mathematical preparation with programming, formal reasoning, systems, computation and the world, and advanced computer science.',
+       'Harvard SEAS Computer Science', $3, 'official_source'
+     )
+     ON CONFLICT (tenant_id, code) DO UPDATE
+     SET name = EXCLUDED.name,
+         degree = EXCLUDED.degree,
+         total_credits = EXCLUDED.total_credits,
+         description = EXCLUDED.description,
+         source_label = EXCLUDED.source_label,
+         source_url = EXCLUDED.source_url,
+         source_status = EXCLUDED.source_status,
+         updated_at = now()`,
+    [programId, tenantId, programSource],
+  );
+  await client.query(
+    `INSERT INTO course_catalog_version (
+       id, tenant_id, code, effective_from, effective_until, status,
+       source_label, source_url, source_status
+     )
+     VALUES (
+       $1, $2, 'HARVARD-CS-2026-27.preview.v1',
+       '2026-07-01', '2027-06-30', 'active',
+       'Harvard SEAS course listing', $3, 'official_source'
+     )
+     ON CONFLICT (tenant_id, code) DO UPDATE
+     SET status = EXCLUDED.status,
+         source_label = EXCLUDED.source_label,
+         source_url = EXCLUDED.source_url,
+         source_status = EXCLUDED.source_status,
+         updated_at = now()`,
+    [catalogId, tenantId, courseSource],
+  );
+
+  const courses = [
+    {
+      id: "82000000-0000-7000-8000-000000000020",
+      code: "COMPSCI 20",
+      title: "Discrete Mathematics for Computer Science",
+      description:
+        "Mathematical tools for computer science, including logic, combinatorics, probability, graph theory, and formal proof.",
+      level: 20,
+      availability: "Spring 2027 published example",
+      instructors: ["Adam Hesterberg"],
+      meeting: "Monday, Wednesday, Friday - 9:45-11:00 AM",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000032",
+      code: "COMPSCI 32",
+      title: "Computational Thinking and Problem Solving",
+      description:
+        "An introduction to computational thinking, problem solving, and programming with Python; prior programming experience is not required.",
+      level: 32,
+      availability: "Spring 2027 published example",
+      instructors: ["Michael Smith"],
+      meeting: "Monday, Wednesday - 1:30-2:45 PM",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000050",
+      code: "COMPSCI 50",
+      title: "Introduction to Computer Science",
+      description:
+        "Harvard's introduction to computer science and programming, emphasizing computational thinking, algorithms, data structures, correctness, design, and style.",
+      level: 50,
+      availability: "Fall 2026 / Spring 2027 published example",
+      instructors: ["David J. Malan", "Kelly Ding"],
+      meeting: "Multiple published lecture sections",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000051",
+      code: "COMPSCI 51",
+      title: "Abstraction and Design in Computation",
+      description:
+        "Program design through functional, imperative, and object-oriented paradigms, with software-engineering and computation models.",
+      level: 51,
+      availability: "Fall 2026 published example",
+      instructors: ["Stephen Chong"],
+      meeting: "Tuesday, Thursday - 11:15 AM-12:30 PM",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000061",
+      code: "COMPSCI 61",
+      title: "Systems Programming and Machine Organization",
+      description:
+        "Systems programming, data representation, storage, process management, synchronization, operating systems, and machine organization.",
+      level: 61,
+      availability: "Fall 2026 / Spring 2027 published example",
+      instructors: ["Eddie Kohler", "Juncheng Yang"],
+      meeting: "Published fall and spring sections",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000079",
+      code: "COMPSCI 79",
+      title: "Design of Useful and Usable Interactive Systems",
+      description:
+        "Human-centered product design, need finding, prototyping, and evaluation of interactive systems.",
+      level: 79,
+      availability: "Fall 2026 published example",
+      instructors: ["Krzysztof Gajos"],
+      meeting: "Tuesday, Thursday - 9:45-11:00 AM",
+      sourceUrl: courseSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000001200",
+      code: "COMPSCI 1200",
+      title: "Introduction to Algorithms and Their Limitations",
+      description:
+        "A tenant-seeded plan example for the formal-reasoning, algorithms, and computational-limitations areas of the concentration.",
+      level: 120,
+      availability: "Plan example - verify current offering",
+      instructors: [],
+      meeting: null,
+      sourceUrl: requirementSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000001240",
+      code: "COMPSCI 1240",
+      title: "Data Structures and Algorithms",
+      description:
+        "A tenant-seeded advanced plan example associated with the algorithms, formal-reasoning, and advanced-computer-science requirement tags.",
+      level: 124,
+      availability: "Plan example - verify current offering",
+      instructors: [],
+      meeting: null,
+      sourceUrl: requirementSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000110",
+      code: "STAT 110",
+      title: "Introduction to Probability",
+      description:
+        "A probability-course option named in the published Harvard CS concentration requirements.",
+      level: 110,
+      availability: "Requirement option - verify current offering",
+      instructors: [],
+      meeting: null,
+      sourceUrl: requirementSource,
+    },
+    {
+      id: "82000000-0000-7000-8000-000000000021",
+      code: "MATH 21B",
+      title: "Linear Algebra and Differential Equations",
+      description:
+        "A linear-algebra option named in the published Harvard CS concentration requirements.",
+      level: 21,
+      availability: "Requirement option - verify current offering",
+      instructors: [],
+      meeting: null,
+      sourceUrl: requirementSource,
+    },
+  ] as const;
+  for (const course of courses) {
+    await client.query(
+      `INSERT INTO catalog_course (
+         id, tenant_id, catalog_version_id, code, title, description,
+         credits, level, availability_label, instructor_names,
+         meeting_pattern, source_url
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, 4, $7, $8, $9, $10, $11)
+       ON CONFLICT (catalog_version_id, code) DO UPDATE
+       SET title = EXCLUDED.title,
+           description = EXCLUDED.description,
+           credits = EXCLUDED.credits,
+           level = EXCLUDED.level,
+           availability_label = EXCLUDED.availability_label,
+           instructor_names = EXCLUDED.instructor_names,
+           meeting_pattern = EXCLUDED.meeting_pattern,
+           source_url = EXCLUDED.source_url,
+           active = true,
+           updated_at = now()`,
+      [
+        course.id,
+        tenantId,
+        catalogId,
+        course.code,
+        course.title,
+        course.description,
+        course.level,
+        course.availability,
+        course.instructors,
+        course.meeting,
+        course.sourceUrl,
+      ],
+    );
+  }
+
+  const requirements = [
+    ["COMPSCI 50", "major_core", 1],
+    ["MATH 21B", "math_science", 1],
+    ["COMPSCI 20", "major_core", 2],
+    ["STAT 110", "math_science", 2],
+    ["COMPSCI 51", "major_core", 3],
+    ["COMPSCI 61", "major_core", 3],
+    ["COMPSCI 79", "major_core", 4],
+    ["COMPSCI 1200", "major_core", 4],
+    ["COMPSCI 1240", "major_core", 5],
+  ] as const;
+  for (const [index, requirement] of requirements.entries()) {
+    const course = courses.find((item) => item.code === requirement[0]);
+    if (!course) continue;
+    await client.query(
+      `INSERT INTO program_requirement (
+         id, tenant_id, program_id, catalog_version_id, course_id,
+         category, recommended_term, required
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+       ON CONFLICT (program_id, catalog_version_id, course_id) DO UPDATE
+       SET category = EXCLUDED.category,
+           recommended_term = EXCLUDED.recommended_term,
+           required = true`,
+      [
+        `83000000-0000-7000-8000-${String(index + 1).padStart(12, "0")}`,
+        tenantId,
+        programId,
+        catalogId,
+        course.id,
+        requirement[1],
+        requirement[2],
+      ],
+    );
+  }
+
+  const clubMedia = portalMediaAssets.filter(
+    (asset) => asset.purpose === "student_club",
+  );
+  const mediaIds = [
+    "84000000-0000-7000-8000-000000000101",
+    "84000000-0000-7000-8000-000000000102",
+    "84000000-0000-7000-8000-000000000103",
+    "84000000-0000-7000-8000-000000000104",
+  ];
+  for (const [index, mediaId] of mediaIds.entries()) {
+    const asset = clubMedia[index % clubMedia.length];
+    if (!asset) continue;
+    await client.query(
+      `INSERT INTO media_asset (
+         id, tenant_id, purpose, storage_provider, storage_key, public_path,
+         mime_type, sha256, alt_text, attribution, source_url, license_name
+       )
+       VALUES (
+         $1, $2, 'student_club', 's3', $3, $4,
+         'image/jpeg', $5, $6, $7, $8, $9
+       )
+       ON CONFLICT (tenant_id, storage_key) DO UPDATE
+       SET public_path = EXCLUDED.public_path,
+           alt_text = EXCLUDED.alt_text,
+           attribution = EXCLUDED.attribution,
+           source_url = EXCLUDED.source_url,
+           active = true,
+           updated_at = now()`,
+      [
+        mediaId,
+        tenantId,
+        `harvard/${asset.storageKey}`,
+        asset.publicPath,
+        asset.sha256,
+        asset.altText,
+        asset.attribution,
+        asset.sourceUrl,
+        asset.licenseName,
+      ],
+    );
+  }
+
+  const events = [
+    {
+      id: "85000000-0000-7000-8000-000000000101",
+      title: "Student Organization Fair",
+      description:
+        "A synthetic 2027 preview of Harvard's annual first-week organization fair, where students explore hundreds of groups and communities.",
+      startsAt: "2027-09-03T19:00:00.000Z",
+      endsAt: "2027-09-03T22:00:00.000Z",
+      location: "Tercentenary Theatre",
+      category: "social",
+      accent: "coral",
+      label: "Harvard College Student Organization Fair",
+      url: "https://dso.college.harvard.edu/student-involvement-fair",
+    },
+    {
+      id: "85000000-0000-7000-8000-000000000102",
+      title: "CS Community Project Night",
+      description:
+        "A synthetic preview bringing computing clubs together for demonstrations, project matching, and conversations with student leaders.",
+      startsAt: "2027-09-08T22:00:00.000Z",
+      endsAt: "2027-09-09T00:00:00.000Z",
+      location: "Science and Engineering Complex",
+      category: "academic",
+      accent: "blue",
+      label: "Harvard CS clubs and activities",
+      url: clubSource,
+    },
+    {
+      id: "85000000-0000-7000-8000-000000000103",
+      title: "Global Day of Service Meetup",
+      description:
+        "A synthetic orientation preview inspired by Harvard's service and leadership programming in Cambridge and Boston.",
+      startsAt: "2027-09-11T14:00:00.000Z",
+      endsAt: "2027-09-11T18:00:00.000Z",
+      location: "Harvard Yard",
+      category: "social",
+      accent: "gold",
+      label: "Harvard College student activities",
+      url: "https://college.harvard.edu/student-life/student-activities",
+    },
+  ] as const;
+  for (const event of events) {
+    await client.query(
+      `INSERT INTO campus_event (
+         id, tenant_id, title, description, starts_at, ends_at, location,
+         category, featured, accent, source_label, source_url, source_status
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, true, $9,
+         $10, $11, 'synthetic_preview'
+       )
+       ON CONFLICT (id) DO UPDATE
+       SET title = EXCLUDED.title,
+           description = EXCLUDED.description,
+           starts_at = EXCLUDED.starts_at,
+           ends_at = EXCLUDED.ends_at,
+           location = EXCLUDED.location,
+           category = EXCLUDED.category,
+           accent = EXCLUDED.accent,
+           source_label = EXCLUDED.source_label,
+           source_url = EXCLUDED.source_url,
+           source_status = EXCLUDED.source_status,
+           active = true,
+           updated_at = now()`,
+      [
+        event.id,
+        tenantId,
+        event.title,
+        event.description,
+        event.startsAt,
+        event.endsAt,
+        event.location,
+        event.category,
+        event.accent,
+        event.label,
+        event.url,
+      ],
+    );
+  }
+  const eventVisuals = [
+    [
+      "85000000-0000-7000-8000-000000000101",
+      "festival",
+      "/media/events/welcome-week-block-party.webp",
+      "Students enjoying music, food stalls, and conversation at a welcome-week block party on a campus lawn",
+      "Original portal artwork generated with OpenAI",
+      null,
+    ],
+    [
+      "85000000-0000-7000-8000-000000000102",
+      "discovery",
+      "/media/events/first-year-research-showcase.webp",
+      "Students presenting robotics projects and research posters in a university innovation hall",
+      "Original portal artwork generated with OpenAI",
+      null,
+    ],
+    [
+      "85000000-0000-7000-8000-000000000103",
+      "community",
+      "/media/clubs/outdoor-aster.jpg",
+      "Students hiking together on a wooded trail",
+      "Photo by Gustavo Denuncio via Pexels",
+      "https://www.pexels.com/photo/group-of-friends-hiking-in-forest-trail-30273507/",
+    ],
+  ] as const;
+  for (const visual of eventVisuals) {
+    await client.query(
+      `UPDATE campus_event
+       SET visual_theme = $2,
+           image_url = $3,
+           image_alt = $4,
+           image_attribution = $5,
+           image_source_url = $6,
+           updated_at = now()
+       WHERE id = $1 AND tenant_id = $7`,
+      [
+        visual[0],
+        visual[1],
+        visual[2],
+        visual[3],
+        visual[4],
+        visual[5],
+        tenantId,
+      ],
+    );
+  }
+
+  const clubs = [
+    {
+      id: "86000000-0000-7000-8000-000000000101",
+      name: "Harvard Computer Society",
+      category: "Computing",
+      description:
+        "A no-competition community connecting students with technical projects, learning, mentorship, and career opportunities.",
+      role: "Harvard Computer Society",
+      channel: "presidents@hcs.harvard.edu",
+      update: "Explore HCS programs and affiliated project groups.",
+      next: "Project community meetup - preview",
+      social: [
+        { label: "Website", url: "https://hcs.harvard.edu/" },
+        {
+          label: "Instagram",
+          url: "https://www.instagram.com/harvard.computer.society/",
+        },
+      ],
+    },
+    {
+      id: "86000000-0000-7000-8000-000000000102",
+      name: "Women in Computer Science",
+      category: "Community & Technology",
+      description:
+        "A student community supporting technical women at Harvard and beyond through connection, learning, and professional development.",
+      role: "Harvard WiCS",
+      channel: "harvardwics@gmail.com",
+      update: "Community and mentorship programming is highlighted for new members.",
+      next: "Welcome circle - preview",
+      social: [{ label: "Website", url: "https://www.harvardwics.com/" }],
+    },
+    {
+      id: "86000000-0000-7000-8000-000000000103",
+      name: "Harvard Undergraduate Robotics Club",
+      category: "Engineering & Robotics",
+      description:
+        "Hands-on robotics projects paired with a welcoming undergraduate engineering community.",
+      role: "Robotics Club",
+      channel: "team@harvardrobotics.com",
+      update: "Project teams are preparing demonstrations for incoming students.",
+      next: "Open build session - preview",
+      social: [{ label: "Website", url: "https://harvardrobotics.com/" }],
+    },
+    {
+      id: "86000000-0000-7000-8000-000000000104",
+      name: "Harvard Open Data Project",
+      category: "Data & Public Interest",
+      description:
+        "Students and faculty use public Harvard data, analysis, and visualization to improve transparency and understand campus questions.",
+      role: "Open Data Project",
+      channel: "team@hodp.org",
+      update: "New contributors can explore published campus-data projects.",
+      next: "Data story workshop - preview",
+      social: [
+        { label: "Website", url: "https://hodp.org/" },
+        {
+          label: "Harvard on Facebook",
+          url: "https://www.facebook.com/Harvard/",
+        },
+      ],
+    },
+  ] as const;
+  for (const [index, club] of clubs.entries()) {
+    await client.query(
+      `INSERT INTO student_club (
+         id, tenant_id, name, category, description, contact_name,
+         contact_role, contact_channel, latest_update, next_activity,
+         media_asset_id, source_label, source_url, source_status, social_links
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, 'Student leadership team',
+         $6, $7, $8, $9, $10,
+         'Harvard CS clubs and activities', $11, 'official_source', $12::jsonb
+       )
+       ON CONFLICT (tenant_id, name) DO UPDATE
+       SET category = EXCLUDED.category,
+           description = EXCLUDED.description,
+           contact_name = EXCLUDED.contact_name,
+           contact_role = EXCLUDED.contact_role,
+           contact_channel = EXCLUDED.contact_channel,
+           latest_update = EXCLUDED.latest_update,
+           next_activity = EXCLUDED.next_activity,
+           media_asset_id = EXCLUDED.media_asset_id,
+           source_label = EXCLUDED.source_label,
+           source_url = EXCLUDED.source_url,
+           source_status = EXCLUDED.source_status,
+           social_links = EXCLUDED.social_links,
+           active = true,
+           updated_at = now()`,
+      [
+        club.id,
+        tenantId,
+        club.name,
+        club.category,
+        club.description,
+        club.role,
+        club.channel,
+        club.update,
+        club.next,
+        mediaIds[index],
+        clubSource,
+        JSON.stringify(club.social),
+      ],
+    );
   }
 }
 

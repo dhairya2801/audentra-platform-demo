@@ -6,9 +6,10 @@ import { demoTenants, tenantConfigForSlug } from "./tenant-config.js";
 export class TenantStoreRegistry {
   #stores = new Map();
 
-  constructor(primaryStore, clock = () => new Date()) {
+  constructor(primaryStore, clock = () => new Date(), seedStateOptions = {}) {
     this.primaryStore = primaryStore;
     this.clock = clock;
+    this.seedStateOptions = seedStateOptions;
   }
 
   async initialize() {
@@ -18,7 +19,11 @@ export class TenantStoreRegistry {
       join(directory, "tenants", demoTenants.harvard.slug, "state.json"),
       this.clock,
       join(directory, "tenants", demoTenants.harvard.slug, "uploads"),
-      () => createSeedState({ tenantSlug: demoTenants.harvard.slug }),
+      () =>
+        createSeedState({
+          ...this.seedStateOptions,
+          tenantSlug: demoTenants.harvard.slug,
+        }),
     );
     await harvardStore.initialize();
     this.#stores.set(demoTenants.harvard.slug, harvardStore);

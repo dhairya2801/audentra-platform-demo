@@ -1,6 +1,11 @@
 import { demoTenants, publicTenantContext, tenantConfigForSlug } from "./tenant-config.js";
+import {
+  harvardAcademicContent,
+  harvardCampusLifeContent,
+} from "./tenant-content.js";
 
 export const FIXTURE_VERSION = "vv-demo-v4";
+export const TENANT_CONTENT_VERSION = "tenant-content-v5";
 export const ONBOARDING_STEPS = Object.freeze([
   "offer",
   "about_you",
@@ -224,6 +229,64 @@ const courses = [
   },
 ];
 
+const openCourseResources = Object.freeze({
+  programming: [
+    {
+      id: "think-python-2e",
+      title: "Think Python, 2nd Edition",
+      description: "A beginner-friendly guide to programming and problem solving with Python.",
+      url: "https://greenteapress.com/thinkpython2/thinkpython2.pdf",
+      format: "pdf",
+      provider: "Green Tea Press",
+      licenseLabel: "CC BY-NC 3.0",
+    },
+  ],
+  discreteMath: [
+    {
+      id: "mit-mathematics-for-computer-science",
+      title: "Mathematics for Computer Science",
+      description: "MIT OpenCourseWare's undergraduate text on proofs, graphs, counting, and probability.",
+      url: "https://ocw.mit.edu/courses/6-042j-mathematics-for-computer-science-spring-2015/mit6_042js15_textbook.pdf",
+      format: "pdf",
+      provider: "MIT OpenCourseWare",
+      licenseLabel: "Creative Commons",
+    },
+  ],
+  algorithms: [
+    {
+      id: "erickson-algorithms",
+      title: "Algorithms",
+      description: "A rigorous open textbook covering recursion, dynamic programming, graphs, and complexity.",
+      url: "https://jeffe.cs.illinois.edu/teaching/algorithms/book/Algorithms-JeffE.pdf",
+      format: "pdf",
+      provider: "Jeff Erickson · UIUC",
+      licenseLabel: "CC BY 4.0",
+    },
+  ],
+  linearAlgebra: [
+    {
+      id: "hefferon-linear-algebra",
+      title: "Linear Algebra",
+      description: "A free first-course text with worked examples, exercises, and applications.",
+      url: "https://hefferon.net/linearalgebra/book.pdf",
+      format: "pdf",
+      provider: "Jim Hefferon",
+      licenseLabel: "CC BY-SA 4.0",
+    },
+  ],
+});
+
+for (const course of courses) {
+  course.resources =
+    course.code === "CS 101"
+      ? structuredClone(openCourseResources.programming)
+      : course.code === "CS 201"
+        ? structuredClone(openCourseResources.algorithms)
+        : course.code === "MATH 251"
+          ? structuredClone(openCourseResources.linearAlgebra)
+          : [];
+}
+
 const programs = [
   {
     id: "20000000-0000-7000-8000-000000000101",
@@ -288,6 +351,7 @@ export function createSeedState(options = {}) {
     schemaVersion: 4,
     fixture: {
       version: FIXTURE_VERSION,
+      contentVersion: TENANT_CONTENT_VERSION,
       seededAt: seedTimestamp,
       updatedAt: seedTimestamp,
       revision: 1,
@@ -520,6 +584,12 @@ export function createSeedState(options = {}) {
           category: "social",
           featured: true,
           accent: "gold",
+          visualTheme: "festival",
+          imageUrl: "/media/events/welcome-week-block-party.webp",
+          imageAlt:
+            "Students enjoying music, food stalls, and conversation at a welcome-week block party on a campus lawn",
+          imageAttribution: "Original portal artwork generated with OpenAI",
+          imageSourceUrl: null,
         },
         {
           id: "50000000-0000-7000-8000-000000000102",
@@ -532,6 +602,12 @@ export function createSeedState(options = {}) {
           category: "academic",
           featured: true,
           accent: "blue",
+          visualTheme: "discovery",
+          imageUrl: "/media/events/first-year-research-showcase.webp",
+          imageAlt:
+            "Students presenting robotics projects and research posters in a university innovation hall",
+          imageAttribution: "Original portal artwork generated with OpenAI",
+          imageSourceUrl: null,
         },
         {
           id: "50000000-0000-7000-8000-000000000103",
@@ -544,6 +620,12 @@ export function createSeedState(options = {}) {
           category: "career",
           featured: true,
           accent: "navy",
+          visualTheme: "career",
+          imageUrl: "/media/events/internship-ready-lab.webp",
+          imageAlt:
+            "Students working with career coaches on resumes and interview practice in a campus career commons",
+          imageAttribution: "Original portal artwork generated with OpenAI",
+          imageSourceUrl: null,
         },
       ],
       clubs: [
@@ -672,6 +754,7 @@ export function createSeedState(options = {}) {
     state.portalProjectionVersion = 2;
   }
   customizeSeedForTenant(state, tenant);
+  normalizeTenantContent(state);
   return state;
 }
 
@@ -701,30 +784,17 @@ function customizeSeedForTenant(state, tenant) {
     );
   }
 
-  const [welcomeWeek, researchShowcase, internshipLab] =
-    state.campusLife.events;
-  if (welcomeWeek) welcomeWeek.location = "Harvard Yard";
-  if (researchShowcase) researchShowcase.location = "Science Center";
-  if (internshipLab) internshipLab.location = "Mignone Center";
-
-  const [robotics, codeCollective, womenInBusiness, outdoors] =
-    state.campusLife.clubs;
-  if (robotics) {
-    robotics.name = "Harvard Undergraduate Robotics Club";
-    robotics.contactChannel = "robotics@harvard.edu";
-  }
-  if (codeCollective) {
-    codeCollective.name = "Harvard Computer Society";
-    codeCollective.contactChannel = "computersociety@harvard.edu";
-  }
-  if (womenInBusiness) {
-    womenInBusiness.name = "Harvard Undergraduate Women in Business";
-    womenInBusiness.contactChannel = "womeninbusiness@harvard.edu";
-  }
-  if (outdoors) {
-    outdoors.name = "Harvard Outing Club";
-    outdoors.contactChannel = "outingclub@harvard.edu";
-  }
+  state.offer.programName = "Computer Science Concentration";
+  state.academicCatalog = {
+    version: harvardAcademicContent.version,
+    programs: structuredClone(harvardAcademicContent.programs),
+    courses: structuredClone(harvardAcademicContent.courses),
+    equivalencyRules: [],
+  };
+  state.academics.selectedProgramCode = "AB-CS";
+  state.academics.transcriptCredits = [];
+  state.academics.exemptionRecommendations = [];
+  state.campusLife = structuredClone(harvardCampusLifeContent);
 
   for (const requirement of state.requirements) {
     requirement.title = requirement.title.replaceAll("Aster", tenant.shortName);
@@ -732,6 +802,81 @@ function customizeSeedForTenant(state, tenant) {
       "Aster",
       tenant.shortName,
     );
+  }
+}
+
+function normalizeTenantContent(state) {
+  for (const program of state.academicCatalog.programs) {
+    program.source ??= null;
+  }
+  for (const course of state.academicCatalog.courses) {
+    course.availabilityLabel ??= "2027–2028 tenant catalog preview";
+    course.instructorNames ??= [];
+    course.meetingPattern ??= null;
+    course.source ??= null;
+    course.resources ??= [];
+  }
+  for (const event of state.campusLife.events) {
+    event.source ??= null;
+    event.registrationUrl ??= null;
+    event.visualTheme ??=
+      event.category === "career"
+        ? "career"
+        : event.category === "academic"
+          ? "discovery"
+          : event.category === "wellness"
+            ? "community"
+            : "festival";
+    event.imageUrl ??= null;
+    event.imageAlt ??= null;
+    event.imageAttribution ??= null;
+    event.imageSourceUrl ??= null;
+  }
+  for (const [index, club] of state.campusLife.clubs.entries()) {
+    club.source ??= null;
+    club.socialLinks ??= [];
+    club.longDescription ??=
+      `${club.description} New members can meet the team, explore current projects, and take part at their own pace.`;
+    club.meetingSchedule ??=
+      index % 2 === 0
+        ? "Weekly · Thursdays at 6:00 PM"
+        : "Every other week · Tuesdays at 7:00 PM";
+    club.membershipOpen ??= true;
+    club.events ??= [
+      {
+        id: `${club.id}-welcome`,
+        title: `${club.name} welcome meetup`,
+        description:
+          "Meet student leaders, hear what the club is working on, and find a comfortable first way to participate.",
+        startsAt: `2027-09-${String(4 + index).padStart(2, "0")}T22:00:00.000Z`,
+        endsAt: `2027-09-${String(4 + index).padStart(2, "0")}T23:30:00.000Z`,
+        location: index % 2 === 0 ? "Student Commons · Studio A" : "Campus Center · Room 204",
+        category: "social",
+        registrationUrl: null,
+      },
+      {
+        id: `${club.id}-workshop`,
+        title: `${club.name} hands-on session`,
+        description:
+          "A guided, beginner-friendly session led by returning members. Materials and support are provided.",
+        startsAt: `2027-09-${String(12 + index).padStart(2, "0")}T21:00:00.000Z`,
+        endsAt: `2027-09-${String(12 + index).padStart(2, "0")}T23:00:00.000Z`,
+        location: "Innovation Hall · Collaboration Lab",
+        category: "workshop",
+        registrationUrl: null,
+      },
+      {
+        id: `${club.id}-community`,
+        title: "Open community night",
+        description:
+          "Bring a friend, meet other members, and preview the club's projects and calendar for the semester.",
+        startsAt: `2027-09-${String(20 + index).padStart(2, "0")}T23:00:00.000Z`,
+        endsAt: `2027-09-${String(21 + index).padStart(2, "0")}T00:30:00.000Z`,
+        location: "University Green",
+        category: index === 3 ? "service" : "meeting",
+        registrationUrl: null,
+      },
+    ];
   }
 }
 

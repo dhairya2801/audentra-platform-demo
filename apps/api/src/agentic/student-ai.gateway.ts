@@ -47,14 +47,47 @@ export interface EdwardStudentContext {
   preferredName: string;
   programName: string;
   termName: string;
-  onboardingStatus: string;
-  enrollmentCompletion: number;
+  onboardingStatus?: string;
+  enrollmentChecklistCompletionPercent: number;
   nextAction: unknown;
-  unreadMessages: number;
-  documentStatuses: Array<{ category: string; status: string }>;
+  unreadMessages?: number;
+  documentStatuses?: Array<{ category: string; status: string }>;
   offerId: string;
   depositAmountCents: number;
   depositPaid: boolean;
+  academicSummary?: {
+    selectedProgram: string;
+    degree: string;
+    catalogVersion: string;
+    suggestedExemptions: string[];
+    plan: Array<{
+      code: string;
+      title: string;
+      recommendedTerm: number;
+      status: string;
+      missingPrerequisites: string[];
+    }>;
+  };
+  financialSummary?: {
+    remainingBalanceCents: number;
+    acceptedAidCents: number;
+    actionRequiredDocuments: string[];
+    sapStatus: string;
+  };
+  campusLifeSummary?: {
+    upcomingEvents: Array<{
+      title: string;
+      startsAt: string;
+      location: string;
+      category: string;
+    }>;
+    clubs: Array<{
+      name: string;
+      category: string;
+      description: string;
+      nextActivity: string | null;
+    }>;
+  };
 }
 
 export interface StudentAiGateway {
@@ -2004,6 +2037,12 @@ function guidedEdwardResponse(
     text,
   )
     ? nextActionGuidance(context.nextAction)
+    : /class|classroom|course|catalog|major|program|prerequisite|academic/.test(
+          text,
+        )
+      ? academicGuidance(context)
+      : /campus|club|event|activity|organization|social life/.test(text)
+        ? campusLifeGuidance(context)
     : /document|upload|transcript|fafsa|ferpa/.test(text)
     ? "Open Documents to upload a PDF, JPEG, or PNG. Aster stores the original file and prepares structured fields for your review. Nothing extracted is treated as verified until you approve it."
     : /deadline|due|when/.test(text)
@@ -2014,7 +2053,7 @@ function guidedEdwardResponse(
           ? "You can update changeable contact preferences from Profile. Legal identity changes may require supporting documentation and staff review."
           : /appointment|advisor|person|human/.test(text)
             ? "Open Appointments to schedule enrollment, admissions, or financial-aid support with a staff member."
-            : "I can help you find enrollment steps, documents, deadlines, payments, appointments, and profile settings.";
+            : "I can help with enrollment, documents, academics, classes, financial aid, campus life, appointments, and profile settings. Ask one specific question and I’ll use only the relevant part of your university record.";
   return {
     message: response,
     provider: "guided",
@@ -2064,6 +2103,37 @@ function nextActionGuidance(nextAction: unknown): string {
   return description
     ? `Your next step is ${title}. ${description}`
     : `Your next step is ${title}. Open Enrollment to continue.`;
+}
+
+function academicGuidance(context: EdwardStudentContext): string {
+  const academics = context.academicSummary;
+  if (!academics) {
+    return "Open My Classrooms to review your academic plan and searchable course catalog.";
+  }
+  const nextCourses = academics.plan
+    .filter((item) =>
+      ["eligible", "required", "in_progress"].includes(item.status),
+    )
+    .slice(0, 3)
+    .map((item) => `${item.code} ${item.title}`);
+  const suffix = nextCourses.length
+    ? ` Your next available plan options include ${nextCourses.join(", ")}.`
+    : "";
+  return `Your ${academics.selectedProgram} plan is using catalog ${academics.catalogVersion}.${suffix} Open My Classrooms for requirement status, prerequisites, and official source details.`;
+}
+
+function campusLifeGuidance(context: EdwardStudentContext): string {
+  const campus = context.campusLifeSummary;
+  if (!campus) {
+    return "Open My Campus Life to explore upcoming events and student organizations.";
+  }
+  const events = campus.upcomingEvents.slice(0, 2).map((event) => event.title);
+  const clubs = campus.clubs.slice(0, 3).map((club) => club.name);
+  const eventText = events.length ? ` Upcoming: ${events.join(" and ")}.` : "";
+  const clubText = clubs.length
+    ? ` Featured groups include ${clubs.join(", ")}.`
+    : "";
+  return `${eventText}${clubText} Open My Campus Life to search the full tenant-managed directory.`.trim();
 }
 
 function widgetsFor(
@@ -2118,6 +2188,16 @@ function widgetsFor(
 
 function suggestedActionsFor(message: string) {
   const text = message.toLowerCase();
+  if (
+    /class|classroom|course|catalog|major|program|prerequisite|academic/.test(
+      text,
+    )
+  ) {
+    return [{ label: "Open My Classrooms", href: "/classrooms" }];
+  }
+  if (/campus|club|event|activity|organization|social life/.test(text)) {
+    return [{ label: "Open My Campus Life", href: "/campus-life" }];
+  }
   if (/document|upload|transcript|fafsa|ferpa/.test(text)) {
     return [{ label: "Open documents", href: "/documents" }];
   }

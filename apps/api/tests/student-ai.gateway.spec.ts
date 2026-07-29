@@ -30,7 +30,7 @@ const studentContext: EdwardStudentContext = {
   programName: "Computer Science",
   termName: "Fall 2027",
   onboardingStatus: "completed",
-  enrollmentCompletion: 42,
+  enrollmentChecklistCompletionPercent: 42,
   nextAction: { title: "Provide identity documentation" },
   unreadMessages: 0,
   documentStatuses: [],

@@ -1841,6 +1841,7 @@ function publicProgram(program) {
     degree: program.degree,
     totalCredits: program.totalCredits,
     description: program.description,
+    source: program.source ?? null,
   };
 }
 

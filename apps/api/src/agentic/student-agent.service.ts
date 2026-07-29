@@ -4,7 +4,6 @@ import type {
   AskEdwardInput,
   AskEdwardResponse,
   ConfirmStudentDocumentExtractionInput,
-  EdwardContextReceipt,
   StudentDocument,
   StudentDocumentCategory,
   StudentDocumentExtraction,
@@ -488,32 +487,130 @@ export class StudentAgentService {
     const guarded = guardedEdwardResponse(input.question.message);
     if (guarded) return guarded;
     const normalizedQuestion = input.question.message.toLowerCase();
-    const [dashboard, profile, documents, onboarding, payments] = await Promise.all([
+    const normalizedContext =
+      `${normalizedQuestion} ${input.question.pageContext}`.toLowerCase();
+    const wantsDocuments =
+      /document|upload|transcript|fafsa|ferpa|verification/.test(
+        normalizedContext,
+      );
+    const wantsOnboarding =
+      /onboarding|offer|housing|roommate|emergency contact|sign/.test(
+        normalizedContext,
+      );
+    const wantsPayments =
+      /payment|deposit|pay|balance|billing|financial|aid|loan/.test(
+        normalizedContext,
+      );
+    const wantsAcademics =
+      /academic|class|classroom|course|catalog|major|program|prerequisite|exempt|credit/.test(
+        normalizedContext,
+      );
+    const wantsFinancials =
+      /financial|aid|fafsa|loan|award|balance|billing|payment plan|sap/.test(
+        normalizedContext,
+      );
+    const wantsMessages = /message|inbox|notification|unread/.test(
+      normalizedContext,
+    );
+    const wantsCampus =
+      /campus|club|event|activity|activities|organization|community|social life/.test(
+        normalizedContext,
+      );
+    const [
+      dashboard,
+      profile,
+      documents,
+      onboarding,
+      payments,
+      academics,
+      financials,
+      messages,
+      campusLife,
+    ] = await Promise.all([
       this.store.getStudentDashboard(input.auth),
       this.store.getStudentProfile(input.auth),
-      this.store.getStudentDocuments(input.auth),
-      this.store.getStudentOnboarding(input.auth),
-      this.store.getStudentPayments(input.auth),
+      wantsDocuments ? this.store.getStudentDocuments(input.auth) : null,
+      wantsOnboarding ? this.store.getStudentOnboarding(input.auth) : null,
+      wantsPayments ? this.store.getStudentPayments(input.auth) : null,
+      wantsAcademics ? this.store.getStudentAcademics(input.auth) : null,
+      wantsFinancials ? this.store.getStudentFinancials(input.auth) : null,
+      wantsMessages ? this.store.getStudentMessages(input.auth) : null,
+      wantsCampus ? this.store.getCampusLife(input.auth) : null,
     ]);
     const studentContext = {
       preferredName: profile.preferredName,
       programName: dashboard.offer.programName,
       termName: dashboard.offer.termName,
-      onboardingStatus: onboarding.status,
-      enrollmentCompletion: dashboard.journey.completionPercent,
+      ...(onboarding ? { onboardingStatus: onboarding.status } : {}),
+      enrollmentChecklistCompletionPercent:
+        dashboard.journey.completionPercent,
       nextAction: dashboard.journey.nextAction,
-      unreadMessages: dashboard.unreadMessageCount,
-      documentStatuses: documents.items.map((document) => ({
-        category: document.category,
-        status: document.status,
-      })),
+      ...(messages ? { unreadMessages: messages.unreadCount } : {}),
+      ...(documents
+        ? {
+            documentStatuses: documents.items.slice(0, 24).map((document) => ({
+              category: document.category,
+              status: document.status,
+            })),
+          }
+        : {}),
       offerId: dashboard.offer.id,
       depositAmountCents: dashboard.offer.depositAmountCents,
-      depositPaid: payments.items.some(
-        (payment) =>
-          payment.type === "enrollment_deposit" &&
-          payment.status === "succeeded",
-      ),
+      depositPaid:
+        payments?.items.some(
+          (payment) =>
+            payment.type === "enrollment_deposit" &&
+            payment.status === "succeeded",
+        ) ?? false,
+      ...(academics
+        ? {
+            academicSummary: {
+              selectedProgram: academics.selectedProgram.name,
+              degree: academics.selectedProgram.degree,
+              catalogVersion: academics.catalogVersion,
+              suggestedExemptions: academics.exemptionRecommendations.map(
+                (recommendation) => recommendation.targetCourseCode,
+              ),
+              plan: academics.plan.slice(0, 16).map((item) => ({
+                code: item.course.code,
+                title: item.course.title,
+                recommendedTerm: item.recommendedTerm,
+                status: item.status,
+                missingPrerequisites: item.missingPrerequisiteCodes,
+              })),
+            },
+          }
+        : {}),
+      ...(financials
+        ? {
+            financialSummary: {
+              remainingBalanceCents: financials.remainingBalanceCents,
+              acceptedAidCents: financials.acceptedAidCents,
+              actionRequiredDocuments: financials.requiredDocuments
+                .filter((document) => document.status === "action_required")
+                .map((document) => document.code),
+              sapStatus: financials.sap.status,
+            },
+          }
+        : {}),
+      ...(campusLife
+        ? {
+            campusLifeSummary: {
+              upcomingEvents: campusLife.events.slice(0, 8).map((event) => ({
+                title: event.title,
+                startsAt: event.startsAt,
+                location: event.location,
+                category: event.category,
+              })),
+              clubs: campusLife.clubs.slice(0, 16).map((club) => ({
+                name: club.name,
+                category: club.category,
+                description: club.description,
+                nextActivity: club.nextActivity,
+              })),
+            },
+          }
+        : {}),
     };
     const response = await this.ai.askEdward({
       ...input.question,
@@ -548,18 +645,20 @@ export class StudentAgentService {
               : "enrollment_support"
             : null,
       }),
-      contextReceipts: collectedEdwardContextReceipts,
+      contextReceipts: [
+        { source: "dashboard" },
+        { source: "profile" },
+        ...(documents ? [{ source: "documents" as const }] : []),
+        ...(onboarding ? [{ source: "onboarding" as const }] : []),
+        ...(payments ? [{ source: "payments" as const }] : []),
+        ...(academics ? [{ source: "academics" as const }] : []),
+        ...(financials ? [{ source: "financials" as const }] : []),
+        ...(messages ? [{ source: "messages" as const }] : []),
+        ...(campusLife ? [{ source: "campus_life" as const }] : []),
+      ],
     };
   }
 }
-
-const collectedEdwardContextReceipts: EdwardContextReceipt[] = [
-  { source: "dashboard" },
-  { source: "profile" },
-  { source: "documents" },
-  { source: "onboarding" },
-  { source: "payments" },
-];
 
 function safeFileName(fileName: string): string {
   const name = fileName

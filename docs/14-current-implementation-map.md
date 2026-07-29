@@ -1,7 +1,7 @@
 # Current implementation map
 
 This document describes what the repository actually implements as of
-2026-07-26. It complements the design documents by distinguishing the complete
+2026-07-29. It complements the design documents by distinguishing the complete
 production-oriented code path from the lighter public preview deployment.
 
 ## 1. System in one picture
@@ -198,11 +198,35 @@ Student message + page context
   -> payment/upload/appointment action still calls a deterministic API command
 ```
 
-Edward can display deposit, document-upload, and appointment widgets. It cannot
-directly waive requirements, approve credit, change permissions, or mark a
-payment successful.
+Edward can display deposit, document-upload, and appointment widgets. Academic
+questions receive a bounded program/plan/prerequisite summary; campus-life
+questions receive bounded event and organization summaries. Dashboard and
+profile identity are always available, while documents, onboarding, payments,
+academics, financials, messages, and campus life are fetched only when the
+message or current page makes that domain relevant. Edward cannot directly
+waive requirements, approve credit, change permissions, or mark a payment
+successful.
 
-### 4.5 CRM change graph and runtime lineage
+### 4.5 Tenant-owned academic and campus content
+
+Academic programs, catalog versions, courses, program requirements, campus
+events, event visual themes and background media, clubs, club calendars,
+meeting schedules, course-resource PDFs, media references, source URLs, and
+social links are tenant-owned
+records. The Aster and Harvard previews therefore return different catalogs and
+directories through the same public contracts. Staff editing is not yet
+implemented, but no page needs a tenant-specific React component when that
+editor is added.
+
+Content provenance is explicit:
+
+- `official_source` identifies information represented from an institutional
+  source;
+- `synthetic_preview` identifies a plausible preview derived from an official
+  activity or policy but not an announced event;
+- `tenant_authored` identifies content entered by university staff.
+
+### 4.6 CRM change graph and runtime lineage
 
 The system uses three complementary forms of evidence:
 
@@ -225,6 +249,7 @@ The student navigation contains:
 - My Classrooms
 - My Campus Life
 - Edward AI
+- My Documents
 - Profile
 
 Supporting routes include documents, messages, appointments, payments, help,

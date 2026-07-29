@@ -2624,8 +2624,14 @@ export class PostgresPortalStore {
         p.degree,
         p.total_credits,
         p.description,
+        p.source_label,
+        p.source_url,
+        p.source_status,
         ccv.id AS catalog_id,
-        ccv.code AS catalog_code
+        ccv.code AS catalog_code,
+        ccv.source_label AS catalog_source_label,
+        ccv.source_url AS catalog_source_url,
+        ccv.source_status AS catalog_source_status
       FROM admission_offer ao
       JOIN program p
         ON p.id = ao.program_id
@@ -2645,8 +2651,14 @@ export class PostgresPortalStore {
       degree: string;
       total_credits: number;
       description: string;
+      source_label: string | null;
+      source_url: string | null;
+      source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
       catalog_id: string;
       catalog_code: string;
+      catalog_source_label: string | null;
+      catalog_source_url: string | null;
+      catalog_source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
     }>(programResult)[0];
     if (!selected) {
       throw new NotFoundError(
@@ -2655,7 +2667,9 @@ export class PostgresPortalStore {
       );
     }
     const availableResult = await this.database.db.execute(sql`
-      SELECT id, code, name, degree, total_credits, description
+      SELECT
+        id, code, name, degree, total_credits, description,
+        source_label, source_url, source_status
       FROM program
       WHERE tenant_id = ${auth.tenantId}
       ORDER BY name
@@ -2667,6 +2681,9 @@ export class PostgresPortalStore {
       degree: string;
       total_credits: number;
       description: string;
+      source_label: string | null;
+      source_url: string | null;
+      source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
     }>(availableResult).map(mapProgram);
     const courseResult = await this.database.db.execute(sql`
       SELECT
@@ -2676,6 +2693,13 @@ export class PostgresPortalStore {
         cc.description,
         cc.credits,
         cc.level,
+        cc.availability_label,
+        cc.instructor_names,
+        cc.meeting_pattern,
+        cc.resources,
+        COALESCE(cc.source_url, ccv.source_url) AS source_url,
+        ccv.source_label,
+        ccv.source_status,
         COALESCE(
           json_agg(
             json_build_object(
@@ -2686,6 +2710,9 @@ export class PostgresPortalStore {
           '[]'::json
         ) AS prerequisites
       FROM catalog_course cc
+      JOIN course_catalog_version ccv
+        ON ccv.id = cc.catalog_version_id
+       AND ccv.tenant_id = cc.tenant_id
       LEFT JOIN course_prerequisite cp
         ON cp.course_id = cc.id
        AND cp.tenant_id = cc.tenant_id
@@ -2695,7 +2722,7 @@ export class PostgresPortalStore {
       WHERE cc.tenant_id = ${auth.tenantId}
         AND cc.catalog_version_id = ${selected.catalog_id}
         AND cc.active = true
-      GROUP BY cc.id
+      GROUP BY cc.id, ccv.id
       ORDER BY cc.code
     `);
     const courses = rows<{
@@ -2705,6 +2732,13 @@ export class PostgresPortalStore {
       description: string;
       credits: string | number;
       level: number;
+      availability_label: string | null;
+      instructor_names: string[];
+      meeting_pattern: string | null;
+      resources: CatalogCourse["resources"];
+      source_label: string | null;
+      source_url: string | null;
+      source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
       prerequisites: CatalogCourse["prerequisites"];
     }>(courseResult).map(mapCatalogCourse);
     const courseById = new Map(courses.map((course) => [course.id, course]));
@@ -2866,6 +2900,13 @@ export class PostgresPortalStore {
         cc.description,
         cc.credits,
         cc.level,
+        cc.availability_label,
+        cc.instructor_names,
+        cc.meeting_pattern,
+        cc.resources,
+        COALESCE(cc.source_url, ccv.source_url) AS source_url,
+        ccv.source_label,
+        ccv.source_status,
         ccv.code AS catalog_code,
         COALESCE(
           json_agg(
@@ -2892,7 +2933,7 @@ export class PostgresPortalStore {
           OR cc.title ILIKE ${pattern}
           OR cc.description ILIKE ${pattern}
         )
-      GROUP BY cc.id, ccv.code
+      GROUP BY cc.id, ccv.id
       ORDER BY cc.code
       LIMIT 60
     `);
@@ -2903,6 +2944,13 @@ export class PostgresPortalStore {
       description: string;
       credits: string | number;
       level: number;
+      availability_label: string | null;
+      instructor_names: string[];
+      meeting_pattern: string | null;
+      resources: CatalogCourse["resources"];
+      source_label: string | null;
+      source_url: string | null;
+      source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
       catalog_code: string;
       prerequisites: CatalogCourse["prerequisites"];
     }>(result);
@@ -3157,11 +3205,13 @@ export class PostgresPortalStore {
   }
 
   async getCampusLife(auth: AuthContext): Promise<CampusLifeFeed> {
-    const [eventResult, clubResult] = await Promise.all([
+    const [eventResult, clubResult, clubEventResult] = await Promise.all([
       this.database.db.execute(sql`
         SELECT
           id, title, description, starts_at, ends_at, location,
-          category, featured, accent
+          category, featured, accent, source_label, source_url,
+          source_status, registration_url, visual_theme, image_url,
+          image_alt, image_attribution, image_source_url
         FROM campus_event
         WHERE tenant_id = ${auth.tenantId}
           AND active = true
@@ -3172,7 +3222,9 @@ export class PostgresPortalStore {
         SELECT
           club.id, club.name, club.category, club.description,
           club.contact_name, club.contact_role, club.contact_channel,
-          club.latest_update, club.next_activity,
+          club.latest_update, club.next_activity, club.source_label,
+          club.source_url, club.source_status, club.social_links,
+          club.long_description, club.meeting_schedule, club.membership_open,
           COALESCE(media.public_path, '/media/clubs/code-collective.jpg')
             AS image_url,
           COALESCE(media.alt_text, 'Students collaborating in a campus club')
@@ -3190,7 +3242,30 @@ export class PostgresPortalStore {
         ORDER BY club.name
         LIMIT 100
       `),
+      this.database.db.execute(sql`
+        SELECT
+          id, club_id, title, description, starts_at, ends_at, location,
+          category, registration_url
+        FROM student_club_event
+        WHERE tenant_id = ${auth.tenantId}
+          AND active = true
+        ORDER BY starts_at, id
+        LIMIT 500
+      `),
     ]);
+    const clubEvents = rows<{
+      id: string;
+      club_id: string;
+      title: string;
+      description: string;
+      starts_at: Date;
+      ends_at: Date;
+      location: string;
+      category: NonNullable<
+        CampusLifeFeed["clubs"][number]["events"]
+      >[number]["category"];
+      registration_url: string | null;
+    }>(clubEventResult);
     return {
       events: rows<{
         id: string;
@@ -3202,6 +3277,15 @@ export class PostgresPortalStore {
         category: CampusLifeFeed["events"][number]["category"];
         featured: boolean;
         accent: CampusLifeFeed["events"][number]["accent"];
+        visual_theme: CampusLifeFeed["events"][number]["visualTheme"] | null;
+        image_url: string | null;
+        image_alt: string | null;
+        image_attribution: string | null;
+        image_source_url: string | null;
+        source_label: string | null;
+        source_url: string | null;
+        source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
+        registration_url: string | null;
       }>(eventResult).map((event) => ({
         id: event.id,
         title: event.title,
@@ -3212,6 +3296,15 @@ export class PostgresPortalStore {
         category: event.category,
         featured: event.featured,
         accent: event.accent,
+        ...(event.visual_theme
+          ? { visualTheme: event.visual_theme }
+          : {}),
+        imageUrl: event.image_url,
+        imageAlt: event.image_alt,
+        imageAttribution: event.image_attribution,
+        imageSourceUrl: event.image_source_url,
+        source: mapContentSource(event),
+        registrationUrl: event.registration_url,
       })),
       clubs: rows<{
         id: string;
@@ -3227,6 +3320,13 @@ export class PostgresPortalStore {
         image_alt: string;
         image_attribution: string;
         image_source_url: string;
+        source_label: string | null;
+        source_url: string | null;
+        source_status: "official_source" | "synthetic_preview" | "tenant_authored" | null;
+        social_links: CampusLifeFeed["clubs"][number]["socialLinks"];
+        long_description: string | null;
+        meeting_schedule: string | null;
+        membership_open: boolean;
       }>(clubResult).map((club) => ({
         id: club.id,
         name: club.name,
@@ -3241,6 +3341,23 @@ export class PostgresPortalStore {
         imageAlt: club.image_alt,
         imageAttribution: club.image_attribution,
         imageSourceUrl: club.image_source_url,
+        source: mapContentSource(club),
+        socialLinks: Array.isArray(club.social_links) ? club.social_links : [],
+        longDescription: club.long_description,
+        meetingSchedule: club.meeting_schedule,
+        membershipOpen: club.membership_open,
+        events: clubEvents
+          .filter((event) => event.club_id === club.id)
+          .map((event) => ({
+            id: event.id,
+            title: event.title,
+            description: event.description,
+            startsAt: isoTimestamp(event.starts_at),
+            endsAt: isoTimestamp(event.ends_at),
+            location: event.location,
+            category: event.category,
+            registrationUrl: event.registration_url,
+          })),
       })),
       generatedAt: new Date().toISOString(),
     };
@@ -3870,6 +3987,9 @@ function mapProgram(row: {
   degree: string;
   total_credits: number;
   description: string;
+  source_label?: string | null;
+  source_url?: string | null;
+  source_status?: "official_source" | "synthetic_preview" | "tenant_authored" | null;
 }): AcademicProgram {
   return {
     id: row.id,
@@ -3878,6 +3998,7 @@ function mapProgram(row: {
     degree: row.degree,
     totalCredits: row.total_credits,
     description: row.description,
+    source: mapContentSource(row),
   };
 }
 
@@ -3888,6 +4009,13 @@ function mapCatalogCourse(row: {
   description: string;
   credits: string | number;
   level: number;
+  availability_label?: string | null;
+  instructor_names?: string[] | null;
+  meeting_pattern?: string | null;
+  resources?: CatalogCourse["resources"] | null;
+  source_label?: string | null;
+  source_url?: string | null;
+  source_status?: "official_source" | "synthetic_preview" | "tenant_authored" | null;
   prerequisites: CatalogCourse["prerequisites"];
 }): CatalogCourse {
   return {
@@ -3898,5 +4026,27 @@ function mapCatalogCourse(row: {
     credits: Number(row.credits),
     level: row.level,
     prerequisites: Array.isArray(row.prerequisites) ? row.prerequisites : [],
+    availabilityLabel: row.availability_label ?? null,
+    instructorNames: Array.isArray(row.instructor_names)
+      ? row.instructor_names
+      : [],
+    meetingPattern: row.meeting_pattern ?? null,
+    resources: Array.isArray(row.resources) ? row.resources : [],
+    source: mapContentSource(row),
+  };
+}
+
+function mapContentSource(row: {
+  source_label?: string | null;
+  source_url?: string | null;
+  source_status?: "official_source" | "synthetic_preview" | "tenant_authored" | null;
+}) {
+  if (!row.source_label || !row.source_url || !row.source_status) {
+    return null;
+  }
+  return {
+    label: row.source_label,
+    url: row.source_url,
+    dataStatus: row.source_status,
   };
 }

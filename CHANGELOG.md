@@ -9,6 +9,24 @@ compatibility.
 
 ### Added
 
+- Added tenant-owned course-resource libraries and student-club event calendars,
+  including licensed open PDF textbooks and dedicated tenant-prefixed club pages
+- Added club membership, meeting-schedule, contact, social, and upcoming-event
+  presentation backed by reusable database fields and event records
+- Added tenant-owned academic-program, course-catalog, campus-event, and
+  student-organization source metadata, with Harvard CS and campus-life preview
+  content seeded independently from Aster
+- Added official-source links, course availability/instructor/meeting details,
+  campus source labels, organization social links, and explicit synthetic-event
+  labels to the student UI
+- Added Edward academic and campus-life context domains, scoped retrieval
+  receipts, and direct navigation actions for My Classrooms and My Campus Life
+- Added tenant-managed campus-event visual themes, accessible image metadata,
+  and three optimized original event backgrounds for the featured carousel
+- Added deterministic portal regression journeys for event theming, responsive
+  overflow, tenant isolation, club calendars, course PDFs, enrollment actions,
+  document layout, secure sign-out, JPEG limits, Edward context minimization,
+  and bounded conversation history
 - Added path-based Aster and Harvard preview tenants with tenant-prefixed
   routing, tenant-scoped credential/state stores, tenant-aware branding, and a
   documented hostname-based Kubernetes production target
@@ -21,6 +39,23 @@ compatibility.
 
 ### Changed
 
+- Made the campus-event carousel more vibrant and converted organization cards
+  into image-backed, event-specific themes; organization cards now open
+  navigable club experiences with full event calendars
+- Fixed the web command wrapper so forwarded `--host` and `--port` arguments
+  reach vinext, preventing isolated test/dev servers from silently colliding
+  with the portal already running on port 3000
+- Hardened the browser-test launcher so completed-student fixtures apply to
+  every tenant and isolated Windows process trees are cleaned up explicitly
+- Restyled the student document center as a submitted-and-signed document
+  library, added padded processing guidance, and improved the profile sign-out
+  security card
+- Rebuilt My Classrooms around tenant-managed recommendations, program paths,
+  transcript matches, searchable catalog cards, and source-aware course dialogs
+- Polished My Campus Life with readable responsive club cards, fixed image
+  bounds, overview metrics, empty search states, and expandable sourced details
+- Edward now selects only the record domains relevant to the question instead
+  of loading every student projection into every model call
 - Onboarding now gates every portal route until final completion; admission
   offer acceptance, identity/contact details, housing path, emergency contact,
   and document signing cannot be skipped

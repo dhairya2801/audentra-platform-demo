@@ -887,8 +887,6 @@ describe("functional student portal API", () => {
         { source: "dashboard" },
         { source: "profile" },
         { source: "documents" },
-        { source: "onboarding" },
-        { source: "payments" },
       ],
     });
   });

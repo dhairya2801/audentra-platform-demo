@@ -77,7 +77,7 @@ describe("OpenRouterGateway", () => {
         programName: "Computer Science",
         termName: "Fall 2026",
         onboardingStatus: "completed",
-        enrollmentCompletion: 66,
+        enrollmentChecklistCompletionPercent: 66,
         nextAction: { title: "Upload ID" },
         unreadMessages: 1,
         documentStatuses: [],

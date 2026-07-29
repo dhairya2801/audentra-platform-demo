@@ -87,7 +87,8 @@ export async function createDemoApi(options = {}) {
     );
   await store.initialize();
   const tenantStores =
-    options.tenantStores ?? new TenantStoreRegistry(store, clock);
+    options.tenantStores ??
+    new TenantStoreRegistry(store, clock, options.tenantSeedStateOptions);
   await tenantStores.initialize();
   for (const [, tenantStore] of tenantStores.entries()) {
     await reconcileCompletedTranscripts(tenantStore, clock);
@@ -894,7 +895,11 @@ async function route({
     const body = await readJson(request);
     const pageContext = validateEdwardInput(body);
     const state = store.snapshot();
-    const studentContext = buildAssistantContext(state);
+    const studentContext = buildAssistantContext(
+      state,
+      body.message,
+      pageContext,
+    );
     const guarded = guardedEdwardResponse(body.message, studentContext);
     if (guarded) return { body: guarded };
     const response = await ai.askEdward({
@@ -1425,34 +1430,38 @@ function validateEdwardInput(input) {
   return normalizeEdwardPageContext(body.pageContext);
 }
 
-function buildAssistantContext(state) {
-  const academics = buildStudentAcademics(state);
-  const financials = buildStudentFinancials(state);
-  return {
+function buildAssistantContext(state, message = "", pageContext = "/dashboard") {
+  const normalized = `${message} ${pageContext}`.toLowerCase();
+  const wantsDocuments =
+    /document|upload|transcript|fafsa|ferpa|verification/.test(normalized);
+  const wantsOnboarding =
+    /onboarding|offer|housing|roommate|emergency contact|sign/.test(normalized);
+  const wantsPayments =
+    /payment|deposit|pay|balance|billing|financial|aid|loan/.test(normalized);
+  const wantsAcademics =
+    /academic|class|classroom|course|catalog|major|program|prerequisite|exempt|credit/.test(
+      normalized,
+    );
+  const wantsFinancials =
+    /financial|aid|fafsa|loan|award|balance|billing|payment plan|sap/.test(
+      normalized,
+    );
+  const wantsMessages = /message|inbox|notification|unread/.test(normalized);
+  const wantsCampus =
+    /campus|club|event|activity|activities|organization|community|social life/.test(
+      normalized,
+    );
+  const dashboard = buildDashboard(state);
+  const contextReceipts = [{ source: "dashboard" }, { source: "profile" }];
+  const context = {
     universityName: state.tenant?.name ?? "the university",
     universityShortName: state.tenant?.shortName ?? "the university",
-    contextReceipts: [
-      { source: "dashboard" },
-      { source: "profile" },
-      { source: "documents" },
-      { source: "onboarding" },
-      { source: "payments" },
-      { source: "academics" },
-      { source: "financials" },
-      { source: "messages" },
-    ],
+    contextReceipts,
     preferredName: state.profile.preferredName,
     programName: state.offer.programName,
     termName: state.offer.termName,
-    onboardingStatus: state.onboarding.status,
-    enrollmentCompletion: buildDashboard(state).journey.completionPercent,
-    nextAction: buildDashboard(state).journey.nextAction,
-    unreadMessages: state.messages.filter((message) => message.readAt === null)
-      .length,
-    documentStatuses: state.documents.map((document) => ({
-      category: document.category,
-      status: document.status,
-    })),
+    enrollmentChecklistCompletionPercent: dashboard.journey.completionPercent,
+    nextAction: dashboard.journey.nextAction,
     offerId: state.offer.id,
     depositAmountCents: state.offer.depositAmountCents,
     depositPaid: state.payments.some(
@@ -1460,24 +1469,79 @@ function buildAssistantContext(state) {
         payment.type === "enrollment_deposit" &&
         payment.status === "succeeded",
     ),
-    academicSummary: {
+  };
+  if (wantsDocuments) {
+    contextReceipts.push({ source: "documents" });
+    context.documentStatuses = state.documents.slice(0, 24).map((document) => ({
+      category: document.category,
+      status: document.status,
+    }));
+  }
+  if (wantsOnboarding) {
+    contextReceipts.push({ source: "onboarding" });
+    context.onboardingStatus = state.onboarding.status;
+    context.housingPreference =
+      state.onboarding.data?.housingPreference ?? null;
+  }
+  if (wantsPayments) {
+    contextReceipts.push({ source: "payments" });
+  }
+  if (wantsMessages) {
+    contextReceipts.push({ source: "messages" });
+    context.unreadMessages = state.messages.filter(
+      (studentMessage) => studentMessage.readAt === null,
+    ).length;
+  }
+  if (wantsAcademics) {
+    const academics = buildStudentAcademics(state);
+    contextReceipts.push({ source: "academics" });
+    context.academicSummary = {
       selectedProgram: academics.selectedProgram.name,
+      degree: academics.selectedProgram.degree,
+      catalogVersion: academics.catalogVersion,
       suggestedExemptions: academics.exemptionRecommendations.map(
         (recommendation) => recommendation.targetCourseCode,
       ),
-      eligibleCourses: academics.plan
-        .filter((item) => item.status === "eligible")
-        .map((item) => item.course.code),
-    },
-    financialSummary: {
+      plan: academics.plan.slice(0, 16).map((item) => ({
+        code: item.course.code,
+        title: item.course.title,
+        recommendedTerm: item.recommendedTerm,
+        status: item.status,
+        missingPrerequisites: item.missingPrerequisiteCodes,
+      })),
+    };
+  }
+  if (wantsFinancials) {
+    const financials = buildStudentFinancials(state);
+    contextReceipts.push({ source: "financials" });
+    context.financialSummary = {
       remainingBalanceCents: financials.remainingBalanceCents,
       acceptedAidCents: financials.acceptedAidCents,
       actionRequiredDocuments: financials.requiredDocuments
         .filter((document) => document.status === "action_required")
         .map((document) => document.code),
       sapStatus: financials.sap.status,
-    },
-  };
+    };
+  }
+  if (wantsCampus) {
+    const campusLife = buildCampusLife(state);
+    contextReceipts.push({ source: "campus_life" });
+    context.campusLifeSummary = {
+      upcomingEvents: campusLife.events.slice(0, 8).map((event) => ({
+        title: event.title,
+        startsAt: event.startsAt,
+        location: event.location,
+        category: event.category,
+      })),
+      clubs: campusLife.clubs.slice(0, 16).map((club) => ({
+        name: club.name,
+        category: club.category,
+        description: club.description,
+        nextActivity: club.nextActivity,
+      })),
+    };
+  }
+  return context;
 }
 
 function safeExtension(fileName, mimeType) {
