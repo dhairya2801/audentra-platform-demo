@@ -1413,7 +1413,17 @@ function deterministicSignedDocumentId(value) {
 
 function resolveRequestTenant(request) {
   const rawSlug = request.headers["x-tenant-slug"];
-  const slug = Array.isArray(rawSlug) ? rawSlug[0] : rawSlug;
+  const headerSlug = Array.isArray(rawSlug) ? rawSlug[0] : rawSlug;
+  const url = new URL(request.url ?? "/", "http://localhost");
+  const isDocumentMediaRequest =
+    /^\/v1\/student\/documents\/[0-9a-f-]+\/(?:content|profile-photo)$/i.test(
+      url.pathname,
+    );
+  const querySlug =
+    headerSlug === undefined && isDocumentMediaRequest
+      ? url.searchParams.get("tenant") ?? undefined
+      : undefined;
+  const slug = headerSlug ?? querySlug;
   if (slug === undefined || slug === "") return demoTenants.aster;
   const tenant = tenantConfigForSlug(slug);
   if (!tenant) {

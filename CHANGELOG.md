@@ -47,6 +47,10 @@ compatibility.
 
 ### Changed
 
+- Signed-PDF and document-photo links now carry validated tenant context during
+  browser navigation, preventing Harvard credential sessions from being
+  evaluated against the default Aster tenant while preserving cross-tenant
+  denial
 - Transcript PDFs now render every supported page as its own high-resolution
   2,048px, quality-88 JPEG and send exactly one page image per parallel vision
   request for both Groq and OpenRouter

@@ -315,6 +315,42 @@ describe("contract-compatible development preview API", () => {
     assert.equal(secondProfile.payload.email, "second.student@example.com");
     assert.notEqual(firstProfile.payload.studentId, secondProfile.payload.studentId);
 
+    const harvardSignup = await api(baseUrl, "/v1/auth/sign-up", {
+      authenticated: false,
+      method: "POST",
+      headers: { "x-tenant-slug": "harvard" },
+      body: {
+        email: "harvard.student@example.com",
+        phone: "+15551230003",
+        password: "harvard-student-123",
+      },
+    });
+    const harvardCookie = harvardSignup.response.headers
+      .get("set-cookie")
+      ?.split(";", 1)[0];
+    const missingHarvardDocument = await api(
+      baseUrl,
+      "/v1/student/documents/00000000-0000-7000-8000-000000009999/content?tenant=harvard",
+      {
+        authenticated: false,
+        headers: { cookie: harvardCookie },
+      },
+    );
+    const crossTenantDocument = await api(
+      baseUrl,
+      "/v1/student/documents/00000000-0000-7000-8000-000000009999/content?tenant=aster",
+      {
+        authenticated: false,
+        headers: { cookie: harvardCookie },
+      },
+    );
+    assert.equal(missingHarvardDocument.response.status, 404);
+    assert.equal(
+      missingHarvardDocument.payload.error.code,
+      "STUDENT_DOCUMENT_CONTENT_NOT_FOUND",
+    );
+    assert.equal(crossTenantDocument.response.status, 401);
+
     const signedOut = await api(baseUrl, "/v1/auth/sign-out", {
       authenticated: false,
       method: "POST",
@@ -659,7 +695,7 @@ describe("contract-compatible development preview API", () => {
       onboardingVersion: 10,
     });
     const signedPdf = await fetch(
-      `${baseUrl}${signedDocuments[0].contentUrl}`,
+      `${baseUrl}${signedDocuments[0].contentUrl}?tenant=aster`,
       {
         headers: { cookie: "vv_demo_session=demo-session-v2" },
       },
