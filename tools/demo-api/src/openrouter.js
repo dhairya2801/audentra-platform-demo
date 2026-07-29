@@ -388,68 +388,68 @@ export class OpenRouterGateway {
     requestId,
     attempt,
   }) {
-    const extractions = [];
-    for (const [index, segment] of segments.entries()) {
-      const segmentFileName =
-        `${fileName} - pages ${segment.renderedPageNumbers.join(", ") || index + 1}`;
-      const request =
-        provider === "groq"
-          ? buildGroqDocumentRequest({
-              model: this.groqModel,
-              maxTokens: this.groqDocumentMaxTokens,
-              reasoningEffort: this.groqReasoningEffort,
-              prepared: segment,
-              fileName: segmentFileName,
-              expectedDocumentType: "transcript",
-              systemPrompt: buildTranscriptSegmentSystemPrompt(),
-            })
-          : buildOpenRouterDocumentRequest({
-              model: this.model,
-              maxTokens: this.documentMaxTokens,
-              reasoningTokens: this.documentReasoningTokens,
-              prepared: segment,
-              fileName: segmentFileName,
-              expectedDocumentType: "transcript",
-            });
-      const payload = await this.#complete(
-        request,
-        {
-          operation: "transcript_segment_extraction",
-          fileName,
-          mimeType,
-          expectedDocumentType: expectedDocumentType ?? "transcript",
-          documentId: documentId ?? null,
-          requestId: requestId ?? null,
-          attempt: (attempt ?? 1) * 100 + index + 1,
-          timeoutMs:
-            provider === "groq"
-              ? this.groqDocumentTimeoutMs
-              : this.documentTimeoutMs,
-        },
-        transport,
-      );
-      const extraction = normalizeExtraction(
-        parseExtractionJson(readMessageContent(payload)),
-        {
-          model:
-            payload.model ??
-            (provider === "groq" ? this.groqModel : this.model),
-          provider,
-          processedAt: new Date().toISOString(),
-        },
-        "transcript",
-      );
-      if (!hasUsefulStructuredExtraction(extraction, "transcript")) {
-        const error = new Error(
-          `${transport.label} returned an incomplete transcript segment extraction`,
+    const extractions = await Promise.all(
+      segments.map(async (segment, index) => {
+        const segmentFileName =
+          `${fileName} - pages ${segment.renderedPageNumbers.join(", ") || index + 1}`;
+        const request =
+          provider === "groq"
+            ? buildGroqDocumentRequest({
+                model: this.groqModel,
+                maxTokens: this.groqDocumentMaxTokens,
+                reasoningEffort: this.groqReasoningEffort,
+                prepared: segment,
+                fileName: segmentFileName,
+                expectedDocumentType: "transcript",
+                systemPrompt: buildTranscriptSegmentSystemPrompt(),
+              })
+            : buildOpenRouterDocumentRequest({
+                model: this.model,
+                maxTokens: this.documentMaxTokens,
+                reasoningTokens: this.documentReasoningTokens,
+                prepared: segment,
+                fileName: segmentFileName,
+                expectedDocumentType: "transcript",
+              });
+        const payload = await this.#complete(
+          request,
+          {
+            operation: "transcript_segment_extraction",
+            fileName,
+            mimeType,
+            expectedDocumentType: expectedDocumentType ?? "transcript",
+            documentId: documentId ?? null,
+            requestId: requestId ?? null,
+            attempt: (attempt ?? 1) * 100 + index + 1,
+            timeoutMs:
+              provider === "groq"
+                ? this.groqDocumentTimeoutMs
+                : this.documentTimeoutMs,
+          },
+          transport,
         );
-        error.code = "incomplete_extraction";
-        throw error;
-      }
-      extractions.push(extraction);
-    }
+        return normalizeExtraction(
+          parseExtractionJson(readMessageContent(payload)),
+          {
+            model:
+              payload.model ??
+              (provider === "groq" ? this.groqModel : this.model),
+            provider,
+            processedAt: new Date().toISOString(),
+          },
+          "transcript",
+        );
+      }),
+    );
 
     const merged = mergeTranscriptExtractions(extractions);
+    if (!hasUsefulStructuredExtraction(merged, "transcript")) {
+      const error = new Error(
+        `${transport.label} returned an incomplete transcript extraction`,
+      );
+      error.code = "incomplete_extraction";
+      throw error;
+    }
     const withPreprocessingWarnings = addPreprocessingWarnings(
       merged,
       prepared,
@@ -1105,7 +1105,12 @@ function mergeTranscriptExtractions(extractions) {
     fields: [...fields.values()],
     courses: [...courses.values()],
     visualRegions: [],
-    warnings: [...warnings].slice(0, 12),
+    warnings: [...warnings]
+      .filter(
+        (warning) =>
+          courses.size === 0 || !/\bno course rows?\b/i.test(warning),
+      )
+      .slice(0, 12),
     model: first.model,
     provider: first.provider,
     processedAt: new Date().toISOString(),

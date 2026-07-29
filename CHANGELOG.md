@@ -39,6 +39,12 @@ compatibility.
 
 ### Changed
 
+- Transcript page segments now parse concurrently, header-only pages no longer
+  abort an otherwise valid transcript, and merged results suppress misleading
+  segment-local “no courses” warnings
+- Transcript uploads remain locked while extraction is active, recover their
+  processing state after navigation or retry, and render progress punctuation
+  without mojibake
 - Made the campus-event carousel more vibrant and converted organization cards
   into image-backed, event-specific themes; organization cards now open
   navigable club experiences with full event calendars

@@ -288,6 +288,8 @@ describe("OpenRouterGateway", () => {
     const requests = [];
     const preprocessingOptions = [];
     const recorded = [];
+    let activeRequests = 0;
+    let maximumConcurrentRequests = 0;
     const gateway = new OpenRouterGateway({
       apiKey: "openrouter-key",
       groqApiKey: "groq-key",
@@ -298,6 +300,13 @@ describe("OpenRouterGateway", () => {
         const body = JSON.parse(init.body);
         const segmentNumber = requests.length + 1;
         requests.push({ url, init, body });
+        activeRequests += 1;
+        maximumConcurrentRequests = Math.max(
+          maximumConcurrentRequests,
+          activeRequests,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeRequests -= 1;
         return jsonResponse({
           id: `groq-generation-${segmentNumber}`,
           model: "qwen/qwen3.6-27b",
@@ -313,22 +322,28 @@ describe("OpenRouterGateway", () => {
                   issueDate: null,
                   academicTerm: "Fall 2025",
                   fields: [],
-                  courses: [
-                    {
-                      sourceCode:
-                        segmentNumber === 1 ? "MATH 201" : "CS 220",
-                      title:
-                        segmentNumber === 1
-                          ? "Calculus II"
-                          : "Data Structures",
-                      credits: 4,
-                      grade: "A",
-                      score: null,
-                      term: "Fall 2025",
-                      confidence: 0.97,
-                    },
-                  ],
-                  warnings: [],
+                  courses:
+                    segmentNumber === 1
+                      ? []
+                      : [
+                          {
+                            sourceCode:
+                              segmentNumber === 2 ? "MATH 201" : "CS 220",
+                            title:
+                              segmentNumber === 2
+                                ? "Calculus II"
+                                : "Data Structures",
+                            credits: 4,
+                            grade: "A",
+                            score: null,
+                            term: "Fall 2025",
+                            confidence: 0.97,
+                          },
+                        ],
+                  warnings:
+                    segmentNumber === 1
+                      ? ["No course rows found on this header page."]
+                      : [],
                 }),
               },
             },
@@ -369,6 +384,10 @@ describe("OpenRouterGateway", () => {
 
     assert.equal(result.provider, "groq");
     assert.equal(result.courses.length, 2);
+    assert.equal(
+      result.warnings.some((warning) => /no course rows/i.test(warning)),
+      false,
+    );
     assert.match(result.warnings[0], /4 bounded segments/);
     assert.deepEqual(preprocessingOptions, [
       {
@@ -378,6 +397,7 @@ describe("OpenRouterGateway", () => {
       },
     ]);
     assert.equal(requests.length, 4);
+    assert.equal(maximumConcurrentRequests, 4);
     assert.equal(requests[0].url, "https://api.groq.com/openai/v1/chat/completions");
     assert.equal(requests[0].init.headers.Authorization, "Bearer groq-key");
     assert.equal(requests[0].init.headers["HTTP-Referer"], undefined);

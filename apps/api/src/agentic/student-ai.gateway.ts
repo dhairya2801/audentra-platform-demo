@@ -577,83 +577,82 @@ export class OpenRouterStudentAiGateway implements StudentAiGateway {
     transport: AiProviderTransport;
     provider: DocumentExtractionProvider;
   }): Promise<StudentDocumentExtraction> {
-    const segmentExtractions: StudentDocumentExtraction[] = [];
-    for (const [index, segment] of input.segments.entries()) {
-      const runtime = await this.resolvePromptRuntime({
-        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
-        operation: "transcript_segment_extraction",
-        fallback: {
-          systemPrompt:
-            "Extract every transcript course row in this page segment. Preserve terms, codes, titles, credits, grades, and scores. Do not stop after a fixed number of rows.",
-          model:
-            input.provider === "groq" ? this.groqModel : this.model,
-          maxOutputTokens:
-            input.provider === "groq"
-              ? this.groqDocumentMaxTokens
-              : this.documentMaxTokens,
-          temperature: 0,
-          outputSchema: documentSchema as unknown as Record<string, unknown>,
-        },
-      });
-      const body =
-        input.provider === "groq"
-          ? buildGroqDocumentRequest({
-              model: runtime.model,
-              maxTokens: runtime.maxOutputTokens,
-              reasoningEffort: this.groqReasoningEffort,
-              prepared: segment,
-              fileName: `${input.fileName} - segment ${index + 1} of ${input.segments.length}`,
-              expectedDocumentType: "transcript",
-              systemPrompt: composeTranscriptSegmentPrompt(
-                runtime.systemPrompt,
-              ),
-              outputSchema: runtime.outputSchema ?? documentSchema,
-              includeOutputSchemaInPrompt: false,
-            })
-          : buildOpenRouterDocumentRequest({
-              model: runtime.model,
-              maxTokens: runtime.maxOutputTokens,
-              reasoningTokens: this.documentReasoningTokens,
-              prepared: segment,
-              fileName: `${input.fileName} - segment ${index + 1} of ${input.segments.length}`,
-              expectedDocumentType: "transcript",
-              systemPrompt: composeDocumentPrompt(
-                runtime.systemPrompt,
-                false,
-              ),
-            });
-      const payload = await this.complete(
-        body,
-        {
-          operation: "transcript_segment_extraction",
+    const segmentExtractions = await Promise.all(
+      input.segments.map(async (segment, index) => {
+        const runtime = await this.resolvePromptRuntime({
           ...(input.tenantId ? { tenantId: input.tenantId } : {}),
-          ...(input.studentId ? { studentId: input.studentId } : {}),
-          ...(input.documentId ? { documentId: input.documentId } : {}),
-          ...(input.requestId ? { requestId: input.requestId } : {}),
-          attempt: (input.attempt ?? 1) * 100 + index + 1,
-          timeoutMs:
-            input.provider === "groq"
-              ? this.groqDocumentTimeoutMs
-              : this.documentTimeoutMs,
-          runtime,
-          contextSha256: promptContextSha256({
-            fileName: input.fileName,
-            segment: index + 1,
-            pageNumbers: segment.renderedPageNumbers,
-            extractedText: segment.extractedText,
-          }),
-        },
-        input.transport,
-      );
-      segmentExtractions.push(
-        normalizeExtraction(
+          operation: "transcript_segment_extraction",
+          fallback: {
+            systemPrompt:
+              "Extract every transcript course row in this page segment. Preserve terms, codes, titles, credits, grades, and scores. Do not stop after a fixed number of rows.",
+            model:
+              input.provider === "groq" ? this.groqModel : this.model,
+            maxOutputTokens:
+              input.provider === "groq"
+                ? this.groqDocumentMaxTokens
+                : this.documentMaxTokens,
+            temperature: 0,
+            outputSchema: documentSchema as unknown as Record<string, unknown>,
+          },
+        });
+        const body =
+          input.provider === "groq"
+            ? buildGroqDocumentRequest({
+                model: runtime.model,
+                maxTokens: runtime.maxOutputTokens,
+                reasoningEffort: this.groqReasoningEffort,
+                prepared: segment,
+                fileName: `${input.fileName} - segment ${index + 1} of ${input.segments.length}`,
+                expectedDocumentType: "transcript",
+                systemPrompt: composeTranscriptSegmentPrompt(
+                  runtime.systemPrompt,
+                ),
+                outputSchema: runtime.outputSchema ?? documentSchema,
+                includeOutputSchemaInPrompt: false,
+              })
+            : buildOpenRouterDocumentRequest({
+                model: runtime.model,
+                maxTokens: runtime.maxOutputTokens,
+                reasoningTokens: this.documentReasoningTokens,
+                prepared: segment,
+                fileName: `${input.fileName} - segment ${index + 1} of ${input.segments.length}`,
+                expectedDocumentType: "transcript",
+                systemPrompt: composeDocumentPrompt(
+                  runtime.systemPrompt,
+                  false,
+                ),
+              });
+        const payload = await this.complete(
+          body,
+          {
+            operation: "transcript_segment_extraction",
+            ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+            ...(input.studentId ? { studentId: input.studentId } : {}),
+            ...(input.documentId ? { documentId: input.documentId } : {}),
+            ...(input.requestId ? { requestId: input.requestId } : {}),
+            attempt: (input.attempt ?? 1) * 100 + index + 1,
+            timeoutMs:
+              input.provider === "groq"
+                ? this.groqDocumentTimeoutMs
+                : this.documentTimeoutMs,
+            runtime,
+            contextSha256: promptContextSha256({
+              fileName: input.fileName,
+              segment: index + 1,
+              pageNumbers: segment.renderedPageNumbers,
+              extractedText: segment.extractedText,
+            }),
+          },
+          input.transport,
+        );
+        return normalizeExtraction(
           parseExtractionJson(readMessageContent(payload)),
           payload.model ?? runtime.model,
           "transcript",
           input.provider,
-        ),
-      );
-    }
+        );
+      }),
+    );
 
     const deterministic = mergeTranscriptExtractions(segmentExtractions);
     if (input.provider === "groq") {
@@ -1424,7 +1423,12 @@ function mergeTranscriptExtractions(
     fields: [...fields.values()],
     courses: [...courses.values()],
     visualRegions: [],
-    warnings: [...warnings].slice(0, 12),
+    warnings: [...warnings]
+      .filter(
+        (warning) =>
+          courses.size === 0 || !/\bno course rows?\b/i.test(warning),
+      )
+      .slice(0, 12),
     model: first.model,
     provider: first.provider,
     processedAt: new Date().toISOString(),

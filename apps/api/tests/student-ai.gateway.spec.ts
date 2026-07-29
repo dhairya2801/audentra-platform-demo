@@ -740,6 +740,8 @@ describe("OpenRouterStudentAiGateway", () => {
 
   it("extracts long transcripts by page segment and conserves every distinct course", async () => {
     const requests: Array<Record<string, unknown>> = [];
+    let activeRequests = 0;
+    let maximumConcurrentRequests = 0;
     const course = (
       sourceCode: string,
       title: string,
@@ -770,6 +772,13 @@ describe("OpenRouterStudentAiGateway", () => {
           JSON.parse(String(init?.body)) as Record<string, unknown>,
         );
         const requestIndex = requests.length - 1;
+        activeRequests += 1;
+        maximumConcurrentRequests = Math.max(
+          maximumConcurrentRequests,
+          activeRequests,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeRequests -= 1;
         const courses =
           requestIndex < segmentCourses.length
             ? segmentCourses[requestIndex]
@@ -820,6 +829,7 @@ describe("OpenRouterStudentAiGateway", () => {
     });
 
     expect(requests).toHaveLength(3);
+    expect(maximumConcurrentRequests).toBe(2);
     expect(extraction.courses).toHaveLength(4);
     expect(extraction.courses?.map((item) => item.sourceCode)).toEqual([
       "MATH 101",
