@@ -684,6 +684,59 @@ export class InMemoryPlatformStore implements PlatformStore {
     };
   }
 
+  async saveStudentSignedDocument(input: {
+    auth: AuthContext;
+    document: {
+      id: string;
+      templateCode: string;
+      onboardingVersion: number;
+      title: string;
+      fileName: string;
+      sizeBytes: number;
+      storageKey: string;
+      sha256: string;
+      signerName: string;
+      signatureMethod: "typed" | "drawn";
+      signedAt: string;
+    };
+    requestId: string;
+  }): Promise<StudentDocument> {
+    this.authorize(input.auth);
+    const existing = this.documents.find(
+      (document) =>
+        document.signature?.templateCode === input.document.templateCode &&
+        document.signature.onboardingVersion ===
+          input.document.onboardingVersion,
+    );
+    if (existing) return structuredClone(existing);
+    const document: StudentDocument = {
+      id: input.document.id,
+      fileName: input.document.fileName,
+      mimeType: "application/pdf",
+      sizeBytes: input.document.sizeBytes,
+      category: "other",
+      processingMode: "generated",
+      status: "accepted",
+      contentUrl: `/v1/student/documents/${input.document.id}/content`,
+      sha256: input.document.sha256,
+      signature: {
+        templateCode: input.document.templateCode,
+        title: input.document.title,
+        signerName: input.document.signerName,
+        method: input.document.signatureMethod,
+        signedAt: input.document.signedAt,
+        onboardingVersion: input.document.onboardingVersion,
+      },
+      createdAt: input.document.signedAt,
+    };
+    this.documents.unshift(document);
+    this.documentStorageKeys.set(
+      input.document.id,
+      input.document.storageKey,
+    );
+    return structuredClone(document);
+  }
+
   async createStudentDocument(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput;

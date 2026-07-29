@@ -800,6 +800,53 @@ export const documentRecord = pgTable(
   ],
 );
 
+export const studentSignedDocument = pgTable(
+  "student_signed_document",
+  {
+    id: uuid("id").primaryKey(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenant.id),
+    studentId: uuid("student_id")
+      .notNull()
+      .references(() => student.id),
+    templateCode: varchar("template_code", { length: 100 }).notNull(),
+    onboardingVersion: integer("onboarding_version").notNull(),
+    title: varchar("title", { length: 180 }).notNull(),
+    fileName: varchar("file_name", { length: 255 }).notNull(),
+    mimeType: varchar("mime_type", { length: 80 })
+      .notNull()
+      .default("application/pdf"),
+    sizeBytes: integer("size_bytes").notNull(),
+    storageProvider: varchar("storage_provider", { length: 40 }).notNull(),
+    storageKey: varchar("storage_key", { length: 512 }).notNull(),
+    sha256: varchar("sha256", { length: 64 }).notNull(),
+    signerName: varchar("signer_name", { length: 240 }).notNull(),
+    signatureMethod: varchar("signature_method", { length: 20 }).notNull(),
+    signedAt: timestamp("signed_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("student_signed_document_version_uidx").on(
+      table.tenantId,
+      table.studentId,
+      table.templateCode,
+      table.onboardingVersion,
+    ),
+    uniqueIndex("student_signed_document_storage_uidx").on(
+      table.tenantId,
+      table.storageKey,
+    ),
+    index("student_signed_document_student_idx").on(
+      table.tenantId,
+      table.studentId,
+      table.signedAt,
+    ),
+  ],
+);
+
 export const aiPromptTemplateVersion = pgTable(
   "ai_prompt_template_version",
   {

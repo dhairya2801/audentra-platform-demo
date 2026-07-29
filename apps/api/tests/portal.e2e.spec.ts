@@ -368,6 +368,19 @@ describe("functional student portal API", () => {
       method: "GET",
       url: "/v1/student/bootstrap",
     });
+    const documents = await app.inject({
+      method: "GET",
+      url: "/v1/student/documents",
+    });
+    const signedDocuments = documents
+      .json()
+      .items.filter(
+        (document: { signature?: unknown }) => document.signature != null,
+      );
+    const signedContent = await app.inject({
+      method: "GET",
+      url: signedDocuments[0].contentUrl,
+    });
 
     expect(completed.statusCode).toBe(200);
     expect(replay.json()).toEqual(completed.json());
@@ -379,6 +392,25 @@ describe("functional student portal API", () => {
       onboarding: { required: false, status: "completed" },
       initialRoute: "/dashboard",
     });
+    expect(signedDocuments).toHaveLength(2);
+    expect(signedDocuments[0]).toMatchObject({
+      mimeType: "application/pdf",
+      category: "other",
+      processingMode: "generated",
+      status: "accepted",
+      signature: {
+        signerName: "Alex Morgan",
+        method: "typed",
+        onboardingVersion: 10,
+      },
+    });
+    expect(signedContent.statusCode).toBe(200);
+    expect(signedContent.headers["content-type"]).toContain(
+      "application/pdf",
+    );
+    expect(signedContent.rawPayload.subarray(0, 5).toString("ascii")).toBe(
+      "%PDF-",
+    );
   });
 
   it("lists tenant-scoped requirements and returns tenant-safe detail errors", async () => {
@@ -463,7 +495,7 @@ describe("functional student portal API", () => {
     expect(first.json()).toMatchObject({ status: "placeholder" });
     expect(replay.json()).toEqual(first.json());
     expect(invalid.statusCode).toBe(400);
-    expect(list.json()).toMatchObject({ total: 2 });
+    expect(list.json()).toMatchObject({ total: 4 });
   });
 
   it("uploads, parses, downloads, and confirms a real document idempotently", async () => {

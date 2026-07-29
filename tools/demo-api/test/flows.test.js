@@ -638,6 +638,41 @@ describe("contract-compatible development preview API", () => {
     assert.equal(completedBootstrap.payload.rewards.lifetimePoints, 180);
     assert.equal(completedBootstrap.payload.rewards.bookstoreCreditCents, 180);
 
+    const signedDocumentList = await api(
+      baseUrl,
+      "/v1/student/documents",
+    );
+    const signedDocuments = signedDocumentList.payload.items.filter(
+      (document) => document.signature != null,
+    );
+    assert.equal(signedDocuments.length, 2);
+    assert.deepEqual(
+      signedDocuments.map((document) => document.signature.templateCode).sort(),
+      ["enrollment_acknowledgment", "ferpa_release"],
+    );
+    assert.deepEqual(signedDocuments[0].signature, {
+      templateCode: signedDocuments[0].signature.templateCode,
+      title: signedDocuments[0].signature.title,
+      signerName: "Alex Morgan",
+      method: "typed",
+      signedAt: "2026-07-24T12:00:00.000Z",
+      onboardingVersion: 10,
+    });
+    const signedPdf = await fetch(
+      `${baseUrl}${signedDocuments[0].contentUrl}`,
+      {
+        headers: { cookie: "vv_demo_session=demo-session-v2" },
+      },
+    );
+    assert.equal(signedPdf.status, 200);
+    assert.match(signedPdf.headers.get("content-type"), /application\/pdf/);
+    assert.equal(
+      Buffer.from(await signedPdf.arrayBuffer())
+        .subarray(0, 5)
+        .toString("ascii"),
+      "%PDF-",
+    );
+
     const requirements = await api(baseUrl, "/v1/student/requirements");
     assert.equal(requirements.payload.total, 8);
     const identity = requirements.payload.items.find(
@@ -686,7 +721,7 @@ describe("contract-compatible development preview API", () => {
     );
     assert.equal(document.payload.status, "placeholder");
     const documents = await api(baseUrl, "/v1/student/documents");
-    assert.equal(documents.payload.total, 1);
+    assert.equal(documents.payload.total, 3);
 
     const appointment = await api(
       baseUrl,

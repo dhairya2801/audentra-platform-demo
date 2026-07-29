@@ -30,7 +30,14 @@ describe("initial PostgreSQL migration", () => {
       ),
       "utf8",
     );
-    const migration = `${initialMigration}\n${portalMigration}\n${agenticDocumentMigration}\n${aiResponseMigration}\n${credentialIdentityMigration}`;
+    const signedDocumentMigration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0017_student_signed_documents.sql",
+      ),
+      "utf8",
+    );
+    const migration = `${initialMigration}\n${portalMigration}\n${agenticDocumentMigration}\n${aiResponseMigration}\n${credentialIdentityMigration}\n${signedDocumentMigration}`;
     const requiredTables = [
       "tenant",
       "person",
@@ -56,6 +63,7 @@ describe("initial PostgreSQL migration", () => {
       "payment_transaction",
       "student_profile",
       "help_article",
+      "student_signed_document",
     ];
 
     for (const table of requiredTables) {
@@ -181,6 +189,27 @@ describe("initial PostgreSQL migration", () => {
     );
     expect(migration).toContain(
       "PRIMARY KEY (tenant_id, actor_id, operation, idempotency_key)",
+    );
+  });
+
+  it("stores signed onboarding PDFs as immutable student records", async () => {
+    const migration = await readFile(
+      resolve(
+        __dirname,
+        "../migrations/0017_student_signed_documents.sql",
+      ),
+      "utf8",
+    );
+
+    expect(migration).toContain("template_code varchar(100) NOT NULL");
+    expect(migration).toContain("onboarding_version integer NOT NULL");
+    expect(migration).toContain("signature_method varchar(20) NOT NULL");
+    expect(migration).toContain("sha256 varchar(64) NOT NULL");
+    expect(migration).toMatch(
+      /UNIQUE \(tenant_id, student_id, template_code, onboarding_version\)/i,
+    );
+    expect(migration).toMatch(
+      /BEFORE UPDATE OR DELETE ON student_signed_document[\s\S]*prevent_student_signed_document_mutation/i,
     );
   });
 

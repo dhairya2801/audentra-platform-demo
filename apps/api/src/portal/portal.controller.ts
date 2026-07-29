@@ -38,6 +38,7 @@ import { CurrentAuth, type AuthContext } from "../auth/auth-context";
 import { ApiError, BadRequestError } from "../common/api-error";
 import { requireIdempotencyKey } from "../common/idempotency-key";
 import { APP_CONFIG, type AppConfig } from "../config/app-config";
+import { OnboardingSignedDocumentService } from "../documents/onboarding-signed-document.service";
 import {
   PLATFORM_STORE,
   type PlatformStore,
@@ -86,6 +87,7 @@ export class PortalController {
     @Inject(PLATFORM_STORE)
     private readonly store: PlatformStore,
     private readonly studentAgent: StudentAgentService,
+    private readonly signedDocuments: OnboardingSignedDocumentService,
     @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
@@ -114,18 +116,26 @@ export class PortalController {
 
   @Post("onboarding/complete")
   @HttpCode(200)
-  completeOnboarding(
+  async completeOnboarding(
     @CurrentAuth() auth: AuthContext,
     @Body() update: CompleteStudentOnboardingDto,
     @Headers("idempotency-key") idempotencyKey: string | undefined,
     @Req() request: FastifyRequest,
   ): Promise<StudentOnboarding> {
-    return this.store.completeStudentOnboarding({
+    const onboarding = await this.store.completeStudentOnboarding({
       auth,
       update,
       idempotencyKey: requireIdempotencyKey(idempotencyKey),
       requestId: request.id,
     });
+    const documents = await this.store.getStudentDocuments(auth);
+    await this.signedDocuments.ensure({
+      auth,
+      onboarding,
+      documents,
+      requestId: request.id,
+    });
+    return onboarding;
   }
 
   @Get("housing-plan")
@@ -181,8 +191,21 @@ export class PortalController {
   }
 
   @Get("documents")
-  documents(@CurrentAuth() auth: AuthContext): Promise<StudentDocumentList> {
-    return this.store.getStudentDocuments(auth);
+  async documents(
+    @CurrentAuth() auth: AuthContext,
+    @Req() request: FastifyRequest,
+  ): Promise<StudentDocumentList> {
+    const [onboarding, documents] = await Promise.all([
+      this.store.getStudentOnboarding(auth),
+      this.store.getStudentDocuments(auth),
+    ]);
+    const created = await this.signedDocuments.ensure({
+      auth,
+      onboarding,
+      documents,
+      requestId: request.id,
+    });
+    return created > 0 ? this.store.getStudentDocuments(auth) : documents;
   }
 
   @Post("documents")

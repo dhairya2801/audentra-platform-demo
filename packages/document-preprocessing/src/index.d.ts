@@ -57,3 +57,24 @@ export function extractStudentDocumentImageRegion(input: {
     height: number;
   };
 }): Promise<Buffer>;
+
+export function createSignedOnboardingPdf(
+  input: {
+    templateBytes: Buffer;
+    signerName: string;
+    signatureMethod: "typed" | "drawn";
+    signatureImageData?: string;
+    signedAt: string;
+    auditReceipt: string;
+    signatureBox: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+  },
+  options?: {
+    pythonExecutable?: string;
+    timeoutMs?: number;
+  },
+): Promise<Buffer>;

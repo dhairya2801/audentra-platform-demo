@@ -22,6 +22,7 @@ import {
   S3DocumentStorage,
   type DocumentStorage,
 } from "./documents/document-storage";
+import { OnboardingSignedDocumentService } from "./documents/onboarding-signed-document.service";
 import { HealthController } from "./health/health.controller";
 import { OffersController } from "./offers/offers.controller";
 import { PortalController } from "./portal/portal.controller";
@@ -92,6 +93,7 @@ export class AppModule {
           useClass: AuthContextGuard,
         },
         StudentAgentService,
+        OnboardingSignedDocumentService,
         agenticOverrides?.documentStorage
           ? {
               provide: DOCUMENT_STORAGE,

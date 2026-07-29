@@ -132,6 +132,22 @@ interface DocumentRow {
   created_at: Date;
 }
 
+interface SignedDocumentRow {
+  id: string;
+  template_code: string;
+  onboarding_version: number;
+  title: string;
+  file_name: string;
+  mime_type: "application/pdf";
+  size_bytes: number;
+  storage_key: string;
+  sha256: string;
+  signer_name: string;
+  signature_method: "typed" | "drawn";
+  signed_at: Date;
+  created_at: Date;
+}
+
 interface AppointmentRow {
   id: string;
   type: StudentAppointment["type"];
@@ -1176,17 +1192,139 @@ export class PostgresPortalStore {
   }
 
   async getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList> {
-    const result = await this.database.db.execute(sql`
-      SELECT
-        id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
-        storage_key, sha256, extraction, created_at
-      FROM document_record
-      WHERE tenant_id = ${auth.tenantId}
-        AND student_id = ${auth.studentId}
-      ORDER BY created_at DESC, id
-    `);
-    const items = rows<DocumentRow>(result).map(mapDocument);
+    const [uploadResult, signedResult] = await Promise.all([
+      this.database.db.execute(sql`
+        SELECT
+          id, requirement_id, file_name, mime_type, size_bytes, category, processing_mode, status,
+          storage_key, sha256, extraction, created_at
+        FROM document_record
+        WHERE tenant_id = ${auth.tenantId}
+          AND student_id = ${auth.studentId}
+        ORDER BY created_at DESC, id
+      `),
+      this.database.db.execute(sql`
+        SELECT
+          id, template_code, onboarding_version, title, file_name, mime_type,
+          size_bytes, storage_key, sha256, signer_name, signature_method,
+          signed_at, created_at
+        FROM student_signed_document
+        WHERE tenant_id = ${auth.tenantId}
+          AND student_id = ${auth.studentId}
+        ORDER BY signed_at DESC, id
+      `),
+    ]);
+    const items = [
+      ...rows<DocumentRow>(uploadResult).map(mapDocument),
+      ...rows<SignedDocumentRow>(signedResult).map(mapSignedDocument),
+    ].sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        left.id.localeCompare(right.id),
+    );
     return { items, total: items.length };
+  }
+
+  async saveStudentSignedDocument(input: {
+    auth: AuthContext;
+    document: {
+      id: string;
+      templateCode: string;
+      onboardingVersion: number;
+      title: string;
+      fileName: string;
+      sizeBytes: number;
+      storageKey: string;
+      sha256: string;
+      signerName: string;
+      signatureMethod: "typed" | "drawn";
+      signedAt: string;
+    };
+    requestId: string;
+  }): Promise<StudentDocument> {
+    return this.database.db.transaction(async (transaction) => {
+      const inserted = await transaction.execute(sql`
+        INSERT INTO student_signed_document (
+          id,
+          tenant_id,
+          student_id,
+          template_code,
+          onboarding_version,
+          title,
+          file_name,
+          mime_type,
+          size_bytes,
+          storage_provider,
+          storage_key,
+          sha256,
+          signer_name,
+          signature_method,
+          signed_at
+        )
+        VALUES (
+          ${input.document.id},
+          ${input.auth.tenantId},
+          ${input.auth.studentId},
+          ${input.document.templateCode},
+          ${input.document.onboardingVersion},
+          ${input.document.title},
+          ${input.document.fileName},
+          'application/pdf',
+          ${input.document.sizeBytes},
+          's3',
+          ${input.document.storageKey},
+          ${input.document.sha256},
+          ${input.document.signerName},
+          ${input.document.signatureMethod},
+          ${input.document.signedAt}
+        )
+        ON CONFLICT (
+          tenant_id,
+          student_id,
+          template_code,
+          onboarding_version
+        ) DO NOTHING
+        RETURNING
+          id, template_code, onboarding_version, title, file_name, mime_type,
+          size_bytes, storage_key, sha256, signer_name, signature_method,
+          signed_at, created_at
+      `);
+      let document = rows<SignedDocumentRow>(inserted)[0];
+      if (!document) {
+        const existing = await transaction.execute(sql`
+          SELECT
+            id, template_code, onboarding_version, title, file_name, mime_type,
+            size_bytes, storage_key, sha256, signer_name, signature_method,
+            signed_at, created_at
+          FROM student_signed_document
+          WHERE tenant_id = ${input.auth.tenantId}
+            AND student_id = ${input.auth.studentId}
+            AND template_code = ${input.document.templateCode}
+            AND onboarding_version = ${input.document.onboardingVersion}
+          LIMIT 1
+        `);
+        document = rows<SignedDocumentRow>(existing)[0];
+      } else {
+        await this.insertAudit(transaction, {
+          auth: input.auth,
+          action: "student_signed_document.created",
+          resourceType: "student_signed_document",
+          resourceId: document.id,
+          requestId: input.requestId,
+          metadata: {
+            templateCode: document.template_code,
+            onboardingVersion: document.onboarding_version,
+          },
+        });
+      }
+      if (!document) {
+        throw new ApiError(
+          500,
+          "SIGNED_DOCUMENT_WRITE_FAILED",
+          "The signed document could not be saved",
+        );
+      }
+      return mapSignedDocument(document);
+    });
   }
 
   async getCourseExemptionContext(input: {
@@ -2195,11 +2333,21 @@ export class PostgresPortalStore {
   }> {
     const result = await this.database.db.execute(sql`
       SELECT storage_key, file_name, mime_type
-      FROM document_record
-      WHERE tenant_id = ${input.auth.tenantId}
-        AND student_id = ${input.auth.studentId}
-        AND id = ${input.documentId}
-        AND storage_key IS NOT NULL
+      FROM (
+        SELECT storage_key, file_name, mime_type, 1 AS priority
+        FROM document_record
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+          AND storage_key IS NOT NULL
+        UNION ALL
+        SELECT storage_key, file_name, mime_type, 2 AS priority
+        FROM student_signed_document
+        WHERE tenant_id = ${input.auth.tenantId}
+          AND student_id = ${input.auth.studentId}
+          AND id = ${input.documentId}
+      ) content_reference
+      ORDER BY priority
       LIMIT 1
     `);
     const reference = rows<{
@@ -4247,6 +4395,29 @@ function mapProgram(row: {
     totalCredits: row.total_credits,
     description: row.description,
     source: mapContentSource(row),
+  };
+}
+
+function mapSignedDocument(row: SignedDocumentRow): StudentDocument {
+  return {
+    id: row.id,
+    fileName: row.file_name,
+    mimeType: row.mime_type,
+    sizeBytes: row.size_bytes,
+    category: "other",
+    processingMode: "generated",
+    status: "accepted",
+    contentUrl: `/v1/student/documents/${row.id}/content`,
+    sha256: row.sha256,
+    signature: {
+      templateCode: row.template_code,
+      title: row.title,
+      signerName: row.signer_name,
+      method: row.signature_method,
+      signedAt: isoTimestamp(row.signed_at),
+      onboardingVersion: row.onboarding_version,
+    },
+    createdAt: isoTimestamp(row.created_at),
   };
 }
 

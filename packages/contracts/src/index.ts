@@ -404,7 +404,8 @@ export type StudentDocumentCategory =
 export type StudentDocumentProcessingMode =
   | "agentic"
   | "classification_only"
-  | "manual_review";
+  | "manual_review"
+  | "generated";
 
 /**
  * Server-authored upload policy. The browser may suggest a category, but it
@@ -550,6 +551,14 @@ export interface StudentDocument {
   sha256?: string;
   contentUrl?: string;
   extraction?: StudentDocumentExtraction;
+  signature?: {
+    templateCode: string;
+    title: string;
+    signerName: string;
+    method: "typed" | "drawn";
+    signedAt: string;
+    onboardingVersion: number;
+  };
   createdAt: string;
 }
 

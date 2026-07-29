@@ -23,7 +23,7 @@ derived solely from `localStorage`, a query parameter, or client-owned state.
 | `/dashboard` | Shows the authoritative offer, journey progress, deadlines, and next action |
 | `/enrollment` | Lists all assigned enrollment requirements and their current states |
 | `/enrollment/requirements/:slug` | Explains one requirement and embeds its valid action; database UUIDs are not exposed as navigation |
-| `/documents` | Lists document records, supports unclassified uploads, and exposes extraction review |
+| `/documents` | Lists uploaded and onboarding-signed document records, supports unclassified uploads, exposes extraction review, and opens immutable signed PDFs |
 | `/messages` | Lists student messages and persists read state |
 | `/appointments` | Lists and schedules an enrollment appointment |
 | `/payments` | Shows deposit state and records an idempotent development payment |
@@ -53,6 +53,12 @@ invalidate the development session and return the student to `/sign-in`.
 - Accepting an offer updates the dashboard and creates the enrollment journey.
 - Reading a message removes it from the unread count after reload.
 - Creating a document record makes it visible after reload.
+- Completing onboarding creates one immutable, tenant-branded PDF for each
+  signed onboarding document. Typed or drawn signatures appear in the expected
+  field, and the PDFs remain visible and downloadable from My Documents.
+- A completed onboarding record missing its generated packet is repaired
+  idempotently when My Documents is opened; repeated requests create no
+  duplicate signed records.
 - A document requirement accepts its file inline without redirecting to
   `/documents` or asking the student to classify it.
 - The parser classifies from contents. A mismatch is visible and cannot advance

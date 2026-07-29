@@ -1,7 +1,7 @@
 "use strict";
 
 const { execFile } = require("node:child_process");
-const { mkdtemp, rm, writeFile } = require("node:fs/promises");
+const { mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { promisify } = require("node:util");
@@ -10,6 +10,7 @@ const sharp = require("sharp");
 const execFileAsync = promisify(execFile);
 const maximumInputBytes = 10 * 1024 * 1024;
 const pythonScript = join(__dirname, "preprocess_pdf.py");
+const signingScript = join(__dirname, "sign_pdf.py");
 
 class DocumentPreprocessingError extends Error {
   constructor(code, message) {
@@ -265,6 +266,127 @@ function mapPreprocessingError(error) {
   );
 }
 
+async function createSignedOnboardingPdf(input, options = {}) {
+  validateSigningInput(input);
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "vv-signature-"));
+  const inputPath = join(temporaryDirectory, "template.pdf");
+  const outputPath = join(temporaryDirectory, "signed.pdf");
+  const signaturePath = join(temporaryDirectory, "signature.png");
+  try {
+    await writeFile(inputPath, input.templateBytes, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const args = [
+      signingScript,
+      "--input",
+      inputPath,
+      "--output",
+      outputPath,
+      "--signer-name",
+      input.signerName,
+      "--signature-method",
+      input.signatureMethod,
+      "--signed-at",
+      input.signedAt,
+      "--audit-receipt",
+      input.auditReceipt,
+      "--x",
+      String(input.signatureBox.x),
+      "--y",
+      String(input.signatureBox.y),
+      "--width",
+      String(input.signatureBox.width),
+      "--height",
+      String(input.signatureBox.height),
+    ];
+    if (input.signatureMethod === "drawn") {
+      const imageBytes = decodeSignatureImage(input.signatureImageData);
+      await writeFile(signaturePath, imageBytes, {
+        flag: "wx",
+        mode: 0o600,
+      });
+      args.push("--signature-image", signaturePath);
+    }
+    await execFileAsync(resolvePythonExecutable(options.pythonExecutable), args, {
+      encoding: "utf8",
+      maxBuffer: 256 * 1024,
+      timeout: boundedInteger(options.timeoutMs, 15_000, 1_000, 30_000),
+      windowsHide: true,
+    });
+    const signed = await readFile(outputPath);
+    if (
+      signed.length < 100 ||
+      signed.length > maximumInputBytes ||
+      signed.subarray(0, 5).toString("ascii") !== "%PDF-"
+    ) {
+      throw new DocumentPreprocessingError(
+        "PDF_PREPROCESSING_FAILED",
+        "The signed PDF could not be created safely",
+      );
+    }
+    return signed;
+  } catch (error) {
+    if (error instanceof DocumentPreprocessingError) throw error;
+    throw mapPreprocessingError(error);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+function validateSigningInput(input) {
+  if (
+    !input ||
+    !Buffer.isBuffer(input.templateBytes) ||
+    input.templateBytes.length < 100 ||
+    input.templateBytes.length > maximumInputBytes
+  ) {
+    throw new TypeError("A bounded PDF template is required");
+  }
+  if (
+    typeof input.signerName !== "string" ||
+    input.signerName.trim().length < 2 ||
+    input.signerName.trim().length > 240
+  ) {
+    throw new TypeError("A bounded signer name is required");
+  }
+  if (!["typed", "drawn"].includes(input.signatureMethod)) {
+    throw new TypeError("A supported signature method is required");
+  }
+  if (
+    typeof input.signedAt !== "string" ||
+    Number.isNaN(Date.parse(input.signedAt))
+  ) {
+    throw new TypeError("A valid signing timestamp is required");
+  }
+  if (
+    typeof input.auditReceipt !== "string" ||
+    !/^[A-Za-z0-9._:-]{8,160}$/.test(input.auditReceipt)
+  ) {
+    throw new TypeError("A bounded audit receipt is required");
+  }
+  const box = input.signatureBox;
+  if (!box || !["x", "y", "width", "height"].every((key) =>
+    typeof box[key] === "number" && Number.isFinite(box[key])
+  )) {
+    throw new TypeError("Normalized signature bounds are required");
+  }
+}
+
+function decodeSignatureImage(value) {
+  if (
+    typeof value !== "string" ||
+    !value.startsWith("data:image/png;base64,")
+  ) {
+    throw new TypeError("A PNG signature image is required");
+  }
+  const bytes = Buffer.from(value.slice("data:image/png;base64,".length), "base64");
+  if (bytes.length < 20 || bytes.length > 100_000) {
+    throw new TypeError("The signature image is outside the allowed size");
+  }
+  return bytes;
+}
+
 function resolvePythonExecutable(optionValue) {
   const configured =
     optionValue?.trim() || process.env.DOCUMENT_PYTHON_BIN?.trim();
@@ -315,5 +437,6 @@ function boundedInteger(value, fallback, minimum, maximum) {
 }
 
 exports.DocumentPreprocessingError = DocumentPreprocessingError;
+exports.createSignedOnboardingPdf = createSignedOnboardingPdf;
 exports.extractStudentDocumentImageRegion = extractStudentDocumentImageRegion;
 exports.preprocessStudentDocument = preprocessStudentDocument;

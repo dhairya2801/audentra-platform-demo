@@ -18,23 +18,33 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+import pypdfium2 as pdfium
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "apps" / "web" / "public" / "documents" / "onboarding"
 PAGE_WIDTH, PAGE_HEIGHT = letter
-def footer(canvas, document) -> None:
-    canvas.saveState()
-    canvas.setStrokeColor(HexColor("#D8DED8"))
-    canvas.line(0.75 * inch, 0.56 * inch, 7.75 * inch, 0.56 * inch)
-    canvas.setFont("Helvetica", 7.5)
-    canvas.setFillColor(HexColor("#66756D"))
-    canvas.drawString(0.75 * inch, 0.39 * inch, "Aster University - Student Enrollment")
-    canvas.drawRightString(
-        7.75 * inch,
-        0.39 * inch,
-        f"Page {document.page}",
-    )
-    canvas.restoreState()
+
+
+def footer_for(tenant: dict[str, str]):
+    def footer(canvas, document) -> None:
+        canvas.saveState()
+        canvas.setStrokeColor(HexColor("#D8DED8"))
+        canvas.line(0.75 * inch, 0.56 * inch, 7.75 * inch, 0.56 * inch)
+        canvas.setFont("Helvetica", 7.5)
+        canvas.setFillColor(HexColor("#66756D"))
+        canvas.drawString(
+            0.75 * inch,
+            0.39 * inch,
+            f"{tenant['name']} - Student Enrollment",
+        )
+        canvas.drawRightString(
+            7.75 * inch,
+            0.39 * inch,
+            f"Page {document.page}",
+        )
+        canvas.restoreState()
+
+    return footer
 
 
 def styles() -> dict[str, ParagraphStyle]:
@@ -122,13 +132,21 @@ def signature_table(style: dict[str, ParagraphStyle], field_name: str) -> Table:
     return table
 
 
-def build_ferpa(path: Path, style: dict[str, ParagraphStyle]) -> None:
+def build_ferpa(
+    path: Path,
+    style: dict[str, ParagraphStyle],
+    tenant: dict[str, str],
+) -> None:
+    short_upper = tenant["shortName"].upper()
     story = [
         Paragraph("FERPA Information Release Authorization", style["title"]),
-        Paragraph("ASTER UNIVERSITY - OPTIONAL STUDENT AUTHORIZATION", style["subtitle"]),
+        Paragraph(
+            f"{short_upper} UNIVERSITY - OPTIONAL STUDENT AUTHORIZATION",
+            style["subtitle"],
+        ),
         Paragraph(
             "The Family Educational Rights and Privacy Act protects the privacy "
-            "of student education records. This authorization lets Aster University "
+            f"of student education records. This authorization lets {tenant['name']} "
             "share only the record categories and with only the people you selected "
             "during onboarding.",
             style["body"],
@@ -137,7 +155,8 @@ def build_ferpa(path: Path, style: dict[str, ParagraphStyle]) -> None:
         Paragraph(
             "Your saved onboarding choices identify each authorized person, their "
             "relationship to you, the permitted record categories, the purpose, and "
-            "the expiration rule. Aster will verify identity before releasing records.",
+            f"the expiration rule. {tenant['shortName']} will verify identity before "
+            "releasing records.",
             style["body"],
         ),
         Paragraph("Your choices and rights", style["heading"]),
@@ -156,7 +175,7 @@ def build_ferpa(path: Path, style: dict[str, ParagraphStyle]) -> None:
         Paragraph("Student confirmation", style["heading"]),
         Paragraph(
             "By signing, I confirm that I reviewed the people, scopes, purpose, and "
-            "expiration shown in the portal. I authorize Aster University to disclose "
+            f"expiration shown in the portal. I authorize {tenant['name']} to disclose "
             "the selected education records as described.",
             style["body"],
         ),
@@ -164,8 +183,9 @@ def build_ferpa(path: Path, style: dict[str, ParagraphStyle]) -> None:
         KeepTogether(signature_table(style, "ferpa_student_signature")),
         Spacer(1, 0.12 * inch),
         Paragraph(
-            "Reference: Registrar - registrar@aster.edu - This Aster form is a portal "
-            "template and is not the East-West University form used as a design reference.",
+            f"Reference: Registrar - {tenant['registrarEmail']} - This "
+            f"{tenant['shortName']} form is a portal template and is not the East-West "
+            "University form used as a design reference.",
             style["small"],
         ),
     ]
@@ -176,16 +196,25 @@ def build_ferpa(path: Path, style: dict[str, ParagraphStyle]) -> None:
         leftMargin=0.75 * inch,
         topMargin=0.68 * inch,
         bottomMargin=0.72 * inch,
-        title="Aster University FERPA Information Release Authorization",
-        author="Aster University",
+        title=f"{tenant['name']} FERPA Information Release Authorization",
+        author=tenant["name"],
     )
+    footer = footer_for(tenant)
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
 
-def build_enrollment(path: Path, style: dict[str, ParagraphStyle]) -> None:
+def build_enrollment(
+    path: Path,
+    style: dict[str, ParagraphStyle],
+    tenant: dict[str, str],
+) -> None:
+    short_upper = tenant["shortName"].upper()
     story = [
         Paragraph("Enrollment Information Acknowledgment", style["title"]),
-        Paragraph("ASTER UNIVERSITY - ONBOARDING PACKET", style["subtitle"]),
+        Paragraph(
+            f"{short_upper} UNIVERSITY - ONBOARDING PACKET",
+            style["subtitle"],
+        ),
         Paragraph(
             "This acknowledgment records that you reviewed the information supplied "
             "during onboarding. It does not replace an admission offer decision, a "
@@ -217,7 +246,7 @@ def build_enrollment(path: Path, style: dict[str, ParagraphStyle]) -> None:
         KeepTogether(signature_table(style, "enrollment_student_signature")),
         Spacer(1, 0.12 * inch),
         Paragraph(
-            "Questions: Enrollment Services - enrollment@aster.edu",
+            f"Questions: Enrollment Services - {tenant['supportEmail']}",
             style["small"],
         ),
     ]
@@ -228,50 +257,92 @@ def build_enrollment(path: Path, style: dict[str, ParagraphStyle]) -> None:
         leftMargin=0.75 * inch,
         topMargin=0.68 * inch,
         bottomMargin=0.72 * inch,
-        title="Aster University Enrollment Information Acknowledgment",
-        author="Aster University",
+        title=f"{tenant['name']} Enrollment Information Acknowledgment",
+        author=tenant["name"],
     )
+    footer = footer_for(tenant)
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
+
+
+def render_preview(pdf_path: Path, preview_path: Path) -> None:
+    document = pdfium.PdfDocument(str(pdf_path))
+    try:
+        page = document[0]
+        try:
+            image = page.render(scale=2.2).to_pil()
+            image.save(preview_path, format="PNG", optimize=True)
+        finally:
+            page.close()
+    finally:
+        document.close()
 
 
 def main() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     style = styles()
-    documents = [
+    tenants = [
         {
-            "id": "ferpa_release",
-            "name": "FERPA Information Release",
-            "file": "aster-ferpa-release.pdf",
-            "preview": "aster-ferpa-release-page-1.png",
-            "signatureBox": {
-                "x": 0.098,
-                "y": 0.488,
-                "width": 0.53,
-                "height": 0.054,
-                "page": 1,
-            },
+            "slug": "aster",
+            "name": "Aster University",
+            "shortName": "Aster",
+            "supportEmail": "enrollment@aster.edu",
+            "registrarEmail": "registrar@aster.edu",
         },
         {
-            "id": "enrollment_acknowledgment",
-            "name": "Enrollment Information Acknowledgment",
-            "file": "aster-enrollment-acknowledgment.pdf",
-            "preview": "aster-enrollment-acknowledgment-page-1.png",
-            "signatureBox": {
-                "x": 0.098,
-                "y": 0.447,
-                "width": 0.53,
-                "height": 0.054,
-                "page": 1,
-            },
+            "slug": "harvard",
+            "name": "Harvard University",
+            "shortName": "Harvard",
+            "supportEmail": "studentservices@harvard.edu",
+            "registrarEmail": "registrar@harvard.edu",
         },
     ]
-    build_ferpa(OUTPUT / documents[0]["file"], style)
-    build_enrollment(OUTPUT / documents[1]["file"], style)
+    manifest: dict[str, list[dict[str, object]]] = {}
+    for tenant in tenants:
+        documents = [
+            {
+                "id": "ferpa_release",
+                "name": "FERPA Information Release",
+                "file": f"{tenant['slug']}-ferpa-release.pdf",
+                "preview": f"{tenant['slug']}-ferpa-release-page-1.png",
+                "signatureBox": {
+                    "x": 0.098,
+                    "y": 0.488,
+                    "width": 0.53,
+                    "height": 0.054,
+                    "page": 1,
+                },
+            },
+            {
+                "id": "enrollment_acknowledgment",
+                "name": "Enrollment Information Acknowledgment",
+                "file": f"{tenant['slug']}-enrollment-acknowledgment.pdf",
+                "preview": (
+                    f"{tenant['slug']}-enrollment-acknowledgment-page-1.png"
+                ),
+                "signatureBox": {
+                    "x": 0.098,
+                    "y": 0.447,
+                    "width": 0.53,
+                    "height": 0.054,
+                    "page": 1,
+                },
+            },
+        ]
+        ferpa_pdf = OUTPUT / str(documents[0]["file"])
+        enrollment_pdf = OUTPUT / str(documents[1]["file"])
+        build_ferpa(ferpa_pdf, style, tenant)
+        build_enrollment(enrollment_pdf, style, tenant)
+        render_preview(ferpa_pdf, OUTPUT / str(documents[0]["preview"]))
+        render_preview(
+            enrollment_pdf,
+            OUTPUT / str(documents[1]["preview"]),
+        )
+        manifest[tenant["slug"]] = documents
     (OUTPUT / "manifest.json").write_text(
-        json.dumps({"documents": documents}, indent=2) + "\n",
+        json.dumps({"tenants": manifest}, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"Generated {len(documents)} onboarding PDFs in {OUTPUT}")
+    print(f"Generated {len(tenants) * 2} onboarding PDFs in {OUTPUT}")
 
 
 if __name__ == "__main__":

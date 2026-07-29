@@ -9,6 +9,11 @@ compatibility.
 
 ### Added
 
+- Added immutable, tenant-branded PDFs for documents signed during onboarding;
+  typed and drawn signatures are rendered into the document, stored with an
+  integrity digest and audit receipt, and shown in My Documents
+- Added idempotent signed-document backfill for students who completed
+  onboarding before signed PDF storage was introduced
 - Added tenant-managed Aster and Harvard point programs, editable completion
   and exploration reward rules, an idempotent student ledger, bookstore-credit
   conversion, and visible balance/task reward UI

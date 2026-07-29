@@ -3,15 +3,17 @@
 const assert = require("node:assert/strict");
 const { describe, it } = require("node:test");
 const {
+  createSignedOnboardingPdf,
   DocumentPreprocessingError,
   extractStudentDocumentImageRegion,
   preprocessStudentDocument,
 } = require("../src/index.cjs");
+const { createHash } = require("node:crypto");
 const sharp = require("sharp");
 const { execFileSync } = require("node:child_process");
 const { mkdtempSync, readFileSync, rmSync } = require("node:fs");
 const { tmpdir } = require("node:os");
-const { join } = require("node:path");
+const { join, resolve } = require("node:path");
 
 const pythonExecutable =
   process.env.DOCUMENT_PYTHON_BIN?.trim() ||
@@ -144,5 +146,75 @@ describe("document preprocessing", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("creates deterministic typed and valid drawn onboarding signature PDFs", async () => {
+    const templateBytes = readFileSync(
+      resolve(
+        __dirname,
+        "../../../apps/web/public/documents/onboarding/aster-ferpa-release.pdf",
+      ),
+    );
+    const commonInput = {
+      templateBytes,
+      signerName: "Alex Morgan",
+      signedAt: "2026-07-24T12:00:00.000Z",
+      auditReceipt: "onboarding-signature-test",
+      signatureBox: {
+        pageNumber: 1,
+        x: 0.098,
+        y: 0.488,
+        width: 0.53,
+        height: 0.054,
+      },
+    };
+    const typed = await createSignedOnboardingPdf({
+      ...commonInput,
+      signatureMethod: "typed",
+    });
+    const typedReplay = await createSignedOnboardingPdf({
+      ...commonInput,
+      signatureMethod: "typed",
+    });
+    const signatureImageBytes = await sharp({
+      create: {
+        width: 480,
+        height: 120,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 0 },
+      },
+    })
+      .composite([
+        {
+          input: Buffer.from(
+            "<svg width='480' height='120'><path d='M20 85 C110 5 160 110 250 35 S390 100 455 25' fill='none' stroke='#173f31' stroke-width='8' stroke-linecap='round'/></svg>",
+          ),
+        },
+      ])
+      .png()
+      .toBuffer();
+    const drawn = await createSignedOnboardingPdf({
+      ...commonInput,
+      signatureMethod: "drawn",
+      signatureImageData: `data:image/png;base64,${signatureImageBytes.toString("base64")}`,
+    });
+    const preparedTyped = await preprocessStudentDocument(
+      { mimeType: "application/pdf", bytes: typed },
+      { maxImagePages: 0 },
+    );
+    const preparedDrawn = await preprocessStudentDocument(
+      { mimeType: "application/pdf", bytes: drawn },
+      { maxImagePages: 0 },
+    );
+    const digest = (value) =>
+      createHash("sha256").update(value).digest("hex");
+
+    assert.equal(typed.subarray(0, 5).toString("ascii"), "%PDF-");
+    assert.equal(drawn.subarray(0, 5).toString("ascii"), "%PDF-");
+    assert.equal(digest(typed), digest(typedReplay));
+    assert.match(preparedTyped.extractedText, /Alex Morgan/);
+    assert.match(preparedTyped.extractedText, /Electronically signed/);
+    assert.equal(preparedTyped.pageCount, 1);
+    assert.equal(preparedDrawn.pageCount, 1);
   });
 });

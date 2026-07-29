@@ -205,6 +205,23 @@ export interface PlatformStore {
     requestId: string;
   }): Promise<StudentMessage>;
   getStudentDocuments(auth: AuthContext): Promise<StudentDocumentList>;
+  saveStudentSignedDocument(input: {
+    auth: AuthContext;
+    document: {
+      id: string;
+      templateCode: string;
+      onboardingVersion: number;
+      title: string;
+      fileName: string;
+      sizeBytes: number;
+      storageKey: string;
+      sha256: string;
+      signerName: string;
+      signatureMethod: "typed" | "drawn";
+      signedAt: string;
+    };
+    requestId: string;
+  }): Promise<StudentDocument>;
   createStudentDocument(input: {
     auth: AuthContext;
     document: CreateStudentDocumentInput;

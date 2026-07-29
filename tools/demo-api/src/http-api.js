@@ -1,5 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { extractStudentDocumentImageRegion } from "@vv/document-preprocessing";
+import { readFile } from "node:fs/promises";
+import {
+  createSignedOnboardingPdf,
+  extractStudentDocumentImageRegion,
+} from "@vv/document-preprocessing";
 import { createServer } from "node:http";
 import { dirname, extname, join } from "node:path";
 import {
@@ -77,6 +81,22 @@ const maximumMultipartBytes = maximumUploadBytes + 65_536;
 // credential authentication was introduced cannot silently keep entering the
 // shared Alex fixture.
 const demoSessionToken = "demo-session-v2";
+const onboardingDocumentTemplates = [
+  {
+    code: "ferpa_release",
+    title: "FERPA Information Release",
+    fileName: "ferpa-information-release-signed.pdf",
+    sourceSuffix: "ferpa-release.pdf",
+    signatureBox: { x: 0.098, y: 0.488, width: 0.53, height: 0.054 },
+  },
+  {
+    code: "enrollment_acknowledgment",
+    title: "Enrollment Information Acknowledgment",
+    fileName: "enrollment-information-acknowledgment-signed.pdf",
+    sourceSuffix: "enrollment-acknowledgment.pdf",
+    signatureBox: { x: 0.098, y: 0.447, width: 0.53, height: 0.054 },
+  },
+];
 
 export async function createDemoApi(options = {}) {
   const clock = options.clock ?? (() => new Date());
@@ -611,13 +631,15 @@ async function route({
   }
   if (method === "POST" && path === "/v1/student/onboarding/complete") {
     const body = await readJson(request);
-    return materialWrite({
+    const result = await materialWrite({
       request,
       store,
       operation: "onboarding.complete",
       body,
       mutate: (draft) => completeOnboarding(draft, body, clock()),
     });
+    await ensureOnboardingSignedDocuments(store, tenant, clock);
+    return result;
   }
   if (method === "GET" && path === "/v1/student/housing-plan") {
     return { body: housingPlanResponse(store.snapshot()) };
@@ -699,6 +721,7 @@ async function route({
       if (expired === 0) transaction.skipWrite();
       return expired;
     });
+    await ensureOnboardingSignedDocuments(store, tenant, clock);
     return { body: listDocuments(store.snapshot()) };
   }
   if (method === "POST" && path === "/v1/student/documents") {
@@ -1258,6 +1281,134 @@ function hasDemoSession(request) {
 function credentialSessionFor(request, authStore, tenantSlug) {
   const cookies = parseCookies(request.headers.cookie);
   return authStore.getSession(cookies.vv_session, tenantSlug);
+}
+
+async function ensureOnboardingSignedDocuments(store, tenant, clock) {
+  const snapshot = store.snapshot();
+  const onboarding = snapshot.onboarding;
+  const data = onboarding.data;
+  if (
+    onboarding.status !== "completed" ||
+    !onboarding.completedAt ||
+    data.signatureConsent !== true ||
+    !data.signatureFullName ||
+    !data.signatureMethod ||
+    !Array.isArray(data.signedDocumentIds)
+  ) {
+    return 0;
+  }
+  const existing = new Set(
+    snapshot.documents
+      .filter(
+        (document) =>
+          document.signature?.onboardingVersion === onboarding.version,
+      )
+      .map((document) => document.signature?.templateCode),
+  );
+  const requested = new Set(data.signedDocumentIds);
+  let created = 0;
+  for (const template of onboardingDocumentTemplates) {
+    if (!requested.has(template.code) || existing.has(template.code)) continue;
+    const id = deterministicSignedDocumentId(
+      `${tenant.id}:${snapshot.profile.studentId}:${template.code}:${onboarding.version}`,
+    );
+    const bytes = await createSignedOnboardingPdf({
+      templateBytes: await readOnboardingTemplate(
+        `${tenant.slug}-${template.sourceSuffix}`,
+      ),
+      signerName: data.signatureFullName,
+      signatureMethod: data.signatureMethod,
+      ...(data.signatureMethod === "drawn"
+        ? { signatureImageData: data.signatureImageData }
+        : {}),
+      signedAt: onboarding.completedAt,
+      auditReceipt:
+        `onboarding.${onboarding.version}.${template.code}.${snapshot.profile.studentId}`,
+      signatureBox: template.signatureBox,
+    });
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const storageKey = `${id}.pdf`;
+    await store.writeUpload(storageKey, bytes);
+    await store.transact((draft, transaction) => {
+      if (
+        draft.documents.some(
+          (document) =>
+            document.signature?.templateCode === template.code &&
+            document.signature?.onboardingVersion === onboarding.version,
+        )
+      ) {
+        transaction.skipWrite();
+        return false;
+      }
+      draft.documents.push({
+        id,
+        fileName: template.fileName,
+        mimeType: "application/pdf",
+        sizeBytes: bytes.length,
+        category: "other",
+        processingMode: "generated",
+        status: "accepted",
+        storageKey,
+        contentStored: true,
+        sha256,
+        signature: {
+          templateCode: template.code,
+          title: template.title,
+          signerName: data.signatureFullName,
+          method: data.signatureMethod,
+          signedAt: onboarding.completedAt,
+          onboardingVersion: onboarding.version,
+        },
+        createdAt: onboarding.completedAt ?? clock().toISOString(),
+      });
+      return true;
+    });
+    existing.add(template.code);
+    created += 1;
+  }
+  return created;
+}
+
+async function readOnboardingTemplate(fileName) {
+  const roots = [
+    process.env.ONBOARDING_DOCUMENT_TEMPLATE_DIR,
+    join(process.cwd(), "apps", "web", "public", "documents", "onboarding"),
+    join(process.cwd(), "..", "web", "public", "documents", "onboarding"),
+    join(
+      process.cwd(),
+      "..",
+      "..",
+      "apps",
+      "web",
+      "public",
+      "documents",
+      "onboarding",
+    ),
+  ].filter(Boolean);
+  let missing;
+  for (const root of roots) {
+    try {
+      return await readFile(join(root, fileName));
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      missing = error;
+    }
+  }
+  throw missing ?? new Error(`Missing onboarding template ${fileName}`);
+}
+
+function deterministicSignedDocumentId(value) {
+  const bytes = createHash("sha256").update(value).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20),
+  ].join("-");
 }
 
 function resolveRequestTenant(request) {

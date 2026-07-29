@@ -26,6 +26,7 @@ RUN apk add --no-cache python3 py3-pip \
 COPY --from=dependencies /runtime/node_modules /workspace/node_modules
 COPY tools/demo-api tools/demo-api
 COPY packages/document-preprocessing /workspace/node_modules/@vv/document-preprocessing
+COPY apps/web/public/documents/onboarding apps/web/public/documents/onboarding
 
 RUN mkdir -p /var/lib/vv \
   && chown -R node:node /workspace /var/lib/vv

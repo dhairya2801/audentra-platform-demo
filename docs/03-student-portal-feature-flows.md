@@ -262,9 +262,33 @@ AI may classify or extract candidate metadata. A deterministic validator or
 authorized human confirms consequential results. Raw documents are not placed in
 general-purpose model memory.
 
-## 9. E-signature
+## 9. Electronic signatures and packets
 
-### Flow
+### Onboarding signature flow
+
+```text
+Student reviews the tenant-owned onboarding documents
+  -> student types or draws a signature and explicitly consents
+  -> API validates the required document identifiers and completes onboarding
+  -> server renders the signature and completion date into each PDF
+  -> immutable PDF bytes are written to private object storage
+  -> student_signed_document stores the digest, signer, method, template code,
+     onboarding version, and signing timestamp
+  -> My Documents lists the signed PDFs beside uploaded records
+```
+
+Generation is deterministic for the same
+`tenant + student + template + onboarding version` tuple. Replayed completion
+requests therefore reuse the same document identity and bytes. My Documents
+also performs an idempotent repair check so students who completed onboarding
+before this capability was deployed receive their signed packet when they next
+open the page.
+
+The current seeded tenants have independent Aster and Harvard document
+templates. Template selection remains server-owned; the browser cannot provide
+an arbitrary source PDF or signature placement rectangle.
+
+### External signature-provider flow
 
 ```text
 Student reaches signature requirement
@@ -278,8 +302,9 @@ Student reaches signature requirement
   -> requirement becomes completed when all required participants signed
 ```
 
-The portal never marks a document signed based only on the browser returning
-from the provider.
+For future multi-party or regulated enrollment packets, the portal never marks
+a document signed based only on the browser returning from the provider. A
+verified provider webhook remains the authoritative completion event.
 
 ## 10. Deposit/payment
 
