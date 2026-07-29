@@ -83,7 +83,10 @@ jobs:
         run: npm --prefix apps/api run db:migrate
 
       - name: Seed deterministic scenario
-        run: npm --prefix apps/api run db:seed
+        # CI validates relational fixtures without requiring the deployment-only
+        # MinIO service. The VM's compose startup still runs the full db:seed
+        # command, including checksum-verified media uploads.
+        run: npm --prefix apps/api run db:seed:data
 
       - name: Typecheck contracts
         run: npm --prefix packages/contracts run typecheck

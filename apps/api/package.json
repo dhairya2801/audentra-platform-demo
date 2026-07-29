@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "tsx src/database/migrate.ts",
-    "db:seed": "tsx src/database/seed.ts && tsx src/database/seed-media.ts"
+    "db:seed": "npm run db:seed:data && npm run db:seed:media",
+    "db:seed:data": "tsx src/database/seed.ts",
+    "db:seed:media": "tsx src/database/seed-media.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1095.0",
