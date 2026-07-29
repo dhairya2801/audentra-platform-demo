@@ -47,6 +47,9 @@ compatibility.
 
 ### Changed
 
+- Edward read-only questions no longer trigger a points-balance record refresh,
+  preventing the assistant conversation from being remounted before its reply
+  appears
 - Signed-PDF and document-photo links now carry validated tenant context during
   browser navigation, preventing Harvard credential sessions from being
   evaluated against the default Aster tenant while preserving cross-tenant
