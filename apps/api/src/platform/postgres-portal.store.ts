@@ -3281,13 +3281,16 @@ export class PostgresPortalStore {
       requiresAction: award.requires_action,
     }));
     const acceptedAidCents = awards.reduce(
-      (total, award) => total + award.acceptedAmountCents,
+      (total, award) =>
+        total +
+        (award.type === "work_study" ? 0 : award.acceptedAmountCents),
       0,
     );
     const pendingAidCents = awards.reduce(
       (total, award) =>
         total +
-        (["offered", "pending"].includes(award.status)
+        (award.type !== "work_study" &&
+        ["offered", "pending"].includes(award.status)
           ? award.offeredAmountCents
           : 0),
       0,

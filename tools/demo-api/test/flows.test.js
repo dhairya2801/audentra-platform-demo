@@ -578,6 +578,7 @@ describe("contract-compatible development preview API", () => {
         citizenshipStatus: "us_citizen",
         communicationPreference: "email",
         residencyStatus: "domestic",
+        residencyVerificationPath: "home_address_review",
         streetAddress: "18 Willow Street",
         city: "Cambridge",
         stateOrProvince: "MA",
@@ -731,6 +732,17 @@ describe("contract-compatible development preview API", () => {
       `/v1/student/requirements/${identity.slug}`,
     );
     assert.deepEqual(detailBySlug.payload, identity);
+
+    const financials = await api(baseUrl, "/v1/student/financials");
+    assert.equal(financials.payload.acceptedAidCents, 1_539_500);
+    assert.equal(financials.payload.pendingAidCents, 350_000);
+    assert.equal(financials.payload.remainingBalanceCents, 1_650_500);
+    assert.equal(
+      financials.payload.awards.find(
+        (award) => award.type === "work_study",
+      ).offeredAmountCents,
+      250_000,
+    );
 
     const document = await api(baseUrl, "/v1/student/documents", {
       method: "POST",

@@ -48,10 +48,11 @@ export function validateOnboardingStepData(
         !data.postalCode ||
         !data.country ||
         !data.communicationPreference ||
-        !data.residencyStatus
+        !data.residencyStatus ||
+        !data.residencyVerificationPath
       ) {
         invalid(
-          "Enter your legal and preferred name, personal contact details, citizenship status, and permanent home address",
+          "Enter your legal and preferred name, personal contact details, citizenship status, permanent home address, and residency review path",
         );
       }
       return;

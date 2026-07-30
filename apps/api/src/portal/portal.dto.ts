@@ -156,6 +156,13 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   residencyStatus?: "domestic" | "international";
 
   @IsOptional()
+  @IsIn(["home_address_review", "document_upload", "advisor_review"])
+  residencyVerificationPath?:
+    | "home_address_review"
+    | "document_upload"
+    | "advisor_review";
+
+  @IsOptional()
   @IsString()
   @Length(1, 180)
   streetAddress?: string;
@@ -193,6 +200,10 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
   supportNeeds?: string[];
 
   @IsOptional()
+  @IsIn(["not_now", "housing", "academic", "both"])
+  accommodationInterest?: "not_now" | "housing" | "academic" | "both";
+
+  @IsOptional()
   @IsIn(["on_campus", "off_campus", "commuting", "undecided", "family"])
   housingPreference?:
     | "on_campus"
@@ -212,6 +223,26 @@ export class StudentOnboardingDataDto implements StudentOnboardingData {
     | "aster_apartments"
     | "student_village"
     | null;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(3)
+  @IsIn(
+    ["aster_residence_hall", "aster_apartments", "student_village"],
+    { each: true },
+  )
+  housingResidencePreferences?: Array<
+    "aster_residence_hall" | "aster_apartments" | "student_village"
+  >;
+
+  @IsOptional()
+  @IsIn(["not_now", "learn_more", "tuition", "housing", "both"])
+  insuranceInterest?:
+    | "not_now"
+    | "learn_more"
+    | "tuition"
+    | "housing"
+    | "both";
 
   @IsOptional()
   @IsString()

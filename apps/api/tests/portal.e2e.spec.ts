@@ -244,6 +244,7 @@ describe("functional student portal API", () => {
           citizenshipStatus: "us_citizen",
           communicationPreference: "email",
           residencyStatus: "domestic",
+          residencyVerificationPath: "home_address_review",
           streetAddress: "18 Willow Street",
           city: "Cambridge",
           stateOrProvince: "MA",

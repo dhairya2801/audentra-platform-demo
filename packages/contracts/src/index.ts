@@ -188,6 +188,10 @@ export interface StudentOnboardingData {
     | "international";
   communicationPreference?: "email" | "sms";
   residencyStatus?: "domestic" | "international";
+  residencyVerificationPath?:
+    | "home_address_review"
+    | "document_upload"
+    | "advisor_review";
   streetAddress?: string;
   addressLine2?: string;
   city?: string;
@@ -195,8 +199,18 @@ export interface StudentOnboardingData {
   postalCode?: string;
   country?: string;
   supportNeeds?: string[];
+  accommodationInterest?: "not_now" | "housing" | "academic" | "both";
   housingPreference?: HousingPreference;
   housingResidenceOption?: HousingResidenceOption;
+  housingResidencePreferences?: Array<
+    Exclude<HousingResidenceOption, null>
+  >;
+  insuranceInterest?:
+    | "not_now"
+    | "learn_more"
+    | "tuition"
+    | "housing"
+    | "both";
   housingRoomType?: string;
   bathroomPreference?: string;
   roommateMatching?: string;

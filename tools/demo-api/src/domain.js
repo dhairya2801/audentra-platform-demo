@@ -312,13 +312,16 @@ export function listCatalogCourses(state, query = "") {
 
 export function buildStudentFinancials(state, clock = () => new Date()) {
   const acceptedAidCents = state.financials.awards.reduce(
-    (sum, award) => sum + award.acceptedAmountCents,
+    (sum, award) =>
+      sum +
+      (award.type === "work_study" ? 0 : award.acceptedAmountCents),
     0,
   );
   const pendingAidCents = state.financials.awards.reduce(
     (sum, award) =>
       sum +
-      (["offered", "pending"].includes(award.status)
+      (award.type !== "work_study" &&
+      ["offered", "pending"].includes(award.status)
         ? award.offeredAmountCents
         : 0),
     0,
@@ -2388,6 +2391,7 @@ function validateOnboardingData(input) {
     "citizenshipStatus",
     "communicationPreference",
     "residencyStatus",
+    "residencyVerificationPath",
     "streetAddress",
     "addressLine2",
     "city",
@@ -2395,8 +2399,11 @@ function validateOnboardingData(input) {
     "postalCode",
     "country",
     "supportNeeds",
+    "accommodationInterest",
     "housingPreference",
     "housingResidenceOption",
+    "housingResidencePreferences",
+    "insuranceInterest",
     "housingRoomType",
     "bathroomPreference",
     "roommateMatching",
@@ -2502,6 +2509,20 @@ function validateOnboardingData(input) {
       ["domestic", "international"],
     );
   }
+  if (data.residencyVerificationPath !== undefined) {
+    result.residencyVerificationPath = enumValue(
+      data.residencyVerificationPath,
+      "residencyVerificationPath",
+      ["home_address_review", "document_upload", "advisor_review"],
+    );
+  }
+  if (data.accommodationInterest !== undefined) {
+    result.accommodationInterest = enumValue(
+      data.accommodationInterest,
+      "accommodationInterest",
+      ["not_now", "housing", "academic", "both"],
+    );
+  }
   if (data.housingPreference !== undefined) {
     result.housingPreference = enumValue(
       data.housingPreference,
@@ -2518,6 +2539,41 @@ function validateOnboardingData(input) {
             "housingResidenceOption",
             ["aster_residence_hall", "aster_apartments", "student_village"],
           );
+  }
+  if (data.housingResidencePreferences !== undefined) {
+    if (
+      !Array.isArray(data.housingResidencePreferences) ||
+      data.housingResidencePreferences.length > 3
+    ) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "housingResidencePreferences must contain at most three residences",
+      );
+    }
+    result.housingResidencePreferences = data.housingResidencePreferences.map(
+      (value, index) =>
+        enumValue(
+          value,
+          `housingResidencePreferences[${index}]`,
+          ["aster_residence_hall", "aster_apartments", "student_village"],
+        ),
+    );
+    if (
+      new Set(result.housingResidencePreferences).size !==
+      result.housingResidencePreferences.length
+    ) {
+      throw badRequest(
+        "INVALID_FIELD",
+        "housingResidencePreferences cannot contain duplicates",
+      );
+    }
+  }
+  if (data.insuranceInterest !== undefined) {
+    result.insuranceInterest = enumValue(
+      data.insuranceInterest,
+      "insuranceInterest",
+      ["not_now", "learn_more", "tuition", "housing", "both"],
+    );
   }
   const boundedStrings = {
     streetAddress: 180,
@@ -2759,10 +2815,11 @@ function validateOnboardingStep(state, step, data) {
       !data.postalCode ||
       !data.country ||
       !data.communicationPreference ||
-      !data.residencyStatus
+      !data.residencyStatus ||
+      !data.residencyVerificationPath
     ) {
       invalid(
-        "Enter your legal and preferred name, personal contact details, citizenship status, and permanent home address",
+        "Enter your legal and preferred name, personal contact details, citizenship status, permanent home address, and residency review path",
       );
     }
     return;
