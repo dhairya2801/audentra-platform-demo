@@ -897,6 +897,7 @@ async function main(): Promise<void> {
     await seedPortalMediaMetadata(client);
     await seedImmunizationPolicy(client);
     await seedAiPromptRuntime(client, config);
+    await seedStaffActionCenter(client);
     await client.query("COMMIT");
     process.stdout.write("Demo seed is ready\n");
   } catch (error) {
@@ -2276,6 +2277,86 @@ async function seedTenantRewards(
       ],
     );
   }
+}
+
+async function seedStaffActionCenter(client: PoolClient): Promise<void> {
+  await client.query(
+    `INSERT INTO staff_member (
+       id, tenant_id, display_name, email_normalized, component
+     )
+     VALUES
+       ($1, $2, 'Priya Shah', 'priya.shah@aster.example.edu', 'Admissions'),
+       ($3, $2, 'Marcus Lee', 'marcus.lee@aster.example.edu', 'Registrar')
+     ON CONFLICT (id) DO UPDATE SET
+       display_name = EXCLUDED.display_name,
+       email_normalized = EXCLUDED.email_normalized,
+       component = EXCLUDED.component,
+       active = true,
+       updated_at = now()`,
+    [
+      DEMO_IDS.staffAdvisorId,
+      DEMO_IDS.tenantId,
+      DEMO_IDS.staffReviewerId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO staff_work_item (
+       id, tenant_id, student_id, key, title, description, status, priority,
+       work_type, component, due_at, escalated, assignee_id, source_type,
+       source_id, version, created_at, updated_at
+     )
+     VALUES
+       (
+         $1, $2, $3, 'ENR-104',
+         'Review Alex''s onboarding support choices',
+         'Confirm residency, housing, and accommodation follow-up choices before the next enrollment milestone.',
+         'todo', 'high', 'enrollment', 'Admissions',
+         '2027-07-29T17:00:00.000Z', false, $4, 'onboarding', $3, 1,
+         '2026-07-24T00:00:00.000Z', '2026-07-24T00:00:00.000Z'
+       ),
+       (
+         $5, $2, $3, 'COM-208',
+         'Follow up on enrollment communication preference',
+         'Confirm the best channel for time-sensitive enrollment reminders.',
+         'in_progress', 'medium', 'communication', 'Admissions',
+         '2027-08-01T17:00:00.000Z', false, $4, 'message', $6, 1,
+         '2026-07-24T00:00:00.000Z', '2026-07-24T00:00:00.000Z'
+       )
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      DEMO_IDS.staffOnboardingWorkItemId,
+      DEMO_IDS.tenantId,
+      DEMO_IDS.studentId,
+      DEMO_IDS.staffAdvisorId,
+      DEMO_IDS.staffOutreachWorkItemId,
+      DEMO_IDS.reminderMessageId,
+    ],
+  );
+  await client.query(
+    `INSERT INTO staff_work_log (
+       id, tenant_id, work_item_id, actor_type, actor_name, action, message,
+       occurred_at
+     )
+     VALUES
+       (
+         $1, $2, $3, 'system', 'VV workflow', 'created',
+         'Created from the enrollment onboarding queue.',
+         '2026-07-24T00:00:00.000Z'
+       ),
+       (
+         $4, $2, $5, 'system', 'VV workflow', 'created',
+         'Created from the student communication queue.',
+         '2026-07-24T00:00:00.000Z'
+       )
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      DEMO_IDS.staffOnboardingLogId,
+      DEMO_IDS.tenantId,
+      DEMO_IDS.staffOnboardingWorkItemId,
+      DEMO_IDS.staffOutreachLogId,
+      DEMO_IDS.staffOutreachWorkItemId,
+    ],
+  );
 }
 
 void main();

@@ -318,6 +318,7 @@ export interface StudentBootstrap {
     version: number;
   };
   rewards?: StudentRewardSummary;
+  unreadMessageCount: number;
   initialRoute: "/onboarding" | "/dashboard";
   generatedAt: string;
 }
@@ -579,6 +580,488 @@ export interface StudentDocument {
 export interface StudentDocumentList {
   items: StudentDocument[];
   total: number;
+}
+
+export type StaffWorkItemStatus = "todo" | "in_progress" | "done";
+export type StaffWorkItemPriority = "urgent" | "high" | "medium" | "low";
+export type StaffWorkItemType =
+  | "enrollment"
+  | "document_review"
+  | "communication";
+
+export interface StaffMemberSummary {
+  id: string;
+  name: string;
+  email: string;
+  component: string;
+}
+
+export interface StaffWorkItemLog {
+  id: string;
+  action:
+    | "created"
+    | "status_changed"
+    | "assigned"
+    | "escalated"
+    | "commented"
+    | "document_decided"
+    | "student_preferences_updated";
+  message: string;
+  actorName: string;
+  occurredAt: string;
+}
+
+export interface StaffWorkItem {
+  id: string;
+  key: string;
+  title: string;
+  description: string;
+  status: StaffWorkItemStatus;
+  priority: StaffWorkItemPriority;
+  type: StaffWorkItemType;
+  component: string;
+  dueAt: string | null;
+  escalated: boolean;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  assignee: StaffMemberSummary | null;
+  student: {
+    id: string;
+    name: string;
+    preferredName: string;
+    programName: string;
+    classYear: number;
+  };
+  source:
+    | {
+        type: "onboarding" | "requirement" | "document" | "message";
+        id: string;
+      }
+    | null;
+  history: StaffWorkItemLog[];
+}
+
+export interface StaffActionCenter {
+  items: StaffWorkItem[];
+  staff: StaffMemberSummary[];
+  counts: {
+    todo: number;
+    inProgress: number;
+    done: number;
+    urgent: number;
+    escalated: number;
+  };
+  generatedAt: string;
+}
+
+export interface StaffStudentRecord {
+  student: StaffWorkItem["student"];
+  onboarding: StudentOnboarding;
+  profile: StudentProfile;
+  requirements: StudentRequirementList;
+  documents: StudentDocumentList;
+  syntheticTestRecord?: boolean;
+  operation?: StaffStudentOperation | null;
+}
+
+export interface StaffSession {
+  authenticated: true;
+  mode: "credentials";
+  actorType: "staff";
+  staff: StaffMemberSummary;
+  notice: string;
+}
+
+export interface StaffSignInInput {
+  email: string;
+  password: string;
+}
+
+export interface UpdateStaffWorkItemInput {
+  expectedVersion: number;
+  status?: StaffWorkItemStatus;
+  assigneeId?: string | null;
+  escalated?: boolean;
+  note?: string;
+}
+
+export interface UpdateStaffStudentPreferencesInput {
+  expectedOnboardingVersion: number;
+  expectedProfileVersion: number;
+  communicationPreference: "email" | "sms";
+  housingPreference: HousingPreference;
+  accommodationInterest: NonNullable<
+    StudentOnboardingData["accommodationInterest"]
+  >;
+  residencyVerificationPath: NonNullable<
+    StudentOnboardingData["residencyVerificationPath"]
+  >;
+  notifyStudent: boolean;
+  note?: string;
+}
+
+export interface ReviewStaffDocumentInput {
+  workItemId: string;
+  expectedWorkItemVersion: number;
+  decision: "accepted" | "rejected";
+  note: string;
+  notifyStudent: boolean;
+}
+
+export interface StaffDocumentDecisionResult {
+  document: StudentDocument;
+  workItem: StaffWorkItem;
+  notification: StudentMessage | null;
+}
+
+export type StaffManagedContentStatus = "draft" | "published" | "archived";
+
+export interface StaffKnowledgeCard {
+  id: string;
+  title: string;
+  summary: string;
+  body: string;
+  category: string;
+  audience: "internal" | "student";
+  status: StaffManagedContentStatus;
+  owner: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface StaffCorePlay {
+  id: string;
+  title: string;
+  description: string;
+  trigger: string;
+  audience: string;
+  steps: string[];
+  status: "draft" | "active" | "archived";
+  owner: string;
+  version: number;
+  updatedAt: string;
+}
+
+export interface StaffInquiry {
+  id: string;
+  student: StaffWorkItem["student"];
+  topicCode: "getting_started" | "documents" | "payments" | "support";
+  subject: string;
+  message: string;
+  status: "new" | "open" | "waiting_on_student" | "resolved";
+  priority: StaffWorkItemPriority;
+  assignee: StaffMemberSummary | null;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface StaffJourneyBlueprintItem {
+  id: string;
+  kind: "onboarding" | "enrollment";
+  flowId: string;
+  flowTitle: string;
+  title: string;
+  description: string;
+  owner: string;
+  required: boolean;
+  published: boolean;
+  order: number;
+  taskType:
+    | "information"
+    | "form"
+    | "upload_file"
+    | "approval"
+    | "single_select"
+    | "multiple_select"
+    | "selection_flow"
+    | "signature"
+    | "payment"
+    | "scheduling";
+  submissionType: "none" | "form" | "document" | "payment" | "appointment";
+  points: number;
+  studentStep: string | null;
+  dependsOn: string[];
+  flow: Array<{
+    id: string;
+    title: string;
+    field_type: string;
+    required: boolean;
+    options?: string[];
+    maximum_selections?: number;
+    when?: { field: string; equals: string };
+  }>;
+  configurationVersion: number;
+}
+
+export type StaffManagedConfigurationKind =
+  | "journeys"
+  | "campus_life"
+  | "academics";
+
+export interface StaffManagedConfiguration {
+  kind: StaffManagedConfigurationKind;
+  fileName: string;
+  version: number;
+  yaml: string;
+  recordCount: number;
+  updatedAt: string;
+  updatedBy: string;
+  changeSummary?: string;
+}
+
+export interface UpdateStaffManagedConfigurationInput {
+  expectedVersion: number;
+  yaml: string;
+  changeSummary?: string;
+}
+
+export interface StaffEdwardConfigurationDraftInput {
+  kind: StaffManagedConfigurationKind;
+  expectedVersion: number;
+  instruction: string;
+}
+
+export interface StaffEdwardConfigurationDraft {
+  kind: StaffManagedConfigurationKind;
+  expectedVersion: number;
+  yaml: string;
+  summary: string;
+  changes: string[];
+  warnings: string[];
+  executionMode: "draft_requires_confirmation";
+}
+
+export interface StaffCommunicationHistoryItem {
+  id: string;
+  channel: "email" | "sms" | "voice" | "portal";
+  direction: "inbound" | "outbound";
+  summary: string;
+  outcome:
+    | "opened"
+    | "delivered"
+    | "no_response"
+    | "needs_follow_up"
+    | "completed";
+  occurredAt: string;
+}
+
+export interface StaffStudentOperation {
+  id: string;
+  name: string;
+  preferredName: string;
+  programName: string;
+  classYear: number;
+  assignedStaffId: string;
+  syntheticSeed: boolean;
+  journey: {
+    stage: string;
+    completedTasks: number;
+    totalTasks: number;
+    lastActivityAt: string;
+  };
+  risk: {
+    score: number;
+    band: "low" | "medium" | "high" | "critical";
+    category:
+      | "financial"
+      | "academic"
+      | "belonging"
+      | "administrative"
+      | "family"
+      | "engagement"
+      | "geographic"
+      | "confidence"
+      | "timing";
+    meltLikelihoodPercent: number;
+    recoveryLikelihoodPercent: number;
+    reason: string;
+    signals: string[];
+    modelVersion: string;
+    evaluatedAt: string;
+  };
+  recommendedAction: {
+    title: string;
+    rationale: string;
+    channel: "email" | "sms" | "voice" | "portal";
+    expectedImpact: string;
+    taskId: string | null;
+    recommendedToday: boolean;
+  };
+  communicationHistory: StaffCommunicationHistoryItem[];
+}
+
+export interface StaffPersonalActionCenter {
+  staff: StaffMemberSummary;
+  students: StaffStudentOperation[];
+  tasks: StaffWorkItem[];
+  counts: {
+    studentsToday: number;
+    critical: number;
+    highRisk: number;
+    inProgress: number;
+    completed: number;
+  };
+  generatedAt: string;
+}
+
+export interface StaffCohortSeed {
+  synthetic: true;
+  count: number;
+  purpose: string;
+  generatedAt: string;
+  tenantSlug: string;
+}
+
+export interface StaffPortalInventoryItem {
+  id:
+    | "onboarding"
+    | "enrollment"
+    | "classrooms"
+    | "campus_life"
+    | "financials"
+    | "messages"
+    | "help";
+  label: string;
+  description: string;
+  recordCount: number;
+  managementState: "editable" | "partially_editable" | "planned";
+}
+
+export interface StaffOutreachRun {
+  id: string;
+  title: string;
+  audience: string;
+  channel: "email" | "sms" | "voice";
+  requestedCount: number;
+  status: "simulation_only";
+  createdBy: string;
+  createdAt: string;
+}
+
+export interface StaffOperationsWorkspace {
+  currentStaff: StaffMemberSummary;
+  actionCenter: StaffActionCenter;
+  personalActionCenter: StaffPersonalActionCenter;
+  cohort: StaffStudentOperation[];
+  cohortSeed: StaffCohortSeed;
+  student: StaffStudentRecord;
+  knowledgeBase: StaffKnowledgeCard[];
+  corePlays: StaffCorePlay[];
+  inquiries: StaffInquiry[];
+  journeyBlueprint: StaffJourneyBlueprintItem[];
+  academicCatalog: {
+    version: string;
+    courses: CatalogCourse[];
+  };
+  configurations: {
+    journeys: StaffManagedConfiguration;
+    campusLife: StaffManagedConfiguration;
+    academics: StaffManagedConfiguration;
+  };
+  campusLife: CampusLifeFeed;
+  portalInventory: StaffPortalInventoryItem[];
+  outreachRuns: StaffOutreachRun[];
+  capabilities: {
+    sharedStudentEdits: true;
+    campusContentEdits: true;
+    knowledgeBaseEdits: true;
+    corePlayEdits: true;
+    inquiryReplies: true;
+    externalOutreach: "simulation_only";
+    staffEdward: "preview_only";
+    managedYaml: true;
+  };
+  generatedAt: string;
+}
+
+export interface UpdateStaffKnowledgeCardInput {
+  expectedVersion: number;
+  title: string;
+  summary: string;
+  body: string;
+  category: string;
+  audience: StaffKnowledgeCard["audience"];
+  status: StaffKnowledgeCard["status"];
+}
+
+export type CreateStaffKnowledgeCardInput = Omit<
+  UpdateStaffKnowledgeCardInput,
+  "expectedVersion"
+>;
+
+export interface UpdateStaffCorePlayInput {
+  expectedVersion: number;
+  title: string;
+  description: string;
+  trigger: string;
+  audience: string;
+  steps: string[];
+  status: StaffCorePlay["status"];
+}
+
+export type CreateStaffCorePlayInput = Omit<
+  UpdateStaffCorePlayInput,
+  "expectedVersion"
+>;
+
+export interface UpdateStaffInquiryInput {
+  expectedVersion: number;
+  status: StaffInquiry["status"];
+  assigneeId?: string | null;
+  responseNote?: string;
+  notifyStudent: boolean;
+}
+
+export interface UpdateStaffClubInput {
+  expectedVersion: number;
+  name: string;
+  category: string;
+  description: string;
+  latestUpdate: string;
+  contactName: string;
+  contactRole: string;
+  contactChannel: string;
+  membershipOpen: boolean;
+}
+
+export interface CreateStaffClubInput {
+  name: string;
+  category: string;
+  description: string;
+  latestUpdate: string;
+  contactName: string;
+  contactRole: string;
+  contactChannel: string;
+  membershipOpen: boolean;
+  imageUrl?: string;
+}
+
+export interface SimulateStaffOutreachInput {
+  title: string;
+  audience: string;
+  channel: StaffOutreachRun["channel"];
+  requestedCount: number;
+}
+
+export interface StaffEdwardPreviewInput {
+  message: string;
+}
+
+export interface StaffEdwardPreview {
+  message: string;
+  plan: {
+    label: string;
+    capability:
+      | "read_student_data"
+      | "update_journey"
+      | "draft_message"
+      | "launch_outreach";
+    status: "available" | "needs_confirmation" | "simulation_only";
+  }[];
+  dataSources: string[];
+  executionMode: "preview_only";
 }
 
 export interface CreateStudentDocumentInput {
@@ -871,6 +1354,9 @@ export interface StudentClub {
   meetingSchedule?: string | null;
   membershipOpen?: boolean;
   events?: StudentClubEvent[];
+  /** Present on staff-managed content records; student clients may ignore it. */
+  version?: number;
+  updatedAt?: string;
 }
 
 export interface CampusLifeFeed {
@@ -961,6 +1447,24 @@ export interface StudentHelp {
     phone: string;
     hours: string;
   };
+}
+
+export interface CreateStudentHelpRequestInput {
+  topicCode: HelpArticle["category"];
+  message: string;
+}
+
+export interface StudentHelpRequest {
+  id: string;
+  topicCode: HelpArticle["category"];
+  subject: string;
+  message: string;
+  status: "new" | "open" | "waiting_on_student" | "resolved";
+  priority: StaffWorkItemPriority;
+  assigneeId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
 }
 
 export interface ApiErrorResponse {

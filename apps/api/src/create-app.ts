@@ -88,6 +88,7 @@ export async function createApiApplication(
       "X-Demo-Tenant-Id",
       "X-Demo-Student-Id",
       "X-Demo-Actor-Id",
+      "X-Demo-Actor-Type",
     ],
     exposedHeaders: ["X-Request-Id", "X-Correlation-Id", "X-Trace-Id"],
     maxAge: 600,

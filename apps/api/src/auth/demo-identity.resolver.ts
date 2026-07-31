@@ -24,6 +24,18 @@ export class DemoIdentityResolver implements IdentityResolver {
   constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
 
   resolve(request: FastifyRequest): AuthContext {
+    const isStaffRoute = request.url
+      .split("?", 1)[0]
+      ?.startsWith("/v1/staff");
+    const requestedActorType = getSingleHeader(
+      request,
+      "x-demo-actor-type",
+    );
+    if (isStaffRoute && requestedActorType !== "staff") {
+      throw new UnauthorizedError(
+        "Staff routes require the development staff identity header",
+      );
+    }
     const tenantId =
       getSingleHeader(request, "x-demo-tenant-id") ??
       this.config.demoIds.tenantId;
@@ -32,7 +44,9 @@ export class DemoIdentityResolver implements IdentityResolver {
       this.config.demoIds.studentId;
     const actorId =
       getSingleHeader(request, "x-demo-actor-id") ??
-      this.config.demoIds.actorId;
+      (isStaffRoute
+        ? this.config.demoIds.staffActorId ?? this.config.demoIds.actorId
+        : this.config.demoIds.actorId);
 
     if (![tenantId, studentId, actorId].every(isUuid)) {
       throw new UnauthorizedError("Demo identity headers must be valid UUIDs");
@@ -42,7 +56,7 @@ export class DemoIdentityResolver implements IdentityResolver {
       tenantId,
       studentId,
       actorId,
-      actorType: "student",
+      actorType: isStaffRoute ? "staff" : "student",
       authenticationMethod: "demo",
     };
   }

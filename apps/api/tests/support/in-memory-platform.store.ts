@@ -409,6 +409,9 @@ export class InMemoryPlatformStore implements PlatformStore {
         currentStep: this.onboarding.currentStep,
         version: this.onboarding.version,
       },
+      unreadMessageCount: this.messages.filter(
+        (message) => message.readAt === null,
+      ).length,
       initialRoute: required ? "/onboarding" : "/dashboard",
       generatedAt: "2026-07-24T12:00:00.000Z",
     };

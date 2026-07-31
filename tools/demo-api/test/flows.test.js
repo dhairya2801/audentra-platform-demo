@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 import { createDemoApi } from "../src/http-api.js";
 import { ids, ONBOARDING_STEPS } from "../src/seed.js";
 import { JsonStateStore } from "../src/store.js";
+import { localStaffPassword } from "../src/staff-credential-auth-store.js";
 
 const fixedClock = () => new Date("2026-07-24T12:00:00.000Z");
 const servers = [];
@@ -101,6 +102,415 @@ async function completeProfilePrerequisite(baseUrl) {
 }
 
 describe("contract-compatible development preview API", () => {
+  it("shares versioned staff changes with the student portal", async () => {
+    const { baseUrl } = await startPreview();
+    const unauthenticated = await api(baseUrl, "/v1/staff/action-center", {
+      authenticated: false,
+    });
+    assert.equal(unauthenticated.response.status, 401);
+
+    const signIn = await api(baseUrl, "/v1/auth/staff/sign-in", {
+      authenticated: false,
+      method: "POST",
+      body: {
+        email: "priya.shah@aster.example.edu",
+        password: localStaffPassword,
+      },
+    });
+    assert.equal(signIn.response.status, 200);
+    assert.equal(signIn.payload.actorType, "staff");
+    assert.match(
+      signIn.response.headers.get("set-cookie"),
+      /^vv_staff_session=[A-Za-z0-9_-]{32,};/,
+    );
+    const staffCookie = signIn.response.headers
+      .get("set-cookie")
+      .split(";", 1)[0];
+    const center = await api(baseUrl, "/v1/staff/action-center", {
+      headers: { cookie: staffCookie },
+    });
+    assert.equal(center.response.status, 200);
+    assert.ok(center.payload.items.length >= 120);
+    const onboardingItem = center.payload.items.find(
+      (item) => item.id === ids.staffOnboardingWorkItem,
+    );
+    assert.equal(onboardingItem.status, "todo");
+
+    const moved = await api(
+      baseUrl,
+      `/v1/staff/work-items/${onboardingItem.id}`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: onboardingItem.version,
+          status: "in_progress",
+          note: "Reviewing the latest student choices.",
+        },
+      },
+    );
+    assert.equal(moved.response.status, 200);
+    assert.equal(moved.payload.status, "in_progress");
+    assert.equal(moved.payload.version, onboardingItem.version + 1);
+
+    const stale = await api(
+      baseUrl,
+      `/v1/staff/work-items/${onboardingItem.id}`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: onboardingItem.version,
+          status: "done",
+        },
+      },
+    );
+    assert.equal(stale.response.status, 409);
+    assert.equal(stale.payload.error.code, "VERSION_CONFLICT");
+
+    const student = await api(
+      baseUrl,
+      `/v1/staff/students/${ids.student}`,
+      { headers: { cookie: staffCookie } },
+    );
+    const updated = await api(
+      baseUrl,
+      `/v1/staff/students/${ids.student}/preferences`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedOnboardingVersion: student.payload.onboarding.version,
+          expectedProfileVersion: student.payload.profile.version,
+          communicationPreference: "sms",
+          housingPreference: "off_campus",
+          accommodationInterest: "academic",
+          residencyVerificationPath: "advisor_review",
+          notifyStudent: true,
+          note: "We updated your preferences after your advisor conversation.",
+        },
+      },
+    );
+    assert.equal(updated.response.status, 200);
+    assert.equal(
+      updated.payload.onboarding.data.housingPreference,
+      "off_campus",
+    );
+
+    const studentOnboarding = await api(
+      baseUrl,
+      "/v1/student/onboarding",
+    );
+    assert.equal(
+      studentOnboarding.payload.data.housingPreference,
+      "off_campus",
+    );
+    assert.equal(
+      studentOnboarding.payload.data.communicationPreference,
+      "sms",
+    );
+    const messages = await api(baseUrl, "/v1/student/messages");
+    assert.equal(
+      messages.payload.items[0].subject,
+      "Your enrollment preferences were updated",
+    );
+    const bootstrap = await api(baseUrl, "/v1/student/bootstrap");
+    assert.equal(bootstrap.payload.unreadMessageCount, 2);
+
+    const workspace = await api(baseUrl, "/v1/staff/workspace", {
+      headers: { cookie: staffCookie },
+    });
+    assert.equal(workspace.response.status, 200);
+    assert.equal(workspace.payload.capabilities.externalOutreach, "simulation_only");
+    assert.ok(workspace.payload.knowledgeBase.length >= 3);
+    assert.ok(workspace.payload.corePlays.length >= 2);
+    assert.ok(workspace.payload.inquiries.length >= 1);
+    assert.equal(workspace.payload.cohort.length, 400);
+    assert.equal(
+      workspace.payload.personalActionCenter.counts.studentsToday,
+      30,
+    );
+    assert.equal(workspace.payload.currentStaff.name, "Priya Shah");
+    assert.equal(workspace.payload.cohortSeed.synthetic, true);
+    assert.equal(workspace.payload.configurations.journeys.version, 1);
+
+    const journeyDraft = await api(
+      baseUrl,
+      "/v1/staff/edward/configuration-draft",
+      {
+        method: "POST",
+        headers: { cookie: staffCookie },
+        body: {
+          kind: "journeys",
+          expectedVersion: workspace.payload.configurations.journeys.version,
+          instruction: "Change Review your offer to 75 points.",
+        },
+      },
+    );
+    assert.equal(journeyDraft.response.status, 200);
+    assert.match(journeyDraft.payload.summary, /75 points/);
+    const journeyPublish = await api(
+      baseUrl,
+      "/v1/staff/configurations/journeys",
+      {
+        method: "PUT",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: journeyDraft.payload.expectedVersion,
+          yaml: journeyDraft.payload.yaml,
+          changeSummary: journeyDraft.payload.summary,
+        },
+      },
+    );
+    assert.equal(journeyPublish.response.status, 200);
+    assert.equal(journeyPublish.payload.version, 2);
+    const workspaceAfterJourney = await api(
+      baseUrl,
+      "/v1/staff/workspace",
+      { headers: { cookie: staffCookie } },
+    );
+    assert.equal(
+      workspaceAfterJourney.payload.journeyBlueprint.find(
+        (item) => item.id === "review_offer",
+      ).points,
+      75,
+    );
+
+    const eventDraft = await api(
+      baseUrl,
+      "/v1/staff/edward/configuration-draft",
+      {
+        method: "POST",
+        headers: { cookie: staffCookie },
+        body: {
+          kind: "campus_life",
+          expectedVersion:
+            workspace.payload.configurations.campusLife.version,
+          instruction:
+            'Add an event called "First-Gen Welcome" on 2027-09-18 at Student Commons.',
+        },
+      },
+    );
+    assert.equal(eventDraft.response.status, 200);
+    const eventPublish = await api(
+      baseUrl,
+      "/v1/staff/configurations/campus_life",
+      {
+        method: "PUT",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: eventDraft.payload.expectedVersion,
+          yaml: eventDraft.payload.yaml,
+          changeSummary: eventDraft.payload.summary,
+        },
+      },
+    );
+    assert.equal(eventPublish.response.status, 200);
+    const campusAfterEvent = await api(
+      baseUrl,
+      "/v1/student/campus-life",
+    );
+    assert.ok(
+      campusAfterEvent.payload.events.some(
+        (event) => event.title === "First-Gen Welcome",
+      ),
+    );
+
+    const courseDraft = await api(
+      baseUrl,
+      "/v1/staff/edward/configuration-draft",
+      {
+        method: "POST",
+        headers: { cookie: staffCookie },
+        body: {
+          kind: "academics",
+          expectedVersion:
+            workspace.payload.configurations.academics.version,
+          instruction:
+            'Add course CS 250 called "Applied AI Studio" for 4 credits.',
+        },
+      },
+    );
+    assert.equal(courseDraft.response.status, 200);
+    const coursePublish = await api(
+      baseUrl,
+      "/v1/staff/configurations/academics",
+      {
+        method: "PUT",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: courseDraft.payload.expectedVersion,
+          yaml: courseDraft.payload.yaml,
+          changeSummary: courseDraft.payload.summary,
+        },
+      },
+    );
+    assert.equal(coursePublish.response.status, 200);
+    const courseSearch = await api(
+      baseUrl,
+      "/v1/catalog/courses?query=CS%20250",
+    );
+    assert.equal(courseSearch.payload.items[0].title, "Applied AI Studio");
+
+    const knowledge = workspace.payload.knowledgeBase[0];
+    const knowledgeUpdate = await api(
+      baseUrl,
+      `/v1/staff/knowledge-base/${knowledge.id}`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: knowledge.version,
+          title: knowledge.title,
+          summary: `${knowledge.summary} Reviewed.`,
+          body: knowledge.body,
+          category: knowledge.category,
+          audience: knowledge.audience,
+          status: "published",
+        },
+      },
+    );
+    assert.equal(knowledgeUpdate.response.status, 200);
+    assert.equal(knowledgeUpdate.payload.version, knowledge.version + 1);
+
+    const club = workspace.payload.campusLife.clubs[0];
+    const clubUpdate = await api(
+      baseUrl,
+      `/v1/staff/campus-life/clubs/${club.id}`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: club.version,
+          name: club.name,
+          category: club.category,
+          description: `${club.description} Staff-managed update.`,
+          latestUpdate: club.latestUpdate,
+          contactName: club.contactName,
+          contactRole: club.contactRole,
+          contactChannel: club.contactChannel,
+          membershipOpen: true,
+        },
+      },
+    );
+    assert.equal(clubUpdate.response.status, 200);
+    const campusLife = await api(baseUrl, "/v1/student/campus-life");
+    assert.match(campusLife.payload.clubs[0].description, /Staff-managed update/);
+
+    const createdKnowledge = await api(
+      baseUrl,
+      "/v1/staff/knowledge-base",
+      {
+        method: "POST",
+        headers: { cookie: staffCookie },
+        body: {
+          title: "Orientation arrival guide",
+          summary: "Arrival guidance for new students.",
+          body: "Check in at the student center before the first session.",
+          category: "Orientation",
+          audience: "student",
+          status: "draft",
+        },
+      },
+    );
+    assert.equal(createdKnowledge.response.status, 201);
+    assert.equal(createdKnowledge.payload.version, 1);
+
+    const createdPlay = await api(baseUrl, "/v1/staff/core-plays", {
+      method: "POST",
+      headers: { cookie: staffCookie },
+      body: {
+        title: "Orientation rescue",
+        description: "Help students who have not registered.",
+        trigger: "Orientation registration is overdue",
+        audience: "Students without an orientation session",
+        steps: ["Verify eligibility", "Draft registration guidance"],
+        status: "draft",
+      },
+    });
+    assert.equal(createdPlay.response.status, 201);
+    assert.equal(createdPlay.payload.steps.length, 2);
+
+    const createdClub = await api(
+      baseUrl,
+      "/v1/staff/campus-life/clubs",
+      {
+        method: "POST",
+        headers: { cookie: staffCookie },
+        body: {
+          name: "Aster Debate",
+          category: "Academic",
+          description: "Practice debate and public speaking.",
+          latestUpdate: "New members are welcome.",
+          contactName: "Taylor Kim",
+          contactRole: "President",
+          contactChannel: "debate@aster.edu",
+          membershipOpen: true,
+        },
+      },
+    );
+    assert.equal(createdClub.response.status, 201);
+    const campusAfterCreate = await api(baseUrl, "/v1/student/campus-life");
+    assert.ok(
+      campusAfterCreate.payload.clubs.some(
+        (candidate) => candidate.name === "Aster Debate",
+      ),
+    );
+
+    const inquiry = workspace.payload.inquiries[0];
+    const inquiryUpdate = await api(
+      baseUrl,
+      `/v1/staff/inquiries/${inquiry.id}`,
+      {
+        method: "PATCH",
+        headers: { cookie: staffCookie },
+        body: {
+          expectedVersion: inquiry.version,
+          status: "waiting_on_student",
+          assigneeId: workspace.payload.actionCenter.staff[0].id,
+          responseNote: "Please upload both official transcripts.",
+          notifyStudent: true,
+        },
+      },
+    );
+    assert.equal(inquiryUpdate.response.status, 200);
+    assert.equal(inquiryUpdate.payload.status, "waiting_on_student");
+    const messagesAfterReply = await api(baseUrl, "/v1/student/messages");
+    assert.ok(
+      messagesAfterReply.payload.items.some(
+        (message) =>
+          message.body === "Please upload both official transcripts.",
+      ),
+    );
+
+    const outreach = await api(baseUrl, "/v1/staff/outreach/simulate", {
+      method: "POST",
+      headers: { cookie: staffCookie },
+      body: {
+        title: "Deposit reminder",
+        audience: "Students with deposits due in 72 hours",
+        channel: "voice",
+        requestedCount: 100,
+      },
+    });
+    assert.equal(outreach.response.status, 201);
+    assert.equal(outreach.payload.status, "simulation_only");
+    assert.equal(outreach.payload.requestedCount, 100);
+
+    const edward = await api(baseUrl, "/v1/staff/edward/preview", {
+      method: "POST",
+      headers: { cookie: staffCookie },
+      body: {
+        message: "Show students with incomplete deposits and call 100 of them.",
+      },
+    });
+    assert.equal(edward.response.status, 200);
+    assert.equal(edward.payload.executionMode, "preview_only");
+    assert.ok(
+      edward.payload.plan.some((step) => step.status === "simulation_only"),
+    );
+  });
+
   it("resolves two university tenants and isolates their demo records", async () => {
     const { baseUrl } = await startPreview();
     const asterHeaders = { "x-tenant-slug": "aster" };
@@ -495,6 +905,7 @@ describe("contract-compatible development preview API", () => {
       "rewards",
       "student",
       "tenant",
+      "unreadMessageCount",
     ]);
     assert.equal(bootstrap.payload.authenticated, true);
     assert.equal(bootstrap.payload.initialRoute, "/onboarding");
@@ -711,7 +1122,12 @@ describe("contract-compatible development preview API", () => {
     );
 
     const requirements = await api(baseUrl, "/v1/student/requirements");
-    assert.equal(requirements.payload.total, 8);
+    assert.equal(requirements.payload.total, 9);
+    assert.ok(
+      requirements.payload.items.some(
+        (requirement) => requirement.code === "student_id_photo",
+      ),
+    );
     const identity = requirements.payload.items.find(
       (requirement) => requirement.code === "identity_document",
     );
@@ -927,6 +1343,23 @@ describe("contract-compatible development preview API", () => {
     assert.equal(
       preflight.headers.get("access-control-allow-credentials"),
       "true",
+    );
+    const staffPreflight = await fetch(
+      `${baseUrl}/v1/staff/action-center`,
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://localhost:3000",
+          "access-control-request-method": "GET",
+          "access-control-request-headers":
+            "x-demo-actor-type,x-tenant-slug",
+        },
+      },
+    );
+    assert.equal(staffPreflight.status, 204);
+    assert.match(
+      staffPreflight.headers.get("access-control-allow-headers"),
+      /X-Demo-Actor-Type/i,
     );
 
     const missingKey = await api(

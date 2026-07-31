@@ -112,4 +112,34 @@ describe("JsonStateStore", () => {
     assert.ok(restored.rewards.rules.length > 0);
     assert.deepEqual(restored.rewards.ledger, []);
   });
+
+  it("reprojects managed YAML when upgrading a persisted staff preview", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vv-demo-yaml-migration-"));
+    const dataFile = join(directory, "state.json");
+    const persisted = createSeedState();
+    delete persisted.staff.managedConfigurations;
+    for (const task of persisted.staff.journeyBlueprint) {
+      delete task.taskType;
+      delete task.points;
+    }
+    await writeFile(dataFile, `${JSON.stringify(persisted)}\n`, "utf8");
+
+    const store = new JsonStateStore(dataFile, fixedClock);
+    const restored = await store.initialize();
+
+    assert.equal(restored.staff.managedConfigurations.journeys.version, 1);
+    assert.ok(
+      restored.staff.journeyBlueprint.every(
+        (task) =>
+          typeof task.taskType === "string" &&
+          Number.isInteger(task.points),
+      ),
+    );
+    assert.equal(
+      restored.staff.journeyBlueprint.find(
+        (task) => task.id === "housing_selection",
+      ).taskType,
+      "selection_flow",
+    );
+  });
 });

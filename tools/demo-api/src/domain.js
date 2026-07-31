@@ -11,6 +11,10 @@ import {
   ONBOARDING_STEPS,
 } from "./seed.js";
 import {
+  enrollmentRequirementsFromConfiguration,
+  managedConfigurationSummary,
+} from "./managed-config.js";
+import {
   booleanValue,
   enumValue,
   exactKeys,
@@ -217,6 +221,9 @@ export function buildBootstrap(state, clock) {
     ...(state.rewards?.program?.enabled
       ? { rewards: rewardSummary(state) }
       : {}),
+    unreadMessageCount: state.messages.filter(
+      (message) => message.readAt === null,
+    ).length,
     initialRoute: onboardingRequired ? "/onboarding" : "/dashboard",
     generatedAt: clock().toISOString(),
   };
@@ -445,7 +452,12 @@ export function acceptOffer(draft, offerId, now) {
   draft.offer.acceptedAt = acceptedAt;
   draft.offer.version += 1;
   draft.journey = createJourney(acceptedAt);
-  draft.requirements = createRequirements(acceptedAt);
+  const configuredRequirements =
+    enrollmentRequirementsFromConfiguration(draft, acceptedAt);
+  draft.requirements =
+    configuredRequirements.length > 0
+      ? configuredRequirements
+      : createRequirements(acceptedAt);
   draft.portalProjectionVersion += 1;
   return acceptOfferResponse(draft);
 }
@@ -899,6 +911,1262 @@ export function markMessageRead(draft, messageId, now, transaction) {
   message.readAt = now.toISOString();
   draft.portalProjectionVersion += 1;
   return structuredClone(message);
+}
+
+const staffPriorityOrder = {
+  urgent: 0,
+  high: 1,
+  medium: 2,
+  low: 3,
+};
+
+function staffStudentSummary(state, studentId = state.profile.studentId) {
+  const cohortStudent = state.staff.cohort?.find(
+    (student) => student.id === studentId,
+  );
+  if (cohortStudent) {
+    return {
+      id: cohortStudent.id,
+      name: cohortStudent.name,
+      preferredName: cohortStudent.preferredName,
+      programName: cohortStudent.programName,
+      classYear: cohortStudent.classYear,
+    };
+  }
+  if (studentId === state.profile.studentId) {
+    return {
+      id: state.profile.studentId,
+      name: `${state.profile.firstName} ${state.profile.lastName}`,
+      preferredName: state.profile.preferredName,
+      programName: state.offer.programName,
+      classYear: state.profile.classYear,
+    };
+  }
+  return null;
+}
+
+function staffMember(state, staffId) {
+  return state.staff.members.find((member) => member.id === staffId) ?? null;
+}
+
+function staffActorName(state, staffId) {
+  return staffMember(state, staffId)?.name ?? "Staff member";
+}
+
+function mapStaffWorkItem(state, item) {
+  const student = staffStudentSummary(state, item.studentId);
+  if (!student) {
+    throw new Error(`Staff work item ${item.id} references an unknown student`);
+  }
+  return {
+    ...structuredClone(item),
+    assignee: item.assigneeId
+      ? structuredClone(staffMember(state, item.assigneeId))
+      : null,
+    student,
+    history: state.staff.workLogs
+      .filter((log) => log.workItemId === item.id)
+      .map(({ workItemId: _workItemId, ...log }) => structuredClone(log))
+      .sort((left, right) =>
+        right.occurredAt.localeCompare(left.occurredAt),
+      ),
+    assigneeId: undefined,
+    studentId: undefined,
+  };
+}
+
+function addStaffWorkLog(
+  draft,
+  workItemId,
+  action,
+  message,
+  actorName,
+  now,
+) {
+  draft.staff.workLogs.push({
+    id: randomUUID(),
+    workItemId,
+    action,
+    message,
+    actorName,
+    occurredAt: now.toISOString(),
+  });
+}
+
+export function ensureStaffDocumentWorkItems(draft, now) {
+  let created = 0;
+  for (const document of draft.documents) {
+    if (!["needs_review", "under_review"].includes(document.status)) continue;
+    const existing = draft.staff.workItems.find(
+      (item) =>
+        item.source?.type === "document" && item.source.id === document.id,
+    );
+    if (existing) continue;
+    const component =
+      document.category === "financial_aid"
+        ? "Financial Aid"
+        : document.category === "health"
+          ? "Student Health"
+          : "Registrar";
+    const assignee =
+      draft.staff.members.find((member) => member.component === component) ??
+      draft.staff.members[1] ??
+      draft.staff.members[0] ??
+      null;
+    const item = {
+      id: randomUUID(),
+      key: `DOC-${301 + draft.staff.workItems.length}`,
+      studentId: draft.profile.studentId,
+      title: `Review ${document.fileName}`,
+      description:
+        "Verify the stored original and make the official staff decision.",
+      status: "todo",
+      priority:
+        document.category === "financial_aid" ? "urgent" : "high",
+      type: "document_review",
+      component,
+      dueAt: new Date(now.getTime() + 2 * 86_400_000).toISOString(),
+      escalated: false,
+      assigneeId: assignee?.id ?? null,
+      source: { type: "document", id: document.id },
+      version: 1,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+    draft.staff.workItems.push(item);
+    addStaffWorkLog(
+      draft,
+      item.id,
+      "created",
+      "Created when the student document entered staff review.",
+      "VV workflow",
+      now,
+    );
+    created += 1;
+  }
+  return created;
+}
+
+export function buildStaffActionCenter(state) {
+  const items = state.staff.workItems
+    .map((item) => mapStaffWorkItem(state, item))
+    .sort((left, right) => {
+      const priority =
+        staffPriorityOrder[left.priority] - staffPriorityOrder[right.priority];
+      if (priority !== 0) return priority;
+      if (left.dueAt && right.dueAt) {
+        const due = left.dueAt.localeCompare(right.dueAt);
+        if (due !== 0) return due;
+      }
+      return right.updatedAt.localeCompare(left.updatedAt);
+    });
+  return {
+    items,
+    staff: structuredClone(state.staff.members),
+    counts: {
+      todo: items.filter((item) => item.status === "todo").length,
+      inProgress: items.filter((item) => item.status === "in_progress").length,
+      done: items.filter((item) => item.status === "done").length,
+      urgent: items.filter((item) => item.priority === "urgent").length,
+      escalated: items.filter((item) => item.escalated).length,
+    },
+    generatedAt: state.fixture.updatedAt,
+  };
+}
+
+export function buildStaffStudentRecord(state, studentId) {
+  uuidValue(studentId, "studentId");
+  const summary = staffStudentSummary(state, studentId);
+  if (!summary) {
+    throw notFound("STAFF_STUDENT_NOT_FOUND", "The student was not found");
+  }
+  if (studentId !== state.profile.studentId) {
+    const operation = state.staff.cohort?.find(
+      (student) => student.id === studentId,
+    );
+    return {
+      student: summary,
+      onboarding: {
+        status: "in_progress",
+        currentStep: "offer",
+        completedAt: null,
+        completedSteps: [],
+        data: {},
+        version: 1,
+        updatedAt:
+          operation?.journey.lastActivityAt ?? state.fixture.updatedAt,
+      },
+      profile: {
+        ...structuredClone(state.profile),
+        studentId,
+        preferredName: summary.preferredName,
+        firstName: summary.name.split(" ")[0] ?? summary.preferredName,
+        lastName: summary.name.split(" ").slice(1).join(" "),
+        classYear: summary.classYear,
+        email: null,
+        mobilePhone: null,
+        version: 1,
+        updatedAt:
+          operation?.journey.lastActivityAt ?? state.fixture.updatedAt,
+      },
+      requirements: {
+        items: [],
+        total: 0,
+        generatedAt: state.fixture.updatedAt,
+      },
+      documents: { items: [], total: 0 },
+      syntheticTestRecord: true,
+      operation: operation ? structuredClone(operation) : null,
+    };
+  }
+  return {
+    student: summary,
+    onboarding: buildOnboarding(state),
+    profile: structuredClone(state.profile),
+    requirements: listRequirements(state),
+    documents: listDocuments(state),
+    syntheticTestRecord: false,
+    operation:
+      state.staff.cohort?.find((student) => student.id === studentId) ?? null,
+  };
+}
+
+function staffInquiry(state, inquiry) {
+  return {
+    id: inquiry.id,
+    student: staffStudentSummary(state),
+    topicCode: inquiry.topicCode,
+    subject:
+      inquiry.subject ??
+      `Student question about ${inquiry.topicCode.replaceAll("_", " ")}`,
+    message: inquiry.message,
+    status: inquiry.status === "received" ? "new" : inquiry.status,
+    priority: inquiry.priority ?? "medium",
+    assignee: inquiry.assigneeId
+      ? structuredClone(staffMember(state, inquiry.assigneeId) ?? null)
+      : null,
+    createdAt: inquiry.createdAt,
+    updatedAt: inquiry.updatedAt ?? inquiry.createdAt,
+    version: inquiry.version ?? 1,
+  };
+}
+
+export function buildStaffOperationsWorkspace(
+  state,
+  staffId = state.staff.members[0]?.id,
+) {
+  const actionCenter = buildStaffActionCenter(state);
+  const knowledgeBase = structuredClone(state.staff.knowledgeBase ?? []);
+  const corePlays = structuredClone(state.staff.corePlays ?? []);
+  const journeyBlueprint = structuredClone(state.staff.journeyBlueprint ?? []);
+  const inquiries = (state.helpRequests ?? [])
+    .map((inquiry) => staffInquiry(state, inquiry))
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const campusLife = buildCampusLife(state);
+  const currentStaff =
+    staffMember(state, staffId) ?? state.staff.members[0] ?? null;
+  if (!currentStaff) {
+    throw notFound(
+      "STAFF_PREVIEW_NOT_CONFIGURED",
+      "No staff identity is configured",
+    );
+  }
+  const cohort = structuredClone(state.staff.cohort ?? []);
+  const personalStudents = cohort
+    .filter(
+      (student) =>
+        student.assignedStaffId === currentStaff.id &&
+        student.recommendedAction?.recommendedToday,
+    )
+    .sort((left, right) => right.risk.score - left.risk.score);
+  const personalTaskIds = new Set(
+    personalStudents
+      .map((student) => student.recommendedAction?.taskId)
+      .filter(Boolean),
+  );
+  const personalTasks = actionCenter.items.filter((item) =>
+    personalTaskIds.has(item.id),
+  );
+  const configurations = {
+    journeys: managedConfigurationSummary(
+      state.staff.managedConfigurations.journeys,
+    ),
+    campusLife: managedConfigurationSummary(
+      state.staff.managedConfigurations.campus_life,
+    ),
+    academics: managedConfigurationSummary(
+      state.staff.managedConfigurations.academics,
+    ),
+  };
+  return {
+    currentStaff: structuredClone(currentStaff),
+    actionCenter,
+    personalActionCenter: {
+      staff: structuredClone(currentStaff),
+      students: personalStudents,
+      tasks: personalTasks,
+      counts: {
+        studentsToday: personalStudents.length,
+        critical: personalStudents.filter(
+          (student) => student.risk.band === "critical",
+        ).length,
+        highRisk: personalStudents.filter(
+          (student) => student.risk.band === "high",
+        ).length,
+        inProgress: personalTasks.filter(
+          (task) => task.status === "in_progress",
+        ).length,
+        completed: personalTasks.filter((task) => task.status === "done").length,
+      },
+      generatedAt: state.fixture.updatedAt,
+    },
+    cohort,
+    cohortSeed: structuredClone(state.staff.cohortSeed),
+    student: buildStaffStudentRecord(state, state.profile.studentId),
+    knowledgeBase,
+    corePlays,
+    inquiries,
+    journeyBlueprint,
+    academicCatalog: {
+      version: state.academicCatalog.version,
+      courses: structuredClone(state.academicCatalog.courses),
+    },
+    configurations,
+    campusLife,
+    portalInventory: [
+      {
+        id: "onboarding",
+        label: "Onboarding",
+        description:
+          "Student intake stages, support preferences, and signed consent.",
+        recordCount: journeyBlueprint.filter((item) => item.kind === "onboarding")
+          .length,
+        managementState: "partially_editable",
+      },
+      {
+        id: "enrollment",
+        label: "Enrollment",
+        description:
+          "Enrollment checklist templates and each student's live requirements.",
+        recordCount:
+          journeyBlueprint.filter((item) => item.kind === "enrollment").length +
+          state.requirements.length,
+        managementState: "editable",
+      },
+      {
+        id: "classrooms",
+        label: "Classrooms",
+        description:
+          "Programs, courses, prerequisites, instructors, and learning resources.",
+        recordCount: state.academicCatalog.courses.length,
+        managementState: "editable",
+      },
+      {
+        id: "campus_life",
+        label: "Campus life",
+        description:
+          "Student clubs, contacts, membership status, and university events.",
+        recordCount: campusLife.clubs.length + campusLife.events.length,
+        managementState: "editable",
+      },
+      {
+        id: "financials",
+        label: "Financials",
+        description:
+          "Aid package content, required documents, deadlines, and payment plans.",
+        recordCount:
+          state.financials.awards.length +
+          state.financials.requiredDocuments.length,
+        managementState: "planned",
+      },
+      {
+        id: "messages",
+        label: "Messages",
+        description:
+          "Official notices sent to students and incoming student inquiries.",
+        recordCount: state.messages.length + inquiries.length,
+        managementState: "editable",
+      },
+      {
+        id: "help",
+        label: "Help and guidance",
+        description:
+          "Student-safe knowledge cards and institutional support information.",
+        recordCount: knowledgeBase.filter((item) => item.audience === "student")
+          .length,
+        managementState: "editable",
+      },
+    ],
+    outreachRuns: structuredClone(state.staff.outreachRuns ?? []),
+    capabilities: {
+      sharedStudentEdits: true,
+      campusContentEdits: true,
+      knowledgeBaseEdits: true,
+      corePlayEdits: true,
+      inquiryReplies: true,
+      externalOutreach: "simulation_only",
+      staffEdward: "preview_only",
+      managedYaml: true,
+    },
+    generatedAt: state.fixture.updatedAt,
+  };
+}
+
+export function createStaffKnowledgeCard(draft, input, staffId, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "title",
+    "summary",
+    "body",
+    "category",
+    "audience",
+    "status",
+  ]);
+  const card = {
+    id: randomUUID(),
+    title: requiredString(body.title, "title", { min: 2, max: 120 }),
+    summary: requiredString(body.summary, "summary", { min: 3, max: 240 }),
+    body: requiredString(body.body, "body", { min: 3, max: 2_000 }),
+    category: requiredString(body.category, "category", {
+      min: 2,
+      max: 60,
+    }),
+    audience: enumValue(body.audience, "audience", ["internal", "student"]),
+    status: enumValue(body.status, "status", [
+      "draft",
+      "published",
+      "archived",
+    ]),
+    owner: staffActorName(draft, staffId),
+    version: 1,
+    updatedAt: now.toISOString(),
+  };
+  draft.staff.knowledgeBase ??= [];
+  draft.staff.knowledgeBase.unshift(card);
+  return structuredClone(card);
+}
+
+export function createStaffCorePlay(draft, input, staffId, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "title",
+    "description",
+    "trigger",
+    "audience",
+    "steps",
+    "status",
+  ]);
+  if (
+    !Array.isArray(body.steps) ||
+    body.steps.length < 1 ||
+    body.steps.length > 12
+  ) {
+    throw badRequest(
+      "INVALID_CORE_PLAY_STEPS",
+      "A core play must contain 1-12 steps",
+    );
+  }
+  const play = {
+    id: randomUUID(),
+    title: requiredString(body.title, "title", { min: 2, max: 120 }),
+    description: requiredString(body.description, "description", {
+      min: 3,
+      max: 500,
+    }),
+    trigger: requiredString(body.trigger, "trigger", {
+      min: 3,
+      max: 240,
+    }),
+    audience: requiredString(body.audience, "audience", {
+      min: 3,
+      max: 240,
+    }),
+    steps: body.steps.map((step, index) =>
+      requiredString(step, `steps[${index}]`, { min: 2, max: 240 }),
+    ),
+    status: enumValue(body.status, "status", [
+      "draft",
+      "active",
+      "archived",
+    ]),
+    owner: staffActorName(draft, staffId),
+    version: 1,
+    updatedAt: now.toISOString(),
+  };
+  draft.staff.corePlays ??= [];
+  draft.staff.corePlays.unshift(play);
+  return structuredClone(play);
+}
+
+export function createStaffClub(draft, input, now) {
+  const body = objectBody(input);
+  exactKeys(body, [
+    "name",
+    "category",
+    "description",
+    "latestUpdate",
+    "contactName",
+    "contactRole",
+    "contactChannel",
+    "membershipOpen",
+    "imageUrl",
+  ]);
+  const name = requiredString(body.name, "name", { min: 2, max: 120 });
+  const club = {
+    id: randomUUID(),
+    name,
+    category: requiredString(body.category, "category", {
+      min: 2,
+      max: 80,
+    }),
+    description: requiredString(body.description, "description", {
+      min: 3,
+      max: 500,
+    }),
+    contactName: requiredString(body.contactName, "contactName", {
+      min: 2,
+      max: 120,
+    }),
+    contactRole: requiredString(body.contactRole, "contactRole", {
+      min: 2,
+      max: 120,
+    }),
+    contactChannel: requiredString(
+      body.contactChannel,
+      "contactChannel",
+      { min: 3, max: 160 },
+    ),
+    latestUpdate: requiredString(body.latestUpdate, "latestUpdate", {
+      min: 2,
+      max: 240,
+    }),
+    nextActivity: null,
+    imageUrl:
+      optionalString(body.imageUrl, "imageUrl", { min: 1, max: 500 }) ??
+      "/media/clubs/code-collective.jpg",
+    imageAlt: `Students participating in ${name}`,
+    imageAttribution: "Staff-managed portal image",
+    imageSourceUrl: "",
+    source: null,
+    socialLinks: [],
+    longDescription: null,
+    meetingSchedule: null,
+    membershipOpen: booleanValue(body.membershipOpen, "membershipOpen"),
+    events: [],
+    version: 1,
+    updatedAt: now.toISOString(),
+  };
+  draft.campusLife.clubs.unshift(club);
+  draft.portalProjectionVersion += 1;
+  return structuredClone(club);
+}
+
+export function updateStaffKnowledgeCard(draft, cardId, input, now) {
+  uuidValue(cardId, "cardId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "title",
+    "summary",
+    "body",
+    "category",
+    "audience",
+    "status",
+  ]);
+  const card = (draft.staff.knowledgeBase ?? []).find(
+    (candidate) => candidate.id === cardId,
+  );
+  if (!card) {
+    throw notFound(
+      "STAFF_KNOWLEDGE_CARD_NOT_FOUND",
+      "The knowledge card was not found",
+    );
+  }
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (card.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This knowledge card changed in another staff session",
+    );
+  }
+  card.title = requiredString(body.title, "title", { min: 2, max: 120 });
+  card.summary = requiredString(body.summary, "summary", {
+    min: 3,
+    max: 240,
+  });
+  card.body = requiredString(body.body, "body", { min: 3, max: 2_000 });
+  card.category = requiredString(body.category, "category", {
+    min: 2,
+    max: 60,
+  });
+  card.audience = enumValue(body.audience, "audience", [
+    "internal",
+    "student",
+  ]);
+  card.status = enumValue(body.status, "status", [
+    "draft",
+    "published",
+    "archived",
+  ]);
+  card.version += 1;
+  card.updatedAt = now.toISOString();
+  return structuredClone(card);
+}
+
+export function updateStaffCorePlay(draft, playId, input, now) {
+  uuidValue(playId, "playId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "title",
+    "description",
+    "trigger",
+    "audience",
+    "steps",
+    "status",
+  ]);
+  const play = (draft.staff.corePlays ?? []).find(
+    (candidate) => candidate.id === playId,
+  );
+  if (!play) {
+    throw notFound("STAFF_CORE_PLAY_NOT_FOUND", "The core play was not found");
+  }
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (play.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This core play changed in another staff session",
+    );
+  }
+  if (
+    !Array.isArray(body.steps) ||
+    body.steps.length < 1 ||
+    body.steps.length > 12
+  ) {
+    throw badRequest(
+      "INVALID_CORE_PLAY_STEPS",
+      "A core play must contain 1-12 steps",
+    );
+  }
+  play.title = requiredString(body.title, "title", { min: 2, max: 120 });
+  play.description = requiredString(body.description, "description", {
+    min: 3,
+    max: 500,
+  });
+  play.trigger = requiredString(body.trigger, "trigger", {
+    min: 3,
+    max: 240,
+  });
+  play.audience = requiredString(body.audience, "audience", {
+    min: 3,
+    max: 240,
+  });
+  play.steps = body.steps.map((step, index) =>
+    requiredString(step, `steps[${index}]`, { min: 2, max: 240 }),
+  );
+  play.status = enumValue(body.status, "status", [
+    "draft",
+    "active",
+    "archived",
+  ]);
+  play.version += 1;
+  play.updatedAt = now.toISOString();
+  return structuredClone(play);
+}
+
+export function updateStaffInquiry(
+  draft,
+  inquiryId,
+  input,
+  staffId,
+  now,
+) {
+  uuidValue(inquiryId, "inquiryId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "status",
+    "assigneeId",
+    "responseNote",
+    "notifyStudent",
+  ]);
+  const inquiry = (draft.helpRequests ?? []).find(
+    (candidate) => candidate.id === inquiryId,
+  );
+  if (!inquiry) {
+    throw notFound("STAFF_INQUIRY_NOT_FOUND", "The inquiry was not found");
+  }
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if ((inquiry.version ?? 1) !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This inquiry changed in another staff session",
+    );
+  }
+  const status = enumValue(body.status, "status", [
+    "new",
+    "open",
+    "waiting_on_student",
+    "resolved",
+  ]);
+  const assigneeId =
+    body.assigneeId === undefined
+      ? inquiry.assigneeId ?? null
+      : body.assigneeId === null
+        ? null
+        : uuidValue(body.assigneeId, "assigneeId");
+  if (assigneeId && !staffMember(draft, assigneeId)) {
+    throw notFound("STAFF_MEMBER_NOT_FOUND", "The assignee was not found");
+  }
+  const responseNote = optionalString(body.responseNote, "responseNote", {
+    min: 2,
+    max: 1_000,
+  });
+  const notifyStudent = booleanValue(body.notifyStudent, "notifyStudent");
+  inquiry.status = status;
+  inquiry.assigneeId = assigneeId;
+  inquiry.updatedAt = now.toISOString();
+  inquiry.version = (inquiry.version ?? 1) + 1;
+  if (responseNote && notifyStudent) {
+    draft.messages.push({
+      id: randomUUID(),
+      subject: `Reply: ${inquiry.subject ?? "Your student support question"}`,
+      body: responseNote,
+      sentAt: now.toISOString(),
+      readAt: null,
+      senderName: `${draft.tenant.shortName} Enrollment Team`,
+    });
+    draft.portalProjectionVersion += 1;
+  }
+  const matchingWorkItem = draft.staff.workItems.find(
+    (item) => item.source?.type === "message" && item.studentId === draft.profile.studentId,
+  );
+  if (matchingWorkItem && responseNote) {
+    addStaffWorkLog(
+      draft,
+      matchingWorkItem.id,
+      "commented",
+      `Replied to student inquiry: ${responseNote}`,
+      staffActorName(draft, staffId),
+      now,
+    );
+  }
+  return staffInquiry(draft, inquiry);
+}
+
+export function updateStaffClub(draft, clubId, input, now) {
+  uuidValue(clubId, "clubId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "name",
+    "category",
+    "description",
+    "latestUpdate",
+    "contactName",
+    "contactRole",
+    "contactChannel",
+    "membershipOpen",
+  ]);
+  const club = draft.campusLife.clubs.find(
+    (candidate) => candidate.id === clubId,
+  );
+  if (!club) {
+    throw notFound("STAFF_CLUB_NOT_FOUND", "The club was not found");
+  }
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if ((club.version ?? 1) !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This club changed in another staff session",
+    );
+  }
+  club.name = requiredString(body.name, "name", { min: 2, max: 120 });
+  club.category = requiredString(body.category, "category", {
+    min: 2,
+    max: 80,
+  });
+  club.description = requiredString(body.description, "description", {
+    min: 3,
+    max: 500,
+  });
+  club.latestUpdate = requiredString(body.latestUpdate, "latestUpdate", {
+    min: 2,
+    max: 240,
+  });
+  club.contactName = requiredString(body.contactName, "contactName", {
+    min: 2,
+    max: 120,
+  });
+  club.contactRole = requiredString(body.contactRole, "contactRole", {
+    min: 2,
+    max: 120,
+  });
+  club.contactChannel = requiredString(
+    body.contactChannel,
+    "contactChannel",
+    { min: 3, max: 160 },
+  );
+  club.membershipOpen = booleanValue(body.membershipOpen, "membershipOpen");
+  club.version = (club.version ?? 1) + 1;
+  club.updatedAt = now.toISOString();
+  draft.portalProjectionVersion += 1;
+  return structuredClone(club);
+}
+
+export function simulateStaffOutreach(draft, input, staffId, now) {
+  const body = objectBody(input);
+  exactKeys(body, ["title", "audience", "channel", "requestedCount"]);
+  const run = {
+    id: randomUUID(),
+    title: requiredString(body.title, "title", { min: 2, max: 120 }),
+    audience: requiredString(body.audience, "audience", {
+      min: 3,
+      max: 240,
+    }),
+    channel: enumValue(body.channel, "channel", ["email", "sms", "voice"]),
+    requestedCount: integerValue(
+      body.requestedCount,
+      "requestedCount",
+      1,
+      10_000,
+    ),
+    status: "simulation_only",
+    createdBy: staffActorName(draft, staffId),
+    createdAt: now.toISOString(),
+  };
+  draft.staff.outreachRuns ??= [];
+  draft.staff.outreachRuns.unshift(run);
+  draft.staff.outreachRuns = draft.staff.outreachRuns.slice(0, 20);
+  return structuredClone(run);
+}
+
+export function previewStaffEdward(input) {
+  const body = objectBody(input);
+  exactKeys(body, ["message"]);
+  const message = requiredString(body.message, "message", {
+    min: 2,
+    max: 2_000,
+  });
+  const text = message.toLowerCase();
+  const wantsOutreach = /call|email|sms|outreach|contact|message/.test(text);
+  const wantsJourney =
+    /onboarding|enrollment|checklist|requirement|task/.test(text);
+  const wantsData = /show|find|which|who|how many|list|student/.test(text);
+  const plan = [
+    ...(wantsData
+      ? [
+          {
+            label: "Read the matching student and task records",
+            capability: "read_student_data",
+            status: "available",
+          },
+        ]
+      : []),
+    ...(wantsJourney
+      ? [
+          {
+            label: "Prepare the requested journey changes for staff review",
+            capability: "update_journey",
+            status: "needs_confirmation",
+          },
+        ]
+      : []),
+    ...(wantsOutreach
+      ? [
+          {
+            label: "Draft the outreach content",
+            capability: "draft_message",
+            status: "needs_confirmation",
+          },
+          {
+            label: "Simulate the external outreach run",
+            capability: "launch_outreach",
+            status: "simulation_only",
+          },
+        ]
+      : []),
+  ];
+  if (plan.length === 0) {
+    plan.push({
+      label: "Read the relevant staff workspace context",
+      capability: "read_student_data",
+      status: "available",
+    });
+  }
+  return {
+    message:
+      "I prepared a safe execution plan. I can read current staff data now, but any record change needs explicit confirmation and external email, SMS, or voice outreach remains simulation-only.",
+    plan,
+    dataSources: [
+      "Enrollment action center",
+      "Student journey and documents",
+      "Knowledge base and core plays",
+      "Student inquiries",
+    ],
+    executionMode: "preview_only",
+  };
+}
+
+export function updateStaffWorkItem(
+  draft,
+  workItemId,
+  input,
+  staffId,
+  now,
+) {
+  uuidValue(workItemId, "workItemId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedVersion",
+    "status",
+    "assigneeId",
+    "escalated",
+    "note",
+  ]);
+  const expectedVersion = integerValue(
+    body.expectedVersion,
+    "expectedVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const item = draft.staff.workItems.find(
+    (candidate) => candidate.id === workItemId,
+  );
+  if (!item) {
+    throw notFound("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found");
+  }
+  if (item.version !== expectedVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This work item changed in another staff session",
+    );
+  }
+  const actorName = staffActorName(draft, staffId);
+  let changed = false;
+  if (body.status !== undefined) {
+    const status = enumValue(body.status, "status", [
+      "todo",
+      "in_progress",
+      "done",
+    ]);
+    if (status !== item.status) {
+      addStaffWorkLog(
+        draft,
+        item.id,
+        "status_changed",
+        `Moved from ${item.status.replaceAll("_", " ")} to ${status.replaceAll("_", " ")}.`,
+        actorName,
+        now,
+      );
+      item.status = status;
+      changed = true;
+    }
+  }
+  if (body.assigneeId !== undefined) {
+    const assigneeId =
+      body.assigneeId === null
+        ? null
+        : uuidValue(body.assigneeId, "assigneeId");
+    if (assigneeId && !staffMember(draft, assigneeId)) {
+      throw notFound("STAFF_MEMBER_NOT_FOUND", "The assignee was not found");
+    }
+    if (assigneeId !== item.assigneeId) {
+      item.assigneeId = assigneeId;
+      addStaffWorkLog(
+        draft,
+        item.id,
+        "assigned",
+        assigneeId
+          ? `Assigned to ${staffActorName(draft, assigneeId)}.`
+          : "Removed the assignee.",
+        actorName,
+        now,
+      );
+      changed = true;
+    }
+  }
+  if (body.escalated !== undefined) {
+    const escalated = booleanValue(body.escalated, "escalated");
+    if (escalated !== item.escalated) {
+      item.escalated = escalated;
+      addStaffWorkLog(
+        draft,
+        item.id,
+        "escalated",
+        escalated ? "Marked as escalated." : "Cleared the escalation flag.",
+        actorName,
+        now,
+      );
+      changed = true;
+    }
+  }
+  const note = optionalString(body.note, "note", { min: 1, max: 500 });
+  if (note) {
+    addStaffWorkLog(
+      draft,
+      item.id,
+      "commented",
+      note,
+      actorName,
+      now,
+    );
+    changed = true;
+  }
+  if (!changed) {
+    throw badRequest(
+      "STAFF_WORK_ITEM_NO_CHANGES",
+      "Choose a status, assignee, escalation state, or note to update",
+    );
+  }
+  item.version += 1;
+  item.updatedAt = now.toISOString();
+  return mapStaffWorkItem(draft, item);
+}
+
+export function updateStaffStudentPreferences(
+  draft,
+  studentId,
+  input,
+  staffId,
+  now,
+) {
+  uuidValue(studentId, "studentId");
+  if (studentId !== draft.profile.studentId) {
+    throw notFound("STAFF_STUDENT_NOT_FOUND", "The student was not found");
+  }
+  const body = objectBody(input);
+  exactKeys(body, [
+    "expectedOnboardingVersion",
+    "expectedProfileVersion",
+    "communicationPreference",
+    "housingPreference",
+    "accommodationInterest",
+    "residencyVerificationPath",
+    "notifyStudent",
+    "note",
+  ]);
+  const expectedOnboardingVersion = integerValue(
+    body.expectedOnboardingVersion,
+    "expectedOnboardingVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const expectedProfileVersion = integerValue(
+    body.expectedProfileVersion,
+    "expectedProfileVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (
+    draft.onboarding.version !== expectedOnboardingVersion ||
+    draft.profile.version !== expectedProfileVersion
+  ) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "The student record changed in another session",
+    );
+  }
+  const communicationPreference = enumValue(
+    body.communicationPreference,
+    "communicationPreference",
+    ["email", "sms"],
+  );
+  const housingPreference = enumValue(body.housingPreference, "housingPreference", [
+    "on_campus",
+    "off_campus",
+    "commuting",
+    "undecided",
+    "family",
+  ]);
+  const accommodationInterest = enumValue(
+    body.accommodationInterest,
+    "accommodationInterest",
+    ["not_now", "housing", "academic", "both"],
+  );
+  const residencyVerificationPath = enumValue(
+    body.residencyVerificationPath,
+    "residencyVerificationPath",
+    ["home_address_review", "document_upload", "advisor_review"],
+  );
+  const notifyStudent = booleanValue(body.notifyStudent, "notifyStudent");
+  const note = optionalString(body.note, "note", { min: 1, max: 500 });
+  draft.profile.communicationPreference = communicationPreference;
+  draft.profile.version += 1;
+  draft.profile.updatedAt = now.toISOString();
+  draft.onboarding.data.communicationPreference = communicationPreference;
+  draft.onboarding.data.housingPreference = housingPreference;
+  draft.onboarding.data.accommodationInterest = accommodationInterest;
+  draft.onboarding.data.residencyVerificationPath =
+    residencyVerificationPath;
+  if (housingPreference !== "on_campus") {
+    delete draft.onboarding.data.housingResidenceOption;
+    delete draft.onboarding.data.housingResidencePreferences;
+  }
+  draft.onboarding.version += 1;
+  draft.onboarding.updatedAt = now.toISOString();
+  draft.portalProjectionVersion += 1;
+  const onboardingItem = draft.staff.workItems.find(
+    (item) =>
+      item.studentId === studentId && item.source?.type === "onboarding",
+  );
+  if (onboardingItem) {
+    onboardingItem.updatedAt = now.toISOString();
+    addStaffWorkLog(
+      draft,
+      onboardingItem.id,
+      "student_preferences_updated",
+      note ?? "Updated the student's operational onboarding preferences.",
+      staffActorName(draft, staffId),
+      now,
+    );
+  }
+  if (notifyStudent) {
+    draft.messages.push({
+      id: randomUUID(),
+      subject: "Your enrollment preferences were updated",
+      body:
+        note ??
+        "Your enrollment team updated your communication, housing, and support follow-up preferences. Review your enrollment page for the latest details.",
+      sentAt: now.toISOString(),
+      readAt: null,
+      senderName: `${draft.tenant.shortName} Enrollment Team`,
+    });
+  }
+  return buildStaffStudentRecord(draft, studentId);
+}
+
+export function reviewStaffDocument(
+  draft,
+  documentId,
+  input,
+  staffId,
+  now,
+) {
+  uuidValue(documentId, "documentId");
+  const body = objectBody(input);
+  exactKeys(body, [
+    "workItemId",
+    "expectedWorkItemVersion",
+    "decision",
+    "note",
+    "notifyStudent",
+  ]);
+  const workItemId = uuidValue(body.workItemId, "workItemId");
+  const expectedWorkItemVersion = integerValue(
+    body.expectedWorkItemVersion,
+    "expectedWorkItemVersion",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const decision = enumValue(body.decision, "decision", [
+    "accepted",
+    "rejected",
+  ]);
+  const note = requiredString(body.note, "note", { min: 3, max: 500 });
+  const notifyStudent = booleanValue(body.notifyStudent, "notifyStudent");
+  const document = draft.documents.find(
+    (candidate) => candidate.id === documentId,
+  );
+  if (!document) {
+    throw notFound("STAFF_DOCUMENT_NOT_FOUND", "The document was not found");
+  }
+  const item = draft.staff.workItems.find(
+    (candidate) =>
+      candidate.id === workItemId &&
+      candidate.source?.type === "document" &&
+      candidate.source.id === documentId,
+  );
+  if (!item) {
+    throw notFound(
+      "STAFF_WORK_ITEM_NOT_FOUND",
+      "The document review work item was not found",
+    );
+  }
+  if (item.version !== expectedWorkItemVersion) {
+    throw conflict(
+      "VERSION_CONFLICT",
+      "This document review changed in another staff session",
+    );
+  }
+  if (!["needs_review", "under_review"].includes(document.status)) {
+    throw conflict(
+      "DOCUMENT_REVIEW_ALREADY_DECIDED",
+      "This document already has an official staff decision",
+    );
+  }
+  document.status = decision;
+  const requirement = document.requirementId
+    ? draft.requirements.find(
+        (candidate) => candidate.id === document.requirementId,
+      )
+    : null;
+  if (requirement) {
+    requirement.status = decision === "accepted" ? "completed" : "rejected";
+    requirement.progressPercent = decision === "accepted" ? 100 : 60;
+  }
+  if (document.category === "financial_aid") {
+    const financialDocument = draft.financials.requiredDocuments.find(
+      (candidate) => candidate.code === "verification_worksheet",
+    );
+    if (financialDocument) {
+      financialDocument.status =
+        decision === "accepted" ? "received" : "required";
+    }
+  }
+  item.status = "done";
+  item.version += 1;
+  item.updatedAt = now.toISOString();
+  addStaffWorkLog(
+    draft,
+    item.id,
+    "document_decided",
+    `${decision === "accepted" ? "Accepted" : "Requested changes to"} ${document.fileName}: ${note}`,
+    staffActorName(draft, staffId),
+    now,
+  );
+  let notification = null;
+  if (notifyStudent) {
+    notification = {
+      id: randomUUID(),
+      subject:
+        decision === "accepted"
+          ? `${document.fileName} was accepted`
+          : `${document.fileName} needs changes`,
+      body: note,
+      sentAt: now.toISOString(),
+      readAt: null,
+      senderName: `${draft.tenant.shortName} Enrollment Team`,
+    };
+    draft.messages.push(notification);
+  }
+  draft.portalProjectionVersion += 1;
+  refreshJourneyStatus(draft);
+  return {
+    document: structuredClone(document),
+    workItem: mapStaffWorkItem(draft, item),
+    notification: notification ? structuredClone(notification) : null,
+  };
 }
 
 export function createDocumentMetadata(draft, input, now) {
@@ -1657,9 +2925,14 @@ export function createHelpRequest(draft, input, now) {
   const request = {
     id: randomUUID(),
     topicCode,
+    subject: `Student question about ${topicCode.replaceAll("_", " ")}`,
     message,
-    status: "received",
+    status: "new",
+    priority: topicCode === "support" ? "high" : "medium",
+    assigneeId: null,
     createdAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+    version: 1,
   };
   draft.helpRequests.push(request);
   return structuredClone(request);
@@ -2197,6 +3470,7 @@ function documentCategoryForRequirement(code) {
   return (
     {
       identity_document: "identity",
+      student_id_photo: "identity",
       official_transcript: "transcript",
       financial_aid_verification: "financial_aid",
       immunization_record: "health",

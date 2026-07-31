@@ -5,7 +5,7 @@ export interface AuthContext {
   tenantId: string;
   studentId: string;
   actorId: string;
-  actorType: "student";
+  actorType: "student" | "staff";
   authenticationMethod: "demo";
 }
 

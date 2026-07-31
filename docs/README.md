@@ -9,8 +9,9 @@ delivery phases.
 
 - Architecture status: implemented baseline with an explicit production target
 - Implementation status: functional student portal preview under active development
-- Current product surface: student portal
-- Not yet implemented: counselor, director, enrollment leader, VP of enrollment
+- Current product surface: student portal plus a functional staff-operations
+  preview
+- Not yet implemented: director, enrollment leader, and VP dashboards
 - Local runtime target: Docker Compose
 - Production runtime target: Kubernetes
 - Deployed preview: hardened Google Compute Engine `e2-micro`
@@ -48,6 +49,14 @@ security, ownership, or deployment pressure justifies it.
 19. [Tenant-managed student rewards](./19-tenant-rewards.md)
 20. [Course exemption runtime skill](./agent-skills/course-exemption-skill.md)
 21. [Multi-tenant student portal deployment](./architecture/multi-tenant-student-portal.md)
+22. [Staff Action Center and shared state](./22-staff-action-center-and-realtime-state.md)
+23. [Student and staff sequence diagrams](./sequence-diagrams.md)
+24. [Student–staff user flows and shared contracts](./23-student-staff-user-flows-and-contracts.md)
+25. [Student–staff diagrams.net Mermaid source](./architecture/student-staff-system.drawio-mermaid.md)
+26. [Staff portal implementation and operations](./24-staff-portal-implementation-and-operations.md)
+27. [Student experience changelog — 2026-07-31](./changelog/2026-07-31-student-experience.md)
+28. [Staff operations changelog — 2026-07-31](./changelog/2026-07-31-staff-operations.md)
+29. [Release changelog](../CHANGELOG.md)
 
 For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
 explain the architectural decisions, domain workflows, and longer-term design

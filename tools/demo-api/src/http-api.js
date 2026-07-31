@@ -9,6 +9,9 @@ import { dirname, extname, join } from "node:path";
 import {
   acceptOffer,
   autoProjectCompletedTranscripts,
+  buildStaffActionCenter,
+  buildStaffOperationsWorkspace,
+  buildStaffStudentRecord,
   buildBootstrap,
   buildCampusLife,
   buildDashboard,
@@ -17,11 +20,15 @@ import {
   buildStudentFinancials,
   completeOnboarding,
   completeDocumentExtractionRetry,
+  createStaffClub,
+  createStaffCorePlay,
+  createStaffKnowledgeCard,
   createAppointment,
   createDepositPayment,
   createDocumentMetadata,
   confirmDocumentExtraction,
   createHelpRequest,
+  ensureStaffDocumentWorkItems,
   expireStaleDocumentExtractions,
   findDocumentForDownload,
   fixtureSummary,
@@ -36,14 +43,23 @@ import {
   markMessageRead,
   patchProfile,
   profileResponse,
+  previewStaffEdward,
   queueDocumentExtraction,
   queueDocumentExtractionRetry,
   reconcileAuthoritativeRewards,
+  reviewStaffDocument,
   reserveDocumentUpload,
   requirementDetail,
   selectFinancialPaymentPlan,
+  simulateStaffOutreach,
   updateHousingPlan,
   updateOnboarding,
+  updateStaffClub,
+  updateStaffCorePlay,
+  updateStaffInquiry,
+  updateStaffKnowledgeCard,
+  updateStaffStudentPreferences,
+  updateStaffWorkItem,
 } from "./domain.js";
 import {
   HttpError,
@@ -54,6 +70,7 @@ import {
 } from "./errors.js";
 import { JsonStateStore } from "./store.js";
 import { CredentialAuthStore } from "./credential-auth-store.js";
+import { StaffCredentialAuthStore } from "./staff-credential-auth-store.js";
 import { StudentStoreRegistry } from "./student-store-registry.js";
 import { TenantStoreRegistry } from "./tenant-store-registry.js";
 import {
@@ -72,6 +89,11 @@ import {
   objectBody,
   requireIdempotencyKey,
 } from "./validation.js";
+import {
+  draftManagedConfigurationWithEdward,
+  getManagedConfiguration,
+  updateManagedConfiguration,
+} from "./managed-config.js";
 
 const requestIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
 const maximumBodyBytes = 262_144;
@@ -119,6 +141,19 @@ export async function createDemoApi(options = {}) {
     options.authStore ??
     new CredentialAuthStore(join(dirname(store.filePath), "auth.json"), clock);
   await authStore.initialize();
+  const staffAuthStore =
+    options.staffAuthStore ??
+    new StaffCredentialAuthStore(
+      join(dirname(store.filePath), "staff-auth.json"),
+      clock,
+      options.staffBootstrapPassword,
+    );
+  await staffAuthStore.initialize(
+    tenantStores.entries().map(([tenantSlug, tenantStore]) => ({
+      tenantSlug,
+      members: tenantStore.snapshot().staff.members,
+    })),
+  );
   const studentStores =
     options.studentStores ??
     new StudentStoreRegistry(join(dirname(store.filePath), "students"), clock);
@@ -362,6 +397,7 @@ export async function createDemoApi(options = {}) {
         requestId,
         enqueueDocumentExtraction,
         authStore,
+        staffAuthStore,
         studentStores,
         recoverDocumentJobs,
         guidedOnboardingResetEnabled,
@@ -395,7 +431,14 @@ export async function createDemoApi(options = {}) {
     }
   });
 
-  return { server, store, authStore, studentStores, tenantStores };
+  return {
+    server,
+    store,
+    authStore,
+    staffAuthStore,
+    studentStores,
+    tenantStores,
+  };
 }
 
 async function reconcileCompletedTranscripts(store, clock) {
@@ -416,6 +459,7 @@ async function route({
   requestId,
   enqueueDocumentExtraction,
   authStore,
+  staffAuthStore,
   studentStores,
   recoverDocumentJobs,
   guidedOnboardingResetEnabled,
@@ -472,6 +516,22 @@ async function route({
       body: authenticated
         ? sessionResponse(store.snapshot())
         : { authenticated: false, mode: "demo" },
+    };
+  }
+  if (method === "GET" && path === "/v1/auth/staff/session") {
+    const staffSession = staffCredentialSessionFor(
+      request,
+      staffAuthStore,
+      tenant.slug,
+    );
+    return {
+      body: staffSession
+        ? staffSessionResponse(staffSession.account)
+        : {
+            authenticated: false,
+            mode: "credentials",
+            actorType: "staff",
+          },
     };
   }
   if (method === "POST" && path === "/v1/auth/sign-up") {
@@ -559,6 +619,250 @@ async function route({
           `vv_demo_session=signed-out; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400${cookieSecuritySuffix()}`,
       },
     };
+  }
+  if (method === "POST" && path === "/v1/auth/staff/sign-in") {
+    const body = await readJson(request);
+    const signedIn = await staffAuthStore.signIn(body, tenant.slug);
+    return {
+      body: staffSessionResponse(signedIn.account),
+      headers: {
+        "set-cookie": staffCredentialSessionCookie(
+          signedIn.sessionToken,
+          signedIn.expiresAt,
+        ),
+      },
+    };
+  }
+  if (method === "POST" && path === "/v1/auth/staff/sign-out") {
+    const cookies = parseCookies(request.headers.cookie);
+    await staffAuthStore.signOut(cookies.vv_staff_session);
+    return {
+      body: {
+        authenticated: false,
+        mode: "credentials",
+        actorType: "staff",
+      },
+      headers: {
+        "set-cookie":
+          `vv_staff_session=signed-out; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${cookieSecuritySuffix()}`,
+      },
+    };
+  }
+
+  if (path === "/v1/staff" || path.startsWith("/v1/staff/")) {
+    const staffSession = requireStaffCredentialSession(
+      request,
+      staffAuthStore,
+      tenant.slug,
+    );
+    const staff = store
+      .snapshot()
+      .staff.members.find(
+        (member) => member.id === staffSession.account.staffId,
+      );
+    if (!staff) {
+      throw notFound(
+        "STAFF_PREVIEW_NOT_CONFIGURED",
+        "No staff preview identity is configured",
+      );
+    }
+    if (method === "GET" && path === "/v1/staff/action-center") {
+      const body = await store.transact((draft, transaction) => {
+        const created = ensureStaffDocumentWorkItems(draft, clock());
+        if (created === 0) transaction.skipWrite();
+        return buildStaffActionCenter(draft);
+      });
+      return { body };
+    }
+    if (method === "GET" && path === "/v1/staff/workspace") {
+      const body = await store.transact((draft, transaction) => {
+        const created = ensureStaffDocumentWorkItems(draft, clock());
+        if (created === 0) transaction.skipWrite();
+        return buildStaffOperationsWorkspace(draft, staff.id);
+      });
+      return { body };
+    }
+    const configurationMatch = path.match(
+      /^\/v1\/staff\/configurations\/(journeys|campus_life|academics)$/,
+    );
+    if (method === "GET" && configurationMatch) {
+      return {
+        body: getManagedConfiguration(
+          store.snapshot(),
+          configurationMatch[1],
+        ),
+      };
+    }
+    if (method === "PUT" && configurationMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateManagedConfiguration(
+          draft,
+          configurationMatch[1],
+          body,
+          staff.name,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    if (
+      method === "POST" &&
+      path === "/v1/staff/edward/configuration-draft"
+    ) {
+      const body = await readJson(request);
+      return {
+        body: draftManagedConfigurationWithEdward(
+          store.snapshot(),
+          body.kind,
+          body,
+        ),
+      };
+    }
+    const knowledgeMatch = path.match(
+      /^\/v1\/staff\/knowledge-base\/([^/]+)$/,
+    );
+    if (method === "POST" && path === "/v1/staff/knowledge-base") {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        createStaffKnowledgeCard(draft, body, staff.id, clock()),
+      );
+      return { status: 201, body: result };
+    }
+    if (method === "PATCH" && knowledgeMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffKnowledgeCard(
+          draft,
+          decodeURIComponent(knowledgeMatch[1]),
+          body,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    const corePlayMatch = path.match(/^\/v1\/staff\/core-plays\/([^/]+)$/);
+    if (method === "POST" && path === "/v1/staff/core-plays") {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        createStaffCorePlay(draft, body, staff.id, clock()),
+      );
+      return { status: 201, body: result };
+    }
+    if (method === "PATCH" && corePlayMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffCorePlay(
+          draft,
+          decodeURIComponent(corePlayMatch[1]),
+          body,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    const inquiryMatch = path.match(/^\/v1\/staff\/inquiries\/([^/]+)$/);
+    if (method === "PATCH" && inquiryMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffInquiry(
+          draft,
+          decodeURIComponent(inquiryMatch[1]),
+          body,
+          staff.id,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    const clubMatch = path.match(
+      /^\/v1\/staff\/campus-life\/clubs\/([^/]+)$/,
+    );
+    if (method === "POST" && path === "/v1/staff/campus-life/clubs") {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        createStaffClub(draft, body, clock()),
+      );
+      return { status: 201, body: result };
+    }
+    if (method === "PATCH" && clubMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffClub(
+          draft,
+          decodeURIComponent(clubMatch[1]),
+          body,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    if (method === "POST" && path === "/v1/staff/outreach/simulate") {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        simulateStaffOutreach(draft, body, staff.id, clock()),
+      );
+      return { status: 201, body: result };
+    }
+    if (method === "POST" && path === "/v1/staff/edward/preview") {
+      return { body: previewStaffEdward(await readJson(request)) };
+    }
+    const workItemMatch = path.match(/^\/v1\/staff\/work-items\/([^/]+)$/);
+    if (method === "PATCH" && workItemMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffWorkItem(
+          draft,
+          decodeURIComponent(workItemMatch[1]),
+          body,
+          staff.id,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    const preferenceMatch = path.match(
+      /^\/v1\/staff\/students\/([^/]+)\/preferences$/,
+    );
+    if (method === "PATCH" && preferenceMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        updateStaffStudentPreferences(
+          draft,
+          decodeURIComponent(preferenceMatch[1]),
+          body,
+          staff.id,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    const studentMatch = path.match(/^\/v1\/staff\/students\/([^/]+)$/);
+    if (method === "GET" && studentMatch) {
+      return {
+        body: buildStaffStudentRecord(
+          store.snapshot(),
+          decodeURIComponent(studentMatch[1]),
+        ),
+      };
+    }
+    const decisionMatch = path.match(
+      /^\/v1\/staff\/documents\/([^/]+)\/decision$/,
+    );
+    if (method === "POST" && decisionMatch) {
+      const body = await readJson(request);
+      const result = await store.transact((draft) =>
+        reviewStaffDocument(
+          draft,
+          decodeURIComponent(decisionMatch[1]),
+          body,
+          staff.id,
+          clock(),
+        ),
+      );
+      return { body: result };
+    }
+    throw notFound("STAFF_ROUTE_NOT_FOUND", "The staff route was not found");
   }
 
   const credentialSession = credentialSessionFor(
@@ -1283,6 +1587,23 @@ function credentialSessionFor(request, authStore, tenantSlug) {
   return authStore.getSession(cookies.vv_session, tenantSlug);
 }
 
+function staffCredentialSessionFor(request, authStore, tenantSlug) {
+  const cookies = parseCookies(request.headers.cookie);
+  return authStore.getSession(cookies.vv_staff_session, tenantSlug);
+}
+
+function requireStaffCredentialSession(request, authStore, tenantSlug) {
+  const session = staffCredentialSessionFor(
+    request,
+    authStore,
+    tenantSlug,
+  );
+  if (!session) {
+    throw unauthorized("Sign in with a staff account to continue");
+  }
+  return session;
+}
+
 async function ensureOnboardingSignedDocuments(store, tenant, clock) {
   const snapshot = store.snapshot();
   const onboarding = snapshot.onboarding;
@@ -1475,6 +1796,30 @@ function sessionResponse(state) {
   };
 }
 
+function staffCredentialSessionCookie(token, expiresAt) {
+  const maxAge = Math.max(
+    0,
+    Math.floor((Date.parse(expiresAt) - Date.now()) / 1_000),
+  );
+  return `vv_staff_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}; Priority=High${cookieSecuritySuffix()}`;
+}
+
+function staffSessionResponse(account) {
+  return {
+    authenticated: true,
+    mode: "credentials",
+    actorType: "staff",
+    staff: {
+      id: account.staffId,
+      name: account.displayName,
+      email: account.email,
+      component: account.component,
+    },
+    notice:
+      "Authenticated local staff session. Institutional deployments should replace this adapter with university SSO while preserving the same role boundary.",
+  };
+}
+
 function credentialSessionResponse(account, state) {
   return {
     authenticated: true,
@@ -1509,7 +1854,7 @@ function applyCors(request, response, allowedOrigins) {
   );
   response.setHeader(
     "access-control-allow-headers",
-    "Content-Type, Idempotency-Key, X-Request-Id, X-Tenant-Slug",
+    "Content-Type, Idempotency-Key, X-Request-Id, X-Tenant-Slug, X-Demo-Actor-Type",
   );
   response.setHeader(
     "access-control-expose-headers",

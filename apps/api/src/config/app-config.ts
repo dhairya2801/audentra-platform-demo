@@ -24,6 +24,12 @@ export const DEMO_IDS = {
   helpGettingStartedId: "00000000-0000-7000-8000-000000000801",
   helpDocumentsId: "00000000-0000-7000-8000-000000000802",
   helpPaymentsId: "00000000-0000-7000-8000-000000000803",
+  staffAdvisorId: "00000000-0000-7000-8000-000000000901",
+  staffReviewerId: "00000000-0000-7000-8000-000000000902",
+  staffOnboardingWorkItemId: "00000000-0000-7000-8000-000000000911",
+  staffOutreachWorkItemId: "00000000-0000-7000-8000-000000000912",
+  staffOnboardingLogId: "00000000-0000-7000-8000-000000000921",
+  staffOutreachLogId: "00000000-0000-7000-8000-000000000922",
 } as const;
 
 export type AppEnvironment = "development" | "test" | "production";
@@ -42,6 +48,7 @@ export interface AppConfig {
     tenantId: string;
     studentId: string;
     actorId: string;
+    staffActorId?: string;
   };
   openRouter?: {
     apiKey: string;
@@ -155,6 +162,8 @@ export function loadAppConfig(
       tenantId: environment.DEMO_TENANT_ID ?? DEMO_IDS.tenantId,
       studentId: environment.DEMO_STUDENT_ID ?? DEMO_IDS.studentId,
       actorId: environment.DEMO_ACTOR_ID ?? DEMO_IDS.personId,
+      staffActorId:
+        environment.DEMO_STAFF_ACTOR_ID ?? DEMO_IDS.staffAdvisorId,
     },
     openRouter: {
       apiKey: environment.OPENROUTER_API_KEY?.trim() ?? "",

@@ -1,0 +1,51 @@
+schema_version: 1
+tenant: aster
+configuration: academics
+catalog_version: 2027-2028.v1
+courses:
+  - id: math-151
+    code: MATH 151
+    title: Calculus I
+    description: Limits, derivatives, applications of differentiation, and an introduction to integration.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: []
+    meeting_pattern: null
+    availability_label: 2027-2028 tenant catalog
+  - id: math-152
+    code: MATH 152
+    title: Calculus II
+    description: Techniques and applications of integration, sequences, series, and parametric curves.
+    credits: 4
+    level: 100
+    prerequisites:
+      - course_code: MATH 151
+        minimum_grade: C
+    instructor_names: []
+    meeting_pattern: null
+    availability_label: 2027-2028 tenant catalog
+  - id: cs-101
+    code: CS 101
+    title: Programming Fundamentals
+    description: Problem solving, algorithms, program design, and introductory software development.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names:
+      - Dr. Maya Patel
+    meeting_pattern: Mon/Wed 10:00 AM
+    availability_label: Fall and Spring
+  - id: cs-201
+    code: CS 201
+    title: Data Structures
+    description: Abstract data types, algorithm analysis, linked structures, trees, graphs, and hashing.
+    credits: 4
+    level: 200
+    prerequisites:
+      - course_code: CS 101
+        minimum_grade: C
+    instructor_names:
+      - Prof. Jordan Kim
+    meeting_pattern: Tue/Thu 1:30 PM
+    availability_label: Fall and Spring

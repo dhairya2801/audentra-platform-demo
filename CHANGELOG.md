@@ -1,194 +1,56 @@
 # Changelog
 
-All notable changes to the VV Edgent student portal are documented here.
+This changelog summarizes user-visible releases. Detailed notes are separated
+by persona so students, staff, and implementation teams can review only the
+changes that affect them.
 
-The project is pre-release software and does not yet promise semantic-version
-compatibility.
+## 2026-07-31 — Student experience and staff operations
 
-## [Unreleased]
+### Student users
 
-### Added
+- Expanded onboarding into a complete, resumable enrollment-intake flow with
+  housing and roommate preferences, support interests, emergency contacts,
+  family permissions, review, signature, and deposit planning.
+- Added clearer enrollment progress and optional follow-up summaries.
+- Redesigned Financials with an accessible cost-coverage visualization,
+  clearer balance context, aid sources, and required-document actions.
+- Added Campus Life search and category filters.
+- Added Edward voice input and optional spoken replies on supported browsers.
+- Improved small-text readability and responsive behavior across portal pages.
+- Connected staff document decisions, published content, and notifications to
+  the same student-facing records used by the portal.
 
-- Added immutable, tenant-branded PDFs for documents signed during onboarding;
-  typed and drawn signatures are rendered into the document, stored with an
-  integrity digest and audit receipt, and shown in My Documents
-- Added idempotent signed-document backfill for students who completed
-  onboarding before signed PDF storage was introduced
-- Added tenant-managed Aster and Harvard point programs, editable completion
-  and exploration reward rules, an idempotent student ledger, bookstore-credit
-  conversion, and visible balance/task reward UI
-- Added tenant-owned course-resource libraries and student-club event calendars,
-  including licensed open PDF textbooks and dedicated tenant-prefixed club pages
-- Added club membership, meeting-schedule, contact, social, and upcoming-event
-  presentation backed by reusable database fields and event records
-- Added tenant-owned academic-program, course-catalog, campus-event, and
-  student-organization source metadata, with Harvard CS and campus-life preview
-  content seeded independently from Aster
-- Added official-source links, course availability/instructor/meeting details,
-  campus source labels, organization social links, and explicit synthetic-event
-  labels to the student UI
-- Added Edward academic and campus-life context domains, scoped retrieval
-  receipts, and direct navigation actions for My Classrooms and My Campus Life
-- Added tenant-managed campus-event visual themes, accessible image metadata,
-  and three optimized original event backgrounds for the featured carousel
-- Added deterministic portal regression journeys for event theming, responsive
-  overflow, tenant isolation, club calendars, course PDFs, enrollment actions,
-  document layout, secure sign-out, JPEG limits, Edward context minimization,
-  and bounded conversation history
-- Added path-based Aster and Harvard preview tenants with tenant-prefixed
-  routing, tenant-scoped credential/state stores, tenant-aware branding, and a
-  documented hostname-based Kubernetes production target
-- Added persistent transcript-processing leases, bounded polling, stale-job
-  expiration, upload-bundle locking, and retryable timeout recovery
-- Added background portal process commands for starting, stopping, and
-  inspecting the local web/API pair without blocking the terminal
-- Added My Documents to the primary portal navigation and requirement-specific
-  checklist actions such as Upload transcript, Select housing, and Pay deposit
+See [Detailed student changelog](docs/changelog/2026-07-31-student-experience.md).
 
-### Changed
+### Staff users
 
-- Edward read-only questions no longer trigger a points-balance record refresh,
-  preventing the assistant conversation from being remounted before its reply
-  appears
-- Signed-PDF and document-photo links now carry validated tenant context during
-  browser navigation, preventing Harvard credential sessions from being
-  evaluated against the default Aster tenant while preserving cross-tenant
-  denial
-- Transcript PDFs now render every supported page as its own high-resolution
-  2,048px, quality-88 JPEG and send exactly one page image per parallel vision
-  request for both Groq and OpenRouter
-- Transcript page segments now parse concurrently, header-only pages no longer
-  abort an otherwise valid transcript, and merged results suppress misleading
-  segment-local “no courses” warnings
-- Transcript uploads remain locked while extraction is active, recover their
-  processing state after navigation or retry, and render progress punctuation
-  without mojibake
-- Made the campus-event carousel more vibrant and converted organization cards
-  into image-backed, event-specific themes; organization cards now open
-  navigable club experiences with full event calendars
-- Fixed the web command wrapper so forwarded `--host` and `--port` arguments
-  reach vinext, preventing isolated test/dev servers from silently colliding
-  with the portal already running on port 3000
-- Hardened the browser-test launcher so completed-student fixtures apply to
-  every tenant and isolated Windows process trees are cleaned up explicitly
-- Restyled the student document center as a submitted-and-signed document
-  library, added padded processing guidance, and improved the profile sign-out
-  security card
-- Rebuilt My Classrooms around tenant-managed recommendations, program paths,
-  transcript matches, searchable catalog cards, and source-aware course dialogs
-- Polished My Campus Life with readable responsive club cards, fixed image
-  bounds, overview metrics, empty search states, and expandable sourced details
-- Edward now selects only the record domains relevant to the question instead
-  of loading every student projection into every model call
-- Onboarding now gates every portal route until final completion; admission
-  offer acceptance, identity/contact details, housing path, emergency contact,
-  and document signing cannot be skipped
-- Campus-life preferences and the deposit step remain deferrable without
-  allowing the student to leave incomplete onboarding
-- Transcript parsing can route independently through OpenRouter or Groq, uses
-  provider-specific multimodal segmentation, and deterministically conserves
-  course rows across segment merges
-- The local tenant preview now persists parsing state across navigation and
-  prevents competing uploads while extraction is active
-- Enrollment checklist buttons now describe the concrete action instead of
-  using the generic “Open task” label
-- Added browser-level misuse acceptance tests for authentication and document
-  workflows, with screenshots/videos/traces retained on failure
-- Added Edward adversarial browser tests for code-execution requests, prompt
-  injection, cross-student access, XSS, malicious provider links/actions,
-  forged payment widgets, and oversized prompts
-- Added persistent client-side authentication validation and password
-  confirmation without weakening API validation
-- Financial-aid uploads now use classification-only AI checks: unrelated files
-  cannot advance the requirement and extracted financial fields are discarded
-- Document-type mismatches now render as warnings and classification-only
-  uploads no longer show a field-confirmation panel
-- Pinned the supported local/CI runtime to Node.js 22 LTS to avoid a Node 26.5
-  native test-runner failure observed on macOS
-- Aligned first-session onboarding with the product-owner reference questions
-  while keeping document collection in enrollment
-- Removed the redundant “Confirm your student record” block and the
-  ID/health/access onboarding step
-- Replaced emergency-contact and FERPA acknowledgement checkboxes with
-  structured student-entered records
-- Expanded housing and campus-life onboarding into the reference branches
-- Made campus life and deposit skippable for later completion while keeping the
-  top-level housing decision required
-- Deposit onboarding now pays only after an explicit `pay_now` selection
+- Added authenticated staff operations routes for each tenant.
+- Added Today, Action Center, shared Task Board, Students, Messages, Journeys,
+  Campus Life, Academics, Knowledge Base, Core Plays, and Edward workspaces.
+- Added a Jira-style task board with drag-and-drop status changes, assignment,
+  prioritization, escalation, student context, and append-only activity.
+- Added a personal Action Center with prioritized students, risk evidence,
+  recommended actions, and communication history.
+- Added structured journey, event, club, and course editing. Raw YAML remains an
+  internal versioned persistence format and is no longer shown to staff.
+- Added Edward-assisted configuration drafts with explicit review and publish
+  confirmation.
+- Added a deterministic 400-student local cohort for workflow and scale testing.
+- Improved task-board sizing, scrolling, responsive behavior, and journey-label
+  wrapping at desktop and mobile breakpoints.
 
-### Security
+See [Detailed staff changelog](docs/changelog/2026-07-31-staff-operations.md).
 
-- High-risk Edward capability-escalation requests are rejected before student
-  context collection or an LLM call
-- Edward has an explicit tool boundary with no shell, Python, filesystem,
-  secret-store, raw-SQL, or arbitrary-network capability
-- Model prose is normalized at the HTTP boundary; active markup, unsafe URI
-  schemes, external navigation, and non-allowlisted routes are removed
-- Deposit widgets require explicit payment intent and are rebuilt from the
-  authoritative offer ID, amount, and payment status instead of trusting
-  provider-supplied fields
+### Engineering and operations
 
-### Planned
+- Added shared staff contracts, staff API routes, PostgreSQL migration
+  `0018_staff_action_center.sql`, audit/outbox integration, local credential
+  authentication, and durable preview-state upgrades.
+- Added tenant-owned journey, Campus Life, and academic configuration documents.
+- Added lifecycle-safe detached portal commands that avoid nested npm process
+  trees on Windows.
+- Added student/staff architecture, sequence diagrams, state-freshness guidance,
+  production boundaries, and an implementation runbook.
+- Expanded rendered web, API, state-store, and portal lifecycle coverage.
 
-- Institutional OIDC and verified invitation delivery
-- Managed PostgreSQL and object storage deployment
-- Staff, leader, and VP enrollment workspaces
-- Real payment, communications, and registrar integrations
-- Production backups, alerting, and Kubernetes manifests
-
-## [0.1.0-preview.1] - 2026-07-26
-
-### Added
-
-- Responsive Aster University student portal with dashboard, enrollment,
-  financials, classrooms, campus life, Edward AI, profile, and supporting pages
-- Credential signup/sign-in, account-isolated state, hashed passwords, hashed
-  sessions, lockout state, and one-time resumable onboarding
-- Inline enrollment actions for profile, housing, documents, and deposit
-- Multi-file PDF/JPEG/PNG upload with durable originals
-- Agentic identity/transcript parsing through OpenRouter or Groq
-- PDF text extraction, page rendering, normalized identity-photo regions, and
-  provider-response attempt records
-- Automatic advisory transcript credit and course-exemption insights
-- Manual-review mode for financial-aid and immunization documents
-- Seeded Computer Science, Mechanical Engineering, and Business Administration
-  academic data plus events and clubs
-- Edward bounded context receipts, usage reporting, safe navigation, and typed
-  payment/upload/appointment widgets
-- PostgreSQL migrations for portal, credentials, documents, and AI attempts
-- Transactional outbox worker with retries, leases, dead-letter behavior, and
-  projection receipts
-- CRM State Effect Registry, generated Mermaid/JSON graph, and CI validation
-- Hardened Google Compute Engine preview deployment with automatic HTTPS
-- Keyless GitHub Actions CD through OIDC, Workload Identity Federation, IAP,
-  OS Login, versioned releases, health checks, and rollback
-- Architecture, domain-model, deployment, security, and operations documents
-
-### Changed
-
-- Onboarding now behaves as a one-time application onboarding flow and gates
-  the dashboard
-- Enrollment tasks use stable human-readable slugs and keep actions on the task
-  page
-- Documents are persisted before asynchronous parsing begins
-- Transcript extraction no longer requires a redundant student confirmation
-- Housing preview reflects the current selection and uses real sample imagery
-- Dashboard next action derives from enrollment state
-- Production cookies are marked Secure
-- Preview images install only the dependency graph each runtime needs
-
-### Security
-
-- Public SSH and RDP exposure removed for the portal VM
-- Legacy port 8000 blocked while its local service remains available
-- Shielded VM Secure Boot, vTPM, integrity monitoring, deletion protection, and
-  static address enabled
-- OS Login and IAP-only administration enabled; old static SSH key removed
-- Host firewall, SSH daemon, kernel networking, auditd, and unattended security
-  updates hardened
-- Docker group access removed and deployment directories made root-owned
-- Containers use read-only filesystems, dropped capabilities,
-  no-new-privileges, request/PID/memory limits, and bounded logs
-- Caddy image pinned by digest and response security headers expanded
-- GitHub Actions dependencies pinned to immutable commits
-- Long-lived Google deployment keys prohibited
+See [Staff portal implementation and operations](docs/24-staff-portal-implementation-and-operations.md).

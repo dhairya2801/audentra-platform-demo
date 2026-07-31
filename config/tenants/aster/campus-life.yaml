@@ -1,0 +1,37 @@
+schema_version: 1
+tenant: aster
+configuration: campus_life
+events:
+  - id: first-year-research-showcase
+    title: First-Year Research Showcase
+    description: Meet faculty mentors and discover research opportunities open to first-year students.
+    starts_at: 2027-09-02T16:00:00.000Z
+    ends_at: 2027-09-02T18:00:00.000Z
+    location: Innovation Hall
+    category: academic
+    featured: true
+    accent: blue
+    visual_theme: discovery
+    registration_url: null
+  - id: fall-club-fair
+    title: Fall Student Organization Fair
+    description: Explore student organizations, affinity groups, service teams, and campus communities.
+    starts_at: 2027-09-05T18:00:00.000Z
+    ends_at: 2027-09-05T21:00:00.000Z
+    location: University Green
+    category: social
+    featured: true
+    accent: gold
+    visual_theme: festival
+    registration_url: null
+  - id: career-launch-lab
+    title: Career Launch Lab
+    description: Practice introductions, meet career coaches, and build a first-semester career plan.
+    starts_at: 2027-09-09T20:00:00.000Z
+    ends_at: 2027-09-09T22:00:00.000Z
+    location: Career Center
+    category: career
+    featured: true
+    accent: navy
+    visual_theme: career
+    registration_url: null

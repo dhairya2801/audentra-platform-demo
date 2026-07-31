@@ -3,6 +3,7 @@ import {
   harvardAcademicContent,
   harvardCampusLifeContent,
 } from "./tenant-content.js";
+import { createManagedConfigurations } from "./managed-config.js";
 
 export const FIXTURE_VERSION = "vv-demo-v4";
 export const TENANT_CONTENT_VERSION = "tenant-content-v6";
@@ -36,6 +37,12 @@ export const ids = Object.freeze({
   helpGettingStarted: "00000000-0000-7000-8000-000000000801",
   helpDocuments: "00000000-0000-7000-8000-000000000802",
   helpPayments: "00000000-0000-7000-8000-000000000803",
+  staffAdvisor: "00000000-0000-7000-8000-000000000901",
+  staffReviewer: "00000000-0000-7000-8000-000000000902",
+  staffOnboardingWorkItem: "00000000-0000-7000-8000-000000000911",
+  staffOutreachWorkItem: "00000000-0000-7000-8000-000000000912",
+  staffOnboardingLog: "00000000-0000-7000-8000-000000000921",
+  staffOutreachLog: "00000000-0000-7000-8000-000000000922",
 });
 
 const seedTimestamp = "2026-07-24T00:00:00.000Z";
@@ -364,6 +371,254 @@ export function createSeedState(options = {}) {
         tenantId: tenant.id,
         displayName: "Alex Morgan",
       },
+    },
+    staff: {
+      members: [
+        {
+          id: ids.staffAdvisor,
+          name: "Priya Shah",
+          email: `priya.shah@${tenant.slug}.example.edu`,
+          component: "Admissions",
+        },
+        {
+          id: ids.staffReviewer,
+          name: "Marcus Lee",
+          email: `marcus.lee@${tenant.slug}.example.edu`,
+          component: "Registrar",
+        },
+      ],
+      workItems: [
+        {
+          id: ids.staffOnboardingWorkItem,
+          key: "ENR-104",
+          studentId: ids.student,
+          title: "Review Alex's onboarding support choices",
+          description:
+            "Confirm residency, housing, and accommodation follow-up choices before the next enrollment milestone.",
+          status: "todo",
+          priority: "high",
+          type: "enrollment",
+          component: "Admissions",
+          dueAt: "2027-07-29T17:00:00.000Z",
+          escalated: false,
+          assigneeId: ids.staffAdvisor,
+          source: { type: "onboarding", id: ids.student },
+          version: 1,
+          createdAt: seedTimestamp,
+          updatedAt: seedTimestamp,
+        },
+        {
+          id: ids.staffOutreachWorkItem,
+          key: "COM-208",
+          studentId: ids.student,
+          title: "Follow up on enrollment communication preference",
+          description:
+            "Confirm the best channel for time-sensitive enrollment reminders.",
+          status: "in_progress",
+          priority: "medium",
+          type: "communication",
+          component: "Admissions",
+          dueAt: "2027-08-01T17:00:00.000Z",
+          escalated: false,
+          assigneeId: ids.staffAdvisor,
+          source: { type: "message", id: ids.reminderMessage },
+          version: 1,
+          createdAt: seedTimestamp,
+          updatedAt: seedTimestamp,
+        },
+      ],
+      workLogs: [
+        {
+          id: ids.staffOnboardingLog,
+          workItemId: ids.staffOnboardingWorkItem,
+          action: "created",
+          message: "Created from the enrollment onboarding queue.",
+          actorName: "VV workflow",
+          occurredAt: seedTimestamp,
+        },
+        {
+          id: ids.staffOutreachLog,
+          workItemId: ids.staffOutreachWorkItem,
+          action: "created",
+          message: "Created from the student communication queue.",
+          actorName: "VV workflow",
+          occurredAt: seedTimestamp,
+        },
+      ],
+      knowledgeBase: [
+        {
+          id: "00000000-0000-7000-8000-000000000931",
+          title: "Enrollment deposit policy",
+          summary:
+            "Approved guidance for deposit deadlines, waivers, and student escalation.",
+          body:
+            "Enrollment deposits reserve a place in the incoming class. Staff should verify the offer deadline before discussing extensions or waiver eligibility.",
+          category: "Enrollment",
+          audience: "internal",
+          status: "published",
+          owner: "Admissions Operations",
+          version: 1,
+          updatedAt: seedTimestamp,
+        },
+        {
+          id: "00000000-0000-7000-8000-000000000932",
+          title: "Transcript review expectations",
+          summary:
+            "What students and reviewers should expect after a transcript upload.",
+          body:
+            "Parsing may continue after the student leaves the page. Extracted fields remain suggestions until a staff reviewer confirms the official document decision.",
+          category: "Documents",
+          audience: "student",
+          status: "published",
+          owner: "Registrar",
+          version: 1,
+          updatedAt: seedTimestamp,
+        },
+        {
+          id: "00000000-0000-7000-8000-000000000933",
+          title: "Housing follow-up guide",
+          summary:
+            "Internal routing notes for undecided and off-campus students.",
+          body:
+            "Use the housing preference and accommodation-interest fields to route the student to the appropriate advising queue.",
+          category: "Housing",
+          audience: "internal",
+          status: "draft",
+          owner: "Student Life",
+          version: 1,
+          updatedAt: seedTimestamp,
+        },
+      ],
+      corePlays: [
+        {
+          id: "00000000-0000-7000-8000-000000000941",
+          title: "Deposit deadline rescue",
+          description:
+            "A coordinated sequence for students with an approaching deposit deadline.",
+          trigger: "Deposit due within 72 hours and requirement incomplete",
+          audience: "Admitted students with incomplete deposits",
+          steps: [
+            "Verify the student has an active offer",
+            "Check for an approved waiver or extension",
+            "Draft a concise reminder with the secure payment link",
+            "Escalate unresolved cases to the admissions component",
+          ],
+          status: "active",
+          owner: "Admissions Operations",
+          version: 1,
+          updatedAt: seedTimestamp,
+        },
+        {
+          id: "00000000-0000-7000-8000-000000000942",
+          title: "Missing document recovery",
+          description:
+            "A standard follow-up path for blocking enrollment documents.",
+          trigger: "Blocking document is rejected or seven days overdue",
+          audience: "Students with blocking document requirements",
+          steps: [
+            "Confirm the exact document and rejection reason",
+            "Draft student-safe resubmission instructions",
+            "Create a two-day follow-up task",
+          ],
+          status: "draft",
+          owner: "Registrar",
+          version: 1,
+          updatedAt: seedTimestamp,
+        },
+      ],
+      journeyBlueprint: [
+        {
+          id: "onboarding-offer",
+          kind: "onboarding",
+          title: "Review your offer",
+          description: "Confirm the admitted program, term, and campus.",
+          owner: "Admissions",
+          required: true,
+          published: true,
+          order: 1,
+        },
+        {
+          id: "onboarding-about-you",
+          kind: "onboarding",
+          title: "About you",
+          description: "Collect student identity and contact preferences.",
+          owner: "Admissions",
+          required: true,
+          published: true,
+          order: 2,
+        },
+        {
+          id: "onboarding-housing",
+          kind: "onboarding",
+          title: "Housing",
+          description: "Capture housing plans and accommodation follow-up.",
+          owner: "Housing",
+          required: true,
+          published: true,
+          order: 3,
+        },
+        {
+          id: "onboarding-campus-life",
+          kind: "onboarding",
+          title: "Campus life",
+          description: "Let students select interests and communities.",
+          owner: "Student Life",
+          required: false,
+          published: true,
+          order: 4,
+        },
+        {
+          id: "onboarding-review",
+          kind: "onboarding",
+          title: "Review and sign",
+          description: "Present the final summary and required consent.",
+          owner: "Registrar",
+          required: true,
+          published: true,
+          order: 5,
+        },
+        {
+          id: "enrollment-profile",
+          kind: "enrollment",
+          title: "Verify your profile",
+          description: "Confirm the student's enrollment profile.",
+          owner: "Admissions",
+          required: true,
+          published: true,
+          order: 1,
+        },
+        {
+          id: "enrollment-transcript",
+          kind: "enrollment",
+          title: "Submit an official transcript",
+          description: "Upload a transcript for review and credit matching.",
+          owner: "Registrar",
+          required: true,
+          published: true,
+          order: 2,
+        },
+        {
+          id: "enrollment-deposit",
+          kind: "enrollment",
+          title: "Pay your enrollment deposit",
+          description: "Complete the enrollment deposit requirement.",
+          owner: "Student Accounts",
+          required: true,
+          published: true,
+          order: 3,
+        },
+        {
+          id: "enrollment-orientation",
+          kind: "enrollment",
+          title: "Register for orientation",
+          description: "Choose an available new-student orientation session.",
+          owner: "New Student Programs",
+          required: true,
+          published: true,
+          order: 4,
+        },
+      ],
+      outreachRuns: [],
     },
     profile: {
       studentId: ids.student,
@@ -706,7 +961,21 @@ export function createSeedState(options = {}) {
     },
     appointments: [],
     payments: [],
-    helpRequests: [],
+    helpRequests: [
+      {
+        id: "00000000-0000-7000-8000-000000000951",
+        topicCode: "documents",
+        subject: "Which transcript should I upload?",
+        message:
+          "I completed dual enrollment at two schools. Should I upload both transcripts or only the most recent one?",
+        status: "new",
+        priority: "high",
+        assigneeId: null,
+        createdAt: "2026-07-24T10:30:00.000Z",
+        updatedAt: "2026-07-24T10:30:00.000Z",
+        version: 1,
+      },
+    ],
     activities: [],
     idempotency: {},
   };
@@ -756,6 +1025,12 @@ export function createSeedState(options = {}) {
   }
   customizeSeedForTenant(state, tenant);
   normalizeTenantContent(state);
+  state.staff.managedConfigurations = createManagedConfigurations(
+    state,
+    tenant,
+    seedTimestamp,
+  );
+  seedStaffCohort(state, tenant, 400);
   return state;
 }
 
@@ -843,6 +1118,8 @@ function normalizeTenantContent(state) {
         ? "Weekly · Thursdays at 6:00 PM"
         : "Every other week · Tuesdays at 7:00 PM";
     club.membershipOpen ??= true;
+    club.version ??= 1;
+    club.updatedAt ??= seedTimestamp;
     club.events ??= [
       {
         id: `${club.id}-welcome`,
@@ -879,6 +1156,348 @@ function normalizeTenantContent(state) {
       },
     ];
   }
+}
+
+function seedStaffCohort(state, tenant, count) {
+  const firstNames = [
+    "Avery",
+    "Jordan",
+    "Taylor",
+    "Maya",
+    "Noah",
+    "Sophia",
+    "Ethan",
+    "Olivia",
+    "Lucas",
+    "Amara",
+    "Mateo",
+    "Nora",
+    "Elijah",
+    "Zoe",
+    "Kai",
+    "Leila",
+  ];
+  const lastNames = [
+    "Carter",
+    "Nguyen",
+    "Rivera",
+    "Patel",
+    "Williams",
+    "Kim",
+    "Johnson",
+    "Garcia",
+    "Brown",
+    "Davis",
+    "Wilson",
+    "Martinez",
+    "Anderson",
+    "Clark",
+    "Lewis",
+    "Walker",
+  ];
+  const programs = [
+    state.offer.programName,
+    "Biology",
+    "Business Administration",
+    "Mechanical Engineering",
+    "Psychology",
+    "Data Science",
+  ];
+  const diagnoses = [
+    {
+      category: "financial",
+      reason:
+        "Financial aid verification is incomplete after the award letter was opened twice.",
+      signals: [
+        "Aid package opened",
+        "Verification incomplete",
+        "Deposit not submitted",
+      ],
+      action: "Call to explain verification and net cost",
+      channel: "voice",
+      expectedImpact: "Reduce affordability uncertainty",
+    },
+    {
+      category: "belonging",
+      reason:
+        "The student attended an admitted event but has not engaged with a club or peer since.",
+      signals: [
+        "Admitted event attended",
+        "No club engagement",
+        "Portal activity declining",
+      ],
+      action: "Connect with a peer ambassador",
+      channel: "email",
+      expectedImpact: "Strengthen campus connection",
+    },
+    {
+      category: "administrative",
+      reason:
+        "A blocking enrollment document remains incomplete near the due date.",
+      signals: [
+        "Document missing",
+        "Deadline within 72 hours",
+        "Checklist revisited",
+      ],
+      action: "Send the exact completion path and follow up",
+      channel: "sms",
+      expectedImpact: "Remove the enrollment blocker",
+    },
+    {
+      category: "academic",
+      reason:
+        "The student changed academic interests and repeatedly viewed curriculum pages.",
+      signals: [
+        "Program interest changed",
+        "Curriculum viewed four times",
+        "No faculty interaction",
+      ],
+      action: "Arrange a faculty conversation",
+      channel: "email",
+      expectedImpact: "Increase confidence in program fit",
+    },
+    {
+      category: "engagement",
+      reason:
+        "Portal and message engagement fell sharply after an initially active period.",
+      signals: [
+        "No portal login for 12 days",
+        "Two unread reminders",
+        "Previously high engagement",
+      ],
+      action: "Make a personal counselor call",
+      channel: "voice",
+      expectedImpact: "Re-engage before the deposit deadline",
+    },
+  ];
+
+  const cohort = [
+    {
+      id: state.profile.studentId,
+      name: `${state.profile.firstName} ${state.profile.lastName}`,
+      preferredName: state.profile.preferredName,
+      programName: state.offer.programName,
+      classYear: state.profile.classYear,
+      assignedStaffId: ids.staffAdvisor,
+      syntheticSeed: true,
+      journey: {
+        stage: "Offer accepted",
+        completedTasks: 4,
+        totalTasks: 9,
+        lastActivityAt: "2026-07-30T17:45:00.000Z",
+      },
+      risk: {
+        score: 82,
+        band: "high",
+        category: "financial",
+        meltLikelihoodPercent: 61,
+        recoveryLikelihoodPercent: 68,
+        reason:
+          "Financial aid verification is incomplete and the deposit deadline is approaching.",
+        signals: [
+          "Aid package opened twice",
+          "Verification worksheet incomplete",
+          "No portal activity for eight days",
+        ],
+        modelVersion: "melt-diagnostic-v1",
+        evaluatedAt: "2026-07-31T06:00:00.000Z",
+      },
+      recommendedAction: {
+        title: "Call to explain financial aid verification",
+        rationale:
+          "A personal explanation is the highest-confidence intervention for this risk pattern.",
+        channel: "voice",
+        expectedImpact: "68% modeled recovery opportunity",
+        taskId: ids.staffOnboardingWorkItem,
+        recommendedToday: true,
+      },
+      communicationHistory: [
+        {
+          id: "seed-communication-alex-1",
+          channel: "email",
+          direction: "outbound",
+          summary: "Sent financial aid checklist and secure verification link.",
+          outcome: "opened",
+          occurredAt: "2026-07-28T14:20:00.000Z",
+        },
+        {
+          id: "seed-communication-alex-2",
+          channel: "portal",
+          direction: "inbound",
+          summary: "Asked whether the scholarship changes the amount due.",
+          outcome: "needs_follow_up",
+          occurredAt: "2026-07-29T18:12:00.000Z",
+        },
+      ],
+    },
+  ];
+
+  for (let index = 1; index < count; index += 1) {
+    const firstName = firstNames[index % firstNames.length];
+    const lastName = lastNames[(index * 7) % lastNames.length];
+    const studentId = deterministicSeedUuid("60", index);
+    const diagnosis = diagnoses[index % diagnoses.length];
+    const score = 38 + ((index * 17) % 59);
+    const band =
+      score >= 88
+        ? "critical"
+        : score >= 72
+          ? "high"
+          : score >= 55
+            ? "medium"
+            : "low";
+    const assignedStaffId =
+      index <= 29 || index % 3 !== 0
+        ? ids.staffAdvisor
+        : ids.staffReviewer;
+    const taskId = index <= 120 ? deterministicSeedUuid("61", index) : null;
+    cohort.push({
+      id: studentId,
+      name: `${firstName} ${lastName}`,
+      preferredName: firstName,
+      programName: programs[index % programs.length],
+      classYear: 2027,
+      assignedStaffId,
+      syntheticSeed: true,
+      journey: {
+        stage:
+          index % 4 === 0
+            ? "Deposit pending"
+            : index % 4 === 1
+              ? "Documents"
+              : index % 4 === 2
+                ? "Housing"
+                : "Orientation",
+        completedTasks: 2 + (index % 6),
+        totalTasks: 9,
+        lastActivityAt: new Date(
+          Date.parse("2026-07-31T08:00:00.000Z") -
+            (index % 18) * 86_400_000,
+        ).toISOString(),
+      },
+      risk: {
+        score,
+        band,
+        category: diagnosis.category,
+        meltLikelihoodPercent: Math.min(92, 18 + Math.round(score * 0.7)),
+        recoveryLikelihoodPercent: Math.max(
+          24,
+          82 - Math.round(score * 0.22),
+        ),
+        reason: diagnosis.reason,
+        signals: diagnosis.signals,
+        modelVersion: "melt-diagnostic-v1",
+        evaluatedAt: "2026-07-31T06:00:00.000Z",
+      },
+      recommendedAction: {
+        title: diagnosis.action,
+        rationale:
+          "Recommended from observable engagement and enrollment-state signals; staff judgment is required.",
+        channel: diagnosis.channel,
+        expectedImpact: diagnosis.expectedImpact,
+        taskId,
+        recommendedToday: index <= 29,
+      },
+      communicationHistory: [
+        {
+          id: `seed-communication-${index}-1`,
+          channel: index % 2 === 0 ? "email" : "sms",
+          direction: "outbound",
+          summary:
+            index % 3 === 0
+              ? "Shared a personalized checklist reminder."
+              : "Sent a counselor introduction and next-step link.",
+          outcome: index % 4 === 0 ? "no_response" : "opened",
+          occurredAt: new Date(
+            Date.parse("2026-07-30T15:00:00.000Z") -
+              (index % 10) * 86_400_000,
+          ).toISOString(),
+        },
+        {
+          id: `seed-communication-${index}-2`,
+          channel: "portal",
+          direction: index % 5 === 0 ? "inbound" : "outbound",
+          summary:
+            index % 5 === 0
+              ? "Student asked for clarification about the next deadline."
+              : "Posted an enrollment-center notification.",
+          outcome: index % 5 === 0 ? "needs_follow_up" : "delivered",
+          occurredAt: new Date(
+            Date.parse("2026-07-28T12:00:00.000Z") -
+              (index % 7) * 86_400_000,
+          ).toISOString(),
+        },
+      ],
+    });
+
+    if (taskId) {
+      const status =
+        index % 11 === 0
+          ? "done"
+          : index % 4 === 0
+            ? "in_progress"
+            : "todo";
+      state.staff.workItems.push({
+        id: taskId,
+        key: `ENR-${String(300 + index).padStart(3, "0")}`,
+        studentId,
+        title: diagnosis.action,
+        description: diagnosis.reason,
+        status,
+        priority:
+          band === "critical"
+            ? "urgent"
+            : band === "high"
+              ? "high"
+              : band === "medium"
+                ? "medium"
+                : "low",
+        type:
+          diagnosis.category === "administrative"
+            ? "document_review"
+            : diagnosis.category === "engagement"
+              ? "communication"
+              : "enrollment",
+        component:
+          diagnosis.category === "financial"
+            ? "Financial Aid"
+            : diagnosis.category === "administrative"
+              ? "Registrar"
+              : "Admissions",
+        dueAt: new Date(
+          Date.parse("2026-07-31T17:00:00.000Z") +
+            (index % 5) * 86_400_000,
+        ).toISOString(),
+        escalated: band === "critical",
+        assigneeId: assignedStaffId,
+        source: { type: "onboarding", id: studentId },
+        version: 1,
+        createdAt: seedTimestamp,
+        updatedAt: seedTimestamp,
+      });
+      state.staff.workLogs.push({
+        id: deterministicSeedUuid("62", index),
+        workItemId: taskId,
+        action: "created",
+        message: "Created from the deterministic staff cohort test seed.",
+        actorName: "VV workflow",
+        occurredAt: seedTimestamp,
+      });
+    }
+  }
+
+  state.staff.cohort = cohort;
+  state.staff.cohortSeed = {
+    synthetic: true,
+    count,
+    purpose: "Deterministic staff workflow and scale testing only",
+    generatedAt: seedTimestamp,
+    tenantSlug: tenant.slug,
+  };
+}
+
+function deterministicSeedUuid(prefix, index) {
+  return `${prefix}000000-0000-7000-8000-${String(index).padStart(12, "0")}`;
 }
 
 export function createJourney(acceptedAt) {

@@ -395,7 +395,14 @@ export class PostgresPortalStore {
         so.status,
         so.current_step,
         so.payload,
-        so.version
+        so.version,
+        (
+          SELECT COUNT(*)::integer
+          FROM student_message message
+          WHERE message.tenant_id = s.tenant_id
+            AND message.student_id = s.id
+            AND message.read_at IS NULL
+        ) AS unread_message_count
       FROM student s
       JOIN person p ON p.id = s.person_id AND p.tenant_id = s.tenant_id
       JOIN student_onboarding so
@@ -413,6 +420,7 @@ export class PostgresPortalStore {
       current_step: OnboardingStep;
       payload: StudentOnboardingData;
       version: number;
+      unread_message_count: number;
     }>(result)[0];
     if (!row) {
       throw new NotFoundError(
@@ -436,6 +444,7 @@ export class PostgresPortalStore {
         version: row.version,
       },
       ...(rewards ? { rewards } : {}),
+      unreadMessageCount: Number(row.unread_message_count),
       initialRoute: required ? "/onboarding" : "/dashboard",
       generatedAt: new Date().toISOString(),
     };

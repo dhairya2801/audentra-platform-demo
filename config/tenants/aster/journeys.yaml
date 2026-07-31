@@ -1,0 +1,208 @@
+schema_version: 1
+tenant: aster
+configuration: journeys
+flows:
+  - id: offer_onboarding
+    title: Offer onboarding
+    kind: onboarding
+    status: published
+    tasks:
+      - id: review_offer
+        student_step: offer
+        title: Review your offer
+        description: Confirm the admitted program, term, and campus.
+        task_type: approval
+        owner: Admissions
+        required: true
+        points: 20
+      - id: about_you
+        student_step: about_you
+        title: About you
+        description: Confirm identity, contact, and communication preferences.
+        task_type: form
+        owner: Admissions
+        required: true
+        points: 25
+      - id: housing_selection
+        student_step: housing
+        title: Housing and roommate preferences
+        description: Build a housing plan, rank residences, and record roommate preferences.
+        task_type: selection_flow
+        owner: Housing
+        required: true
+        points: 35
+        flow:
+          - id: living_plan
+            title: Choose where you plan to live
+            field_type: single_select
+            required: true
+            options:
+              - on_campus
+              - off_campus
+              - commuting
+              - family
+              - undecided
+          - id: residence_ranking
+            title: Rank residence choices
+            field_type: ranked_select
+            required: false
+            maximum_selections: 3
+          - id: roommate_preference
+            title: Choose a roommate preference
+            field_type: single_select
+            required: false
+            options:
+              - already_selected
+              - matching_service
+              - no_preference
+              - single_room
+          - id: roommate_details
+            title: Add a requested roommate
+            field_type: conditional_form
+            required: false
+            when:
+              field: roommate_preference
+              equals: already_selected
+      - id: campus_life
+        student_step: campus_life
+        title: Campus life interests
+        description: Select clubs, communities, and activities to personalize recommendations.
+        task_type: multiple_select
+        owner: Student Life
+        required: false
+        points: 15
+      - id: review_and_sign
+        student_step: review_and_sign
+        title: Review and sign
+        description: Review the onboarding summary and sign required acknowledgements.
+        task_type: signature
+        owner: Registrar
+        required: true
+        points: 40
+  - id: enrollment_checklist
+    title: Enrollment checklist
+    kind: enrollment
+    status: published
+    tasks:
+      - id: profile_verification
+        title: Verify your profile
+        description: Confirm the student enrollment profile.
+        task_type: approval
+        submission_type: form
+        owner: Admissions
+        required: true
+        points: 30
+        due_days_after_acceptance: 7
+      - id: identity_document
+        title: Provide identity documentation
+        description: Upload an accepted identity document for staff review.
+        task_type: upload_file
+        submission_type: document
+        accepted_file_types:
+          - application/pdf
+          - image/jpeg
+          - image/png
+        owner: Enrollment Documentation
+        required: true
+        points: 40
+        due_days_after_acceptance: 14
+        depends_on:
+          - profile_verification
+      - id: official_transcript
+        title: Submit an official transcript
+        description: Upload a transcript for review and credit matching.
+        task_type: upload_file
+        submission_type: document
+        accepted_file_types:
+          - application/pdf
+          - image/jpeg
+          - image/png
+        owner: Registrar
+        required: true
+        points: 80
+        due_days_after_acceptance: 14
+        depends_on:
+          - profile_verification
+      - id: financial_aid_verification
+        title: Complete financial-aid verification
+        description: Submit the requested worksheet and review your aid package.
+        task_type: upload_file
+        submission_type: document
+        owner: Financial Aid
+        required: true
+        points: 50
+        due_days_after_acceptance: 10
+        initial_progress_percent: 35
+      - id: immunization_record
+        title: Provide immunization records
+        description: Upload required health clearance documentation before arrival.
+        task_type: upload_file
+        submission_type: document
+        owner: Student Health
+        required: true
+        points: 60
+        due_days_after_acceptance: 30
+        depends_on:
+          - profile_verification
+      - id: housing_preference
+        title: Confirm housing plans
+        description: Choose on-campus, off-campus, commuting, family, or undecided.
+        task_type: selection_flow
+        submission_type: form
+        owner: Housing & Residence Life
+        required: false
+        points: 25
+        due_days_after_acceptance: 18
+        flow:
+          - id: living_plan
+            title: Choose where you plan to live
+            field_type: single_select
+            required: true
+            options:
+              - on_campus
+              - off_campus
+              - commuting
+              - family
+              - undecided
+          - id: roommate_preference
+            title: Choose a roommate preference
+            field_type: single_select
+            required: false
+            options:
+              - already_selected
+              - matching_service
+              - no_preference
+              - single_room
+      - id: enrollment_deposit
+        title: Pay your enrollment deposit
+        description: Complete the enrollment deposit requirement.
+        task_type: payment
+        submission_type: payment
+        owner: Student Accounts
+        required: true
+        points: 50
+        due_days_after_acceptance: 21
+      - id: orientation_registration
+        title: Register for orientation
+        description: Choose an available new-student orientation session.
+        task_type: single_select
+        submission_type: form
+        owner: New Student Programs
+        required: true
+        points: 40
+        due_days_after_acceptance: 35
+        depends_on:
+          - enrollment_deposit
+          - identity_document
+      - id: student_id_photo
+        title: Upload a photo for your student ID
+        description: Submit a clear portrait that meets student ID guidelines.
+        task_type: upload_file
+        submission_type: document
+        accepted_file_types:
+          - image/jpeg
+          - image/png
+        owner: Campus Services
+        required: true
+        points: 25
+        due_days_after_acceptance: 21

@@ -16,6 +16,9 @@ preserving clear service boundaries for a later Kubernetes migration.
   hashing, hashed opaque sessions, revocation, and account-scoped preview data
 - Responsive dashboard plus enrollment, requirement detail, documents,
   messages, appointments, payments, profile, and help pages
+- Tenant-aware staff operations with authenticated preview access, a personal
+  Action Center, shared Jira-style task board, student records, inquiries,
+  journey/content editors, knowledge, Core Plays, and Edward-assisted drafts
 - Working profile saves, message read state, appointment scheduling, original
   document uploads with reviewable structured extraction, simulated deposits,
   and idempotent offer acceptance
@@ -81,8 +84,12 @@ npm run portal:status
 npm run portal:stop
 ```
 
-`portal:start` returns immediately. The PID file and captured logs are local
-runtime artifacts and are not committed.
+`portal:start` returns immediately. It recognizes an already-running VV portal
+even when its PID file is stale, refuses to start when another application owns
+either required port, and never falls back to a different web port. On Windows,
+the runner starts Node directly rather than creating nested `npm.cmd` shells.
+`portal:stop` terminates the complete managed process tree. The PID file and
+captured logs are local runtime artifacts and are not committed.
 
 Use `npm run demo:reset` while the server is stopped to restore the deterministic
 first-visit scenario. This remains a development fixture; do not enter real
@@ -187,6 +194,13 @@ extraction, cost controls, and the path from the local adapter to production.
 The
 [multi-tenant student portal architecture](docs/architecture/multi-tenant-student-portal.md)
 documents local path-based tenants and the verified-hostname Kubernetes target.
+
+The [release changelog](CHANGELOG.md) links detailed notes for
+[student users](docs/changelog/2026-07-31-student-experience.md) and
+[staff users](docs/changelog/2026-07-31-staff-operations.md). The
+[staff implementation and operations guide](docs/24-staff-portal-implementation-and-operations.md)
+documents routes, shared state, managed configuration, local operation, testing,
+CI/CD behavior, and production gaps.
 
 The no-Docker credential adapter is intentionally isolated from domain logic.
 The PostgreSQL migrations define the production identity boundary: a

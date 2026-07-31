@@ -33,6 +33,8 @@ import {
 import { PostgresPlatformStore } from "./platform/postgres-platform.store";
 import { StudentController } from "./student/student.controller";
 import { StudentDomainController } from "./student/student-domain.controller";
+import { PostgresStaffActionStore } from "./staff/staff-action.store";
+import { StaffController } from "./staff/staff.controller";
 
 @Module({})
 export class AppModule {
@@ -80,6 +82,7 @@ export class AppModule {
         OffersController,
         PortalController,
         ActivityController,
+        ...(platformStoreOverride ? [] : [StaffController]),
       ],
       providers: [
         { provide: APP_CONFIG, useValue: config },
@@ -94,6 +97,7 @@ export class AppModule {
         },
         StudentAgentService,
         OnboardingSignedDocumentService,
+        ...(platformStoreOverride ? [] : [PostgresStaffActionStore]),
         agenticOverrides?.documentStorage
           ? {
               provide: DOCUMENT_STORAGE,

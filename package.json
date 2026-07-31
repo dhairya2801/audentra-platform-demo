@@ -18,6 +18,7 @@
     "portal:start": "node tools/portal-process.mjs start",
     "portal:stop": "node tools/portal-process.mjs stop",
     "portal:status": "node tools/portal-process.mjs status",
+    "test:portal-lifecycle": "node --test tools/test/portal-lifecycle.test.mjs",
     "demo:reset": "npm --prefix tools/demo-api run reset",
     "test:demo-api": "npm --prefix tools/demo-api test",
     "test:e2e": "playwright test",

@@ -8,6 +8,7 @@ import {
   TENANT_CONTENT_VERSION,
 } from "./seed.js";
 import { demoTenants, publicTenantContext } from "./tenant-config.js";
+import { ensureManagedConfigurations } from "./managed-config.js";
 
 export const defaultDataFile = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -202,6 +203,68 @@ function migratePersistedState(value, seededState) {
         ? value.rewards.ledger
         : [],
     };
+  }
+  if (
+    !value.staff ||
+    !Array.isArray(value.staff.members) ||
+    !Array.isArray(value.staff.workItems) ||
+    !Array.isArray(value.staff.workLogs)
+  ) {
+    value.staff = structuredClone(seededState.staff);
+  }
+  value.staff.knowledgeBase = Array.isArray(value.staff.knowledgeBase)
+    ? value.staff.knowledgeBase
+    : structuredClone(seededState.staff.knowledgeBase);
+  value.staff.corePlays = Array.isArray(value.staff.corePlays)
+    ? value.staff.corePlays
+    : structuredClone(seededState.staff.corePlays);
+  value.staff.journeyBlueprint = Array.isArray(value.staff.journeyBlueprint)
+    ? value.staff.journeyBlueprint
+    : structuredClone(seededState.staff.journeyBlueprint);
+  value.staff.outreachRuns = Array.isArray(value.staff.outreachRuns)
+    ? value.staff.outreachRuns
+    : [];
+  ensureManagedConfigurations(value, seededState);
+  value.staff.cohort = Array.isArray(value.staff.cohort)
+    ? value.staff.cohort
+    : structuredClone(seededState.staff.cohort);
+  value.staff.cohortSeed =
+    value.staff.cohortSeed ??
+    structuredClone(seededState.staff.cohortSeed);
+  const existingWorkItemIds = new Set(
+    value.staff.workItems.map((item) => item.id),
+  );
+  for (const item of seededState.staff.workItems) {
+    if (!existingWorkItemIds.has(item.id)) {
+      value.staff.workItems.push(structuredClone(item));
+    }
+  }
+  const existingWorkLogIds = new Set(
+    value.staff.workLogs.map((item) => item.id),
+  );
+  for (const log of seededState.staff.workLogs) {
+    if (!existingWorkLogIds.has(log.id)) {
+      value.staff.workLogs.push(structuredClone(log));
+    }
+  }
+  value.helpRequests =
+    Array.isArray(value.helpRequests) && value.helpRequests.length > 0
+      ? value.helpRequests
+      : structuredClone(seededState.helpRequests);
+  for (const inquiry of value.helpRequests) {
+    inquiry.subject ??=
+      `Student question about ${String(inquiry.topicCode).replaceAll("_", " ")}`;
+    inquiry.status = inquiry.status === "received" ? "new" : inquiry.status;
+    inquiry.priority ??= "medium";
+    inquiry.assigneeId ??= null;
+    inquiry.updatedAt ??= inquiry.createdAt;
+    inquiry.version ??= 1;
+  }
+  for (const [index, club] of (value.campusLife?.clubs ?? []).entries()) {
+    club.version ??= 1;
+    club.updatedAt ??=
+      seededState.campusLife.clubs[index]?.updatedAt ??
+      seededState.fixture.updatedAt;
   }
   return value;
 }
