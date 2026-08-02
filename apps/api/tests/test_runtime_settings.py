@@ -1,0 +1,103 @@
+from pathlib import Path
+
+import pytest
+
+from audentra.bootstrap.settings import (
+    LOCAL_DATABASE_URL,
+    LOCAL_WORKER_TOKEN,
+    RuntimeSettings,
+)
+
+
+def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment({}, package_root=tmp_path)
+
+    assert settings.port == 4000
+    assert settings.database_url == LOCAL_DATABASE_URL
+    assert settings.document_worker_token == LOCAL_WORKER_TOKEN
+    assert settings.object_storage.endpoint_url == "http://localhost:9000"
+    assert settings.object_storage.force_path_style is True
+    assert settings.worker.consumer_name == "student-dashboard-v1"
+    assert settings.worker.worker_id
+    assert settings.onboarding_template_dir == tmp_path / "assets" / "onboarding"
+    assert settings.http_settings().tenant_slug_ids["aster"].endswith("0001")
+
+
+def test_legacy_environment_names_and_bounds_are_supported(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {
+            "NODE_ENV": "test",
+            "PORT": "4100",
+            "DATABASE_URL": "postgresql://example/test",
+            "WEB_ORIGIN": "https://student.example,https://staff.example/",
+            "DOCUMENT_WORKER_TOKEN": "test-worker-token-that-is-not-a-production-secret",
+            "TRANSCRIPT_PARSING": "groq",
+            "GROQ_TRANSCRIPT_TIMEOUT_MS": "90000",
+            "DB_POOL_SIZE": "7",
+            "WORKER_BATCH_SIZE": "25",
+            "ONBOARDING_DOCUMENT_TEMPLATE_DIR": str(tmp_path / "templates"),
+        },
+        package_root=tmp_path,
+    )
+
+    assert settings.environment == "test"
+    assert settings.port == 4100
+    assert settings.web_origins == ("https://student.example", "https://staff.example")
+    assert settings.ai.transcript_provider == "groq"
+    assert settings.ai.groq_timeout_seconds == 90
+    assert settings.database.pool_size == 7
+    assert settings.worker.batch_size == 25
+    assert settings.onboarding_template_dir == tmp_path / "templates"
+
+
+@pytest.mark.parametrize(
+    ("values", "message"),
+    [
+        ({"AUDENTRA_ENV": "preview"}, "AUDENTRA_ENV"),
+        ({"API_PORT": "0"}, "API_PORT"),
+        ({"WEB_ORIGIN": "javascript:alert(1)"}, "WEB_ORIGIN"),
+        ({"OBJECT_STORAGE_FORCE_PATH_STYLE": "sometimes"}, "Boolean"),
+        ({"DB_POOL_SIZE": "many"}, "DB_POOL_SIZE"),
+        (
+            {
+                "WORKER_LEASE_SECONDS": "30",
+                "WORKER_COMMAND_TIMEOUT_SECONDS": "30",
+            },
+            "WORKER_LEASE_SECONDS",
+        ),
+    ],
+)
+def test_invalid_settings_fail_fast(values: dict[str, str], message: str, tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=message):
+        RuntimeSettings.from_environment(values, package_root=tmp_path)
+
+
+def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="DATABASE_URL"):
+        RuntimeSettings.from_environment({"AUDENTRA_ENV": "production"}, package_root=tmp_path)
+
+    settings = RuntimeSettings.from_environment(
+        {
+            "AUDENTRA_ENV": "production",
+            "DATABASE_URL": "postgresql://example/prod",
+            "DOCUMENT_WORKER_TOKEN": "x" * 40,
+            "OBJECT_STORAGE_SECRET_KEY": "external-secret",
+        },
+        package_root=tmp_path,
+    )
+    with pytest.raises(ValueError, match="identity adapter"):
+        settings.assert_api_deployable()
+
+
+def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="prohibited in production"):
+        RuntimeSettings.from_environment(
+            {
+                "AUDENTRA_ENV": "production",
+                "DATABASE_URL": "postgresql://example/prod",
+                "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "OBJECT_STORAGE_SECRET_KEY": "external-secret",
+                "EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED": "true",
+            },
+            package_root=tmp_path,
+        )

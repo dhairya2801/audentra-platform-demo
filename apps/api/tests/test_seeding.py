@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import cast
+from uuid import UUID
+
+import pytest
+import yaml  # type: ignore[import-untyped]
+
+from audentra.infrastructure.postgres.managed_configuration_repository import (
+    academic_courses,
+    campus_events,
+    materialized_journey_tasks,
+)
+from audentra.infrastructure.seeding.cli import build_parser, execute_seed, selected_mode
+from audentra.infrastructure.seeding.fixture import load_demo_fixture
+from audentra.infrastructure.seeding.media import (
+    MediaStorage,
+    PortalMediaAsset,
+    PortalMediaChecksumError,
+    seed_portal_media,
+)
+from audentra.infrastructure.seeding.relational import (
+    _CANONICAL_REQUIREMENTS,
+    _DEMO_STAFF,
+    _DEMO_WORK_ITEMS,
+    _EXTRA_STUDENTS,
+    _ONBOARDING_STEPS,
+    ASTER_TENANT_ID,
+    HARVARD_TENANT_ID,
+    ColumnSpec,
+    _convert_value,
+    _foreign_key_order,
+    _upsert_statement,
+    seed_relational_data,
+)
+from audentra.infrastructure.seeding.safety import SeedEnvironmentError, seed_environment
+from audentra.infrastructure.storage.s3 import ObjectNotFoundError, S3ObjectMetadata
+
+
+class FakeMediaStorage:
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+        self.head_calls: list[str] = []
+        self.put_calls: list[str] = []
+
+    async def head(self, key: str) -> S3ObjectMetadata:
+        self.head_calls.append(key)
+        stored = self.objects.get(key)
+        if stored is None:
+            raise ObjectNotFoundError(key)
+        body, digest = stored
+        return S3ObjectMetadata(key, len(body), "image/jpeg", digest, None)
+
+    async def put(
+        self,
+        key: str,
+        body: bytes,
+        *,
+        content_type: str,
+        sha256: str | None = None,
+    ) -> str:
+        assert content_type == "image/jpeg"
+        digest = hashlib.sha256(body).hexdigest()
+        assert sha256 == digest
+        self.put_calls.append(key)
+        self.objects[key] = (body, digest)
+        return digest
+
+
+def test_fixture_is_clean_legacy_inventory_with_expected_demo_ids() -> None:
+    tables = load_demo_fixture()
+    indexed = {table.name: table.rows for table in tables}
+
+    assert len(tables) == 46
+    assert sum(len(rows) for rows in indexed.values()) == 264
+    assert len(indexed["document_record"]) == 1
+    assert len(indexed["student_appointment"]) == 1
+    assert len(indexed["tenant_reward_rule"]) == 34
+    assert {row["id"] for row in indexed["tenant"]} == {
+        "00000000-0000-7000-8000-000000000001",
+        "00000000-0000-7000-8000-000000000002",
+    }
+    assert indexed["student"][0]["id"] == "00000000-0000-7000-8000-000000000101"
+    assert indexed["admission_offer"][0]["status"] == "offered"
+
+
+def test_supplement_inventory_is_deterministic_tenant_safe_and_complete() -> None:
+    requirement_codes = [definition.code for definition in _CANONICAL_REQUIREMENTS]
+    requirement_ids = [definition.definition_suffix for definition in _CANONICAL_REQUIREMENTS]
+    instance_ids = [definition.instance_suffix for definition in _CANONICAL_REQUIREMENTS]
+
+    assert len(requirement_codes) == len(set(requirement_codes)) == 8
+    assert len(requirement_ids) == len(set(requirement_ids)) == 8
+    assert len(instance_ids) == len(set(instance_ids)) == 8
+    assert len(_ONBOARDING_STEPS) == len(set(_ONBOARDING_STEPS)) == 8
+
+    scenarios_by_tenant = {
+        tenant_id: [item for item in _EXTRA_STUDENTS if item.tenant_id == tenant_id]
+        for tenant_id in (ASTER_TENANT_ID, HARVARD_TENANT_ID)
+    }
+    assert {tenant_id: len(items) for tenant_id, items in scenarios_by_tenant.items()} == {
+        ASTER_TENANT_ID: 2,
+        HARVARD_TENANT_ID: 2,
+    }
+    assert len({item.student_id for item in _EXTRA_STUDENTS}) == 4
+    assert all(item.offer_status == "accepted" for item in _EXTRA_STUDENTS)
+
+    assert {
+        tenant_id: sum(staff.tenant_id == tenant_id for staff in _DEMO_STAFF)
+        for tenant_id in (ASTER_TENANT_ID, HARVARD_TENANT_ID)
+    } == {ASTER_TENANT_ID: 3, HARVARD_TENANT_ID: 3}
+    assert len({staff.staff_id for staff in _DEMO_STAFF}) == 6
+    assert {
+        tenant_id: sum(item.tenant_id == tenant_id for item in _DEMO_WORK_ITEMS)
+        for tenant_id in (ASTER_TENANT_ID, HARVARD_TENANT_ID)
+    } == {ASTER_TENANT_ID: 2, HARVARD_TENANT_ID: 3}
+    assert len({item.item_id for item in _DEMO_WORK_ITEMS}) == 5
+
+
+def test_packaged_tenant_configurations_match_seeded_workflow_inventory() -> None:
+    root = Path(__file__).resolve().parents[1] / "assets" / "config" / "tenants"
+    expected_requirement_codes = {item.code for item in _CANONICAL_REQUIREMENTS}
+
+    for tenant_slug in ("aster", "harvard"):
+        tenant_root = root / tenant_slug
+        journeys = yaml.safe_load((tenant_root / "journeys.yaml").read_text(encoding="utf-8"))
+        academics = yaml.safe_load((tenant_root / "academics.yaml").read_text(encoding="utf-8"))
+        campus_life = yaml.safe_load((tenant_root / "campus-life.yaml").read_text(encoding="utf-8"))
+
+        assert journeys["tenant"] == tenant_slug
+        assert journeys["configuration"] == "journeys"
+        flows = {flow["kind"]: flow for flow in journeys["flows"]}
+        assert set(flows) == {"onboarding", "enrollment"}
+        assert [task["student_step"] for task in flows["onboarding"]["tasks"]] == list(
+            _ONBOARDING_STEPS
+        )
+        assert {task["id"] for task in flows["enrollment"]["tasks"]} == (expected_requirement_codes)
+        assert sum(len(flow["tasks"]) for flow in flows.values()) == 16
+        assert len(materialized_journey_tasks(journeys)) == 8
+
+        assert academics["tenant"] == tenant_slug
+        assert academics["configuration"] == "academics"
+        assert len(academics["courses"]) >= 6
+        assert len({course["code"] for course in academics["courses"]}) == len(academics["courses"])
+        assert len(academic_courses(academics)) == len(academics["courses"])
+
+        assert campus_life["tenant"] == tenant_slug
+        assert campus_life["configuration"] == "campus_life"
+        assert len(campus_life["events"]) >= 3
+        assert all(event["starts_at"] < event["ends_at"] for event in campus_life["events"])
+        assert len(campus_events(campus_life)) == len(campus_life["events"])
+
+
+def test_seed_environment_is_explicit_and_production_fails_closed() -> None:
+    assert seed_environment({"AUDENTRA_ENV": "development"}) == "development"
+    assert seed_environment({"NODE_ENV": "test"}) == "test"
+    with pytest.raises(SeedEnvironmentError, match="disabled in production"):
+        seed_environment({"AUDENTRA_ENV": "production"})
+    with pytest.raises(SeedEnvironmentError, match="explicitly"):
+        seed_environment({})
+
+
+def test_cli_requires_exactly_one_explicit_mode() -> None:
+    parser = build_parser()
+    assert selected_mode(parser.parse_args(["--data"])) == "data"
+    assert selected_mode(parser.parse_args(["--media"])) == "media"
+    assert selected_mode(parser.parse_args(["--all"])) == "all"
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--data", "--media"])
+
+
+def test_execute_seed_rejects_production_before_composing_resources() -> None:
+    with pytest.raises(SeedEnvironmentError, match="disabled in production"):
+        asyncio.run(execute_seed("all", environment={"AUDENTRA_ENV": "production"}))
+
+
+def test_relational_seed_rejects_production_before_using_engine() -> None:
+    with pytest.raises(SeedEnvironmentError, match="disabled in production"):
+        asyncio.run(
+            seed_relational_data(
+                cast("object", None),  # type: ignore[arg-type]
+                environment="production",
+            )
+        )
+
+
+def test_upsert_statement_is_insert_only_and_uses_typed_json_cast() -> None:
+    columns = {
+        "id": ColumnSpec("id", "uuid", "uuid"),
+        "payload": ColumnSpec("payload", "jsonb", "jsonb"),
+    }
+    sql, binds = _upsert_statement("example", ("id", "payload"), columns, ("id",))
+
+    assert 'INSERT INTO public."example"' in sql
+    assert "CAST(:value_1 AS jsonb)" in sql
+    assert 'ON CONFLICT ("id") DO NOTHING' in sql
+    assert binds == {"id": "value_0", "payload": "value_1"}
+
+
+def test_seed_tables_are_stably_topologically_sorted() -> None:
+    fixture = load_demo_fixture()
+    by_name = {table.name: table for table in fixture}
+    ordered = _foreign_key_order(
+        (by_name["student_club"], by_name["media_asset"], by_name["tenant"]),
+        {
+            "student_club": frozenset({"tenant", "media_asset"}),
+            "media_asset": frozenset({"tenant"}),
+            "tenant": frozenset(),
+        },
+    )
+
+    assert [table.name for table in ordered] == ["tenant", "media_asset", "student_club"]
+
+
+def test_fixture_value_conversion_preserves_postgres_boundary_types() -> None:
+    uuid_value = _convert_value(
+        "00000000-0000-7000-8000-000000000001", ColumnSpec("id", "uuid", "uuid")
+    )
+    timestamp = _convert_value(
+        "2026-07-24T00:00:00+00:00",
+        ColumnSpec("created_at", "timestamp with time zone", "timestamptz"),
+    )
+    date_value = _convert_value("2027-09-01", ColumnSpec("starts_on", "date", "date"))
+    numeric = _convert_value("3.500", ColumnSpec("credits", "numeric", "numeric"))
+    payload = _convert_value({"b": 2, "a": 1}, ColumnSpec("payload", "jsonb", "jsonb"))
+
+    assert isinstance(uuid_value, UUID)
+    assert isinstance(timestamp, datetime) and timestamp.tzinfo is not None
+    assert date_value == date(2027, 9, 1)
+    assert numeric == Decimal("3.500")
+    assert payload == '{"a":1,"b":2}'
+
+
+def test_media_seed_preflights_checksum_then_uploads_and_skips_unchanged(
+    tmp_path: Path,
+) -> None:
+    body = b"reviewed-jpeg-bytes"
+    digest = hashlib.sha256(body).hexdigest()
+    (tmp_path / "housing").mkdir()
+    (tmp_path / "housing" / "room.jpg").write_bytes(body)
+    asset = PortalMediaAsset("housing/room.jpg", "tenant/media/room.jpg", digest)
+    storage = FakeMediaStorage()
+
+    first = asyncio.run(
+        seed_portal_media(
+            storage,
+            environment="test",
+            media_root=tmp_path,
+            assets=(asset,),
+        )
+    )
+    second = asyncio.run(
+        seed_portal_media(
+            storage,
+            environment="test",
+            media_root=tmp_path,
+            assets=(asset,),
+        )
+    )
+
+    assert first.uploaded == 1 and first.unchanged == 0
+    assert second.uploaded == 0 and second.unchanged == 1
+    assert storage.put_calls == [asset.storage_key]
+
+
+def test_media_checksum_failure_makes_no_storage_calls(tmp_path: Path) -> None:
+    (tmp_path / "clubs").mkdir()
+    (tmp_path / "clubs" / "one.jpg").write_bytes(b"changed")
+    asset = PortalMediaAsset("clubs/one.jpg", "tenant/media/one.jpg", "0" * 64)
+    storage = FakeMediaStorage()
+
+    with pytest.raises(PortalMediaChecksumError, match="checksum mismatch"):
+        asyncio.run(
+            seed_portal_media(
+                cast(MediaStorage, storage),
+                environment="development",
+                media_root=tmp_path,
+                assets=(asset,),
+            )
+        )
+    assert storage.head_calls == []
+    assert storage.put_calls == []

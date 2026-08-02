@@ -72,4 +72,23 @@ describe("CRM State Effect Registry", () => {
       }).map((issue) => issue.code),
     ).toContain("EVENT_HANDLER_WITHOUT_DEDUPLICATION");
   });
+
+  it("requires concrete handlers only for implemented effects", () => {
+    const implemented = stateEffects.find(
+      (effect) => effect.implementationStatus === "implemented",
+    )!;
+    const previewOnly = stateEffects.find(
+      (effect) => effect.implementationStatus === "preview_only",
+    )!;
+    const effects = [
+      { ...implemented, handler: null },
+      { ...previewOnly, handler: "InventedProductionHandler.run" },
+    ] satisfies readonly StateEffect[];
+    const issueCodes = validateStateEffectRegistry({
+      owners: stateFieldOwnership,
+      effects,
+    }).map((issue) => issue.code);
+    expect(issueCodes).toContain("IMPLEMENTED_EFFECT_WITHOUT_HANDLER");
+    expect(issueCodes).toContain("PREVIEW_EFFECT_WITH_RUNTIME_HANDLER");
+  });
 });

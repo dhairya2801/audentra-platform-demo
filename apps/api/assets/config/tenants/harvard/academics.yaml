@@ -1,0 +1,69 @@
+schema_version: 1
+tenant: harvard
+configuration: academics
+catalog_version: 2027-2028.demo.v1
+courses:
+  - id: compsci-20
+    code: COMPSCI 20
+    title: Discrete Mathematics for Computer Science
+    description: Logic, proofs, combinatorics, probability, graphs, and discrete structures.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Prof. Elena Park]
+    meeting_pattern: Mon/Wed 10:30 AM
+    availability_label: Fall
+  - id: compsci-32
+    code: COMPSCI 32
+    title: Computational Thinking and Problem Solving
+    description: Algorithmic problem solving and foundational programming techniques.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Dr. Marcus Reed]
+    meeting_pattern: Tue/Thu 9:00 AM
+    availability_label: Fall and Spring
+  - id: compsci-50
+    code: COMPSCI 50
+    title: Introduction to Computer Science
+    description: Intellectual enterprises of computer science and the art of programming.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Prof. David Chen]
+    meeting_pattern: Mon/Wed 1:30 PM
+    availability_label: Fall and Spring
+  - id: compsci-51
+    code: COMPSCI 51
+    title: Abstraction and Design in Computation
+    description: Functional programming, data abstraction, modularity, and program design.
+    credits: 4
+    level: 100
+    prerequisites:
+      - course_code: COMPSCI 50
+        minimum_grade: C
+    instructor_names: [Prof. Nora Singh]
+    meeting_pattern: Tue/Thu 12:00 PM
+    availability_label: Spring
+  - id: math-21b
+    code: MATH 21B
+    title: Linear Algebra and Differential Equations
+    description: Linear systems, vector spaces, eigenvalues, and differential equations.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Prof. Julian Wright]
+    meeting_pattern: Mon/Wed/Fri 9:00 AM
+    availability_label: Fall and Spring
+  - id: stat-110
+    code: STAT 110
+    title: Introduction to Probability
+    description: Probability models, random variables, distributions, expectation, and conditioning.
+    credits: 4
+    level: 100
+    prerequisites:
+      - course_code: MATH 21B
+        minimum_grade: C
+    instructor_names: [Prof. Leila Ahmed]
+    meeting_pattern: Tue/Thu 2:15 PM
+    availability_label: Fall

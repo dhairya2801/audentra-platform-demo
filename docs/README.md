@@ -1,5 +1,9 @@
 # VV Enrollment Platform — Engineering Design
 
+> The codebase is now split between Audentra Platform and Audentra Portals.
+> Read [Repository split](repository-split.md) before following older path or
+> deployment references.
+
 This directory is the engineering specification for the VV student enrollment
 platform. It translates the product PDFs and the existing onboarding experience
 into implementable system boundaries, workflows, events, data ownership, and
@@ -18,13 +22,16 @@ delivery phases.
 
 ## Architecture in one paragraph
 
-VV starts as a modular monolith with three independently deployable processes:
-a Next.js web application, a NestJS application API, and a background worker.
-PostgreSQL is the source of truth, S3-compatible object storage holds documents,
-and a transactional outbox connects business changes to notifications,
-integrations, read models, and controlled AI workflows. Modules are designed so
-that a boundary can be extracted into a microservice later when scaling,
-security, ownership, or deployment pressure justifies it.
+VV remains a modular monolith split across independently deployable
+repositories. `Audentra-portals` owns the Next.js web applications;
+`Audentra-platform` owns a FastAPI HTTP process and an independent Python
+outbox worker, plus migration and deterministic seed roles from one shared
+image. PostgreSQL is the source of truth, S3-compatible object storage holds
+documents, and a transactional outbox connects business changes to
+notifications, integrations, read models, and controlled AI workflows.
+Framework-neutral application and domain modules keep Python integrations
+direct while allowing a boundary to be extracted later when scaling, security,
+ownership, or deployment pressure justifies it.
 
 ## Documentation map
 

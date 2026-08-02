@@ -8,7 +8,9 @@ export interface RegistryIssue {
     | "DUPLICATE_EFFECT_ID"
     | "DUPLICATE_FIELD_OWNER"
     | "EVENT_HANDLER_WITHOUT_DEDUPLICATION"
+    | "IMPLEMENTED_EFFECT_WITHOUT_HANDLER"
     | "MISSING_FIELD_OWNER"
+    | "PREVIEW_EFFECT_WITH_RUNTIME_HANDLER"
     | "SYNCHRONOUS_CYCLE"
     | "UNKNOWN_SYNCHRONOUS_EFFECT";
   message: string;
@@ -42,6 +44,24 @@ export function validateStateEffectRegistry(input: {
       });
     }
     effectById.set(effect.id, effect);
+    if (
+      effect.implementationStatus === "implemented" &&
+      (!effect.handler || !effect.handler.trim())
+    ) {
+      issues.push({
+        code: "IMPLEMENTED_EFFECT_WITHOUT_HANDLER",
+        message: `${effect.id} is implemented but has no runtime handler`,
+      });
+    }
+    if (
+      effect.implementationStatus === "preview_only" &&
+      effect.handler !== null
+    ) {
+      issues.push({
+        code: "PREVIEW_EFFECT_WITH_RUNTIME_HANDLER",
+        message: `${effect.id} is preview-only but declares a production runtime handler`,
+      });
+    }
     if (
       effect.kind === "event_handler" &&
       effect.consumes.length > 0 &&

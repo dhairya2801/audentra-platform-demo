@@ -16,6 +16,10 @@ export type StateEffectKind =
   | "event_handler"
   | "projection";
 
+export type StateEffectImplementationStatus =
+  | "implemented"
+  | "preview_only";
+
 export interface StateFieldOwnership {
   field: string;
   owner: DomainOwner;
@@ -39,7 +43,8 @@ export interface StateEffect {
   version: 1;
   owner: DomainOwner;
   kind: StateEffectKind;
-  handler: string;
+  implementationStatus: StateEffectImplementationStatus;
+  handler: string | null;
   description: string;
   reads: readonly string[];
   writes: readonly string[];

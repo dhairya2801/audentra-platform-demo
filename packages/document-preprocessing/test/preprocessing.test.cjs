@@ -152,7 +152,7 @@ describe("document preprocessing", () => {
     const templateBytes = readFileSync(
       resolve(
         __dirname,
-        "../../../apps/web/public/documents/onboarding/aster-ferpa-release.pdf",
+        "./fixtures/aster-ferpa-release.pdf",
       ),
     );
     const commonInput = {

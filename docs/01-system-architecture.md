@@ -2,31 +2,37 @@
 
 ## 1. Architectural decision
 
-Build a modular monolith first, with three deployable processes:
+Use a modular monolith with the portals deployed from their own repository and
+two independently scalable backend processes built from one Python image:
 
 ```text
 Student / Staff / Leader / VP
               |
               v
-      Next.js web application
+   Audentra portals application
               |
               v
-       NestJS application API
-          |       |       |
-          v       v       v
-    PostgreSQL  Object   Transactional
-                storage  outbox
-                           |
-                           v
-                    Background worker
+        FastAPI HTTP adapter
+               |
+               v
+  Framework-neutral application/domain core
+           |       |       |
+           v       v       v
+     PostgreSQL  Object   Transactional
+                 storage  outbox
+                            |
+                            v
+                    Python outbox worker
                       |    |    |
                       v    v    v
                     CRM  Comms  Read models / AI
 ```
 
 The modular monolith is an operational choice, not permission to mix business
-logic together. Internally, every module has explicit application, domain, and
-infrastructure boundaries.
+logic together. FastAPI is an inbound adapter; business use cases depend on
+Python ports and domain types rather than web-framework objects. PostgreSQL,
+S3-compatible storage, AI providers, and the outbox worker are outbound or
+process adapters around that core.
 
 ## 2. Why this baseline
 
@@ -89,13 +95,20 @@ Responsibilities:
 - expose query endpoints for portal read models;
 - mediate every agent tool call.
 
-Proposed technology:
+Current backend technology:
 
-- NestJS with Fastify;
-- REST endpoints documented through OpenAPI;
-- PostgreSQL;
-- Drizzle plus explicit SQL migrations;
-- typed configuration validated at startup.
+- Python 3.12 and FastAPI/ASGI with REST endpoints documented through OpenAPI;
+- Pydantic v2 request, response, and startup configuration validation;
+- PostgreSQL through async SQLAlchemy Core and `asyncpg`, with bounded pools
+  and statement timeouts;
+- explicit, checksummed SQL migrations executed by `audentra-migrate`;
+- framework-neutral application/domain layers suitable for reuse from other
+  Python entry points.
+
+Blocking production constraint: the only implemented identity composition is
+`AUTH_MODE=demo`. Setting `AUDENTRA_ENV=production` fails closed until an
+institutional identity adapter is implemented; the presence of local Keycloak
+does not remove that gate.
 
 ### 3.3 Background worker
 
@@ -112,8 +125,11 @@ Responsibilities:
 - retry transient failures with bounded backoff;
 - move permanent failures to a dead-letter/operations queue.
 
-The worker uses the same domain packages as the API but runs independently, so
-it can be scaled separately.
+The Python worker uses the same application/domain code and release image as
+the API but starts through `audentra-worker`, so it can be scaled and restarted
+independently. It is a headless process with no HTTP listener. Blocking S3 SDK
+calls and CPU-heavy document preprocessing are moved off the asyncio event loop
+with `asyncio.to_thread`.
 
 ### 3.4 PostgreSQL
 
@@ -141,14 +157,19 @@ the first product phase.
 - Production: institution-approved S3-compatible service
 
 The application stores file metadata in PostgreSQL and file bytes in object
-storage. The browser uploads through short-lived signed URLs. Uploaded content
-remains unavailable to users and agents until security scanning completes.
+storage. The current compatibility route accepts a bounded multipart upload and
+the server writes the immutable original through its S3 adapter. Short-lived
+signed browser uploads remain a future scaling option. Uploaded content remains
+unavailable to users and agents until the applicable review and security gates
+complete.
 
 ### 3.6 Identity provider
 
-Authentication is externalized behind OIDC.
+Authentication is isolated behind an application port so an OIDC adapter can be
+introduced without changing domain use cases.
 
-- Local/demo provider: Keycloak
+- Current implementation: explicit demo identity adapter
+- Local integration target: Keycloak
 - Production: institutional OIDC/SAML federation or an approved identity
   platform
 
@@ -180,14 +201,19 @@ Analytics Projections
 Agent Gateway
 ```
 
-Each module contains:
+The current Python package expresses these boundaries as:
 
 ```text
-module/
-  domain/           Entities, value objects, policies, domain events
-  application/      Commands, queries, use cases, ports
-  infrastructure/   SQL repositories, external adapters
-  presentation/     HTTP controllers and response mappers
+apps/api/src/audentra/
+  domain/            Entities, policies, and domain behavior
+  application/       Framework-neutral use cases
+  core/              Ports, authorization context, shared errors
+  contracts/         Pydantic request/response contracts
+  interfaces/http/   FastAPI routes, middleware, dependency adapters
+  interfaces/worker/ Python worker entry point
+  infrastructure/   PostgreSQL, storage, outbox, documents, worker adapters
+  integrations/ai/  Bounded provider gateways and validation
+  bootstrap/         Production composition and validated settings
 ```
 
 Rules:
@@ -274,29 +300,35 @@ intervention.completed.v1
 Consumers are idempotent. Each consumer records an event/consumer pair so the
 same delivery cannot produce duplicate side effects.
 
-## 8. Proposed repository structure
+## 8. Current backend repository structure
 
 ```text
 apps/
-  web/
   api/
-  worker/
+    src/audentra/
+    assets/
+    migrations/
+    tests/
 
 packages/
-  contracts/
-  domain/
-  db/
-  ui/
-  config/
-  observability/
-  testing/
+  contracts/                 Retained browser/event compatibility contracts
+  state-effects/             Field ownership and effect registry
+  document-preprocessing/    Retained compatibility tooling/tests
+
+tools/
+  demo-api/                  Development-only preview adapter
 
 infra/
-  compose/
-  kubernetes/
+  compose.yaml
+  docker/api.Dockerfile      Shared migration/API/worker image
 
 docs/
 ```
+
+The React/Next.js portals and their browser tests live in the separate
+`Audentra-portals` repository. Keeping the HTTP adapter under `interfaces/http`
+and the worker under `interfaces/worker` lets future Python frameworks invoke
+the same application services without importing FastAPI route objects.
 
 ## 9. Microservice extraction rules
 

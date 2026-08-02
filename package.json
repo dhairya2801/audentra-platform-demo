@@ -1,51 +1,47 @@
 {
-  "name": "vv-enrollment-platform",
+  "name": "audentra-platform",
   "version": "0.1.0",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "packages/*"
+    "packages/*",
+    "tools/demo-api"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
-    "dev:web": "npm --workspace @vv/web run dev",
-    "dev:api": "npm --workspace @vv/api run dev",
-    "dev:worker": "npm --workspace @vv/worker run dev",
-    "dev:portal": "node tools/run-student-portal.mjs",
-    "portal:start": "node tools/portal-process.mjs start",
-    "portal:stop": "node tools/portal-process.mjs stop",
-    "portal:status": "node tools/portal-process.mjs status",
-    "test:portal-lifecycle": "node --test tools/test/portal-lifecycle.test.mjs",
-    "demo:reset": "npm --prefix tools/demo-api run reset",
-    "test:demo-api": "npm --prefix tools/demo-api test",
-    "test:e2e": "playwright test",
+    "build": "npm run build:api && npm run build:node",
+    "build:api": "uv build --directory apps/api --wheel",
+    "build:node": "npm run build --workspaces --if-present",
+    "test": "npm run test:api && npm run test:node",
+    "test:api": "uv run --directory apps/api --locked pytest --cov=audentra --cov-report=term-missing",
+    "test:api:postgres": "uv run --directory apps/api --locked pytest -m postgres",
+    "test:node": "npm run test --workspaces --if-present",
+    "lint": "npm run lint:api && npm run lint:node",
+    "lint:api": "uv run --directory apps/api --locked ruff check src tests && uv run --directory apps/api --locked ruff format --check src tests",
+    "lint:node": "npm run lint --workspaces --if-present",
+    "format:api": "uv run --directory apps/api --locked ruff format src tests",
+    "typecheck": "npm run typecheck:api && npm run typecheck:node",
+    "typecheck:api": "uv run --directory apps/api --locked mypy src tests",
+    "typecheck:node": "npm run typecheck --workspaces --if-present",
+    "sync:api": "uv sync --directory apps/api --locked --all-groups",
+    "dev:api": "uv run --directory apps/api --locked audentra-api",
+    "dev:worker": "uv run --directory apps/api --locked audentra-worker",
+    "worker:once": "uv run --directory apps/api --locked audentra-worker --once",
+    "dev:demo-api": "npm --workspace @vv/demo-api run dev",
+    "demo:reset": "npm --workspace @vv/demo-api run reset",
+    "test:demo-api": "npm --workspace @vv/demo-api test",
     "crm:graph": "npm --workspace @vv/state-effects run generate",
     "crm:graph:check": "npm --workspace @vv/state-effects run generate:check",
     "cgc:index": "cgc --db kuzudb --path ./tmp/codegraphcontext index .",
     "cgc:update": "cgc --db kuzudb --path ./tmp/codegraphcontext update .",
     "cgc:report": "cgc --db kuzudb --path ./tmp/codegraphcontext report --output ./docs/generated/codegraphcontext-report.md",
-    "db:migrate": "npm --workspace @vv/api run db:migrate",
-    "db:seed": "npm --workspace @vv/api run db:seed"
+    "db:migrate": "uv run --directory apps/api --locked audentra-migrate --migrations-dir migrations",
+    "db:seed": "uv run --directory apps/api --locked audentra-seed --all",
+    "db:seed:data": "uv run --directory apps/api --locked audentra-seed --data",
+    "db:seed:media": "uv run --directory apps/api --locked audentra-seed --media"
   },
   "engines": {
     "node": ">=22.13.0 <23"
   },
   "overrides": {
-    "next": {
-      "postcss": "8.5.22",
-      "sharp": "0.35.3"
-    },
-    "postcss": "8.5.22",
-    "sharp": "0.35.3"
-  },
-  "dependencies": {
-    "postcss": "8.5.22",
-    "sharp": "0.35.3"
-  },
-  "devDependencies": {
-    "@playwright/test": "1.62.0"
+    "find-my-way": "^9.7.0"
   }
 }

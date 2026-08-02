@@ -154,8 +154,9 @@
       "version": 1,
       "owner": "identity",
       "kind": "command",
-      "handler": "CredentialAuthService.signUp",
-      "description": "Consumes one student invitation, stores a slow password hash, and creates a hashed opaque session atomically.",
+      "implementationStatus": "preview_only",
+      "handler": null,
+      "description": "Defines the credential-registration contract exercised by the development preview; the production FastAPI identity adapter is not implemented yet.",
       "reads": [
         "identity.invitation"
       ],
@@ -185,8 +186,9 @@
       "version": 1,
       "owner": "identity",
       "kind": "command",
-      "handler": "CredentialAuthService.signIn",
-      "description": "Verifies a password with generic failures, applies lockout policy, and stores only the opaque session-token digest.",
+      "implementationStatus": "preview_only",
+      "handler": null,
+      "description": "Defines the credential-session contract exercised by the development preview; the production FastAPI identity adapter is not implemented yet.",
       "reads": [
         "identity.account"
       ],
@@ -214,7 +216,8 @@
       "version": 1,
       "owner": "admissions",
       "kind": "command",
-      "handler": "PostgresPlatformStore.acceptAdmissionOffer",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPlatformRepository.accept_admission_offer",
       "description": "Accepts an eligible offer and creates the enrollment journey atomically.",
       "reads": [
         "admission.offer.status"
@@ -245,7 +248,8 @@
       "version": 1,
       "owner": "onboarding",
       "kind": "command",
-      "handler": "PostgresPortalStore.updateStudentOnboarding",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.update_student_onboarding",
       "description": "Validates and saves exactly the next authorized onboarding step.",
       "reads": [
         "student.onboarding.status",
@@ -277,7 +281,8 @@
       "version": 1,
       "owner": "onboarding",
       "kind": "command",
-      "handler": "PostgresPortalStore.completeStudentOnboarding",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.complete_student_onboarding",
       "description": "Locks the onboarding record and makes dashboard the future home route.",
       "reads": [
         "student.onboarding.currentStep",
@@ -307,7 +312,8 @@
       "version": 1,
       "owner": "onboarding",
       "kind": "command",
-      "handler": "PostgresPortalStore.updateStudentHousingPlan",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.update_student_housing_plan",
       "description": "Updates a student-owned housing selection and completes its enrollment requirement atomically.",
       "reads": [
         "student.onboarding.payload",
@@ -338,7 +344,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "PostgresPortalStore.reserveStudentDocumentUpload",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.reserve_student_document_upload",
       "description": "Commits a recoverable upload reservation before immutable object storage transfer.",
       "reads": [
         "enrollment.requirement.status"
@@ -369,7 +376,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "PostgresPortalStore.claimStudentDocumentProcessing",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.claim_student_document_processing",
       "description": "After object storage succeeds, atomically routes full-extraction and classification-only categories to durable processing, and disabled categories directly to staff review.",
       "reads": [
         "document.status",
@@ -403,8 +411,9 @@
       "version": 1,
       "owner": "documents",
       "kind": "event_handler",
-      "handler": "StudentAgentService.processQueuedDocumentExtraction",
-      "description": "The outbox worker reads the immutable original and records a terminal reviewable extraction; duplicate delivery returns the current terminal document without another model call.",
+      "implementationStatus": "implemented",
+      "handler": "DocumentExtractionRunner.handle",
+      "description": "The outbox worker invokes a private authenticated API command; the API reads the immutable original and records a terminal reviewable extraction. Duplicate delivery returns the current terminal document without another model call.",
       "reads": [
         "document.status",
         "document.category",
@@ -434,7 +443,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "PostgresPlatformStore.recordAiProviderResponse",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPlatformRepository.record_ai_provider_response",
       "description": "Persists the exact provider completion or transport failure separately from the normalized document extraction.",
       "reads": [
         "document.status"
@@ -460,8 +470,9 @@
       "version": 1,
       "owner": "documents",
       "kind": "event_handler",
-      "handler": "StudentAgentService.recoverReservedDocumentExtraction",
-      "description": "Reconciles a reservation after a process interruption by verifying immutable storage before it queues extraction.",
+      "implementationStatus": "implemented",
+      "handler": "DocumentExtractionRunner.handle",
+      "description": "The outbox worker invokes a private authenticated recovery command, which verifies immutable storage before queuing extraction after a process interruption.",
       "reads": [
         "document.status",
         "document.extraction"
@@ -489,7 +500,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "PostgresPortalStore.completeStudentDocumentExtraction",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.complete_student_document_extraction",
       "description": "Stores model extraction as reviewable data and automatically projects correctly classified transcript courses into advisory equivalency matching.",
       "reads": [
         "document.status",
@@ -526,7 +538,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "StudentAgentService.retryDocumentExtraction",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPlatformService._retry_document_extraction",
       "description": "Atomically queues a retryable stored extraction and publishes a new durable worker request without rereading the original in the HTTP request.",
       "reads": [
         "document.status",
@@ -559,7 +572,8 @@
       "version": 1,
       "owner": "documents",
       "kind": "command",
-      "handler": "PostgresPortalStore.confirmStudentDocumentExtraction",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.confirm_student_document_extraction",
       "description": "Confirms selected non-transcript document fields and projects only safe student-owned fields; retained as an idempotent compatibility path for older transcript reviews.",
       "reads": [
         "document.extraction"
@@ -588,39 +602,12 @@
       }
     },
     {
-      "id": "enrollment.applyDocumentExtraction",
-      "version": 1,
-      "owner": "enrollment",
-      "kind": "event_handler",
-      "handler": "EnrollmentProjectionHandler.onDocumentExtractionCompleted",
-      "description": "Projects a reviewed document into the matching enrollment requirement.",
-      "reads": [
-        "document.status"
-      ],
-      "writes": [
-        "enrollment.requirement.status"
-      ],
-      "emits": [],
-      "consumes": [
-        "document.extraction_completed.v1"
-      ],
-      "synchronousCalls": [],
-      "idempotency": {
-        "required": true,
-        "key": "eventId",
-        "scope": "event"
-      },
-      "transaction": {
-        "boundary": "single_database",
-        "isolation": "database_default"
-      }
-    },
-    {
       "id": "financials.recordDeposit",
       "version": 1,
       "owner": "financials",
       "kind": "command",
-      "handler": "PostgresPortalStore.createDepositPayment",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.create_deposit_payment",
       "description": "Records the processor result once and emits the payment fact.",
       "reads": [
         "admission.offer.status",
@@ -651,7 +638,8 @@
       "version": 1,
       "owner": "financials",
       "kind": "command",
-      "handler": "PostgresPortalStore.selectFinancialPaymentPlan",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.select_financial_payment_plan",
       "description": "Selects one eligible plan and refreshes the financial projection.",
       "reads": [
         "financial.remainingBalanceCents",
@@ -680,7 +668,8 @@
       "version": 1,
       "owner": "student-profile",
       "kind": "command",
-      "handler": "PostgresPortalStore.updateStudentProfile",
+      "implementationStatus": "implemented",
+      "handler": "PostgresPortalRepository.update_student_profile",
       "description": "Updates the student-owned profile under optimistic concurrency.",
       "reads": [
         "student.profile"
@@ -759,12 +748,6 @@
       "type": "effect",
       "label": "documents.retryExtraction",
       "owner": "documents"
-    },
-    {
-      "id": "effect:enrollment.applyDocumentExtraction",
-      "type": "effect",
-      "label": "enrollment.applyDocumentExtraction",
-      "owner": "enrollment"
     },
     {
       "id": "effect:financials.recordDeposit",
@@ -1324,12 +1307,6 @@
       "runtimeEvidence": false
     },
     {
-      "from": "effect:enrollment.applyDocumentExtraction",
-      "to": "field:enrollment.requirement.status",
-      "type": "writes",
-      "runtimeEvidence": false
-    },
-    {
       "from": "effect:financials.recordDeposit",
       "to": "event:payment.deposit_succeeded.v1",
       "type": "emits",
@@ -1492,12 +1469,6 @@
       "runtimeEvidence": false
     },
     {
-      "from": "event:document.extraction_completed.v1",
-      "to": "effect:enrollment.applyDocumentExtraction",
-      "type": "consumes",
-      "runtimeEvidence": true
-    },
-    {
       "from": "event:document.extraction_requested.v1",
       "to": "effect:documents.processQueuedExtraction",
       "type": "consumes",
@@ -1620,12 +1591,6 @@
     {
       "from": "field:document.status",
       "to": "effect:documents.retryExtraction",
-      "type": "reads",
-      "runtimeEvidence": false
-    },
-    {
-      "from": "field:document.status",
-      "to": "effect:enrollment.applyDocumentExtraction",
       "type": "reads",
       "runtimeEvidence": false
     },

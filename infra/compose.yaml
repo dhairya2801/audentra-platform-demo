@@ -1,4 +1,63 @@
-name: vv-enrollment
+name: audentra-platform
+
+x-python-service: &python-service
+  image: audentra-platform-python:local
+  build:
+    context: ..
+    dockerfile: infra/docker/api.Dockerfile
+  init: true
+
+x-runtime-environment: &runtime-environment
+  AUDENTRA_ENV: development
+  AUTH_MODE: demo
+  BROWSER_AUTH_REQUIRED: ${BROWSER_AUTH_REQUIRED:-true}
+  API_HOST: 0.0.0.0
+  API_PORT: "4000"
+  WEB_ORIGIN: http://localhost:${WEB_PORT:-3000}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+  DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-0}
+  DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-5}
+  DB_POOL_RECYCLE_SECONDS: ${DB_POOL_RECYCLE_SECONDS:-1800}
+  DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-15000}
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:-vv-documents}
+  OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-vv_minio}
+  OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-vv_minio_password}
+  OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-10485760}
+  ONBOARDING_DOCUMENT_TEMPLATE_DIR: /workspace/apps/api/assets/onboarding
+  DOCUMENT_WORKER_TOKEN: ${DOCUMENT_WORKER_TOKEN:-local-development-document-worker-token}
+  API_INTERNAL_URL: http://api:4000
+  DEMO_TENANT_ID: 00000000-0000-7000-8000-000000000001
+  DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101
+  DEMO_ACTOR_ID: 00000000-0000-7000-8000-000000000100
+  DEMO_STAFF_ACTOR_ID: 00000000-0000-7000-8000-000000000901
+  WORKER_ID: ${WORKER_ID:-compose-worker}
+  WORKER_CONSUMER_NAME: ${WORKER_CONSUMER_NAME:-student-dashboard-v1}
+  WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
+  WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-1}
+  WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
+  WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-10}
+  WORKER_BASE_RETRY_MS: ${WORKER_BASE_RETRY_MS:-1000}
+  WORKER_MAX_RETRY_MS: ${WORKER_MAX_RETRY_MS:-300000}
+  WORKER_COMMAND_TIMEOUT_SECONDS: ${WORKER_COMMAND_TIMEOUT_SECONDS:-30}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
+  OPENROUTER_APP_URL: http://localhost:${WEB_PORT:-3000}
+  OPENROUTER_APP_NAME: Aster Student Portal
+  OPENROUTER_DOCUMENT_TIMEOUT_MS: ${OPENROUTER_DOCUMENT_TIMEOUT_MS:-120000}
+  OPENROUTER_DOCUMENT_MAX_TOKENS: ${OPENROUTER_DOCUMENT_MAX_TOKENS:-6000}
+  OPENROUTER_DOCUMENT_REASONING_TOKENS: ${OPENROUTER_DOCUMENT_REASONING_TOKENS:-256}
+  EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED: ${EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED:-true}
+  TRANSCRIPT_PARSING: ${TRANSCRIPT_PARSING:-groq}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
+  GROQ_TRANSCRIPT_TIMEOUT_MS: ${GROQ_TRANSCRIPT_TIMEOUT_MS:-60000}
+  GROQ_TRANSCRIPT_MAX_TOKENS: ${GROQ_TRANSCRIPT_MAX_TOKENS:-1400}
+  GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS: ${GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS:-40000}
+  GROQ_TRANSCRIPT_REASONING_EFFORT: ${GROQ_TRANSCRIPT_REASONING_EFFORT:-none}
 
 services:
   postgres:
@@ -15,10 +74,8 @@ services:
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\"",
-        ]
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
       interval: 5s
       timeout: 3s
       retries: 20
@@ -40,12 +97,10 @@ services:
       - minio-data:/data
     healthcheck:
       test:
-        [
-          "CMD",
-          "curl",
-          "-f",
-          "http://127.0.0.1:9000/minio/health/live",
-        ]
+        - CMD
+        - curl
+        - -f
+        - http://127.0.0.1:9000/minio/health/live
       interval: 10s
       timeout: 5s
       retries: 12
@@ -59,9 +114,11 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-ec"]
+    entrypoint:
+      - /bin/sh
+      - -ec
     command:
-      - >
+      - >-
         mc alias set local http://minio:9000
         "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
         mc mb --ignore-existing "local/$${MINIO_BUCKET}";
@@ -84,7 +141,7 @@ services:
       KC_DB_URL: jdbc:postgresql://postgres:5432/vv_keycloak
       KC_DB_USERNAME: ${POSTGRES_USER:-vv}
       KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-vv_local_password}
-      KC_HTTP_PORT: 8080
+      KC_HTTP_PORT: "8080"
       KC_HEALTH_ENABLED: "true"
     ports:
       - "${KEYCLOAK_PORT:-8080}:8080"
@@ -94,14 +151,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     healthcheck:
       test:
-        [
-          "CMD-SHELL",
-          "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3",
-        ]
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '200 OK' <&3
       interval: 10s
       timeout: 5s
       retries: 30
@@ -114,7 +170,7 @@ services:
     restart: unless-stopped
     environment:
       MP_DATABASE: /data/mailpit.db
-      MP_MAX_MESSAGES: 5000
+      MP_MAX_MESSAGES: "5000"
     ports:
       - "${MAILPIT_SMTP_PORT:-1025}:1025"
       - "${MAILPIT_UI_PORT:-8025}:8025"
@@ -122,11 +178,9 @@ services:
       - mailpit-data:/data
     healthcheck:
       test:
-        [
-          "CMD",
-          "/mailpit",
-          "readyz",
-        ]
+        - CMD
+        - /mailpit
+        - readyz
       interval: 10s
       timeout: 3s
       retries: 12
@@ -135,70 +189,59 @@ services:
       - vv-local
 
   migrate:
-    build:
-      context: ..
-      dockerfile: infra/docker/api.Dockerfile
+    <<: *python-service
     restart: "no"
     command:
-      [
-        "sh",
-        "-ec",
-        "npm --workspace @vv/api run db:migrate && npm --workspace @vv/api run db:seed",
-      ]
-    environment: &api-environment
-      NODE_ENV: development
-      DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
-      API_PORT: 4000
-      WEB_ORIGIN: http://localhost:${WEB_PORT:-3000}
-      AUTH_MODE: demo
-      OBJECT_STORAGE_ENDPOINT: http://minio:9000
-      OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET:-vv-documents}
-      OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-vv_minio}
-      OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-vv_minio_password}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free}
-      OPENROUTER_APP_URL: http://localhost:${WEB_PORT:-3000}
-      OPENROUTER_APP_NAME: Aster Student Portal
-      TRANSCRIPT_PARSING: ${TRANSCRIPT_PARSING:-openrouter}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-120b}
-      GROQ_TRANSCRIPT_TIMEOUT_MS: ${GROQ_TRANSCRIPT_TIMEOUT_MS:-60000}
-      GROQ_TRANSCRIPT_MAX_TOKENS: ${GROQ_TRANSCRIPT_MAX_TOKENS:-4000}
-      GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS: ${GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS:-10000}
-      GROQ_TRANSCRIPT_REASONING_EFFORT: ${GROQ_TRANSCRIPT_REASONING_EFFORT:-low}
-      DOCUMENT_PYTHON_BIN: python3
-      SMTP_HOST: mailpit
-      SMTP_PORT: 1025
-      OIDC_ISSUER_URL: http://keycloak:8080/realms/vv-local
+      - audentra-migrate
+      - --migrations-dir
+      - /workspace/apps/api/migrations
+    environment:
+      <<: *runtime-environment
+      DB_POOL_SIZE: "1"
+      DB_MAX_OVERFLOW: "0"
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - vv-local
+
+  seed:
+    <<: *python-service
+    restart: "no"
+    command:
+      - audentra-seed
+      - --all
+    environment:
+      <<: *runtime-environment
+      DB_POOL_SIZE: "1"
+      DB_MAX_OVERFLOW: "0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     networks:
       - vv-local
 
   api:
-    build:
-      context: ..
-      dockerfile: infra/docker/api.Dockerfile
+    <<: *python-service
     restart: unless-stopped
-    environment: *api-environment
+    command:
+      - audentra-api
+    environment: *runtime-environment
     ports:
       - "${API_PORT:-4000}:4000"
     depends_on:
-      migrate:
-        condition: service_completed_successfully
-      minio-init:
+      seed:
         condition: service_completed_successfully
     healthcheck:
       test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:4000/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
-        ]
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:4000/health/ready', timeout=2).read()
       interval: 10s
       timeout: 5s
       retries: 15
@@ -207,71 +250,17 @@ services:
       - vv-local
 
   worker:
-    build:
-      context: ..
-      dockerfile: infra/docker/worker.Dockerfile
+    <<: *python-service
     restart: unless-stopped
-    environment:
-      NODE_ENV: development
-      DATABASE_URL: postgresql://${POSTGRES_USER:-vv}:${POSTGRES_PASSWORD:-vv_local_password}@postgres:5432/${POSTGRES_DB:-vv_enrollment}
-      API_INTERNAL_URL: http://api:4000
-      DOCUMENT_WORKER_TOKEN: ${DOCUMENT_WORKER_TOKEN:-local-development-document-worker-token}
-      WORKER_ID: compose-worker
-      WORKER_HEALTH_PORT: 3002
-      WORKER_BATCH_SIZE: ${WORKER_BATCH_SIZE:-20}
-      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-1000}
-      WORKER_LEASE_SECONDS: ${WORKER_LEASE_SECONDS:-60}
-      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-10}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-    ports:
-      - "${WORKER_HEALTH_PORT:-3002}:3002"
+    command:
+      - audentra-worker
+    environment: *runtime-environment
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       api:
         condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3002/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 10s
     stop_grace_period: 30s
-    networks:
-      - vv-local
-
-  web:
-    build:
-      context: ..
-      dockerfile: infra/docker/web.Dockerfile
-    restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 3000
-      HOST: 0.0.0.0
-      API_BASE_URL: http://api:4000
-      NEXT_PUBLIC_API_BASE_URL: http://localhost:${API_PORT:-4000}
-    ports:
-      - "${WEB_PORT:-3000}:3000"
-    depends_on:
-      api:
-        condition: service_healthy
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 15
-      start_period: 15s
     networks:
       - vv-local
 

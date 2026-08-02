@@ -1,0 +1,2 @@
+# Migration identity must not depend on a developer's core.autocrlf setting.
+migrations/*.sql text eol=lf

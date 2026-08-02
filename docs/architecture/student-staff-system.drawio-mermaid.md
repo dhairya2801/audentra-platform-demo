@@ -12,13 +12,13 @@ flowchart LR
   end
 
   subgraph Identity["🔐 Identity & Access"]
-    Auth["🛡️ Tenant isolation<br/>SSO / OIDC · Roles · Permissions"]
+    Auth["🛡️ Tenant isolation<br/>Demo identity today · OIDC required for production<br/>Roles · Permissions"]
   end
 
-  subgraph BE["⚙️ NestJS Application API"]
+  subgraph BE["⚙️ FastAPI Application API"]
     StudentAPI["📋 Student domain<br/>Onboarding · Requirements · Profile<br/>Appointments · Payments"]
     StaffAPI["🗂️ Staff operations<br/>Work items · Reviews · Student context"]
-    ConfigAPI["🧩 Configuration service<br/>Journey YAML · Events · Catalog"]
+    ConfigAPI["🧩 Configuration boundary<br/>Versioned journeys · Events · Catalog"]
     DocAPI["🔎 Document and AI orchestration<br/>Upload · Extraction · Evaluation"]
   end
 
@@ -30,9 +30,9 @@ flowchart LR
   end
 
   subgraph Async["🚀 Worker & Integrations"]
-    Worker["⚙️ Background Worker<br/>Parsing · Projections · Recovery"]
-    Notify["📨 Delivery adapters<br/>Email · SMS · Voice"]
-    Realtime["📡 SSE / Live invalidation"]
+    Worker["🐍 Python Outbox Worker<br/>Parsing · Projections · Recovery"]
+    Notify["📨 Delivery adapter ports<br/>Email · SMS · Voice"]
+    Realtime["📡 Planned SSE / Live invalidation"]
     University["🏛️ University systems<br/>SIS · CRM · Financial Aid · Payments"]
     AI["🧠 Approved AI providers"]
   end

@@ -1,0 +1,37 @@
+schema_version: 1
+tenant: aster
+configuration: campus_life
+events:
+  - id: welcome-week-block-party
+    title: Welcome Week Block Party
+    description: Meet classmates, student leaders, and campus support teams on University Green.
+    starts_at: 2027-08-28T18:00:00.000Z
+    ends_at: 2027-08-28T21:00:00.000Z
+    location: University Green
+    category: social
+    featured: true
+    accent: gold
+    visual_theme: festival
+    registration_url: null
+  - id: first-year-research-showcase
+    title: First-Year Research Showcase
+    description: Meet faculty mentors and discover research opportunities open to first-year students.
+    starts_at: 2027-09-02T16:00:00.000Z
+    ends_at: 2027-09-02T18:00:00.000Z
+    location: Innovation Hall
+    category: academic
+    featured: true
+    accent: blue
+    visual_theme: discovery
+    registration_url: null
+  - id: internship-ready-lab
+    title: Internship Ready Lab
+    description: Practice introductions, meet career coaches, and build a first-semester career plan.
+    starts_at: 2027-09-09T20:00:00.000Z
+    ends_at: 2027-09-09T22:00:00.000Z
+    location: Career Center
+    category: career
+    featured: true
+    accent: navy
+    visual_theme: career
+    registration_url: null

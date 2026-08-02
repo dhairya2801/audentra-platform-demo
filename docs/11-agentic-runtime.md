@@ -1,8 +1,8 @@
 # Agentic runtime: Edward and document extraction
 
-This implementation keeps the LLM behind a server-side adapter. The browser
-never receives the OpenRouter key, selects a model, or writes extracted facts
-directly to the student record.
+This implementation keeps every LLM behind a server-side Python adapter. The
+browser never receives provider credentials, selects a model, or writes
+extracted facts directly to the student record.
 
 ## Runtime boundaries
 
@@ -14,7 +14,7 @@ Student browser
   +-- uploads PDF/JPEG/PNG                  |
            |                               |
            v                               v
-     Portal API                     bounded context builder
+     FastAPI adapter                bounded context builder
            |                               |
            +-- reserves metadata            |
            +-- stores immutable original    |
@@ -22,12 +22,13 @@ Student browser
            |       +-- staff review --------+-- no model call
            |       +-- type classification -+-- fields discarded
            |       +-- agentic extraction
-           +-- Python/PyMuPDF preprocessor
+           +-- Python/PyMuPDF processing adapter
            |       +-- bounded text extraction
            |       +-- bounded rendered page images
            |       |
-           +-- OpenRouter gateway <---------+
-           |       +-- multimodal text + page images
+           +-- configured AI gateway <------+
+           |       +-- OpenRouter or Groq
+           |       +-- bounded text + page images
            |       +-- JSON-only text extraction
            |       +-- local normalization and validation
            |       +-- token usage response
@@ -39,11 +40,13 @@ Student browser
            +-- record moves to staff review
 ```
 
-The no-Docker preview adapter persists metadata in
+The development-only no-Docker preview adapter persists metadata in
 `tools/demo-api/.data/state.json` and originals in
-`tools/demo-api/.data/uploads`; both are ignored by Git. The complete Compose
-stack uses PostgreSQL for metadata and MinIO through the S3 API for originals.
-Both adapters implement the same browser-facing contract.
+`tools/demo-api/.data/uploads`; both are ignored by Git. The production-oriented
+FastAPI composition uses PostgreSQL for metadata and MinIO/managed object
+storage through the S3 API for originals. A 42-operation compatibility set is
+covered by parity tests. The preview still exposes additional development
+routes, so closing or explicitly versioning that gap is a release gate.
 
 ## Edward
 
@@ -99,10 +102,12 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
    metadata while discarding every extracted student/financial field;
 5. for agentic and classification-only documents, atomically claims processing
    so replays do not spend LLM tokens twice;
-6. for PDFs, invokes an isolated Python/PyMuPDF preprocessor that extracts
-   bounded text and renders page images locally; transcript PDFs render every
-   supported page (up to eight) as an independent 2,048px, quality-88 JPEG,
-   while the images remain ephemeral and are not stored in the CRM;
+6. for PDFs, invokes the Python/PyMuPDF processing adapter directly; bounded
+   text extraction and page rendering run through `asyncio.to_thread` so CPU
+   and blocking library work do not stall the ASGI event loop; transcript PDFs
+   render every supported page (up to eight) as an independent 2,048px,
+   quality-88 JPEG, while the images remain ephemeral and are not stored in the
+   CRM;
 7. first applies a conservative local heading check for unmistakable document
    mismatches (for example a FERPA release uploaded to the transcript task),
    preserving the original and keeping the requirement incomplete without an
@@ -113,8 +118,9 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
    every page result; identity documents use the OpenRouter multimodal path;
 9. treats the document text and page images as untrusted evidence, never as
    executable instructions, and requires JSON-only text output;
-10. in development, records the exact provider response or transport failure in
-   a correlated extraction-attempt journal before parsing it;
+10. records the exact provider response or transport failure in a durable,
+    correlated extraction-attempt journal before parsing it; recorder failures
+    are isolated from the safety decision and surfaced operationally;
 11. locally normalizes field counts and lengths, then rejects empty structured
     results;
 12. for identity documents, accepts an optional `profile_photo` page region as
@@ -128,19 +134,16 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
 17. records only the fields explicitly accepted by the student for full
     agentic categories.
 
-`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` is a suitable local/demo
-choice because it accepts page images and returns text. The request does not
-rely on a provider-specific PDF-file capability, tool-call endpoint, or
-provider structured-output feature. The Groq path uses
-`openai/gpt-oss-120b` in strict JSON Schema mode with low reasoning effort and
-no image input. The default Groq window is capped at 10,000 extracted
-characters and 4,000 output tokens to fit the currently observed 8,000 TPM
-on-demand limit. Long transcripts remain reviewable but carry an explicit
-incomplete-course-list warning; use OpenRouter when full multimodal coverage is
-more important than latency. A textless scan requires the OpenRouter path (or
-future OCR) rather than silently discarding its visual evidence. A free model
-can still be rate-limited or unavailable, so production must pin an evaluated
-model and retain the same safe retry/review boundary.
+Model names and bounds are runtime configuration. The checked-in development
+defaults are `openai/gpt-4o-mini` for OpenRouter and `qwen/qwen3.6-27b` for
+Groq. Only `TRANSCRIPT_PARSING=groq` selects Groq for transcripts; any other
+value selects OpenRouter. Both transcript paths receive bounded text and
+rendered page evidence, and identity documents use the OpenRouter multimodal
+path. The current Groq defaults bound output to 1,400 tokens, input text to
+40,000 characters, and reasoning effort to `none`. The request does not rely
+on a provider-specific PDF-file capability or tool-call endpoint. Production
+must pin evaluated providers/models and retain the same safe retry and human
+review boundary.
 
 ### Failure and retry semantics
 
@@ -148,10 +151,10 @@ Failures do not destroy the upload. The original remains available and a
 failed extraction preserves only a safe `failureCode` (`provider_unavailable`,
 `unsupported_capability`, `invalid_response`, `timeout`, or `unknown`) plus a
 `retryable` flag. The exact provider payload is never copied into the
-student-facing document record or shown to the browser. When
-`OPENROUTER_STORE_RESPONSES=true`, it is retained separately in the local
-`aiProviderResponses` attempt journal or PostgreSQL
-`ai_provider_response_attempt` table with document, request, attempt, model,
+student-facing document record or shown to the browser. It is retained
+separately in the development `aiProviderResponses` attempt journal or the
+PostgreSQL `ai_provider_response_attempt` table with document, request,
+attempt, model,
 provider (`openrouter` or `groq`), HTTP, finish-reason, usage, duration, and
 transport correlation.
 
@@ -190,7 +193,7 @@ step after that transaction commits:
 
 ```text
 upload API -> document reservation -> object storage -> processing row + outbox event -> worker
-  -> malware scan -> sandboxed text/OCR + page render -> LLM extraction
+  -> bounded text extraction + page render -> LLM extraction
   -> review projection
 ```
 
@@ -202,39 +205,51 @@ The remaining production substitutions are:
 - development MinIO to managed S3-compatible storage;
 - console metrics to OpenTelemetry and cost dashboards.
 
-The Kubernetes deployment then scales web/API pods separately from extraction
-workers. Worker concurrency, per-student rate limits, model allowlists, document
-size limits, timeouts, and retry budgets become configuration rather than
-frontend logic.
+The backend Kubernetes deployment scales FastAPI and extraction-worker pods
+independently from the separately deployed portals. Worker concurrency,
+per-student rate limits, model allowlists, document size limits, timeouts, and
+retry budgets remain server configuration rather than frontend logic.
 
-## Required environment variables
+## Relevant environment variables
 
 ```text
-OPENROUTER_API_KEY=                 # server only
-OPENROUTER_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+AUDENTRA_ENV=development             # production fails closed with demo auth
+AUTH_MODE=demo
+DATABASE_URL=postgresql://user:password@localhost:5432/audentra
+
+OBJECT_STORAGE_ENDPOINT=http://localhost:9000
+OBJECT_STORAGE_REGION=us-east-1
+OBJECT_STORAGE_BUCKET=audentra-documents
+OBJECT_STORAGE_ACCESS_KEY=replace-me
+OBJECT_STORAGE_SECRET_KEY=replace-me
+OBJECT_STORAGE_FORCE_PATH_STYLE=true
+MAX_DOCUMENT_BYTES=10485760
+
+OPENROUTER_API_KEY=                  # optional, server only
+OPENROUTER_MODEL=openai/gpt-4o-mini
 OPENROUTER_APP_URL=http://localhost:3000
-OPENROUTER_APP_NAME=Aster Student Portal
-OPENROUTER_STORE_RESPONSES=true
+OPENROUTER_APP_NAME=Audentra Student Portal
 OPENROUTER_DOCUMENT_TIMEOUT_MS=120000
 OPENROUTER_DOCUMENT_MAX_TOKENS=6000
 OPENROUTER_DOCUMENT_REASONING_TOKENS=256
-TRANSCRIPT_PARSING=openrouter        # both providers receive one image per transcript page
-GROQ_API_KEY=                        # server only
-GROQ_MODEL=openai/gpt-oss-120b
+TRANSCRIPT_PARSING=openrouter         # exact "groq" selects Groq
+GROQ_API_KEY=                         # optional, server only
+GROQ_MODEL=qwen/qwen3.6-27b
 GROQ_TRANSCRIPT_TIMEOUT_MS=60000
-GROQ_TRANSCRIPT_MAX_TOKENS=4000
-GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS=10000
-GROQ_TRANSCRIPT_REASONING_EFFORT=low
-DOCUMENT_PYTHON_BIN=python3
-DOCUMENT_UPLOAD_DIR=./tools/demo-api/.data/uploads
-OBJECT_STORAGE_ENDPOINT=http://localhost:9000
-OBJECT_STORAGE_BUCKET=vv-documents
-OBJECT_STORAGE_ACCESS_KEY=vv_minio
-OBJECT_STORAGE_SECRET_KEY=vv_minio_password
+GROQ_TRANSCRIPT_MAX_TOKENS=1400
+GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS=40000
+GROQ_TRANSCRIPT_REASONING_EFFORT=none
+
 API_INTERNAL_URL=http://localhost:4000
 DOCUMENT_WORKER_TOKEN=replace-with-a-long-shared-secret
+WORKER_POLL_INTERVAL_SECONDS=1
+WORKER_BATCH_SIZE=20
+WORKER_LEASE_SECONDS=60
+WORKER_MAX_ATTEMPTS=10
 ```
 
-The default model is only a configurable starting point. Production should pin
-an approved model after accuracy, privacy, latency, and cost evaluation on a
-representative redacted document set.
+These model defaults are configurable starting points. Production should pin
+approved models after accuracy, privacy, latency, and cost evaluation on a
+representative redacted document set. Production also requires a real identity
+adapter; the application rejects `AUDENTRA_ENV=production` while
+`AUTH_MODE=demo` is selected.

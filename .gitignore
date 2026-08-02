@@ -14,3 +14,18 @@ tmp/
 playwright-report/
 test-results/
 .portal-dev.pid
+
+# Python environments, bytecode, tool caches, and coverage output.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest-work/
+.pytest-*/
+.mypy_cache/
+.mypy-cache*/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/

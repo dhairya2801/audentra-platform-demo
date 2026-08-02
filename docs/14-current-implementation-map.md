@@ -1,109 +1,121 @@
 # Current implementation map
 
 This document describes what the repository actually implements as of
-2026-07-29. It complements the design documents by distinguishing the complete
-production-oriented code path from the lighter public preview deployment.
+2026-08-02. It complements the design documents by distinguishing the
+production-oriented FastAPI path from development-only preview tooling and
+from integrations that remain planned.
 
 ## 1. System in one picture
 
 ```mermaid
 flowchart LR
   Browser["Student browser"]
-  Web["React + vinext web"]
-  API["NestJS/Fastify API"]
-  Preview["Account-isolated preview API"]
+  Web["Audentra portals<br/>(separate repository/deployment)"]
+  API["FastAPI HTTP adapter"]
+  Core["Framework-neutral<br/>Python application/domain core"]
   DB[("PostgreSQL")]
   Object[("S3-compatible object storage")]
   Outbox[("Transactional outbox")]
-  Worker["Background worker"]
+  Worker["Headless Python worker"]
   AI["OpenRouter / Groq"]
   CRM["Future CRM/SIS/payment/comms adapters"]
 
-  Browser -->|HTTPS + HttpOnly session| Web
+  Browser -->|HTTPS + browser identity context| Web
   Web -->|typed /v1 contracts| API
-  Web -. "deployed e2-micro profile" .-> Preview
-  API --> DB
-  API --> Object
-  API --> Outbox
+  API --> Core
+  Core --> DB
+  Core --> Object
+  Core --> Outbox
+  Core --> AI
   Outbox --> Worker
-  Worker --> AI
+  Worker -->|private document command| API
+  Worker -->|projection handlers| DB
   Worker --> CRM
-  Preview -->|JSON state + immutable upload bytes| Preview
-  Preview --> AI
 ```
 
 Text fallback:
 
 1. The browser renders the portal and calls same-origin `/v1` routes.
-2. The production path uses NestJS, PostgreSQL, object storage, and an outbox
-   worker.
-3. The current micro-VM preview substitutes an account-isolated JSON store and
-   durable local upload volume because the complete stack is too large for a
-   1 GB VM.
-4. Both paths use the same public TypeScript contracts and preserve the same
-   domain boundaries.
+2. The separately deployed portal routes those requests to the FastAPI inbound
+   adapter.
+3. FastAPI composes the framework-neutral application core. The worker shares
+   the Python package and executes idempotent projection handlers or invokes a
+   private authenticated FastAPI document command.
+4. Domain changes, audit records, and outbox events commit atomically. The
+   headless worker leases committed events and performs recoverable side
+   effects outside the request lifecycle.
 
 ## 2. Runtime profiles
 
-| Capability | Local/full-stack profile | Public micro-VM preview |
+| Capability | Production-oriented FastAPI profile | Development preview tool |
 |---|---|---|
-| Web | `apps/web` | `apps/web` production build |
-| API | `apps/api` NestJS/Fastify | `tools/demo-api` Node HTTP adapter |
+| Web | Separately deployed `Audentra-portals` repository | Portal or contract-test client |
+| API | `apps/api` FastAPI/ASGI adapter | `tools/demo-api` Node HTTP adapter |
 | Primary state | PostgreSQL 17 | Account-isolated JSON files |
-| Document bytes | MinIO/S3 adapter | Protected Docker volume |
-| Async processing | `apps/worker` outbox consumer | Recoverable in-process job queue |
-| Authentication | Demo identity resolver today; credential tables prepared | Real credential signup/sign-in and hashed sessions |
-| AI providers | OpenRouter and Groq adapters | OpenRouter and Groq adapters |
-| Edge/TLS | Environment-specific ingress | Caddy with automatic HTTPS |
-| Intended use | Architecture and integration development | Synthetic-data product preview |
+| Document bytes | MinIO/managed S3-compatible adapter | Ignored local development directory |
+| Async processing | `audentra-worker` outbox consumer from the shared Python image | Recoverable in-process job queue |
+| Authentication | Demo adapter only; production fails closed | Development credential signup/sign-in and hashed sessions |
+| AI providers | Python OpenRouter and Groq adapters | Node OpenRouter and Groq adapters |
+| Deployment | Compose locally; independent API/worker roles in production | Development process only |
+| Intended use | Target production integration path (identity-gated) | Synthetic-data compatibility preview |
 
-The preview is functional, persistent across container restarts, and
-account-isolated. It is not approved for real student records, payment details,
-or institutional production traffic.
+The preview remains useful for synthetic-data product development but is not a
+production deployment path. The combined public VM profile has been retired and
+is preserved only in Git history. Preview-only routes are not evidence of
+FastAPI parity.
 
 ## 3. Repository map
 
 ```text
-apps/web
-  Portal routes, components, browser state, API client, activity tracking
-
 apps/api
-  HTTP controllers, authorization context, application services,
-  PostgreSQL stores, migrations, audit/outbox/runtime-lineage writes
-
-apps/worker
-  Outbox leasing, deduplication receipts, retries, dead-letter behavior,
-  document extraction execution, dashboard projection
+  src/audentra/interfaces/http
+    FastAPI routes, middleware, error mapping, request dependencies
+  src/audentra/application + domain + core
+    Framework-neutral use cases, policies, ports, authorization context
+  src/audentra/infrastructure
+    Async PostgreSQL repositories, S3 storage, SQL migrations, outbox,
+    document processing, worker leasing/retry/dead-letter behavior
+  src/audentra/interfaces/worker
+    Headless Python worker entry point
+  src/audentra/integrations/ai
+    OpenRouter/Groq gateways, Edward safety, extraction validation
+  migrations + assets + tests
+    Checksummed SQL, onboarding templates, backend verification suite
 
 packages/contracts
-  Browser/API/event types and deterministic mapping helpers
+  Retained browser/API/event compatibility types and mapping helpers
 
 packages/state-effects
   Authoritative CRM field ownership and read/write/event registry
 
 packages/document-preprocessing
-  PDF text extraction, bounded page rendering, visual-region cropping
+  Retained Node compatibility tooling/tests; production processing is Python
 
 tools/demo-api
-  Stateful preview adapter, credential store, student store registry,
-  OpenRouter/Groq gateway, durable uploads
+  Development-only preview adapter and its local state/providers
 
 infra
-  Full Compose stack, container images, hardened VM profile, CI/CD scripts
+  Compose stack and shared migration/seed/API/worker Python image
 
 docs
   Architecture decisions, flows, models, security, operations, generated graphs
 ```
 
+Portal routes, components, browser state, browser tests, and public assets live
+in `Audentra-portals`, not this backend repository.
+
 ## 4. Primary application flows
 
-### 4.1 First registration and returning login
+### 4.1 Development-preview registration and returning login
+
+The following flow is implemented by `tools/demo-api` for synthetic preview
+accounts. It is not the production FastAPI identity design:
 
 ```mermaid
 sequenceDiagram
   participant S as Student
   participant W as Web
-  participant A as API
+  participant A as Preview API
   participant I as Identity store
   participant O as Onboarding store
 
@@ -135,6 +147,12 @@ Security properties:
 Email and SMS verification state is modeled, but delivery providers are not yet
 connected.
 
+The FastAPI composition currently has no credential sign-up route and only
+supports `AUTH_MODE=demo`. `AUDENTRA_ENV=production` rejects that mode at
+startup. An institutional OIDC/SAML identity adapter, session integration, and
+authorization tests are mandatory before production; local Keycloak is an
+integration target, not an active production-auth implementation.
+
 ### 4.2 Enrollment requirement
 
 ```text
@@ -162,9 +180,9 @@ flowchart TD
   Policy -->|classification_only| Queue
   Queue --> Preprocess["Extract PDF text + render bounded page images"]
   Preprocess --> Provider{"Configured provider"}
-  Provider -->|Groq transcript| Text["Text-only strict JSON schema"]
-  Provider -->|OpenRouter| Multi["Text + page images"]
-  Text --> Normalize["Validate and normalize"]
+  Provider -->|Groq transcript| Groq["Bounded text + page images"]
+  Provider -->|OpenRouter| Multi["Bounded text + page images"]
+  Groq --> Normalize["Validate and normalize"]
   Multi --> Normalize
   Normalize --> Result["Reviewable extraction"]
   Result --> Financial["Financial-aid type check; extracted fields discarded"]
@@ -230,7 +248,8 @@ Content provenance is explicit:
 
 The system uses three complementary forms of evidence:
 
-1. CodeGraphContext describes static TypeScript imports and call paths.
+1. CodeGraphContext describes static Python and retained TypeScript imports and
+   call paths.
 2. `packages/state-effects` is the source of truth for domain field ownership,
    reads, writes, events, idempotency, and transaction boundaries.
 3. Runtime correlation IDs, audit records, outbox events, trace/span IDs, and
@@ -260,7 +279,7 @@ a mobile bottom navigation pattern.
 
 | Concern | Current owner | Notes |
 |---|---|---|
-| Credential account/session | Identity | Passwords/tokens never stored in plaintext |
+| Credential account/session | Identity | Preview credentials only; institutional adapter pending |
 | Onboarding answers | Onboarding | Versioned and student-editable |
 | Admission offer | Admissions | Eventually synchronized from CRM |
 | Enrollment requirement state | Enrollment | Deterministic server transitions |
@@ -275,8 +294,15 @@ a mobile bottom navigation pattern.
 
 Implemented:
 
-- functional student portal and responsive UI;
-- credential accounts in the preview and production credential schema;
+- a FastAPI compatibility surface with 42 operations protected by OpenAPI and
+  parity tests;
+- framework-neutral Python application/domain code behind the HTTP adapter;
+- async SQLAlchemy Core/`asyncpg` PostgreSQL access with bounded connection
+  pools, statement timeouts, and PostgreSQL-backed readiness;
+- a headless Python outbox worker with leases, idempotent receipts, retries,
+  dead-letter behavior, and graceful shutdown;
+- preview credential accounts and a production-oriented identity schema (but no
+  production identity adapter);
 - resumable one-time onboarding;
 - enrollment actions in their requirement pages;
 - multiple file uploads, durable originals, parsing, retry, and review;
@@ -284,15 +310,21 @@ Implemented:
 - financial, academic, campus, message, appointment, payment, profile, and help
   projections;
 - Edward context orchestration and action widgets;
+- staff action-center, student-context, preferences, and document-review API
+  operations;
 - activity tracking, audit/outbox lineage, state-effect graph checks;
-- full local Compose stack and hardened VM preview deployment.
+- local Compose with PostgreSQL, MinIO, migration, seed, API, worker, Keycloak,
+  and Mailpit; migration/seed/API/worker use one non-root Python image.
 
 Not yet production-complete:
 
-- institutional OIDC and invitation delivery;
+- institutional OIDC/SAML and invitation delivery; production currently fails
+  closed while only `AUTH_MODE=demo` exists;
+- migration or explicit contract removal of development-preview routes outside
+  the 42-operation FastAPI compatibility set;
 - real email/SMS verification;
 - payment processor and signed webhook verification;
-- staff/leader/VP interfaces;
+- broader staff and leader/VP interfaces beyond the action-center operations;
 - official registrar exemption approval;
 - production object storage, managed PostgreSQL, backup policy, and Kubernetes;
 - malware scanning and institutional retention/DLP policy;
@@ -300,11 +332,19 @@ Not yet production-complete:
 
 ## 8. Source-of-truth files
 
-- Public contracts: `packages/contracts/src/index.ts`
-- PostgreSQL model: `apps/api/src/database/schema.ts`
+- FastAPI routes: `apps/api/src/audentra/interfaces/http/`
+- Production composition: `apps/api/src/audentra/bootstrap/`
+- Application/domain core: `apps/api/src/audentra/application/` and
+  `apps/api/src/audentra/domain/`
+- PostgreSQL repositories: `apps/api/src/audentra/infrastructure/postgres/`
 - Migrations: `apps/api/migrations/`
+- Worker: `apps/api/src/audentra/interfaces/worker/` and
+  `apps/api/src/audentra/infrastructure/worker/`
+- Storage: `apps/api/src/audentra/infrastructure/storage/s3.py`
+- Document processing: `apps/api/src/audentra/infrastructure/documents/processing.py`
+- Agent integrations: `apps/api/src/audentra/integrations/ai/`
+- Backend tests: `apps/api/tests/`
+- Public compatibility contracts: `packages/contracts/src/index.ts`
 - CRM state effects: `packages/state-effects/src/registry.ts`
-- Agent preprocessing: `packages/document-preprocessing/`
-- Production store behavior: `apps/api/src/platform/`
 - Preview behavior: `tools/demo-api/src/`
-- Runtime deployment: `infra/preview-vm/`
+- Runtime deployment: `infra/compose.yaml` and `infra/docker/api.Dockerfile`

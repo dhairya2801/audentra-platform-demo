@@ -4,8 +4,9 @@
 
 The project uses three complementary layers:
 
-1. **CodeGraphContext** indexes TypeScript files, symbols, imports, call chains,
-   and structural dependencies for developer and AI navigation.
+1. **CodeGraphContext** indexes Python and retained TypeScript/JavaScript files,
+   symbols, imports, call chains, and structural dependencies for developer and
+   AI navigation.
 2. **The typed State Effect Registry** is the authoritative declaration of CRM
    field ownership, reads, writes, emitted or consumed events, idempotency, and
    transaction boundaries.
@@ -21,7 +22,7 @@ changed a particular student.
 
 ```mermaid
 flowchart LR
-  TS["TypeScript source"] --> CGC["CodeGraphContext static graph"]
+  CODE["Python and retained Node source"] --> CGC["CodeGraphContext static graph"]
   REG["Typed State Effect Registry"] --> CHECKS["CI semantic checks"]
   REG --> JSON["Generated JSON graph"]
   REG --> MMD["Generated Mermaid graph"]
@@ -43,7 +44,7 @@ The versioned source is
 `packages/state-effects/src/registry.ts`. Each state effect declares:
 
 - one stable effect ID and owning domain;
-- its concrete TypeScript handler;
+- its implementation status and concrete Python runtime handler when one exists;
 - fields read and written;
 - events emitted and consumed;
 - synchronous effect calls;
@@ -56,6 +57,16 @@ The generated artifacts are:
   internal CRM visualization and bounded AI context;
 - [`generated/crm-change-graph.mmd`](./generated/crm-change-graph.mmd), for
   architecture documentation.
+
+`implemented` effects must name a real FastAPI/Python runtime symbol. The two
+credential identity effects are `preview_only` and therefore have a null
+production handler: the retained demo API exercises those user flows, while
+the FastAPI process deliberately refuses production startup until a real
+identity adapter is configured. The former
+`enrollment.applyDocumentExtraction` consumer was removed because no such
+worker handler exists; `documents.completeExtraction` commits the matching
+requirement projection in the same database transaction, and its emitted
+completion event is deliberately ignored by the worker catalog.
 
 Run `npm run crm:graph` after editing the registry. CI runs
 `npm run crm:graph:check` and fails when:
@@ -96,12 +107,14 @@ append-only audit fact, and publishable domain event.
 
 `documents.retryExtraction` is a documents-owned command in the registry. It
 reads the stored document state, category, requirement context, and prior
-extraction; writes only the document processing state; emits
-`document.extraction_retry_started.v1`; and synchronously invokes
-`documents.completeExtraction` for the terminal extraction result. Its
-aggregate-scoped `Idempotency-Key` contract prevents duplicate retry clicks
-from creating another provider call after the document reaches a terminal
-state.
+extraction; writes only the document processing state; and emits both
+`document.extraction_retry_started.v1` and a durable
+`document.extraction_requested.v1` worker request. The worker then calls the
+private authenticated API command that performs extraction and commits
+`documents.completeExtraction`; this is asynchronous, not a synchronous graph
+edge. Its aggregate-scoped `Idempotency-Key` contract prevents duplicate retry
+clicks from creating another provider call after the document reaches a
+terminal state.
 
 At runtime, `document.extraction_retry_started` maps to that effect ID in the
 lineage mapper. The subsequent `document.extraction_completed` audit/outbox
@@ -121,8 +134,10 @@ npm run cgc:report
 ```
 
 The first command creates the initial index, the second refreshes an existing
-index after code changes, and the third writes a static architecture report to
-`docs/generated/codegraphcontext-report.md`. Developers can also use
+index after code changes, and the third writes a local static architecture
+report to `docs/generated/codegraphcontext-report.md`. The pre-split checked-in
+snapshot was retired because it indexed deleted NestJS symbols; regenerate it
+before using it for current code review. Developers can also use
 CodeGraphContext CLI/MCP call-chain and dependency queries while reviewing a
 registry change.
 

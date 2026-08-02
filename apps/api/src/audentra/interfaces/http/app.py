@@ -1,0 +1,87 @@
+"""FastAPI application factory and HTTP composition root."""
+
+from typing import Any
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
+from starlette.types import Lifespan
+
+from audentra.core.ports import (
+    BrowserAuthService,
+    PlatformService,
+    UnavailableBrowserAuthService,
+    UnavailablePlatformService,
+)
+
+from .auth_routes import auth_router
+from .config import HttpSettings
+from .error_handlers import install_error_handlers
+from .middleware import RequestContextMiddleware
+from .routes import router
+
+ALLOWED_HEADERS = [
+    "Content-Type",
+    "Idempotency-Key",
+    "X-Request-Id",
+    "X-Correlation-Id",
+    "X-Demo-Tenant-Id",
+    "X-Demo-Student-Id",
+    "X-Demo-Actor-Id",
+    "X-Demo-Actor-Type",
+    "X-Tenant-Slug",
+    "X-VV-Worker-Token",
+]
+
+
+def create_app(
+    service: PlatformService | None = None,
+    auth_service: BrowserAuthService | None = None,
+    settings: HttpSettings | None = None,
+    lifespan: Lifespan[FastAPI] | None = None,
+) -> FastAPI:
+    """Build an isolated API instance with injected application behavior."""
+
+    app = FastAPI(
+        title="Audentra Platform API",
+        version="0.1.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        lifespan=lifespan,
+    )
+    app.state.http_settings = settings or HttpSettings.from_environment()
+    app.state.platform_service = service or UnavailablePlatformService()
+    app.state.browser_auth_service = auth_service or UnavailableBrowserAuthService()
+
+    app.include_router(auth_router)
+    app.include_router(router)
+    install_error_handlers(app)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(app.state.http_settings.web_origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+        allow_headers=ALLOWED_HEADERS,
+        expose_headers=["X-Request-Id", "X-Correlation-Id", "X-Trace-Id"],
+        max_age=600,
+    )
+    # Added last so correlation headers also decorate CORS and error responses.
+    app.add_middleware(RequestContextMiddleware)
+
+    def custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            routes=app.routes,
+        )
+        for path_item in schema.get("paths", {}).values():
+            for operation in path_item.values():
+                if isinstance(operation, dict):
+                    operation.get("responses", {}).pop("422", None)
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+    return app

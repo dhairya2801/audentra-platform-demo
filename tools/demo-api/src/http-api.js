@@ -6,6 +6,7 @@ import {
 } from "@vv/document-preprocessing";
 import { createServer } from "node:http";
 import { dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   acceptOffer,
   autoProjectCompletedTranscripts,
@@ -1693,17 +1694,9 @@ async function ensureOnboardingSignedDocuments(store, tenant, clock) {
 async function readOnboardingTemplate(fileName) {
   const roots = [
     process.env.ONBOARDING_DOCUMENT_TEMPLATE_DIR,
-    join(process.cwd(), "apps", "web", "public", "documents", "onboarding"),
-    join(process.cwd(), "..", "web", "public", "documents", "onboarding"),
     join(
-      process.cwd(),
-      "..",
-      "..",
-      "apps",
-      "web",
-      "public",
-      "documents",
-      "onboarding",
+      dirname(fileURLToPath(import.meta.url)),
+      "../../../apps/api/assets/onboarding",
     ),
   ].filter(Boolean);
   let missing;

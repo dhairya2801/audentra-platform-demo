@@ -15,6 +15,7 @@ export type {
   IdempotencyContract,
   StateEffect,
   StateEffectGraph,
+  StateEffectImplementationStatus,
   StateEffectKind,
   StateFieldOwnership,
   TransactionContract,

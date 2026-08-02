@@ -1,238 +1,102 @@
-# VV Enrollment Platform
+# Audentra Platform
 
-Production-oriented foundation for a stateful student enrollment portal.
-Authentication-aware entry routing sends a first-time student into resumable
-onboarding and sends a returning student directly to their dashboard.
+Backend services for the Audentra enrollment product. The active backend is a
+Python modular monolith: framework-neutral application/domain code is exposed
+through FastAPI, while a separate Python process consumes the durable outbox.
+The portals live in
+[`Audentra-ai/Audentra-portals`](https://github.com/Audentra-ai/Audentra-portals).
 
-The codebase is a modular monolith plus an independently deployable outbox
-worker. That keeps transactions and early product development simple while
-preserving clear service boundaries for a later Kubernetes migration.
-
-## What is implemented
-
-- One-time, server-persisted, eight-step onboarding with ordered validation,
-  optimistic versions, resume behavior, and completion gating
-- Credential sign-up/sign-in with normalized unique contacts, scrypt password
-  hashing, hashed opaque sessions, revocation, and account-scoped preview data
-- Responsive dashboard plus enrollment, requirement detail, documents,
-  messages, appointments, payments, profile, and help pages
-- Tenant-aware staff operations with authenticated preview access, a personal
-  Action Center, shared Jira-style task board, student records, inquiries,
-  journey/content editors, knowledge, Core Plays, and Edward-assisted drafts
-- Working profile saves, message read state, appointment scheduling, original
-  document uploads with reviewable structured extraction, simulated deposits,
-  and idempotent offer acceptance
-- Edward AI with a bounded student context, OpenRouter integration, usage
-  reporting, safe navigation actions, and a useful no-key guided mode
-- Loading, empty, validation, failure, retry, confirmation, and success states
-- NestJS/Fastify API with validation, correlation IDs, typed errors, and CORS
-- PostgreSQL schema, deterministic seed, migrations, audit log, idempotency
-  records, and transactional outbox
-- Batched, allowlisted student activity ingestion
-- Outbox worker with leases, bounded retries, dead-lettering, event receipts,
-  and a student dashboard projection
-- Stateful, no-dependency preview API for running the entire portal without
-  Docker while keeping the frontend on the same typed contracts
-- Local PostgreSQL, Keycloak, MinIO, Mailpit, API, worker, and web stack
-- Unit, contract, rendered-HTML, and integration tests plus CI
+```mermaid
+flowchart LR
+  Portals["Next.js portals"] -->|HTTPS / REST| API["FastAPI adapter"]
+  API --> Core["Application and domain core"]
+  Core --> DB[(PostgreSQL)]
+  Core --> Files[(S3 / MinIO)]
+  Core --> Outbox[(Transactional outbox)]
+  Worker["Python outbox worker"] --> Outbox
+  Worker --> API
+```
 
 ## Repository layout
 
 ```text
-apps/
-  api/       Student portal API and PostgreSQL migrations
-  web/       Student portal user interface
-  worker/    Transactional outbox processor and projections
-packages/
-  contracts/ Shared API and event contracts
-infra/       Dockerfiles, Compose stack, and local service configuration
-docs/        Architecture, security, tracking, agentic, and feature flows
-tools/       Stateful no-Docker preview API and local launch script
+apps/api/                         FastAPI adapter, Python core, worker, tests
+apps/api/migrations/              Immutable SQL migration chain
+apps/api/assets/                  Backend-owned signing templates and media
+packages/contracts/               Temporary TypeScript contract source
+packages/document-preprocessing/  Retained compatibility tests/tooling
+packages/state-effects/           State-effect registry and graph generator
+tools/demo-api/                   Development-only preview API
+config/tenants/                   Tenant configuration fixtures
+infra/                            Container image and local service stack
 ```
 
-## Run the portal now, without Docker
+FastAPI is an inbound adapter, not the application architecture. Business
+operations depend on Python protocols and can later be reused from Django,
+Flask, a CLI, a job runner, or another Python framework without importing
+FastAPI. PostgreSQL uses bounded async pools, object-storage calls are moved off
+the event loop, and API/worker HTTP clients are shared for each process lifetime.
 
-Requirements: Node.js 22 LTS and npm. The repository pins `22.23.1` in
-`.nvmrc`; use that version for the same runtime as CI.
+## Local development
+
+Tested requirements: Python 3.12.11, uv 0.7.12, Node.js 22, npm, and Docker
+for the full dependency stack.
 
 ```bash
-npm run demo:reset
-npm run dev:portal
+uv sync --directory apps/api --locked --all-groups
+npm ci
+docker compose --env-file infra/.env.example -f infra/compose.yaml up --build
 ```
 
-Open <http://localhost:3000/aster> or <http://localhost:3000/harvard>, create
-an account with an email, international
-phone number, and password, then complete onboarding. Protected routes require
-the HTTP-only credential session cookie; the dashboard remains gated until
-onboarding is complete. Each account receives its own student state file and
-upload directory. Profile changes, read messages, appointments, payments,
-documents, provider responses, and reviewed extraction results persist in the
-ignored `tools/demo-api/.data/` directory.
+The API defaults to `http://localhost:4000`. The worker is deliberately a
+headless process; its liveness is managed by process supervision and outbox
+lease recovery rather than an extra HTTP server.
 
-`npm run dev:portal` keeps both processes in the foreground. API request lines
-contain `service:"vv-demo-api"` and a `requestId`. A document attempt also
-prints `document_extraction_started`, any bounded retry/failure, and
-`document_extraction_completed` with the same document/request IDs, provider,
-model, course count, terminal status, and duration. Do not redirect this command
-to a file when you want to watch parsing live.
-
-For a detached local process with captured logs, use:
+Useful direct-process commands:
 
 ```bash
-npm run portal:start
-npm run portal:status
-npm run portal:stop
+npm run dev:api
+npm run dev:worker
+npm run worker:once
+npm run db:migrate
+npm run db:seed
+npm run lint
+npm run typecheck
+npm test
 ```
 
-`portal:start` returns immediately. It recognizes an already-running VV portal
-even when its PID file is stale, refuses to start when another application owns
-either required port, and never falls back to a different web port. On Windows,
-the runner starts Node directly rather than creating nested `npm.cmd` shells.
-`portal:stop` terminates the complete managed process tree. The PID file and
-captured logs are local runtime artifacts and are not committed.
+Use [`.env.example`](.env.example) as the direct-process variable reference
+(the application does not silently load dotenv files). Compose defaults are in
+[`infra/.env.example`](infra/.env.example). The local credentials are never
+appropriate for a shared or production environment.
 
-Use `npm run demo:reset` while the server is stopped to restore the deterministic
-first-visit scenario. This remains a development fixture; do not enter real
-student, document, or payment data.
+## Migration and release safety
 
-### Enable Edward and document extraction
+- The Nest-era SQL files remain byte-for-byte immutable and the Python migrator
+  rejects checksum changes. New schema work must use a new numbered migration.
+- Migration, API, and worker run from one locked Python image with different
+  commands, eliminating dependency drift between process roles.
+- The local-development Compose stack runs the integrity-checked compatibility
+  seed after migrations and before the API. The Python seeder is insert-only,
+  idempotent, and disabled in production; shared environments should provision
+  application data explicitly.
+- Preserve the pre-rewrite implementation in Git history and retain its built
+  images during the compatibility window; do not keep duplicate legacy source
+  trees in the active repository.
+- CI uses the committed `uv.lock`, strict Ruff/mypy checks, coverage enforcement,
+  real PostgreSQL tests, remaining Node checks, and a non-root container build.
 
-The portal works without an LLM key: Edward uses a deterministic navigation
-guide and uploaded originals remain available with extraction marked as waiting
-for configuration. To enable the real agentic paths:
+`AUDENTRA_ENV=production` currently fails closed while `AUTH_MODE=demo`; a real
+identity adapter must be configured before production rollout. This prevents a
+demo identity from being deployed accidentally. Run FastAPI and Nest contract
+comparisons against the checkpointed revision during the migration window, and
+retire its images only after production route and event parity gates are green.
 
-```bash
-cp .env.example .env
-```
+## Cross-repository contract
 
-Set `OPENROUTER_API_KEY` in `.env`, optionally choose
-`OPENROUTER_MODEL`, and restart `npm run dev:portal`. The launcher reads the
-root `.env`; the key stays server-side and is never included in the web bundle.
-PDF/JPEG/PNG uploads are capped at 10 MB. PDFs are preprocessed locally with
-Python/PyMuPDF into bounded text and rendered page images, then sent as
-multimodal evidence to the configured model. The model returns JSON-only text;
-the server normalizes, bounds, and review-gates the result.
-Extracted fields must be selected by the student before they enter the review
-state.
+`packages/contracts` remains the temporary contract source during the repo
+split. Publish a versioned client generated from FastAPI OpenAPI and consume it
+from the portals repo before allowing the two snapshots to evolve independently.
+Internal outbox event contracts stay backend-only.
 
-Student gamification is tenant-owned. Each university can configure its point
-name, task/page reward rules, enabled state, and bookstore conversion; awarded
-values are preserved in an idempotent ledger. See
-[`docs/19-tenant-rewards.md`](docs/19-tenant-rewards.md).
-
-For faster transcript extraction, also set `GROQ_API_KEY` and
-`TRANSCRIPT_PARSING=groq`. That path uses `GROQ_MODEL` (currently
-`qwen/qwen3.6-27b` by default). Both transcript providers receive one 2,048px
-JPEG per PDF page, together with that page's extracted text; a six-page
-transcript therefore produces six independent vision requests. Set
-`TRANSCRIPT_PARSING=openrouter` to use the configured OpenRouter multimodal
-model instead. Non-transcript documents remain on the OpenRouter multimodal
-path.
-
-The complete Compose stack exposes the same routes through the Nest API. It
-stores document metadata and review state in PostgreSQL, stores originals in
-MinIO through the S3 API, and atomically claims extraction work so an
-idempotent upload replay does not spend LLM tokens twice.
-
-## Run the complete local stack
-
-Requirements: Docker Desktop with Compose, Node.js 22 LTS (see `.nvmrc`), and
-npm.
-
-```bash
-cp .env.example .env
-docker compose --env-file .env -f infra/compose.yaml up --build
-```
-
-Then open:
-
-- Student portal: <http://localhost:3000>
-- API readiness: <http://localhost:4000/health/ready>
-- Mailpit: <http://localhost:8025>
-- Keycloak: <http://localhost:8080>
-- MinIO console: <http://localhost:9001>
-
-The Compose migration job applies the schema and loads the deterministic demo
-student automatically. Data remains in named volumes between restarts.
-
-## Run checks without Docker
-
-Each deployable package has its own lockfile and can be verified independently:
-
-```bash
-npm --prefix packages/contracts ci --workspaces=false
-npm --prefix apps/api ci --workspaces=false
-npm --prefix apps/worker ci --workspaces=false
-npm --prefix apps/web ci --workspaces=false
-
-npm --prefix packages/contracts run typecheck
-npm --prefix apps/api run typecheck
-npm --prefix apps/api test
-npm --prefix apps/worker run typecheck
-npm --prefix apps/worker test
-npm --prefix apps/web run typecheck
-npm --prefix apps/web run lint
-npm --prefix apps/web test
-npm --prefix tools/demo-api test
-```
-
-API and worker unit/integration tests use isolated in-memory or mocked
-boundaries. CI additionally starts PostgreSQL, applies the real migration and
-seed, and builds every package.
-
-## Architectural documentation
-
-Start with [the documentation index](docs/README.md), then read the
-[current implementation map](docs/14-current-implementation-map.md),
-[domain model reference](docs/15-domain-model-reference.md), and
-[deployment/security runbook](docs/16-deployment-security-and-cicd.md). The
-[system architecture](docs/01-system-architecture.md) and
-[student feature flows](docs/03-student-portal-feature-flows.md) explain the
-longer-term design. The
-[agentic runtime guide](docs/11-agentic-runtime.md) covers Edward, document
-extraction, cost controls, and the path from the local adapter to production.
-The
-[multi-tenant student portal architecture](docs/architecture/multi-tenant-student-portal.md)
-documents local path-based tenants and the verified-hostname Kubernetes target.
-
-The [release changelog](CHANGELOG.md) links detailed notes for
-[student users](docs/changelog/2026-07-31-student-experience.md) and
-[staff users](docs/changelog/2026-07-31-staff-operations.md). The
-[staff implementation and operations guide](docs/24-staff-portal-implementation-and-operations.md)
-documents routes, shared state, managed configuration, local operation, testing,
-CI/CD behavior, and production gaps.
-
-The no-Docker credential adapter is intentionally isolated from domain logic.
-The PostgreSQL migrations define the production identity boundary: a
-single-use, hashed student invitation links an already-admitted student to a
-credential account; password and session tokens are never stored in plaintext;
-email/SMS verification delivery remains provider-adapted. Replacing the local
-JSON adapter with that service or institutional OIDC does not change student
-domain ownership or frontend API contracts.
-
-## Continue this project with Codex
-
-Start with the portable [Codex continuation handoff](CODEX_RESUME.md). It
-contains the current state, verified test boundary, known next issue, and a
-paste-ready prompt for a fresh Codex task. The
-[sanitized visible session history](docs/codex-session-visible-history.md) is
-available when an earlier product decision needs more context.
-
-The native Codex task database is machine-local, so a Git clone cannot make the
-original task appear in `codex resume`. The checked-in handoff provides the
-safe repository-based continuation path without committing secrets, internal
-reasoning, local student data, or raw session records.
-
-## Deployed preview
-
-The synthetic-data preview is available at
-<https://aster.34-30-254-45.sslip.io>. It runs the production web build, the
-account-isolated preview API, and Caddy on a hardened Google Compute Engine
-`e2-micro`.
-
-The host uses IAP-only SSH, OS Login, Shielded VM Secure Boot, default-deny
-firewalls, root-owned releases, and sandboxed containers. A successful push to
-`main` runs the full CI suite and then deploys the exact Git commit through
-keyless GitHub OIDC/Google Workload Identity Federation. See the
-[runbook](docs/16-deployment-security-and-cicd.md) and
-[changelog](CHANGELOG.md).
+See [`docs/README.md`](docs/README.md) for the architecture and flow index.

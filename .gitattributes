@@ -2,3 +2,10 @@
 *.png binary
 *.jpg binary
 *.jpeg binary
+
+# The Python migrator uses canonical LF checksums for immutable SQL files.
+apps/api/migrations/*.sql text eol=lf
+
+# Deterministic registry outputs are compared byte-for-byte in CI.
+docs/generated/crm-change-graph.json text eol=lf
+docs/generated/crm-change-graph.mmd text eol=lf
