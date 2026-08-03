@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -24,6 +25,12 @@ AUTH = AuthContext(
     student_id="10000000-0000-7000-8000-000000000001",
     actor_id="10000000-0000-7000-8000-000000000001",
     actor_type="student",
+)
+STAFF_AUTH = AuthContext(
+    tenant_id=AUTH.tenant_id,
+    student_id=AUTH.student_id,
+    actor_id="10000000-0000-7000-8000-000000000901",
+    actor_type="staff",
 )
 
 
@@ -212,6 +219,51 @@ def _call(
         query_params=query or {},
         idempotency_key=key,
         upload=upload,
+    )
+
+
+def test_staff_portal_media_upload_and_public_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    rig = _rig()
+    media_id = "12345678-1234-4234-8234-123456789abc"
+    monkeypatch.setattr(service_module, "uuid4", lambda: media_id)
+    content = b"\xff\xd8\xffevent-image"
+
+    uploaded = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "staff.upload_portal_media",
+                auth=STAFF_AUTH,
+                payload={"publicBaseUrl": "http://localhost:4000"},
+                upload=FileUpload("welcome.jpg", "image/jpeg", content),
+            )
+        )
+    )
+
+    assert uploaded == {
+        "fileName": "welcome.jpg",
+        "mimeType": "image/jpeg",
+        "sizeBytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "publicPath": f"/v1/media/{media_id}.jpg",
+        "publicUrl": f"http://localhost:4000/v1/media/{media_id}.jpg",
+    }
+    storage_key = f"public/portal-media/{media_id}.jpg"
+    assert rig.storage.objects[storage_key] == content
+
+    downloaded = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "public.get_portal_media",
+                auth=None,
+                path={"mediaFile": f"{media_id}.jpg"},
+            )
+        )
+    )
+    assert downloaded == BinaryPayload(
+        data=content,
+        media_type="image/jpeg",
+        file_name=f"{media_id}.jpg",
+        cache_control="public, max-age=31536000, immutable",
     )
 
 

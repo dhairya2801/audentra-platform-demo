@@ -37,9 +37,32 @@ _CONFIGURATION_NAMES: dict[ConfigurationKind, str] = {
     "campus_life": "campus_life",
     "academics": "academics",
 }
-_SUBMISSION_TYPES = {
+_INTERACTION_TYPES = {
+    "information": "information",
+    "approval": "approval",
     "form": "form",
+    "single_select": "single_select",
+    "multiple_select": "multiple_select",
+    "selection_flow": "selection_flow",
+    "upload_file": "upload_file",
+    "file_upload": "upload_file",
+    "signature": "signature",
+    "e_signature": "signature",
+    "esignature": "signature",
+    "docusign": "signature",
+    "docu_sign": "signature",
+    "payment": "payment",
+    "scheduling": "scheduling",
+}
+_SUBMISSION_TYPES = {
+    "information": "none",
+    "approval": "form",
+    "form": "form",
+    "single_select": "form",
+    "multiple_select": "form",
+    "selection_flow": "form",
     "upload_file": "document",
+    "signature": "form",
     "payment": "payment",
     "scheduling": "appointment",
 }
@@ -935,26 +958,70 @@ def _apply_configuration_instruction(
                     if "payment" in lowered or "pay " in lowered
                     else "form"
                 )
-                tasks.append(
-                    {
-                        "id": task_id,
-                        "title": task_title,
-                        "description": f"Complete {task_title.lower()} for your student journey.",
-                        "task_type": task_type,
-                        "submission_type": (
-                            "document"
-                            if task_type == "upload_file"
-                            else "payment"
-                            if task_type == "payment"
-                            else "form"
-                        ),
-                        "owner": "Enrollment Operations",
-                        "required": "optional" not in lowered,
-                        "points": int(points.group(1)) if points else 0,
-                        "depends_on": [],
-                    }
-                )
-                changes.append(f"Added {task_title} to {normalized_kind}.")
+                selection_options: list[str] | None = None
+                selection_ready = True
+                if task_type in {"single_select", "multiple_select"}:
+                    if "meal plan" in task_title.lower():
+                        selection_options = [
+                            "Unlimited dining",
+                            "14 meals per week",
+                            "10 meals per week",
+                            "Commuter plan",
+                        ]
+                    else:
+                        option_match = re.search(
+                            r"\boptions?\s*(?:are|:)?\s*(.+?)(?:\.|$)",
+                            instruction,
+                            re.IGNORECASE,
+                        )
+                        if option_match:
+                            selection_options = [
+                                value.strip(" \t\"'")
+                                for value in re.split(
+                                    r"\s*,\s*|\s+and\s+",
+                                    option_match.group(1),
+                                )
+                                if value.strip(" \t\"'")
+                            ]
+                    if not selection_options or len(set(selection_options)) < 2:
+                        selection_ready = False
+                        warnings.append(
+                            f"{task_title} needs at least two explicit option values "
+                            "before it can be published."
+                        )
+                if selection_ready:
+                    tasks.append(
+                        {
+                            "id": task_id,
+                            "title": task_title,
+                            "description": (
+                                f"Complete {task_title.lower()} for your student journey."
+                            ),
+                            "task_type": task_type,
+                            "submission_type": (
+                                "document"
+                                if task_type == "upload_file"
+                                else "payment"
+                                if task_type == "payment"
+                                else "form"
+                            ),
+                            "owner": "Enrollment Operations",
+                            "required": "optional" not in lowered,
+                            "points": int(points.group(1)) if points else 0,
+                            "depends_on": [],
+                            **(
+                                {"options": selection_options}
+                                if selection_options is not None
+                                else {}
+                            ),
+                            **(
+                                {"maximum_selections": len(selection_options)}
+                                if task_type == "multiple_select" and selection_options is not None
+                                else {}
+                            ),
+                        }
+                    )
+                    changes.append(f"Added {task_title} to {normalized_kind}.")
         title_match = re.search(
             r"(?:change|set)\s+(.+?)\s+(?:to|at)\s+\d+\s+points", instruction, re.IGNORECASE
         )
@@ -1030,7 +1097,7 @@ def _apply_configuration_instruction(
                 }
             )
             changes.append(f"Added {normalized_code} {course_title} to the catalog draft.")
-    if not changes:
+    if not changes and not warnings:
         warnings.append(
             "The preview could not safely translate this instruction; review the unchanged YAML."
         )
@@ -1044,7 +1111,14 @@ def _journey_blueprint(configuration: Mapping[str, Any]) -> list[JsonDict]:
     for flow in _mapping_list(document.get("flows")):
         tasks = _mapping_list(flow.get("tasks"))
         for order, task in enumerate(tasks, start=1):
-            task_type = str(task.get("task_type", "information"))
+            authored_task_type = str(task.get("task_type", "information")).lower()
+            task_type = _INTERACTION_TYPES.get(authored_task_type, authored_task_type)
+            raw_input = task.get("input")
+            input_config = copy.deepcopy(dict(raw_input)) if isinstance(raw_input, Mapping) else {}
+            if task.get("flow") is not None:
+                input_config["flow"] = copy.deepcopy(task["flow"])
+            if task.get("options") is not None:
+                input_config["options"] = copy.deepcopy(task["options"])
             result.append(
                 {
                     "id": str(task.get("id", f"task-{order}")),
@@ -1055,10 +1129,12 @@ def _journey_blueprint(configuration: Mapping[str, Any]) -> list[JsonDict]:
                     "description": str(task.get("description", "")),
                     "owner": str(task.get("owner", "Enrollment Operations")),
                     "required": bool(task.get("required", False)),
+                    "active": task.get("active", True) is True,
                     "published": flow.get("status") == "published",
                     "order": order,
                     "taskType": task_type,
                     "submissionType": _SUBMISSION_TYPES.get(task_type, "none"),
+                    "inputConfig": input_config,
                     "points": int(task.get("points", 0)),
                     "studentStep": task.get("student_step"),
                     "dependsOn": list(task.get("depends_on", [])),
@@ -1126,6 +1202,20 @@ def _campus_event(item: Mapping[str, Any]) -> JsonDict:
         "featured": bool(item.get("featured", False)),
         "accent": str(item.get("accent", "blue")),
         "visualTheme": str(item.get("visual_theme", "community")),
+        "imageUrl": item.get("image_url"),
+        "imageAlt": item.get("image_alt"),
+        "imageAttribution": item.get("image_attribution"),
+        "imageSourceUrl": item.get("image_source_url"),
+        "advertisementStartsAt": (
+            _yaml_timestamp(item.get("advertisement_starts_at"))
+            if item.get("advertisement_starts_at") is not None
+            else None
+        ),
+        "advertisementEndsAt": (
+            _yaml_timestamp(item.get("advertisement_ends_at"))
+            if item.get("advertisement_ends_at") is not None
+            else None
+        ),
         "registrationUrl": item.get("registration_url"),
     }
 

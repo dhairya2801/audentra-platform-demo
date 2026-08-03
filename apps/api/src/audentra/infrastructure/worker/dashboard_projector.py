@@ -68,12 +68,23 @@ SELECT
   student_requirement.due_at,
   student_requirement.progress_percent
 FROM public.student_requirement
+JOIN public.enrollment_journey AS journey
+  ON journey.id = student_requirement.journey_id
+ AND journey.tenant_id = student_requirement.tenant_id
+JOIN public.requirement_definition_version AS evidence_definition
+  ON evidence_definition.id = student_requirement.requirement_definition_version_id
+ AND evidence_definition.tenant_id = student_requirement.tenant_id
+JOIN public.journey_requirement_definition AS current_link
+  ON current_link.journey_definition_version_id = journey.journey_definition_version_id
 JOIN public.requirement_definition_version AS definition
-  ON definition.id = student_requirement.requirement_definition_version_id
+  ON definition.id = current_link.requirement_definition_version_id
  AND definition.tenant_id = student_requirement.tenant_id
+ AND definition.code = evidence_definition.code
 WHERE student_requirement.tenant_id = :tenant_id
   AND student_requirement.journey_id = :journey_id
-ORDER BY definition.display_order ASC, student_requirement.id ASC
+  AND student_requirement.retired_at IS NULL
+ORDER BY CASE definition.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
+         definition.display_order ASC, student_requirement.id ASC
 """
 
 _TERMINAL_REQUIREMENT_STATUSES = {"completed", "waived", "not_applicable"}

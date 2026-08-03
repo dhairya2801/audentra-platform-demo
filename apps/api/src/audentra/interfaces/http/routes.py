@@ -28,6 +28,7 @@ from audentra.contracts.requests import (
     ReviewStaffDocumentRequest,
     SelectPaymentPlanRequest,
     SimulateStaffOutreachRequest,
+    SubmitStudentRequirementResponseRequest,
     UpdateStaffClubRequest,
     UpdateStaffCorePlayRequest,
     UpdateStaffInquiryRequest,
@@ -52,7 +53,9 @@ from .dependencies import (
 )
 
 MAXIMUM_DOCUMENT_BYTES = 10_485_760
+MAXIMUM_PORTAL_MEDIA_BYTES = 5_242_880
 ALLOWED_DOCUMENT_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png"}
+ALLOWED_PORTAL_MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 ALLOWED_DOCUMENT_CATEGORIES = {
     "identity",
     "residency",
@@ -123,7 +126,9 @@ def _valid_file_signature(content: bytes, mime_type: str) -> bool:
         return content.startswith(b"%PDF-")
     if mime_type == "image/jpeg":
         return content.startswith(b"\xff\xd8\xff")
-    return content.startswith(b"\x89PNG\r\n\x1a\n")
+    if mime_type == "image/png":
+        return content.startswith(b"\x89PNG\r\n\x1a\n")
+    return len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WEBP"
 
 
 def _parse_optional_uuid(value: str | None, *, code: str, message: str) -> str | None:
@@ -232,6 +237,48 @@ async def _read_document_upload(request: Request) -> FileUpload:
         await form.close()
 
 
+async def _read_portal_media_upload(request: Request) -> FileUpload:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise ApiError(415, "MULTIPART_REQUIRED", "Content-Type must be multipart/form-data")
+    try:
+        form = await request.form(
+            max_files=1,
+            max_fields=0,
+            max_part_size=MAXIMUM_PORTAL_MEDIA_BYTES,
+        )
+    except (MultiPartException, StarletteHTTPException) as error:
+        raise ApiError(
+            413,
+            "MEDIA_TOO_LARGE",
+            "Upload one event image no larger than 5 MB",
+        ) from error
+    try:
+        items = form.multi_items()
+        if len(items) != 1 or items[0][0] != "file" or not isinstance(items[0][1], UploadFile):
+            raise BadRequestError("ONE_MEDIA_FILE_REQUIRED", "Upload exactly one event image")
+        file_part = items[0][1]
+        mime_type = file_part.content_type or "application/octet-stream"
+        if mime_type not in ALLOWED_PORTAL_MEDIA_MIME_TYPES:
+            raise ApiError(415, "UNSUPPORTED_MEDIA_TYPE", "Use a JPEG, PNG, or WebP image")
+        content = await file_part.read(MAXIMUM_PORTAL_MEDIA_BYTES + 1)
+        if len(content) < 1 or len(content) > MAXIMUM_PORTAL_MEDIA_BYTES:
+            raise ApiError(413, "MEDIA_TOO_LARGE", "Event images must be no larger than 5 MB")
+        if not _valid_file_signature(content, mime_type):
+            raise ApiError(
+                415,
+                "FILE_SIGNATURE_MISMATCH",
+                "The file contents do not match the selected image type",
+            )
+        return FileUpload(
+            file_name=file_part.filename or "event-image",
+            mime_type=mime_type,
+            content=content,
+        )
+    finally:
+        await form.close()
+
+
 @router.get("/health", status_code=200, response_model=None)
 async def liveness(request: Request, service: ServiceDependency) -> object:
     return await _dispatch(service=service, request=request, operation="health.liveness")
@@ -240,6 +287,21 @@ async def liveness(request: Request, service: ServiceDependency) -> object:
 @router.get("/health/ready", status_code=200, response_model=None)
 async def readiness(request: Request, service: ServiceDependency) -> object:
     return await _dispatch(service=service, request=request, operation="health.readiness")
+
+
+@router.get("/v1/media/{file}", status_code=200, response_model=None)
+async def get_portal_media(
+    file_name: Annotated[str, Path(alias="file", max_length=64)],
+    request: Request,
+    service: ServiceDependency,
+) -> Response:
+    result = await _dispatch(
+        service=service,
+        request=request,
+        operation="public.get_portal_media",
+        path_params={"mediaFile": file_name},
+    )
+    return _binary_response(result)
 
 
 @router.get("/v1/student/dashboard", status_code=200, response_model=None)
@@ -467,6 +529,30 @@ async def get_requirement(
         operation="student.get_requirement",
         auth=auth,
         path_params={"requirementId": requirement_id},
+    )
+
+
+@router.post(
+    "/v1/student/requirements/{id}/responses",
+    status_code=200,
+    response_model=None,
+)
+async def submit_requirement_response(
+    requirement_id: Annotated[str, Path(alias="id", min_length=1, max_length=128)],
+    body: SubmitStudentRequirementResponseRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.submit_requirement_response",
+        auth=auth,
+        path_params={"requirementId": requirement_id},
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
     )
 
 
@@ -846,6 +932,23 @@ async def get_staff_workspace(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="staff.get_workspace", auth=auth
+    )
+
+
+@router.post("/v1/staff/media", status_code=201, response_model=None)
+async def upload_staff_portal_media(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    upload = await _read_portal_media_upload(request)
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.upload_portal_media",
+        auth=auth,
+        upload=upload,
+        payload={"publicBaseUrl": str(request.base_url).rstrip("/")},
     )
 
 

@@ -58,6 +58,9 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                                (SELECT COUNT(*) FROM requirement_definition_version
                                 WHERE requirement_definition_version.tenant_id=tenant.id)
                                   AS requirement_definitions,
+                               (SELECT COUNT(*) FROM ai_operation_config
+                                WHERE ai_operation_config.tenant_id=tenant.id)
+                                  AS ai_operations,
                                (SELECT COUNT(*) FROM enrollment_journey
                                 WHERE enrollment_journey.tenant_id=tenant.id) AS journeys,
                                (SELECT COUNT(*) FROM student_requirement
@@ -84,6 +87,7 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 assert tenant["staff"] == 3
                 assert tenant["active_journeys"] == 1
                 assert tenant["requirement_definitions"] == 8
+                assert tenant["ai_operations"] == 9
                 assert tenant["journeys"] == 2
                 assert tenant["requirements"] == 16
 
@@ -121,6 +125,10 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                     },
                 )
             assert harvard_requirement_count == 8
+
+            # Publishing a new requirement-definition version must not make
+            # the deterministic demo requirement IDs collide on the next seed pass.
+            await seed_relational_data(engine, environment="test")
 
             await reset_relational_data(
                 engine,

@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
 from audentra.domain.onboarding import (
+    ABOUT_YOU_REQUIRED_FIELDS,
     ONBOARDING_STEPS,
     is_skippable_onboarding_step,
     validate_onboarding_step,
@@ -55,6 +56,79 @@ PROCESSING_MODES = {
     "financial_aid": "classification_only",
     "consent": "manual_review",
     "other": "agentic",
+}
+_ABOUT_YOU_CONFIGURABLE_FIELDS = frozenset(
+    {
+        "firstName",
+        "lastName",
+        "preferredName",
+        "personalEmail",
+        "mobilePhone",
+        "citizenshipStatus",
+        "streetAddress",
+        "city",
+        "stateOrProvince",
+        "postalCode",
+        "country",
+        "residencyVerificationPath",
+    }
+)
+_ABOUT_YOU_FIELD_BINDINGS = {
+    "first_name": "firstName",
+    "last_name": "lastName",
+    "preferred_name": "preferredName",
+    "personal_email": "personalEmail",
+    "mobile_phone": "mobilePhone",
+    "citizenship_status": "citizenshipStatus",
+    "street_address": "streetAddress",
+    "city": "city",
+    "state_or_province": "stateOrProvince",
+    "postal_code": "postalCode",
+    "country": "country",
+    "residency_verification_path": "residencyVerificationPath",
+}
+_ONBOARDING_SCREEN_DEFAULTS: dict[str, tuple[str, str, str]] = {
+    "offer": (
+        "Offer",
+        "Your place at Aster",
+        "Begin by confirming the admission decision that brought you here.",
+    ),
+    "about_you": (
+        "About you",
+        "Identity & home address",
+        "Add the personal details and permanent address Aster needs to prepare your "
+        "student record.",
+    ),
+    "housing": (
+        "Housing",
+        "One personalized story",
+        "Tell us where you imagine starting your Aster experience.",
+    ),
+    "campus_life": (
+        "Campus life",
+        "Clubs, people & support",
+        "Choose the communities and support you want to hear about.",
+    ),
+    "emergency_contacts": (
+        "Emergency contacts",
+        "People in your corner",
+        "Enter one or more people Aster may contact in an emergency.",
+    ),
+    "family_permissions": (
+        "Family permissions",
+        "Your privacy, your choice",
+        "Choose whether anyone else may discuss parts of your student record.",
+    ),
+    "review_and_sign": (
+        "Review & sign",
+        "Review and sign",
+        "Review your answers and sign the enrollment and privacy acknowledgements.",
+    ),
+    "deposit": (
+        "Deposit",
+        "Review your deposit",
+        "Confirm the enrollment-deposit amount and continue to the enrollment checklist.",
+    ),
 }
 DOCUMENT_SELECT = """
 id, requirement_id, file_name, mime_type, size_bytes, category,
@@ -137,6 +211,63 @@ def _map_onboarding(row: Mapping[str, Any]) -> JsonDict:
     }
 
 
+def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
+    configurations: JsonDict = {}
+    flows = document.get("flows")
+    if not isinstance(flows, list):
+        return configurations
+    for flow in flows:
+        if not isinstance(flow, Mapping) or flow.get("kind") != "onboarding":
+            continue
+        tasks = flow.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, Mapping):
+                continue
+            step = task.get("student_step")
+            if not isinstance(step, str) or step not in ONBOARDING_STEPS:
+                continue
+            raw_input = task.get("input")
+            input_config = raw_input if isinstance(raw_input, Mapping) else {}
+            default_label, default_title, default_description = _ONBOARDING_SCREEN_DEFAULTS[step]
+            configuration: JsonDict = {
+                "label": str(input_config.get("screen_label") or default_label),
+                "title": str(input_config.get("screen_title") or default_title),
+                "description": str(input_config.get("screen_description") or default_description),
+            }
+            raw_fields = input_config.get("fields")
+            if isinstance(raw_fields, list):
+                configuration["fields"] = [
+                    dict(field) for field in raw_fields if isinstance(field, Mapping)
+                ]
+            if step == "about_you":
+                raw_required = input_config.get(
+                    "required_fields", input_config.get("requiredFields")
+                )
+                required_fields = (
+                    [
+                        str(field)
+                        for field in raw_required
+                        if isinstance(field, str) and field in _ABOUT_YOU_CONFIGURABLE_FIELDS
+                    ]
+                    if isinstance(raw_required, list)
+                    else list(ABOUT_YOU_REQUIRED_FIELDS)
+                )
+                configuration.update(
+                    {
+                        "requiredFields": required_fields,
+                        "identityQuickUpload": input_config.get(
+                            "identity_quick_upload",
+                            input_config.get("identityQuickUpload", True),
+                        )
+                        is not False,
+                    }
+                )
+            configurations[step] = configuration
+    return configurations
+
+
 def _map_housing(row: Mapping[str, Any], residences: list[JsonDict] | None = None) -> JsonDict:
     payload = _mapping(row["payload"])
     preference = payload.get("housingPreference")
@@ -159,6 +290,251 @@ def _requirement_code(identifier: str) -> str:
     return reverse.get(identifier, identifier.lower().replace("-", "_"))
 
 
+def _interaction_type_for_submission(submission_type: str) -> str:
+    return {
+        "none": "information",
+        "document": "upload_file",
+        "payment": "payment",
+        "appointment": "scheduling",
+    }.get(submission_type, "form")
+
+
+def _invalid_requirement_response(message: str) -> BadRequestError:
+    return BadRequestError("INVALID_REQUIREMENT_RESPONSE", message)
+
+
+def _bounded_response_value(
+    value: object,
+    *,
+    depth: int = 0,
+    counter: list[int] | None = None,
+) -> object:
+    if depth > 5:
+        raise _invalid_requirement_response("The response is nested too deeply")
+    nodes = counter if counter is not None else [0]
+    nodes[0] += 1
+    if nodes[0] > 200:
+        raise _invalid_requirement_response("The response contains too many values")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if len(value) > 2_000:
+            raise _invalid_requirement_response("Response text cannot exceed 2,000 characters")
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _invalid_requirement_response("Response numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > 100:
+            raise _invalid_requirement_response("A response object has too many fields")
+        result: JsonDict = {}
+        for raw_key, item in value.items():
+            if not isinstance(raw_key, str) or not raw_key or len(raw_key) > 100:
+                raise _invalid_requirement_response("Response field names are invalid")
+            result[raw_key] = _bounded_response_value(
+                item,
+                depth=depth + 1,
+                counter=nodes,
+            )
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) > 100:
+            raise _invalid_requirement_response("A response list has too many values")
+        return [_bounded_response_value(item, depth=depth + 1, counter=nodes) for item in value]
+    raise _invalid_requirement_response("The response contains an unsupported value")
+
+
+def _strict_response_object(value: object) -> JsonDict:
+    if not isinstance(value, Mapping):
+        raise _invalid_requirement_response("response must be an object")
+    bounded = _bounded_response_value(value)
+    if not isinstance(bounded, dict):  # pragma: no cover - guarded above
+        raise _invalid_requirement_response("response must be an object")
+    if len(_json(bounded).encode("utf-8")) > 50_000:
+        raise _invalid_requirement_response("The response is too large")
+    return bounded
+
+
+def _response_keys(
+    response: Mapping[str, Any],
+    *,
+    required: set[str],
+    optional: set[str] | None = None,
+) -> None:
+    optional_keys = optional or set()
+    missing = required - response.keys()
+    extra = response.keys() - required - optional_keys
+    if missing or extra:
+        raise _invalid_requirement_response(
+            "Response fields do not match this task's interaction type"
+        )
+
+
+def _string_options(value: object) -> list[str]:
+    return [str(item) for item in _list(value) if isinstance(item, str)]
+
+
+def _validate_configured_values(values: JsonDict, fields_value: object) -> JsonDict:
+    fields = [field for field in _list(fields_value) if isinstance(field, Mapping)]
+    if not fields:
+        return values
+    known_ids = {str(field.get("id")) for field in fields if field.get("id")}
+    if set(values) - known_ids:
+        raise _invalid_requirement_response("The form contains an unknown field")
+    normalized: JsonDict = {}
+    for field_value in fields:
+        field = _mapping(field_value)
+        field_id = str(field.get("id") or "")
+        if not field_id:
+            raise _invalid_requirement_response("The published form contains an invalid field")
+        when = _mapping(field.get("when"))
+        applies = not when or values.get(str(when.get("field"))) == when.get("equals")
+        present = field_id in values and values[field_id] not in (None, "", [])
+        if not applies:
+            if field_id in values:
+                raise _invalid_requirement_response(
+                    f"Field {field_id} is not applicable to this response"
+                )
+            continue
+        if field.get("required") is True and not present:
+            raise _invalid_requirement_response(f"Field {field_id} is required")
+        if not present:
+            continue
+        value = values[field_id]
+        field_type = str(field.get("field_type") or field.get("fieldType") or "text")
+        if field_type in {"text", "email", "phone", "date"}:
+            if not isinstance(value, str):
+                raise _invalid_requirement_response(f"Field {field_id} must be text")
+            if field_type == "email" and (
+                value.count("@") != 1 or "." not in value.rsplit("@", 1)[1]
+            ):
+                raise _invalid_requirement_response(f"Field {field_id} must be an email")
+            if field_type == "date":
+                try:
+                    date.fromisoformat(value)
+                except ValueError as error:
+                    raise _invalid_requirement_response(
+                        f"Field {field_id} must be an ISO date"
+                    ) from error
+        elif field_type == "checkbox":
+            if not isinstance(value, bool):
+                raise _invalid_requirement_response(f"Field {field_id} must be true or false")
+        elif field_type == "single_select":
+            options = _string_options(field.get("options"))
+            if not isinstance(value, str) or value not in options:
+                raise _invalid_requirement_response(f"Field {field_id} has an invalid option")
+        elif field_type == "multiple_select":
+            if (
+                not isinstance(value, list)
+                or not value
+                or not all(isinstance(item, str) for item in value)
+            ):
+                raise _invalid_requirement_response(f"Field {field_id} must be a selection list")
+            selected = [str(item) for item in value]
+            options = _string_options(field.get("options"))
+            maximum = field.get("maximum_selections", field.get("maximumSelections"))
+            if len(selected) != len(set(selected)) or any(item not in options for item in selected):
+                raise _invalid_requirement_response(f"Field {field_id} has invalid selections")
+            if (
+                isinstance(maximum, int)
+                and not isinstance(maximum, bool)
+                and len(selected) > maximum
+            ):
+                raise _invalid_requirement_response(f"Field {field_id} has too many selections")
+        else:
+            raise _invalid_requirement_response(
+                f"Field {field_id} has an unsupported published type"
+            )
+        normalized[field_id] = value
+    return normalized
+
+
+def _normalize_requirement_response(
+    interaction_type: str,
+    input_config: Mapping[str, Any],
+    value: object,
+) -> JsonDict:
+    response = _strict_response_object(value)
+    if interaction_type == "information":
+        _response_keys(response, required={"acknowledged"})
+        if response["acknowledged"] is not True:
+            raise _invalid_requirement_response("Information tasks must be acknowledged")
+        return {"acknowledged": True}
+    if interaction_type == "approval":
+        _response_keys(response, required={"approved"})
+        if response["approved"] is not True:
+            raise _invalid_requirement_response("Approval tasks require explicit approval")
+        return {"approved": True}
+    if interaction_type in {"form", "selection_flow"}:
+        _response_keys(response, required={"values"})
+        if not isinstance(response["values"], dict):
+            raise _invalid_requirement_response("Form values must be an object")
+        fields = input_config.get(
+            "fields" if interaction_type == "form" else "flow",
+            [],
+        )
+        return {"values": _validate_configured_values(response["values"], fields)}
+    if interaction_type == "single_select":
+        _response_keys(response, required={"selectedOption"})
+        selected = response["selectedOption"]
+        if not isinstance(selected, str) or selected not in _string_options(
+            input_config.get("options")
+        ):
+            raise _invalid_requirement_response("Choose one of the published options")
+        return {"selectedOption": selected}
+    if interaction_type == "multiple_select":
+        _response_keys(response, required={"selectedOptions"})
+        selected_value = response["selectedOptions"]
+        if (
+            not isinstance(selected_value, list)
+            or not selected_value
+            or not all(isinstance(item, str) for item in selected_value)
+        ):
+            raise _invalid_requirement_response("Choose one or more published options")
+        selected = [str(item) for item in selected_value]
+        options = _string_options(input_config.get("options"))
+        maximum = input_config.get("maximumSelections")
+        if len(selected) != len(set(selected)) or any(item not in options for item in selected):
+            raise _invalid_requirement_response("The response contains invalid selections")
+        if isinstance(maximum, int) and not isinstance(maximum, bool) and len(selected) > maximum:
+            raise _invalid_requirement_response("The response contains too many selections")
+        return {"selectedOptions": selected}
+    if interaction_type == "signature":
+        _response_keys(
+            response,
+            required={"accepted", "signerName"},
+            optional={"signatureMethod"},
+        )
+        signer_name = response["signerName"]
+        method = response.get("signatureMethod", "typed")
+        if response["accepted"] is not True:
+            raise _invalid_requirement_response("The signature must be explicitly accepted")
+        if not isinstance(signer_name, str) or not signer_name.strip() or len(signer_name) > 160:
+            raise _invalid_requirement_response("A valid signer name is required")
+        if method not in {"typed", "drawn"}:
+            raise _invalid_requirement_response("The signature method is invalid")
+        return {
+            "accepted": True,
+            "signerName": signer_name.strip(),
+            "signatureMethod": method,
+        }
+    if interaction_type == "scheduling":
+        _response_keys(response, required={"appointmentId"})
+        appointment_id = response["appointmentId"]
+        try:
+            normalized_id = str(UUID(str(appointment_id)))
+        except ValueError as error:
+            raise _invalid_requirement_response("A valid appointmentId is required") from error
+        return {"appointmentId": normalized_id}
+    raise ConflictError(
+        "REQUIREMENT_SPECIALIZED_SUBMISSION_REQUIRED",
+        "This task uses a specialized document or payment submission flow",
+    )
+
+
 def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
     code = str(row["code"])
     item: JsonDict = {
@@ -169,10 +545,16 @@ def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
         "title": row["title"],
         "description": row["description"],
         "status": row["status"],
+        "version": int(row.get("version") or 1),
         "blocking": bool(row["blocking"]),
         "dueAt": _nullable_iso(row.get("due_at")),
         "progressPercent": int(row["progress_percent"]),
         "submissionType": row["submission_type"],
+        "flowKind": row.get("flow_kind") or "enrollment",
+        "interactionType": row.get("interaction_type")
+        or _interaction_type_for_submission(str(row["submission_type"])),
+        "inputConfig": _mapping(row.get("input_config") or {}),
+        "order": int(row.get("display_order") or 0),
         "documentCategory": DOCUMENT_CATEGORIES.get(code),
         "responsibleOffice": row["responsible_office"],
         "dependencyCodes": _list(row["depends_on_codes"]),
@@ -180,6 +562,14 @@ def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
     points = int(row.get("reward_points") or 0)
     if points > 0:
         item["reward"] = {"points": points, "earned": row.get("reward_earned") is True}
+    if row.get("response_id") is not None:
+        item["response"] = {
+            "id": str(row["response_id"]),
+            "interactionType": row.get("response_interaction_type") or item["interactionType"],
+            "data": _mapping(row.get("response_data") or {}),
+            "version": int(row.get("response_version") or 1),
+            "submittedAt": _iso(row["response_submitted_at"]),
+        }
     return item
 
 
@@ -369,6 +759,25 @@ class PostgresPortalRepository:
                    COALESCE(sp.preferred_name, p.preferred_name, p.first_name) AS preferred_name,
                    p.first_name || ' ' || p.last_name AS full_name,
                    so.status, so.current_step, so.version,
+                   COALESCE(
+                     (SELECT definition.onboarding_required
+                      FROM enrollment_journey journey
+                      JOIN journey_definition_version definition
+                        ON definition.id=journey.journey_definition_version_id
+                       AND definition.tenant_id=journey.tenant_id
+                      WHERE journey.tenant_id=s.tenant_id
+                        AND journey.student_id=s.id
+                        AND journey.status<>'cancelled'
+                      ORDER BY journey.created_at DESC
+                      LIMIT 1),
+                     (SELECT definition.onboarding_required
+                      FROM journey_definition_version definition
+                      WHERE definition.tenant_id=s.tenant_id
+                        AND definition.active=1
+                      ORDER BY definition.version DESC
+                      LIMIT 1),
+                     true
+                   ) AS configured_onboarding_required,
                    (SELECT COUNT(*)::integer FROM student_message message
                     WHERE message.tenant_id = s.tenant_id
                       AND message.student_id = s.id AND message.read_at IS NULL)
@@ -385,7 +794,7 @@ class PostgresPortalRepository:
         )
         if row is None:
             raise NotFoundError("STUDENT_NOT_FOUND", "The authenticated student was not found")
-        required = row["status"] != "completed"
+        required = row["configured_onboarding_required"] is True and row["status"] != "completed"
         response: JsonDict = {
             "authenticated": True,
             "student": {
@@ -420,7 +829,22 @@ class PostgresPortalRepository:
         )
         if row is None:
             raise NotFoundError("STUDENT_ONBOARDING_NOT_FOUND", "Student onboarding was not found")
-        return _map_onboarding(row)
+        mapped = _map_onboarding(row)
+        configuration_row = await self._one(
+            """
+            SELECT version, document
+            FROM staff_managed_configuration_version
+            WHERE tenant_id=:tenant_id AND kind='journeys' AND active=true
+            ORDER BY version DESC LIMIT 1
+            """,
+            {"tenant_id": auth.tenant_id},
+        )
+        if configuration_row is not None:
+            mapped["configurationVersion"] = int(configuration_row["version"])
+            mapped["screenConfigurations"] = _onboarding_screen_configurations(
+                _mapping(configuration_row["document"])
+            )
+        return mapped
 
     async def get_student_housing_plan(self, auth: AuthContext) -> JsonDict:
         onboarding = await self._one(
@@ -752,6 +1176,27 @@ class PostgresPortalRepository:
                 "onboarding",
                 auth.student_id,
                 {},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE enrollment_journey journey
+                    SET status='completed', version=journey.version+1, updated_at=NOW()
+                    WHERE journey.tenant_id=:tenant_id
+                      AND journey.student_id=:student_id
+                      AND journey.status<>'cancelled'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM student_requirement requirement
+                        WHERE requirement.tenant_id=journey.tenant_id
+                          AND requirement.journey_id=journey.id
+                          AND requirement.retired_at IS NULL
+                          AND requirement.status NOT IN (
+                            'not_applicable','completed','waived','expired'
+                          )
+                      )
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
             )
             await self._insert_audit(
                 connection,
@@ -1519,15 +1964,37 @@ class PostgresPortalRepository:
         rows = await self._all(
             """
             SELECT sr.id, sr.journey_id, rdv.code, rdv.title, rdv.description,
-                   sr.status, rdv.blocking, sr.due_at, sr.progress_percent,
+                   sr.status, sr.version, rdv.blocking, sr.due_at, sr.progress_percent,
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
+                   rdv.flow_kind, rdv.interaction_type, rdv.input_config,
+                   rdv.display_order,
+                   submitted_response.id AS response_id,
+                   submitted_response.interaction_type AS response_interaction_type,
+                   submitted_response.response_data,
+                   submitted_response.version AS response_version,
+                   submitted_response.submitted_at AS response_submitted_at,
                    reward.reward_points, reward.reward_earned
             FROM student_requirement sr
             JOIN enrollment_journey j
               ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
+            JOIN requirement_definition_version evidence_definition
+              ON evidence_definition.id=sr.requirement_definition_version_id
+             AND evidence_definition.tenant_id=sr.tenant_id
+            JOIN journey_requirement_definition current_link
+              ON current_link.journey_definition_version_id=j.journey_definition_version_id
             JOIN requirement_definition_version rdv
-              ON rdv.id=sr.requirement_definition_version_id
+              ON rdv.id=current_link.requirement_definition_version_id
              AND rdv.tenant_id=sr.tenant_id
+             AND rdv.code=evidence_definition.code
+            LEFT JOIN LATERAL (
+              SELECT response.id, response.interaction_type, response.response_data,
+                     response.version, response.submitted_at
+              FROM student_requirement_response response
+              WHERE response.tenant_id=sr.tenant_id
+                AND response.requirement_id=sr.id
+              ORDER BY response.version DESC
+              LIMIT 1
+            ) submitted_response ON true
             LEFT JOIN LATERAL (
               SELECT COALESCE(SUM(rr.points),0)::integer AS reward_points,
                      CASE WHEN COUNT(rr.id)=0 THEN false ELSE BOOL_AND(EXISTS (
@@ -1545,7 +2012,9 @@ class PostgresPortalRepository:
                 AND (rr.ends_at IS NULL OR rr.ends_at>NOW())
             ) reward ON true
             WHERE sr.tenant_id=:tenant_id AND j.student_id=:student_id
-            ORDER BY rdv.display_order, sr.created_at
+              AND sr.retired_at IS NULL
+            ORDER BY CASE rdv.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
+                     rdv.display_order, sr.created_at
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
@@ -1556,15 +2025,37 @@ class PostgresPortalRepository:
         row = await self._one(
             """
             SELECT sr.id, sr.journey_id, rdv.code, rdv.title, rdv.description,
-                   sr.status, rdv.blocking, sr.due_at, sr.progress_percent,
+                   sr.status, sr.version, rdv.blocking, sr.due_at, sr.progress_percent,
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
+                   rdv.flow_kind, rdv.interaction_type, rdv.input_config,
+                   rdv.display_order,
+                   submitted_response.id AS response_id,
+                   submitted_response.interaction_type AS response_interaction_type,
+                   submitted_response.response_data,
+                   submitted_response.version AS response_version,
+                   submitted_response.submitted_at AS response_submitted_at,
                    reward.reward_points, reward.reward_earned
             FROM student_requirement sr
             JOIN enrollment_journey j
               ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
+            JOIN requirement_definition_version evidence_definition
+              ON evidence_definition.id=sr.requirement_definition_version_id
+             AND evidence_definition.tenant_id=sr.tenant_id
+            JOIN journey_requirement_definition current_link
+              ON current_link.journey_definition_version_id=j.journey_definition_version_id
             JOIN requirement_definition_version rdv
-              ON rdv.id=sr.requirement_definition_version_id
+              ON rdv.id=current_link.requirement_definition_version_id
              AND rdv.tenant_id=sr.tenant_id
+             AND rdv.code=evidence_definition.code
+            LEFT JOIN LATERAL (
+              SELECT response.id, response.interaction_type, response.response_data,
+                     response.version, response.submitted_at
+              FROM student_requirement_response response
+              WHERE response.tenant_id=sr.tenant_id
+                AND response.requirement_id=sr.id
+              ORDER BY response.version DESC
+              LIMIT 1
+            ) submitted_response ON true
             LEFT JOIN LATERAL (
               SELECT COALESCE(SUM(rr.points),0)::integer AS reward_points,
                      CASE WHEN COUNT(rr.id)=0 THEN false ELSE BOOL_AND(EXISTS (
@@ -1582,6 +2073,7 @@ class PostgresPortalRepository:
                 AND (rr.ends_at IS NULL OR rr.ends_at>NOW())
             ) reward ON true
             WHERE sr.tenant_id=:tenant_id AND j.student_id=:student_id
+              AND sr.retired_at IS NULL
               AND (sr.id::text=:identifier OR rdv.code=:requirement_code)
             LIMIT 1
             """,
@@ -1624,6 +2116,332 @@ class PostgresPortalRepository:
                 ],
             }
         return mapped
+
+    async def submit_student_requirement_response(
+        self,
+        auth: AuthContext,
+        identifier: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+        request_id: str,
+    ) -> JsonDict:
+        expected_version = payload.get("expectedVersion")
+        if (
+            not isinstance(expected_version, int)
+            or isinstance(expected_version, bool)
+            or expected_version < 1
+        ):
+            raise BadRequestError("VALIDATION_ERROR", "expectedVersion must be a positive integer")
+
+        async def handler(connection: AsyncConnection) -> JsonDict:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT sr.id, sr.journey_id, sr.status, sr.version, sr.due_at,
+                           sr.progress_percent, rdv.id AS current_definition_id,
+                           rdv.code, rdv.title, rdv.description, rdv.blocking,
+                           rdv.submission_type, rdv.responsible_office,
+                           rdv.depends_on_codes, rdv.flow_kind, rdv.interaction_type,
+                           rdv.input_config, rdv.display_order
+                    FROM student_requirement sr
+                    JOIN enrollment_journey journey
+                      ON journey.id=sr.journey_id AND journey.tenant_id=sr.tenant_id
+                    JOIN requirement_definition_version evidence_definition
+                      ON evidence_definition.id=sr.requirement_definition_version_id
+                     AND evidence_definition.tenant_id=sr.tenant_id
+                    JOIN journey_requirement_definition current_link
+                      ON current_link.journey_definition_version_id=
+                         journey.journey_definition_version_id
+                    JOIN requirement_definition_version rdv
+                      ON rdv.id=current_link.requirement_definition_version_id
+                     AND rdv.tenant_id=sr.tenant_id
+                     AND rdv.code=evidence_definition.code
+                    WHERE sr.tenant_id=:tenant_id AND journey.student_id=:student_id
+                      AND sr.retired_at IS NULL
+                      AND (sr.id::text=:identifier OR rdv.code=:requirement_code)
+                    LIMIT 1
+                    FOR UPDATE OF sr
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "identifier": identifier,
+                    "requirement_code": _requirement_code(identifier),
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                raise NotFoundError(
+                    "STUDENT_REQUIREMENT_NOT_FOUND",
+                    "The requirement was not found",
+                )
+            current = dict(row)
+            if int(current["version"]) != expected_version:
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This requirement changed in another session",
+                )
+            status = str(current["status"])
+            if status == "blocked":
+                raise ConflictError(
+                    "STUDENT_REQUIREMENT_BLOCKED",
+                    "Complete the prerequisite tasks before responding",
+                )
+            if status in {
+                "not_applicable",
+                "submitted",
+                "under_review",
+                "completed",
+                "waived",
+                "expired",
+            }:
+                raise ConflictError(
+                    "STUDENT_REQUIREMENT_NOT_ACTIONABLE",
+                    "This requirement cannot accept a response in its current status",
+                )
+            interaction_type = str(current["interaction_type"])
+            input_config = _mapping(current["input_config"])
+            if (
+                interaction_type == "signature"
+                and input_config.get("signatureProvider") == "docusign"
+            ):
+                raise ConflictError(
+                    "DOCUSIGN_EXECUTION_NOT_CONFIGURED",
+                    "DocuSign execution is not configured for this environment",
+                )
+            response_data = _normalize_requirement_response(
+                interaction_type,
+                input_config,
+                payload.get("response"),
+            )
+            if interaction_type == "scheduling":
+                appointment = await connection.execute(
+                    text(
+                        """
+                        SELECT 1 FROM student_appointment
+                        WHERE id=:appointment_id AND tenant_id=:tenant_id
+                          AND student_id=:student_id
+                          AND status IN ('scheduled','rescheduled')
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "appointment_id": response_data["appointmentId"],
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                    },
+                )
+                if appointment.first() is None:
+                    raise _invalid_requirement_response(
+                        "The selected appointment is not active for this student"
+                    )
+
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE student_requirement
+                    SET status='completed', progress_percent=100,
+                        version=version+1, updated_at=NOW()
+                    WHERE id=:requirement_id AND tenant_id=:tenant_id
+                      AND version=:expected_version AND retired_at IS NULL
+                    RETURNING version, updated_at
+                    """
+                ),
+                {
+                    "requirement_id": current["id"],
+                    "tenant_id": auth.tenant_id,
+                    "expected_version": expected_version,
+                },
+            )
+            updated_row = updated.mappings().first()
+            if updated_row is None:
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This requirement changed in another session",
+                )
+            response_version_result = await connection.execute(
+                text(
+                    """
+                    SELECT COALESCE(MAX(version),0)+1
+                    FROM student_requirement_response
+                    WHERE tenant_id=:tenant_id AND requirement_id=:requirement_id
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "requirement_id": current["id"]},
+            )
+            response_version = int(response_version_result.scalar_one())
+            response_id = str(uuid4())
+            inserted_response = await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_requirement_response (
+                      id, tenant_id, student_id, requirement_id,
+                      requirement_definition_version_id, interaction_type,
+                      response_data, version, submitted_at, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :requirement_id,
+                      :definition_id, :interaction_type, CAST(:response_data AS jsonb),
+                      :version, NOW(), NOW()
+                    )
+                    RETURNING submitted_at
+                    """
+                ),
+                {
+                    "id": response_id,
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "requirement_id": current["id"],
+                    "definition_id": current["current_definition_id"],
+                    "interaction_type": interaction_type,
+                    "response_data": _json(response_data),
+                    "version": response_version,
+                },
+            )
+            response_row = inserted_response.mappings().one()
+            await self._award_rewards(
+                connection,
+                auth,
+                "requirement_completed",
+                str(current["code"]),
+                str(current["id"]),
+                {},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE student_requirement candidate SET status='ready',
+                      version=candidate.version+1, updated_at=NOW()
+                    FROM requirement_definition_version definition,
+                         enrollment_journey journey
+                    WHERE candidate.tenant_id=:tenant_id
+                      AND candidate.journey_id=journey.id
+                      AND journey.student_id=:student_id
+                      AND candidate.requirement_definition_version_id=definition.id
+                      AND candidate.retired_at IS NULL
+                      AND candidate.status='blocked'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
+                        WHERE NOT EXISTS (
+                          SELECT 1 FROM student_requirement prerequisite
+                          JOIN requirement_definition_version prerequisite_definition
+                            ON prerequisite_definition.id=
+                               prerequisite.requirement_definition_version_id
+                           AND prerequisite_definition.tenant_id=prerequisite.tenant_id
+                          WHERE prerequisite.tenant_id=:tenant_id
+                            AND prerequisite.journey_id=candidate.journey_id
+                            AND prerequisite.retired_at IS NULL
+                            AND prerequisite_definition.code=dependency.code
+                            AND prerequisite.status IN (
+                              'completed','waived','not_applicable'
+                            )
+                        )
+                      )
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE student_experience_update
+                    SET status='acknowledged', acknowledged_at=NOW(),
+                        version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND student_id=:student_id
+                      AND requirement_id=:requirement_id
+                      AND status IN ('pending','deferred')
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "requirement_id": current["id"],
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE enrollment_journey journey
+                    SET status='completed', version=journey.version+1, updated_at=NOW()
+                    WHERE journey.id=:journey_id AND journey.tenant_id=:tenant_id
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM journey_definition_version definition
+                          WHERE definition.id=journey.journey_definition_version_id
+                            AND definition.tenant_id=journey.tenant_id
+                            AND NOT definition.onboarding_required
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM student_onboarding onboarding
+                          WHERE onboarding.tenant_id=journey.tenant_id
+                            AND onboarding.student_id=journey.student_id
+                            AND onboarding.status='completed'
+                        )
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM student_requirement requirement
+                        WHERE requirement.tenant_id=journey.tenant_id
+                          AND requirement.journey_id=journey.id
+                          AND requirement.retired_at IS NULL
+                          AND requirement.status NOT IN (
+                            'not_applicable','completed','waived','expired'
+                          )
+                      )
+                    """
+                ),
+                {"journey_id": current["journey_id"], "tenant_id": auth.tenant_id},
+            )
+            updated_version = int(updated_row["version"])
+            await self._insert_audit(
+                connection,
+                auth,
+                "student_requirement.responded",
+                "student_requirement",
+                str(current["id"]),
+                request_id,
+                {
+                    "interactionType": interaction_type,
+                    "requirementVersion": updated_version,
+                    "responseVersion": response_version,
+                },
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "student.requirement_responded.v1",
+                "student_requirement",
+                str(current["id"]),
+                updated_version,
+                request_id,
+                {
+                    "studentId": auth.student_id,
+                    "journeyId": str(current["journey_id"]),
+                    "requirementCode": str(current["code"]),
+                    "interactionType": interaction_type,
+                },
+            )
+            mapped_row = {
+                **current,
+                "status": "completed",
+                "version": updated_version,
+                "progress_percent": 100,
+                "response_id": response_id,
+                "response_interaction_type": interaction_type,
+                "response_data": response_data,
+                "response_version": response_version,
+                "response_submitted_at": response_row["submitted_at"],
+            }
+            return _map_requirement(mapped_row)
+
+        return await self._run_idempotent(
+            auth,
+            idempotency_key,
+            request_id,
+            f"student_requirement.response:{identifier}",
+            payload,
+            200,
+            handler,
+        )
 
     async def get_student_messages(self, auth: AuthContext) -> JsonDict:
         rows = await self._all(
@@ -2065,6 +2883,7 @@ class PostgresPortalRepository:
                          AND rdv.tenant_id=sr.tenant_id
                         WHERE sr.tenant_id=:tenant_id AND j.student_id=:student_id
                           AND sr.id=:requirement_id AND rdv.submission_type='document'
+                          AND sr.retired_at IS NULL
                         LIMIT 1
                         """
                     ),
@@ -2932,11 +3751,22 @@ class PostgresPortalRepository:
             SELECT id, title, description, starts_at, ends_at, location,
                    category, featured, accent, source_label, source_url,
                    source_status, registration_url, visual_theme, image_url,
-                   image_alt, image_attribution, image_source_url
+                   image_alt, image_attribution, image_source_url,
+                   advertisement_starts_at, advertisement_ends_at
             FROM campus_event WHERE tenant_id=:tenant_id AND active=true
+              AND (
+                :include_scheduled
+                OR (
+                  (advertisement_starts_at IS NULL OR advertisement_starts_at <= NOW())
+                  AND (advertisement_ends_at IS NULL OR advertisement_ends_at >= NOW())
+                )
+              )
             ORDER BY featured DESC, starts_at, id LIMIT 30
             """,
-            {"tenant_id": auth.tenant_id},
+            {
+                "tenant_id": auth.tenant_id,
+                "include_scheduled": auth.actor_type == "staff",
+            },
         )
         club_rows = await self._all(
             """
@@ -2982,6 +3812,8 @@ class PostgresPortalRepository:
                 "imageAlt": row.get("image_alt"),
                 "imageAttribution": row.get("image_attribution"),
                 "imageSourceUrl": row.get("image_source_url"),
+                "advertisementStartsAt": _nullable_iso(row.get("advertisement_starts_at")),
+                "advertisementEndsAt": _nullable_iso(row.get("advertisement_ends_at")),
                 "source": _map_source(row),
                 "registrationUrl": row.get("registration_url"),
             }
@@ -3212,7 +4044,48 @@ class PostgresPortalRepository:
         step: str,
         data: Mapping[str, Any],
     ) -> None:
-        validate_onboarding_step(step, data)
+        required_fields = ABOUT_YOU_REQUIRED_FIELDS
+        required_custom_fields: tuple[str, ...] = ()
+        if step == "about_you":
+            configuration_result = await connection.execute(
+                text(
+                    """
+                    SELECT document
+                    FROM staff_managed_configuration_version
+                    WHERE tenant_id=:tenant_id AND kind='journeys' AND active=true
+                    ORDER BY version DESC LIMIT 1
+                    """
+                ),
+                {"tenant_id": auth.tenant_id},
+            )
+            configuration_row = configuration_result.mappings().first()
+            if configuration_row is not None:
+                configuration = _onboarding_screen_configurations(
+                    _mapping(configuration_row["document"])
+                ).get("about_you", {})
+                authored_required = _mapping(configuration).get("requiredFields")
+                if isinstance(authored_required, list):
+                    required_fields = tuple(
+                        str(field)
+                        for field in authored_required
+                        if isinstance(field, str) and field in _ABOUT_YOU_CONFIGURABLE_FIELDS
+                    )
+                authored_fields = _mapping(configuration).get("fields")
+                if isinstance(authored_fields, list):
+                    required_custom_fields = tuple(
+                        str(field["id"])
+                        for field in authored_fields
+                        if isinstance(field, Mapping)
+                        and field.get("required") is True
+                        and isinstance(field.get("id"), str)
+                        and field["id"] not in _ABOUT_YOU_FIELD_BINDINGS
+                    )
+        validate_onboarding_step(
+            step,
+            data,
+            about_you_required_fields=required_fields,
+            about_you_required_custom_fields=required_custom_fields,
+        )
         if step == "offer":
             result = await connection.execute(
                 text(
@@ -3405,6 +4278,7 @@ class PostgresPortalRepository:
                   AND journey.student_id=:student_id
                   AND sr.requirement_definition_version_id=rdv.id
                   AND rdv.code=:requirement_code
+                  AND sr.retired_at IS NULL
                   AND sr.status NOT IN ('completed','waived','not_applicable')
                 RETURNING sr.id
                 """
@@ -3434,6 +4308,7 @@ class PostgresPortalRepository:
                 WHERE candidate.tenant_id=:tenant_id
                   AND candidate.journey_id=journey.id AND journey.student_id=:student_id
                   AND candidate.requirement_definition_version_id=definition.id
+                  AND candidate.retired_at IS NULL
                   AND candidate.status='blocked'
                   AND NOT EXISTS (
                     SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
@@ -3445,6 +4320,7 @@ class PostgresPortalRepository:
                       WHERE prerequisite.tenant_id=:tenant_id
                         AND prerequisite.journey_id=candidate.journey_id
                         AND prerequisite_definition.code=dependency.code
+                        AND prerequisite.retired_at IS NULL
                         AND prerequisite.status IN ('completed','waived','not_applicable')
                     )
                   )

@@ -259,8 +259,8 @@ class PostgresPromptRuntimeRepository:
                     "tenant_id": tenant_id,
                     "operation": operation,
                     "revision": revision,
-                    "checked_at": checked_at,
-                    "loaded_at": loaded_at,
+                    "checked_at": _as_utc_datetime(checked_at),
+                    "loaded_at": _as_utc_datetime(loaded_at),
                 },
             )
 
@@ -281,6 +281,13 @@ def _validate(config: RuntimeConfig, tenant_id: str, operation: AiOperation) -> 
 
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _as_utc_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _iso(value: object) -> str:

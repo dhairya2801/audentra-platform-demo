@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -88,6 +89,15 @@ _EDWARD_DEPOSIT_ACTION = re.compile(
 _EDWARD_DOCUMENT_ACTION = re.compile(r"upload|transcript|fafsa|verification", re.I)
 _EDWARD_APPOINTMENT_ACTION = re.compile(r"appointment|advisor|counselor|human", re.I)
 _EDWARD_FINANCIAL_APPOINTMENT = re.compile(r"financial|aid|fafsa|loan", re.I)
+_PORTAL_MEDIA_MIME_EXTENSIONS = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+}
+_PORTAL_MEDIA_FILE = re.compile(
+    r"^(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\."
+    r"(?P<extension>jpg|png|webp)$"
+)
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -401,6 +411,8 @@ class PostgresPlatformService:
                     503, "DATABASE_UNAVAILABLE", "The API database is not ready"
                 ) from error
             return {"status": "ready", "service": "vv-api", "timestamp": self._timestamp()}
+        if operation == "public.get_portal_media":
+            return await self._get_portal_media(self._path(call, "mediaFile", "file"))
 
         auth = self._auth(call)
         payload = dict(call.payload)
@@ -476,6 +488,14 @@ class PostgresPlatformService:
         if operation == "student.get_requirement":
             return await portal.get_student_requirement(
                 auth, self._path(call, "requirementId", "id", "requirement_id")
+            )
+        if operation == "student.submit_requirement_response":
+            return await portal.submit_student_requirement_response(
+                auth,
+                self._path(call, "requirementId", "id", "requirement_id"),
+                payload,
+                self._key(key),
+                call.request_id,
             )
         if operation == "student.list_messages":
             return await portal.get_student_messages(auth)
@@ -570,6 +590,8 @@ class PostgresPlatformService:
                 campus_life=campus_life,
                 canonical_inquiries=inquiries,
             )
+        if operation == "staff.upload_portal_media":
+            return await self._upload_staff_portal_media(auth, call)
         if operation == "staff.get_managed_configuration":
             return await self._managed_configuration(auth, self._path(call, "kind"))
         if operation == "staff.update_managed_configuration":
@@ -769,6 +791,72 @@ class PostgresPlatformService:
             auth, str(reserved["id"]), request_id=call.request_id
         )
         return await self.repository.portal.get_student_document(auth, str(reserved["id"]))
+
+    async def _upload_staff_portal_media(self, auth: AuthContext, call: ServiceCall) -> JsonDict:
+        if auth.actor_type != "staff":
+            raise UnauthorizedError("Staff authentication is required")
+        upload = call.upload
+        if upload is None:
+            raise BadRequestError("FILE_REQUIRED", "Choose an event image to upload")
+        extension = _PORTAL_MEDIA_MIME_EXTENSIONS.get(upload.mime_type)
+        if extension is None:
+            raise BadRequestError(
+                "UNSUPPORTED_MEDIA_TYPE",
+                "Event images must be JPEG, PNG, or WebP",
+            )
+        if not upload.content or len(upload.content) > 5 * 1024 * 1024:
+            raise BadRequestError(
+                "INVALID_MEDIA_SIZE",
+                "Event images must be between 1 byte and 5 MB",
+            )
+        media_file = f"{uuid4()}.{extension}"
+        storage_key = f"public/portal-media/{media_file}"
+        digest = hashlib.sha256(upload.content).hexdigest()
+        try:
+            await self.storage.put(
+                storage_key,
+                upload.content,
+                content_type=upload.mime_type,
+                sha256=digest,
+            )
+        except (OSError, StorageError) as error:
+            raise ApiError(
+                503,
+                "MEDIA_STORAGE_UNAVAILABLE",
+                "The event image could not be stored. Please retry the upload.",
+            ) from error
+        public_base_url = str(call.payload.get("publicBaseUrl") or "").rstrip("/")
+        public_path = f"/v1/media/{media_file}"
+        return {
+            "fileName": upload.file_name,
+            "mimeType": upload.mime_type,
+            "sizeBytes": len(upload.content),
+            "sha256": digest,
+            "publicPath": public_path,
+            "publicUrl": f"{public_base_url}{public_path}" if public_base_url else public_path,
+        }
+
+    async def _get_portal_media(self, media_file: str) -> BinaryPayload:
+        match = _PORTAL_MEDIA_FILE.fullmatch(media_file.lower())
+        if match is None:
+            raise NotFoundError("PORTAL_MEDIA_NOT_FOUND", "The requested media was not found")
+        mime_type = {
+            "jpg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+        }[match.group("extension")]
+        try:
+            content = await self.storage.get(f"public/portal-media/{media_file.lower()}")
+        except (OSError, StorageError) as error:
+            raise NotFoundError(
+                "PORTAL_MEDIA_NOT_FOUND", "The requested media was not found"
+            ) from error
+        return BinaryPayload(
+            data=content,
+            media_type=mime_type,
+            file_name=media_file.lower(),
+            cache_control="public, max-age=31536000, immutable",
+        )
 
     async def _get_document_content(
         self, auth: AuthContext, document_id: str, *, cache_control: str

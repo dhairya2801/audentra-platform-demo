@@ -11,7 +11,86 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ConflictError
-from audentra.infrastructure.postgres.portal_repository import PostgresPortalRepository
+from audentra.infrastructure.postgres.portal_repository import (
+    PostgresPortalRepository,
+    _onboarding_screen_configurations,
+)
+
+
+def test_about_you_screen_defaults_address_and_residency_to_optional() -> None:
+    configuration = _onboarding_screen_configurations(
+        {
+            "flows": [
+                {
+                    "kind": "onboarding",
+                    "tasks": [
+                        {
+                            "student_step": "about_you",
+                            "title": "Tell us about you",
+                            "description": "Review your identity.",
+                        }
+                    ],
+                }
+            ]
+        }
+    )["about_you"]
+
+    assert configuration["requiredFields"] == [
+        "firstName",
+        "lastName",
+        "preferredName",
+        "personalEmail",
+        "mobilePhone",
+        "citizenshipStatus",
+    ]
+    assert "streetAddress" not in configuration["requiredFields"]
+    assert "residencyVerificationPath" not in configuration["requiredFields"]
+    assert configuration["identityQuickUpload"] is True
+
+
+def test_onboarding_screen_presentation_and_form_fields_share_one_configuration() -> None:
+    fields = [
+        {
+            "id": "preferred_name",
+            "title": "What should we call you?",
+            "field_type": "text",
+            "required": True,
+        },
+        {
+            "id": "arrival_style",
+            "title": "How will you arrive?",
+            "field_type": "single_select",
+            "required": False,
+            "options": ["Train", "Car"],
+        },
+    ]
+    configuration = _onboarding_screen_configurations(
+        {
+            "flows": [
+                {
+                    "kind": "onboarding",
+                    "tasks": [
+                        {
+                            "student_step": "about_you",
+                            "title": "About you list item",
+                            "description": "Legacy list description",
+                            "input": {
+                                "screen_label": "About you",
+                                "screen_title": "Identity and arrival",
+                                "screen_description": "Review the live student form.",
+                                "fields": fields,
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )["about_you"]
+
+    assert configuration["label"] == "About you"
+    assert configuration["title"] == "Identity and arrival"
+    assert configuration["description"] == "Review the live student form."
+    assert configuration["fields"] == fields
 
 
 class FakeResult:
@@ -30,6 +109,9 @@ class FakeResult:
 
     def first_scalar(self) -> object | None:
         return next(iter(self._rows[0].values())) if self._rows else None
+
+    def scalar_one(self) -> object:
+        return next(iter(self._rows[0].values()))
 
     def first(self) -> Mapping[str, Any] | None:
         return self._rows[0] if self._rows else None
@@ -243,3 +325,76 @@ def test_signed_document_converts_iso_timestamp_before_database_bind() -> None:
     insert_parameters = engine.connection.calls[0][1]
     assert insert_parameters["signed_at"] == created_at
     assert result["signature"]["signedAt"] == signed_at
+
+
+def test_generic_requirement_response_commits_evidence_progress_and_idempotency() -> None:
+    submitted_at = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+    requirement_id = "20000000-0000-7000-8000-000000000010"
+    journey_id = "20000000-0000-7000-8000-000000000011"
+    definition_id = "20000000-0000-7000-8000-000000000012"
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "SELECT sr.id, sr.journey_id" in sql:
+            return [
+                {
+                    "id": requirement_id,
+                    "journey_id": journey_id,
+                    "status": "ready",
+                    "version": 2,
+                    "due_at": None,
+                    "progress_percent": 0,
+                    "current_definition_id": definition_id,
+                    "code": "meal_plan",
+                    "title": "Choose a meal plan",
+                    "description": "Select one dining option.",
+                    "blocking": 1,
+                    "submission_type": "form",
+                    "responsible_office": "Dining Services",
+                    "depends_on_codes": [],
+                    "flow_kind": "enrollment",
+                    "interaction_type": "single_select",
+                    "input_config": {"options": ["Standard", "Vegetarian"]},
+                    "display_order": 10,
+                }
+            ]
+        if "UPDATE student_requirement" in sql and "RETURNING version" in sql:
+            return [{"version": 3, "updated_at": submitted_at}]
+        if "SELECT COALESCE(MAX(version),0)+1" in sql:
+            return [{"version": 1}]
+        if "INSERT INTO student_requirement_response" in sql:
+            return [{"submitted_at": submitted_at}]
+        if "SELECT id, points, max_awards_per_student" in sql:
+            return []
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+    result = asyncio.run(
+        repository.submit_student_requirement_response(
+            AUTH,
+            requirement_id,
+            {
+                "expectedVersion": 2,
+                "response": {"selectedOption": "Vegetarian"},
+            },
+            "meal-response-key",
+            "meal-response-request",
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert result["version"] == 3
+    assert result["progressPercent"] == 100
+    assert result["response"] == {
+        "id": result["response"]["id"],
+        "interactionType": "single_select",
+        "data": {"selectedOption": "Vegetarian"},
+        "version": 1,
+        "submittedAt": "2028-01-15T12:00:00.000Z",
+    }
+    calls = [sql for sql, _params in engine.connection.calls]
+    assert any("INSERT INTO student_requirement_response" in sql for sql in calls)
+    assert any("UPDATE student_experience_update" in sql for sql in calls)
+    assert any("INSERT INTO idempotency_record" in sql for sql in calls)

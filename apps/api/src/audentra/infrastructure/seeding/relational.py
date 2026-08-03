@@ -554,6 +554,7 @@ async def ensure_harvard_demo_student(
             tenant_id=HARVARD_TENANT_ID,
             namespace="80000000",
         )
+        await _ensure_harvard_ai_runtime(connection)
         await _ensure_harvard_demo_student(connection, False)
         for scenario in _EXTRA_STUDENTS:
             if scenario.tenant_id == HARVARD_TENANT_ID:
@@ -563,6 +564,15 @@ async def ensure_harvard_demo_student(
 
 def _demo_uuid(namespace: str, suffix: str) -> str:
     return f"{namespace}-0000-7000-8000-{suffix}"
+
+
+def _seed_interaction_type(submission_type: str) -> str:
+    return {
+        "none": "information",
+        "document": "upload_file",
+        "payment": "payment",
+        "appointment": "scheduling",
+    }.get(submission_type, "form")
 
 
 async def _ensure_demo_seed_supplements(
@@ -581,6 +591,7 @@ async def _ensure_demo_seed_supplements(
         tenant_id=HARVARD_TENANT_ID,
         namespace="80000000",
     )
+    await _ensure_harvard_ai_runtime(connection)
     await _ensure_harvard_demo_student(connection, completed_onboarding)
 
     if completed_onboarding:
@@ -606,6 +617,129 @@ async def _ensure_demo_seed_supplements(
     for scenario in _EXTRA_STUDENTS:
         await _ensure_demo_student_scenario(connection, scenario)
     await _ensure_demo_staff_and_work(connection)
+
+
+async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
+    """Clone the published demo AI runtime into the isolated Harvard tenant."""
+
+    tenant_parameters = {
+        "source_tenant_id": UUID(ASTER_TENANT_ID),
+        "target_tenant_id": UUID(HARVARD_TENANT_ID),
+    }
+    await connection.execute(
+        text(
+            """
+            INSERT INTO ai_prompt_template_version (
+              id, tenant_id, operation, version, name, system_prompt,
+              user_prompt_template, template_variables, status, created_by,
+              published_at, created_at
+            )
+            SELECT
+              replace(id::text, '60000000-', '80000000-')::uuid,
+              :target_tenant_id, operation, version, name, system_prompt,
+              user_prompt_template, template_variables, status, NULL,
+              published_at, created_at
+            FROM ai_prompt_template_version
+            WHERE tenant_id=:source_tenant_id
+            ON CONFLICT (id) DO UPDATE SET
+              name=EXCLUDED.name,
+              system_prompt=EXCLUDED.system_prompt,
+              user_prompt_template=EXCLUDED.user_prompt_template,
+              template_variables=EXCLUDED.template_variables,
+              status=EXCLUDED.status,
+              published_at=EXCLUDED.published_at
+            """
+        ),
+        tenant_parameters,
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO ai_context_policy_version (
+              id, tenant_id, operation, version, name, context_policy, status,
+              created_by, published_at, created_at
+            )
+            SELECT
+              replace(id::text, '61000000-', '81000000-')::uuid,
+              :target_tenant_id, operation, version, name, context_policy, status,
+              NULL, published_at, created_at
+            FROM ai_context_policy_version
+            WHERE tenant_id=:source_tenant_id
+            ON CONFLICT (id) DO UPDATE SET
+              name=EXCLUDED.name,
+              context_policy=EXCLUDED.context_policy,
+              status=EXCLUDED.status,
+              published_at=EXCLUDED.published_at
+            """
+        ),
+        tenant_parameters,
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO ai_output_schema_version (
+              id, tenant_id, operation, version, name, output_schema, status,
+              created_by, published_at, created_at
+            )
+            SELECT
+              replace(id::text, '62000000-', '82000000-')::uuid,
+              :target_tenant_id, operation, version, name, output_schema, status,
+              NULL, published_at, created_at
+            FROM ai_output_schema_version
+            WHERE tenant_id=:source_tenant_id
+            ON CONFLICT (id) DO UPDATE SET
+              name=EXCLUDED.name,
+              output_schema=EXCLUDED.output_schema,
+              status=EXCLUDED.status,
+              published_at=EXCLUDED.published_at
+            """
+        ),
+        tenant_parameters,
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO ai_operation_config (
+              tenant_id, operation, prompt_template_version_id,
+              context_policy_version_id, output_schema_version_id, provider,
+              model, max_output_tokens, temperature_milli, config_revision,
+              updated_at
+            )
+            SELECT
+              :target_tenant_id,
+              operation,
+              replace(prompt_template_version_id::text, '60000000-', '80000000-')::uuid,
+              replace(context_policy_version_id::text, '61000000-', '81000000-')::uuid,
+              CASE
+                WHEN output_schema_version_id IS NULL THEN NULL
+                ELSE replace(
+                  output_schema_version_id::text,
+                  '62000000-',
+                  '82000000-'
+                )::uuid
+              END,
+              provider,
+              model,
+              max_output_tokens,
+              temperature_milli,
+              config_revision,
+              updated_at
+            FROM ai_operation_config
+            WHERE tenant_id=:source_tenant_id
+            ON CONFLICT (tenant_id, operation) DO UPDATE SET
+              prompt_template_version_id=EXCLUDED.prompt_template_version_id,
+              context_policy_version_id=EXCLUDED.context_policy_version_id,
+              output_schema_version_id=EXCLUDED.output_schema_version_id,
+              provider=EXCLUDED.provider,
+              model=EXCLUDED.model,
+              max_output_tokens=EXCLUDED.max_output_tokens,
+              temperature_milli=EXCLUDED.temperature_milli,
+              config_revision=EXCLUDED.config_revision,
+              updated_at=EXCLUDED.updated_at
+            """
+        ),
+        tenant_parameters,
+    )
 
 
 async def _ensure_harvard_reference_rows(connection: AsyncConnection) -> None:
@@ -642,11 +776,11 @@ async def _ensure_tenant_workflow(
         text(
             """
             INSERT INTO journey_definition_version (
-              id, tenant_id, code, version, active
+              id, tenant_id, code, version, active, onboarding_required
             ) VALUES (
-              :id, :tenant_id, 'standard_undergraduate_enrollment', 1, 1
+              :id, :tenant_id, 'standard_undergraduate_enrollment', 1, 1, true
             )
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (id) DO UPDATE SET onboarding_required=true
             """
         ),
         {"id": UUID(journey_definition_id), "tenant_id": UUID(tenant_id)},
@@ -659,13 +793,18 @@ async def _ensure_tenant_workflow(
                 INSERT INTO requirement_definition_version (
                   id, tenant_id, code, title, description, blocking,
                   display_order, depends_on_codes, due_offset_days, version,
-                  submission_type, responsible_office
+                  submission_type, responsible_office, flow_kind,
+                  interaction_type, input_config
                 ) VALUES (
                   :id, :tenant_id, :code, :title, :description, :blocking,
                   :display_order, CAST(:depends_on_codes AS text[]),
-                  :due_offset_days, 1, :submission_type, :responsible_office
+                  :due_offset_days, 1, :submission_type, :responsible_office,
+                  'enrollment', :interaction_type, '{}'::jsonb
                 )
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (id) DO UPDATE SET
+                  flow_kind=EXCLUDED.flow_kind,
+                  interaction_type=EXCLUDED.interaction_type,
+                  input_config=EXCLUDED.input_config
                 """
             ),
             {
@@ -679,6 +818,7 @@ async def _ensure_tenant_workflow(
                 "depends_on_codes": list(definition.depends_on_codes),
                 "due_offset_days": definition.due_offset_days,
                 "submission_type": definition.submission_type,
+                "interaction_type": _seed_interaction_type(definition.submission_type),
                 "responsible_office": definition.responsible_office,
             },
         )
@@ -1139,6 +1279,47 @@ async def _ensure_student_journey_for_accepted_offer(
         )
         due_offset = definition["due_offset_days"]
         due_at = None if due_offset is None else accepted_at + timedelta(days=int(due_offset))
+        parameters = {
+            "id": UUID(requirement_id),
+            "tenant_id": UUID(tenant_id),
+            "journey_id": UUID(actual_journey_id),
+            "definition_id": definition["id"],
+            "status": status,
+            "due_at": due_at,
+            "progress": progress,
+            "accepted_at": accepted_at,
+        }
+        existing_result = await connection.execute(
+            text(
+                """
+                SELECT id
+                FROM student_requirement
+                WHERE tenant_id=:tenant_id
+                  AND journey_id=:journey_id
+                  AND requirement_definition_version_id=:definition_id
+                """
+            ),
+            parameters,
+        )
+        existing_requirement = existing_result.first()
+        if existing_requirement is not None:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE student_requirement SET
+                      status=:status,
+                      due_at=:due_at,
+                      progress_percent=:progress,
+                      version=version + 1,
+                      updated_at=:accepted_at
+                    WHERE id=:existing_id
+                      AND (status, due_at, progress_percent) IS DISTINCT FROM
+                          (:status, :due_at, :progress)
+                    """
+                ),
+                {**parameters, "existing_id": existing_requirement[0]},
+            )
+            continue
         await connection.execute(
             text(
                 """
@@ -1149,20 +1330,34 @@ async def _ensure_student_journey_for_accepted_offer(
                   :id, :tenant_id, :journey_id, :definition_id,
                   :status, :due_at, :progress, 1, :accepted_at, :accepted_at
                 )
-                ON CONFLICT (tenant_id, journey_id, requirement_definition_version_id)
-                DO NOTHING
+                ON CONFLICT (id) DO UPDATE SET
+                  tenant_id=EXCLUDED.tenant_id,
+                  journey_id=EXCLUDED.journey_id,
+                  requirement_definition_version_id=
+                    EXCLUDED.requirement_definition_version_id,
+                  status=EXCLUDED.status,
+                  due_at=EXCLUDED.due_at,
+                  progress_percent=EXCLUDED.progress_percent,
+                  version=student_requirement.version + 1,
+                  updated_at=EXCLUDED.updated_at
+                WHERE (
+                  student_requirement.tenant_id,
+                  student_requirement.journey_id,
+                  student_requirement.requirement_definition_version_id,
+                  student_requirement.status,
+                  student_requirement.due_at,
+                  student_requirement.progress_percent
+                ) IS DISTINCT FROM (
+                  EXCLUDED.tenant_id,
+                  EXCLUDED.journey_id,
+                  EXCLUDED.requirement_definition_version_id,
+                  EXCLUDED.status,
+                  EXCLUDED.due_at,
+                  EXCLUDED.progress_percent
+                )
                 """
             ),
-            {
-                "id": UUID(requirement_id),
-                "tenant_id": UUID(tenant_id),
-                "journey_id": UUID(actual_journey_id),
-                "definition_id": definition["id"],
-                "status": status,
-                "due_at": due_at,
-                "progress": progress,
-                "accepted_at": accepted_at,
-            },
+            parameters,
         )
 
 

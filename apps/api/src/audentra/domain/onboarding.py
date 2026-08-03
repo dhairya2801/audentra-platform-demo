@@ -22,7 +22,23 @@ def is_skippable_onboarding_step(step: str) -> bool:
     return step in SKIPPABLE_ONBOARDING_STEPS
 
 
-def validate_onboarding_step(step: str, data: Mapping[str, Any]) -> None:
+ABOUT_YOU_REQUIRED_FIELDS: tuple[str, ...] = (
+    "firstName",
+    "lastName",
+    "preferredName",
+    "personalEmail",
+    "mobilePhone",
+    "citizenshipStatus",
+)
+
+
+def validate_onboarding_step(
+    step: str,
+    data: Mapping[str, Any],
+    *,
+    about_you_required_fields: tuple[str, ...] = ABOUT_YOU_REQUIRED_FIELDS,
+    about_you_required_custom_fields: tuple[str, ...] = (),
+) -> None:
     """Apply the same cross-field policy as the Nest onboarding service."""
 
     def invalid(message: str) -> None:
@@ -31,27 +47,13 @@ def validate_onboarding_step(step: str, data: Mapping[str, Any]) -> None:
     if step == "offer" or step in {"campus_life", "family_permissions"}:
         return
     if step == "about_you":
-        required = (
-            "firstName",
-            "lastName",
-            "preferredName",
-            "personalEmail",
-            "mobilePhone",
-            "citizenshipStatus",
-            "streetAddress",
-            "city",
-            "stateOrProvince",
-            "postalCode",
-            "country",
-            "communicationPreference",
-            "residencyStatus",
-            "residencyVerificationPath",
-        )
+        required = (*about_you_required_fields, "communicationPreference", "residencyStatus")
         if any(not data.get(field) for field in required):
-            invalid(
-                "Enter your legal and preferred name, personal contact details, "
-                "citizenship status, permanent home address, and residency review path"
-            )
+            invalid("Complete every identity field marked as required by your university")
+        custom_fields = data.get("customFields")
+        custom_answers = custom_fields if isinstance(custom_fields, Mapping) else {}
+        if any(not custom_answers.get(field) for field in about_you_required_custom_fields):
+            invalid("Complete every additional field marked as required by your university")
         return
     if step == "housing":
         if not data.get("housingPreference"):

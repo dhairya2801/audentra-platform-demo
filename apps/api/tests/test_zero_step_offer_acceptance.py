@@ -128,6 +128,7 @@ def test_zero_step_acceptance_routes_to_dashboard_and_later_publication_reopens(
                     "title": "Choose a meal plan",
                     "description": "Choose the dining plan that works for you.",
                     "task_type": "single_select",
+                    "options": ["Unlimited dining", "Commuter plan"],
                     "owner": "Dining Services",
                     "required": True,
                     "points": 20,

@@ -1,10 +1,14 @@
 import asyncio
 from dataclasses import replace
+from datetime import datetime
+from typing import Any, cast
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.integrations.ai.prompt_runtime import (
     AiOperation,
+    PostgresPromptRuntimeRepository,
     RuntimeConfig,
     VersionedPromptRuntime,
 )
@@ -80,3 +84,40 @@ async def test_coalesces_concurrent_refreshes() -> None:
     values = await asyncio.gather(*(runtime.resolve("tenant-1", "edward_chat") for _ in range(10)))
     assert repository.loads == 1
     assert {value.model for value in values} == {"test/model"}
+
+
+@pytest.mark.anyio
+async def test_postgres_checkpoint_converts_iso_timestamps_for_asyncpg() -> None:
+    recorded: dict[str, Any] = {}
+
+    class Connection:
+        async def execute(self, _statement: object, parameters: dict[str, object]) -> None:
+            recorded.update(parameters)
+
+    class Transaction:
+        async def __aenter__(self) -> Connection:
+            return Connection()
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    class Engine:
+        def begin(self) -> Transaction:
+            return Transaction()
+
+    repository = PostgresPromptRuntimeRepository(cast(AsyncEngine, Engine()))
+    await repository.checkpoint(
+        instance_id="api-test",
+        tenant_id="00000000-0000-7000-8000-000000000002",
+        operation="document_extraction",
+        revision=1,
+        checked_at="2026-08-03T13:58:36.656915Z",
+        loaded_at="2026-08-03T13:58:36.750634Z",
+    )
+
+    checked_at = recorded["checked_at"]
+    assert isinstance(checked_at, datetime)
+    assert isinstance(recorded["loaded_at"], datetime)
+    offset = checked_at.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0

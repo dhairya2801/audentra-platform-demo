@@ -48,6 +48,7 @@ ALL_EMITTED_EVENT_NAMES = frozenset(
         "student.inquiry_updated_by_staff.v1",
         "student.onboarding_completed.v1",
         "student.preferences_updated_by_staff.v1",
+        "student.requirement_responded.v1",
         "student.profile_updated.v1",
         "student.transcript_credits_imported.v1",
         "student_financial.payment_plan_selected.v1",
@@ -64,6 +65,7 @@ EXPLICITLY_ADDED_IGNORED_EVENTS = frozenset(
         "student.document_decided_by_staff.v1",
         "student.housing_plan_updated.v1",
         "student.preferences_updated_by_staff.v1",
+        "student.requirement_responded.v1",
         "student.transcript_credits_imported.v1",
         "student_financial.payment_plan_selected.v1",
     }

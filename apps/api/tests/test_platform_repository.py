@@ -476,7 +476,7 @@ def test_offer_acceptance_without_definition_creates_replayable_zero_step_journe
         if sql.startswith("insert into public.student_onboarding")
     )
     assert json.loads(str(onboarding["payload"])) == {
-        "onboardingCompletionReason": "no_active_journey_definition"
+        "onboardingCompletionReason": "no_active_core_onboarding"
     }
     assert "completed_steps" not in onboarding
     outbox = [
@@ -540,6 +540,98 @@ def test_existing_synthetic_definition_is_zero_step_for_subsequent_student() -> 
         )["journey_status"]
         == "completed"
     )
+
+
+def test_definition_with_active_core_onboarding_is_not_zero_step_without_requirements() -> None:
+    def handler(sql: str, _parameters: Mapping[str, object]) -> list[Mapping[str, object]]:
+        query = normalized(sql)
+        if "from public.idempotency_record" in query:
+            return []
+        if "from public.admission_offer" in query:
+            return [
+                {
+                    "id": OFFER_ID,
+                    "status": "offered",
+                    "accepted_at": None,
+                    "version": 1,
+                    "is_expired": False,
+                }
+            ]
+        if "select id as journey_definition_version_id" in query:
+            return [
+                {
+                    "journey_definition_version_id": DEFINITION_ID,
+                    "code": "staff_managed_enrollment",
+                    "zero_step": False,
+                }
+            ]
+        if query.startswith("update public.admission_offer"):
+            return [{"version": 2}]
+        if "from public.journey_requirement_definition" in query:
+            return []
+        return []
+
+    engine = FakeEngine(handler)
+    result = run(
+        repository(engine).accept_admission_offer(
+            auth(), OFFER_ID, "accept-core-only", "request-core-only"
+        )
+    )
+    calls = [(normalized(sql), parameters) for sql, parameters in engine.connection.calls]
+
+    assert result["journeyStatus"] == "in_progress"
+    assert result["onboardingRequired"] is True
+    assert result["initialRoute"] == "/onboarding"
+    assert any(
+        "definition.onboarding_required" in sql and "has_requirements" in sql for sql, _ in calls
+    )
+    assert not any(
+        sql.startswith("insert into public.journey_definition_version") for sql, _ in calls
+    )
+
+
+def test_enrollment_requirements_without_core_onboarding_route_to_dashboard() -> None:
+    def handler(sql: str, _parameters: Mapping[str, object]) -> list[Mapping[str, object]]:
+        query = normalized(sql)
+        if "from public.idempotency_record" in query:
+            return []
+        if "from public.admission_offer" in query:
+            return [
+                {
+                    "id": OFFER_ID,
+                    "status": "offered",
+                    "accepted_at": None,
+                    "version": 1,
+                    "is_expired": False,
+                }
+            ]
+        if "select id as journey_definition_version_id" in query:
+            return [
+                {
+                    "journey_definition_version_id": DEFINITION_ID,
+                    "code": "staff_managed_enrollment",
+                    "onboarding_required": False,
+                    "has_requirements": True,
+                }
+            ]
+        if query.startswith("update public.admission_offer"):
+            return [{"version": 2}]
+        if "from public.journey_requirement_definition" in query:
+            return []
+        return []
+
+    engine = FakeEngine(handler)
+    result = run(
+        repository(engine).accept_admission_offer(
+            auth(), OFFER_ID, "accept-enrollment-only", "request-enrollment-only"
+        )
+    )
+    calls = [(normalized(sql), parameters) for sql, parameters in engine.connection.calls]
+
+    assert result["journeyStatus"] == "in_progress"
+    assert result["onboardingRequired"] is False
+    assert result["initialRoute"] == "/dashboard"
+    assert any(sql.startswith("insert into public.student_onboarding") for sql, _ in calls)
 
 
 def test_accepted_offer_without_journey_repairs_state_without_reaccepting() -> None:

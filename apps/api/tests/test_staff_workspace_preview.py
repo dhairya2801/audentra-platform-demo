@@ -342,7 +342,26 @@ async def test_configuration_draft_can_add_a_supplemental_onboarding_task() -> N
     assert draft["changes"] == ["Added Choose a meal plan to onboarding."]
     assert "id: choose_a_meal_plan" in draft["yaml"]
     assert "task_type: single_select" in draft["yaml"]
+    assert "- Unlimited dining" in draft["yaml"]
+    assert "- Commuter plan" in draft["yaml"]
     assert "points: 20" in draft["yaml"]
+
+
+async def test_configuration_draft_refuses_a_selection_without_explicit_options() -> None:
+    draft = await repository().draft_managed_configuration(
+        auth(),
+        {
+            "kind": "journeys",
+            "expectedVersion": 1,
+            "instruction": 'Add "Choose a lab section" to enrollment as a single selection.',
+        },
+    )
+
+    assert draft["changes"] == []
+    assert draft["warnings"] == [
+        "Choose a lab section needs at least two explicit option values before it can be published."
+    ]
+    assert "choose_a_lab_section" not in draft["yaml"]
 
 
 async def test_club_outreach_and_inquiry_mutations_remain_preview_only() -> None:

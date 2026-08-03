@@ -361,9 +361,19 @@ class PostgresPlatformRepository:
               rdv.blocking, sr.due_at, sr.progress_percent,
               reward.reward_points, reward.reward_earned
             FROM {self._table("student_requirement")} sr
+            JOIN {self._table("enrollment_journey")} journey
+              ON journey.id = sr.journey_id
+             AND journey.tenant_id = sr.tenant_id
+            JOIN {self._table("requirement_definition_version")} evidence_definition
+              ON evidence_definition.id = sr.requirement_definition_version_id
+             AND evidence_definition.tenant_id = sr.tenant_id
+            JOIN {self._table("journey_requirement_definition")} current_link
+              ON current_link.journey_definition_version_id =
+                 journey.journey_definition_version_id
             JOIN {self._table("requirement_definition_version")} rdv
-              ON rdv.id = sr.requirement_definition_version_id
+              ON rdv.id = current_link.requirement_definition_version_id
              AND rdv.tenant_id = sr.tenant_id
+             AND rdv.code = evidence_definition.code
             LEFT JOIN LATERAL (
               SELECT
                 COALESCE(SUM(rr.points), 0)::integer AS reward_points,
@@ -385,7 +395,9 @@ class PostgresPlatformRepository:
                 AND (rr.ends_at IS NULL OR rr.ends_at > NOW())
             ) reward ON true
             WHERE sr.tenant_id = :tenant_id AND sr.journey_id = :journey_id
-            ORDER BY rdv.display_order, sr.id
+              AND sr.retired_at IS NULL
+            ORDER BY CASE rdv.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
+                     rdv.display_order, sr.id
         """
 
     async def accept_admission_offer(
@@ -464,7 +476,13 @@ class PostgresPlatformRepository:
                     text(
                         f"""
                         SELECT journey.id, journey.status, journey.version,
-                               definition.code AS definition_code
+                               definition.code AS definition_code,
+                               definition.onboarding_required,
+                               EXISTS (
+                                 SELECT 1
+                                 FROM {self._table("journey_requirement_definition")} link
+                                 WHERE link.journey_definition_version_id=definition.id
+                               ) AS has_requirements
                         FROM {self._table("enrollment_journey")} journey
                         JOIN {self._table("journey_definition_version")} definition
                           ON definition.id = journey.journey_definition_version_id
@@ -486,18 +504,23 @@ class PostgresPlatformRepository:
                         "The accepted offer has no acceptance timestamp",
                     )
                 if journey is not None:
-                    zero_step = journey.get("definition_code") == _ZERO_STEP_JOURNEY_CODE
+                    onboarding_required = (
+                        journey.get("definition_code") != _ZERO_STEP_JOURNEY_CODE
+                        and journey.get("onboarding_required", True) is True
+                    )
+                    has_requirements = journey.get("has_requirements") is True
+                    zero_step = not onboarding_required and not has_requirements
                     response: dict[str, object] = {
                         "offerId": str(offer["id"]),
                         "offerStatus": "accepted",
                         "journeyId": str(journey["id"]),
-                        "journeyStatus": "completed" if zero_step else "in_progress",
+                        "journeyStatus": str(journey["status"]),
                         "projectionVersion": max(
                             _database_int(offer["version"], "offer.version"), 2
                         ),
                         "acceptedAt": _iso_timestamp(offer["accepted_at"]),
-                        "onboardingRequired": not zero_step,
-                        "initialRoute": "/dashboard" if zero_step else "/onboarding",
+                        "onboardingRequired": onboarding_required,
+                        "initialRoute": ("/onboarding" if onboarding_required else "/dashboard"),
                         **({"requirementCount": 0} if zero_step else {}),
                     }
                     await self._store_idempotent_response(
@@ -529,9 +552,16 @@ class PostgresPlatformRepository:
             definition_result = await connection.execute(
                 text(
                     f"""
-                    SELECT id AS journey_definition_version_id, code
-                    FROM {self._table("journey_definition_version")}
-                    WHERE tenant_id = :tenant_id AND active = 1
+                    SELECT id AS journey_definition_version_id,
+                           code,
+                           definition.onboarding_required,
+                           EXISTS (
+                             SELECT 1
+                             FROM {self._table("journey_requirement_definition")} link
+                             WHERE link.journey_definition_version_id=definition.id
+                           ) AS has_requirements
+                    FROM {self._table("journey_definition_version")} definition
+                    WHERE definition.tenant_id = :tenant_id AND definition.active = 1
                     ORDER BY version DESC
                     LIMIT 1
                     """
@@ -539,7 +569,13 @@ class PostgresPlatformRepository:
                 {"tenant_id": _uuid(auth.tenant_id)},
             )
             definition = _first_mapping(definition_result)
-            zero_step = definition is None or definition.get("code") == _ZERO_STEP_JOURNEY_CODE
+            onboarding_required = (
+                definition is not None
+                and definition.get("code") != _ZERO_STEP_JOURNEY_CODE
+                and definition.get("onboarding_required", True) is True
+            )
+            has_requirements = definition is not None and definition.get("has_requirements") is True
+            zero_step = not onboarding_required and not has_requirements
             if definition is None:
                 version_result = await connection.execute(
                     text(
@@ -560,9 +596,10 @@ class PostgresPlatformRepository:
                     text(
                         f"""
                         INSERT INTO {self._table("journey_definition_version")} (
-                          id, tenant_id, code, version, active, created_at, updated_at
+                          id, tenant_id, code, version, active, onboarding_required,
+                          created_at, updated_at
                         ) VALUES (
-                          :id, :tenant_id, :code, :version, 1,
+                          :id, :tenant_id, :code, :version, 1, false,
                           :accepted_at, :accepted_at
                         )
                         """
@@ -694,7 +731,7 @@ class PostgresPlatformRepository:
                     },
                 )
 
-            if zero_step:
+            if not onboarding_required:
                 await connection.execute(
                     text(
                         f"""
@@ -724,7 +761,7 @@ class PostgresPlatformRepository:
                         "tenant_id": _uuid(auth.tenant_id),
                         "student_id": _uuid(auth.student_id),
                         "payload": _json(
-                            {"onboardingCompletionReason": ("no_active_journey_definition")}
+                            {"onboardingCompletionReason": "no_active_core_onboarding"}
                         ),
                         "accepted_at": accepted_at,
                     },
@@ -818,8 +855,8 @@ class PostgresPlatformRepository:
                 "journeyStatus": journey_status,
                 "projectionVersion": max(offer_version, 2),
                 "acceptedAt": _iso_timestamp(accepted_at),
-                "onboardingRequired": not zero_step,
-                "initialRoute": "/dashboard" if zero_step else "/onboarding",
+                "onboardingRequired": onboarding_required,
+                "initialRoute": "/onboarding" if onboarding_required else "/dashboard",
                 **({"requirementCount": 0} if zero_step else {}),
             }
             await self._store_idempotent_response(

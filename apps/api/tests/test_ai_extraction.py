@@ -73,6 +73,17 @@ def test_evidence_mismatch_is_actionable_without_provider_call() -> None:
     assert infer_type_from_evidence("OFFICIAL TRANSCRIPT") == "transcript"
     assert infer_type_from_evidence("Restaurant Menu - Chef Special") == "other"
     assert infer_type_from_evidence("Free Application for Federal Student Aid") == "financial_aid"
+
+
+def test_useful_extraction_rejects_expected_document_type_mismatch() -> None:
+    assert not useful_extraction(
+        {"documentType": "other", "fields": [], "courses": []},
+        "identity",
+    )
+    assert useful_extraction(
+        {"documentType": "identity", "fields": [], "courses": []},
+        "identity",
+    )
     result = evidence_mismatch("ferpa", "transcript")
     assert result["documentType"] == "transcript"
     assert result["provider"] == "local"

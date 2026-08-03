@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -34,6 +35,7 @@ from audentra.infrastructure.seeding.relational import (
     HARVARD_TENANT_ID,
     ColumnSpec,
     _convert_value,
+    _ensure_student_journey_for_accepted_offer,
     _foreign_key_order,
     _upsert_statement,
     seed_relational_data,
@@ -120,6 +122,18 @@ def test_supplement_inventory_is_deterministic_tenant_safe_and_complete() -> Non
         for tenant_id in (ASTER_TENANT_ID, HARVARD_TENANT_ID)
     } == {ASTER_TENANT_ID: 2, HARVARD_TENANT_ID: 3}
     assert len({item.item_id for item in _DEMO_WORK_ITEMS}) == 5
+
+
+def test_demo_requirement_reconciliation_updates_deterministic_ids() -> None:
+    source = inspect.getsource(_ensure_student_journey_for_accepted_offer)
+
+    assert "SELECT id" in source
+    assert "existing_requirement = existing_result.first()" in source
+    assert "if existing_requirement is not None" in source
+    assert "ON CONFLICT (id) DO UPDATE SET" in source
+    assert "requirement_definition_version_id=" in source
+    assert "version=student_requirement.version + 1" in source
+    assert "IS DISTINCT FROM" in source
 
 
 def test_packaged_tenant_configurations_match_seeded_workflow_inventory() -> None:

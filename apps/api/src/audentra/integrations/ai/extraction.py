@@ -270,7 +270,7 @@ def evidence_mismatch(expected: str, actual: str) -> dict[str, Any]:
 
 def useful_extraction(extraction: Mapping[str, Any], expected_type: str | None = None) -> bool:
     if expected_type and extraction.get("documentType") != expected_type:
-        return True
+        return False
     courses = extraction.get("courses")
     has_courses = isinstance(courses, list) and any(
         isinstance(course, Mapping) and str(course.get("title", "")).strip() for course in courses

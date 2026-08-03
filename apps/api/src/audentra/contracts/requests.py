@@ -247,11 +247,42 @@ class StudentOnboardingDataRequest(StrictRequest):
         Field(default=None, max_length=12)
     )
     deposit_choice: Literal["pay_now", "pay_later", "waiver_or_deferral"] | None = None
+    custom_fields: (
+        dict[
+            Annotated[
+                StrictStr,
+                StringConstraints(
+                    min_length=2,
+                    max_length=80,
+                    pattern=r"^[a-z][a-z0-9_]*$",
+                ),
+            ],
+            StrictStr | StrictBool | list[StrictStr],
+        ]
+        | None
+    ) = Field(default=None, max_length=40)
 
     @field_validator("personal_email", "known_roommate_email")
     @classmethod
     def validate_optional_emails(cls, value: str | None) -> str | None:
         return None if value is None else _ensure_email(value)
+
+    @field_validator("custom_fields")
+    @classmethod
+    def validate_custom_fields(
+        cls,
+        value: dict[str, str | bool | list[str]] | None,
+    ) -> dict[str, str | bool | list[str]] | None:
+        if value is None:
+            return None
+        for answer in value.values():
+            if isinstance(answer, str) and len(answer) > 2_000:
+                raise ValueError("custom field answers must be no longer than 2,000 characters")
+            if isinstance(answer, list) and (
+                len(answer) > 25 or any(len(item) > 200 for item in answer)
+            ):
+                raise ValueError("custom field selections exceed the supported limits")
+        return value
 
 
 class UpdateStudentOnboardingRequest(StrictRequest):
@@ -274,6 +305,11 @@ class UpdateStudentHousingPlanRequest(StrictRequest):
 class DecideStudentExperienceUpdateRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
     action: Literal["handle_now", "later"]
+
+
+class SubmitStudentRequirementResponseRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+    response: dict[str, object]
 
 
 class CreateStudentDocumentRequest(StrictRequest):
