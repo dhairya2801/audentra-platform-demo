@@ -106,6 +106,7 @@ if [[ "$deployment_failed" -eq 0 ]]; then
     deployment_failed=1
   else
     "${compose[@]}" run --rm \
+      -e DB_STATEMENT_TIMEOUT_MS=300000 \
       -e "OBJECT_STORAGE_ENDPOINT=http://${minio_ip}:9000" \
       seed || deployment_failed=1
   fi
