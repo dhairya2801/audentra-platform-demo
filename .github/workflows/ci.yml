@@ -232,6 +232,10 @@ jobs:
       - name: Build and push immutable platform image
         run: |
           image_uri="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${ARTIFACT_IMAGE}:${GITHUB_SHA}"
+          if gcloud artifacts docker images describe "${image_uri}" --quiet >/dev/null 2>&1; then
+            echo "Immutable platform image already exists; reusing ${image_uri}."
+            exit 0
+          fi
           docker build \
             --file infra/docker/api.Dockerfile \
             --tag "${image_uri}" \
