@@ -49,7 +49,7 @@ def parse_tenant_slug_ids(raw_value: str | None) -> Mapping[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class HttpSettings:
-    environment: Literal["development", "test", "production"] = "development"
+    environment: Literal["development", "preview", "test", "production"] = "development"
     browser_auth_required: bool = False
     web_origins: tuple[str, ...] = ("http://localhost:3000",)
     # Security note: production composition rejects this explicit local-only fallback.
@@ -92,7 +92,7 @@ class HttpSettings:
 
     @property
     def secure_cookies(self) -> bool:
-        return self.environment == "production"
+        return self.environment in {"preview", "production"}
 
     def demo_student_for(self, tenant_slug: str | None) -> str:
         if tenant_slug is None:
@@ -104,8 +104,8 @@ class HttpSettings:
         environment = (
             os.getenv("AUDENTRA_ENV", os.getenv("NODE_ENV", "development")).strip().lower()
         )
-        if environment not in {"development", "test", "production"}:
-            raise ValueError("AUDENTRA_ENV must be development, test, or production")
+        if environment not in {"development", "preview", "test", "production"}:
+            raise ValueError("AUDENTRA_ENV must be development, preview, test, or production")
         origins = tuple(
             origin.strip()
             for origin in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",")

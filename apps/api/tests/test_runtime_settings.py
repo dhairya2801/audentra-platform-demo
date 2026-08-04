@@ -50,10 +50,27 @@ def test_legacy_environment_names_and_bounds_are_supported(tmp_path: Path) -> No
     assert settings.onboarding_template_dir == tmp_path / "templates"
 
 
+def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {
+            "AUDENTRA_ENV": "preview",
+            "DATABASE_URL": "postgresql://example/preview",
+            "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+        },
+        package_root=tmp_path,
+    )
+
+    settings.assert_api_deployable()
+
+    assert settings.environment == "preview"
+    assert settings.http_settings().secure_cookies is True
+
+
 @pytest.mark.parametrize(
     ("values", "message"),
     [
-        ({"AUDENTRA_ENV": "preview"}, "AUDENTRA_ENV"),
+        ({"AUDENTRA_ENV": "staging"}, "AUDENTRA_ENV"),
         ({"API_PORT": "0"}, "API_PORT"),
         ({"WEB_ORIGIN": "javascript:alert(1)"}, "WEB_ORIGIN"),
         ({"OBJECT_STORAGE_FORCE_PATH_STYLE": "sometimes"}, "Boolean"),

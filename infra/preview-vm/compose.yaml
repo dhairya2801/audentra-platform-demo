@@ -1,0 +1,226 @@
+name: audentra-platform-preview
+
+x-runtime-environment: &runtime-environment
+  AUDENTRA_ENV: preview
+  AUTH_MODE: demo
+  BROWSER_AUTH_REQUIRED: "true"
+  API_HOST: 0.0.0.0
+  API_PORT: "4000"
+  WEB_ORIGIN: https://${SITE_HOST}
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  DB_POOL_SIZE: "4"
+  DB_MAX_OVERFLOW: "0"
+  DB_POOL_TIMEOUT_SECONDS: "5"
+  DB_POOL_RECYCLE_SECONDS: "1800"
+  DB_STATEMENT_TIMEOUT_MS: "15000"
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_BUCKET: ${MINIO_BUCKET}
+  OBJECT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER}
+  OBJECT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+  OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  MAX_DOCUMENT_BYTES: "10485760"
+  ONBOARDING_DOCUMENT_TEMPLATE_DIR: /workspace/apps/api/assets/onboarding
+  DOCUMENT_WORKER_TOKEN: ${DOCUMENT_WORKER_TOKEN}
+  API_INTERNAL_URL: http://api:4000
+  DEMO_TENANT_ID: 00000000-0000-7000-8000-000000000001
+  DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101
+  DEMO_ACTOR_ID: 00000000-0000-7000-8000-000000000100
+  DEMO_STAFF_ACTOR_ID: 00000000-0000-7000-8000-000000000901
+  VV_STAFF_BOOTSTRAP_PASSWORD: ${VV_STAFF_BOOTSTRAP_PASSWORD}
+  WORKER_ID: preview-worker
+  WORKER_CONSUMER_NAME: student-dashboard-v1
+  WORKER_BATCH_SIZE: "10"
+  WORKER_POLL_INTERVAL_SECONDS: "1"
+  WORKER_LEASE_SECONDS: "60"
+  WORKER_MAX_ATTEMPTS: "10"
+  WORKER_BASE_RETRY_MS: "1000"
+  WORKER_MAX_RETRY_MS: "300000"
+  WORKER_COMMAND_TIMEOUT_SECONDS: "30"
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
+  OPENROUTER_APP_URL: https://${SITE_HOST}
+  OPENROUTER_APP_NAME: Audentra Preview
+  OPENROUTER_DOCUMENT_TIMEOUT_MS: "120000"
+  OPENROUTER_DOCUMENT_MAX_TOKENS: "6000"
+  OPENROUTER_DOCUMENT_REASONING_TOKENS: "256"
+  EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED: "false"
+  TRANSCRIPT_PARSING: ${TRANSCRIPT_PARSING:-groq}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  GROQ_MODEL: ${GROQ_MODEL:-qwen/qwen3.6-27b}
+  GROQ_TRANSCRIPT_TIMEOUT_MS: "60000"
+  GROQ_TRANSCRIPT_MAX_TOKENS: "1400"
+  GROQ_TRANSCRIPT_MAX_TEXT_CHARACTERS: "40000"
+  GROQ_TRANSCRIPT_REASONING_EFFORT: none
+
+x-app-service: &app-service
+  image: audentra-platform:${PLATFORM_IMAGE_TAG}
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+  networks:
+    - preview
+
+services:
+  postgres:
+    image: postgres:17.5-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 160m
+    networks:
+      - preview
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: unless-stopped
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://127.0.0.1:9000/minio/health/live
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 160m
+    networks:
+      - preview
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -ec
+    command:
+      - >-
+        mc alias set local http://minio:9000
+        "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}";
+        mc mb --ignore-existing "local/$${MINIO_BUCKET}";
+        mc anonymous set none "local/$${MINIO_BUCKET}"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - preview
+
+  migrate:
+    <<: *app-service
+    restart: "no"
+    command:
+      - audentra-migrate
+      - --migrations-dir
+      - /workspace/apps/api/migrations
+    environment:
+      <<: *runtime-environment
+      DB_POOL_SIZE: "1"
+    mem_limit: 160m
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    <<: *app-service
+    restart: "no"
+    command:
+      - audentra-seed
+      - --all
+    environment:
+      <<: *runtime-environment
+      AUDENTRA_ENV: development
+      DB_POOL_SIZE: "1"
+    mem_limit: 192m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  api:
+    <<: *app-service
+    restart: unless-stopped
+    command:
+      - audentra-api
+    environment: *runtime-environment
+    expose:
+      - "4000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:4000/health/ready', timeout=2).read()
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    pids_limit: 128
+    mem_limit: 192m
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    <<: *app-service
+    restart: unless-stopped
+    command:
+      - audentra-worker
+    environment: *runtime-environment
+    pids_limit: 128
+    mem_limit: 160m
+    stop_grace_period: 30s
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+    name: audentra-platform-postgres-data
+  minio-data:
+    name: audentra-platform-minio-data
+
+networks:
+  preview:
+    name: audentra-preview
+    external: true

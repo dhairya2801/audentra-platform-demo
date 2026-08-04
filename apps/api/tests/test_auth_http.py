@@ -318,3 +318,22 @@ async def test_development_auth_endpoints_are_hidden_in_production(
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "DEVELOPMENT_AUTH_DISABLED"
+
+
+async def test_preview_auth_cookie_is_secure(
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    app = create_app(
+        service=platform_service,
+        auth_service=auth_service,
+        settings=HttpSettings(environment="preview", browser_auth_required=True),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://preview.example",
+    ) as preview_client:
+        response = await preview_client.post("/v1/auth/demo/sign-in", json={})
+
+    assert response.status_code == 200
+    assert "Secure" in response.headers["set-cookie"]

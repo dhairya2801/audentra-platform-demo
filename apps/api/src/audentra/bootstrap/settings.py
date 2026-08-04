@@ -15,7 +15,7 @@ from audentra.infrastructure.storage.s3 import S3StorageSettings
 from audentra.integrations.ai.gateway import GatewaySettings
 from audentra.interfaces.http.config import HttpSettings, parse_tenant_slug_ids
 
-Environment = Literal["development", "test", "production"]
+Environment = Literal["development", "preview", "test", "production"]
 AuthMode = Literal["demo"]
 
 LOCAL_DATABASE_URL = "postgresql://vv:vv_local_password@localhost:5432/vv_enrollment"
@@ -269,8 +269,8 @@ class RuntimeSettings:
 
 def _environment(value: str) -> Environment:
     normalized = value.strip().lower()
-    if normalized not in {"development", "test", "production"}:
-        raise ValueError("AUDENTRA_ENV must be development, test, or production")
+    if normalized not in {"development", "preview", "test", "production"}:
+        raise ValueError("AUDENTRA_ENV must be development, preview, test, or production")
     return normalized  # type: ignore[return-value]
 
 
