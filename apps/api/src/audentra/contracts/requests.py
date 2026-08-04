@@ -108,6 +108,26 @@ class StaffSignInRequest(StudentSignInRequest):
     pass
 
 
+class StaffSignUpRequest(StrictRequest):
+    email: StrictStr
+    password: Annotated[StrictStr, StringConstraints(min_length=12, max_length=128)]
+    institution_access_code: Annotated[
+        StrictStr,
+        StringConstraints(min_length=16, max_length=256),
+    ]
+
+    _normalize_email_value = field_validator("email", mode="before")(_normalize_email)
+
+    @field_validator("password")
+    @classmethod
+    def _strong_password(cls, value: str) -> str:
+        if not any(character.isalpha() for character in value) or not any(
+            character.isdigit() for character in value
+        ):
+            raise ValueError("must include at least one letter and one number")
+        return value
+
+
 ActivityEventName = Literal[
     "ui.portal_session_started.v1",
     "ui.dashboard_viewed.v1",

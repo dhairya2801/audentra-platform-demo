@@ -10,6 +10,7 @@ from fastapi import APIRouter, Request, Response
 from audentra.contracts.requests import (
     EmptyBody,
     StaffSignInRequest,
+    StaffSignUpRequest,
     StartGuidedOnboardingRequest,
     StudentSignInRequest,
     StudentSignUpRequest,
@@ -272,6 +273,34 @@ async def sign_in_staff(
         tenant_slug=tenant_slug,
         email=body.email,
         password=body.password,
+    )
+    if session.token is None or session.expires_at_epoch is None:
+        raise ApiError(500, "AUTH_SESSION_FAILED", "The staff session could not be created")
+    _set_session_cookie(
+        response,
+        request,
+        name="vv_staff_session",
+        token=session.token,
+        expires_at_epoch=session.expires_at_epoch,
+    )
+    return _staff_response(session)
+
+
+@auth_router.post("/v1/auth/staff/sign-up", status_code=201, response_model=None)
+async def sign_up_staff(
+    body: StaffSignUpRequest,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    _development_only(request)
+    tenant_id, tenant_slug = resolve_request_tenant(request)
+    session = await auth.sign_up_staff(
+        tenant_id=tenant_id,
+        tenant_slug=tenant_slug,
+        email=body.email,
+        password=body.password,
+        institution_access_code=body.institution_access_code,
     )
     if session.token is None or session.expires_at_epoch is None:
         raise ApiError(500, "AUTH_SESSION_FAILED", "The staff session could not be created")

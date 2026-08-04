@@ -104,7 +104,7 @@ def test_preview_composes_the_browser_auth_adapter() -> None:
     auth = PostgresDevelopmentAuth(
         StubEngine(),  # type: ignore[arg-type]
         environment="preview",
-        staff_password="x" * 32,
+        staff_invitation_code="x" * 32,
         demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
     )
 
@@ -116,7 +116,7 @@ def test_browser_auth_adapter_still_rejects_production() -> None:
         PostgresDevelopmentAuth(
             StubEngine(),  # type: ignore[arg-type]
             environment="production",
-            staff_password="x" * 32,
+            staff_invitation_code="x" * 32,
             demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
         )
 

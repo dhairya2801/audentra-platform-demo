@@ -106,6 +106,16 @@ class BrowserAuthService(Protocol):
         self, token: str, tenant_id: str, tenant_slug: str | None
     ) -> StaffSession | None: ...
 
+    async def sign_up_staff(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        password: str,
+        institution_access_code: str,
+    ) -> StaffSession: ...
+
     async def sign_in_staff(
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str
     ) -> StaffSession: ...
@@ -141,6 +151,17 @@ class UnavailableBrowserAuthService:
         self, token: str, tenant_id: str, tenant_slug: str | None
     ) -> StaffSession | None:
         return None
+
+    async def sign_up_staff(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        password: str,
+        institution_access_code: str,
+    ) -> StaffSession:
+        self._raise()
 
     async def sign_in_staff(
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str

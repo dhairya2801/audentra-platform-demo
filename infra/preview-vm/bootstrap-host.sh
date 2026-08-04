@@ -40,12 +40,15 @@ fi
 postgres_password="$(from_existing_or_legacy POSTGRES_PASSWORD)"
 minio_password="$(from_existing_or_legacy MINIO_ROOT_PASSWORD)"
 worker_token="$(from_existing_or_legacy DOCUMENT_WORKER_TOKEN)"
-staff_password="$(from_existing_or_legacy VV_STAFF_BOOTSTRAP_PASSWORD)"
+staff_invitation_code="$(from_existing_or_legacy VV_STAFF_INVITATION_CODE)"
+if [[ -z "$staff_invitation_code" ]]; then
+  staff_invitation_code="$(from_existing_or_legacy VV_STAFF_BOOTSTRAP_PASSWORD)"
+fi
 
 [[ -n "$postgres_password" ]] || postgres_password="$(openssl rand -hex 24)"
 [[ -n "$minio_password" ]] || minio_password="$(openssl rand -hex 24)"
 [[ -n "$worker_token" ]] || worker_token="$(openssl rand -hex 32)"
-[[ -n "$staff_password" ]] || staff_password="$(openssl rand -hex 16)"
+[[ -n "$staff_invitation_code" ]] || staff_invitation_code="$(openssl rand -hex 16)"
 
 umask 077
 environment_next="${environment_file}.next"
@@ -58,7 +61,7 @@ environment_next="${environment_file}.next"
   printf 'MINIO_ROOT_PASSWORD=%s\n' "$minio_password"
   printf 'MINIO_BUCKET=%s\n' "$(from_existing_or_legacy MINIO_BUCKET audentra-documents)"
   printf 'DOCUMENT_WORKER_TOKEN=%s\n' "$worker_token"
-  printf 'VV_STAFF_BOOTSTRAP_PASSWORD=%s\n' "$staff_password"
+  printf 'VV_STAFF_INVITATION_CODE=%s\n' "$staff_invitation_code"
   printf 'OPENROUTER_API_KEY=%s\n' "$(from_existing_or_legacy OPENROUTER_API_KEY)"
   printf 'OPENROUTER_MODEL=%s\n' "$(from_existing_or_legacy OPENROUTER_MODEL openai/gpt-4o-mini)"
   printf 'GROQ_API_KEY=%s\n' "$(from_existing_or_legacy GROQ_API_KEY)"

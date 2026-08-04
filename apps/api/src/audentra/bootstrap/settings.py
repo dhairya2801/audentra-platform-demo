@@ -21,7 +21,7 @@ AuthMode = Literal["demo"]
 LOCAL_DATABASE_URL = "postgresql://vv:vv_local_password@localhost:5432/vv_enrollment"
 LOCAL_WORKER_TOKEN = "local-development-document-worker-token"  # noqa: S105
 LOCAL_STORAGE_SECRET = "vv_minio_password"  # noqa: S105
-LOCAL_STAFF_PASSWORD = "AsterStaff2027!"  # noqa: S105
+LOCAL_STAFF_INVITATION_CODE = "local-staff-invitation-2027"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +50,7 @@ class RuntimeSettings:
     database: DatabaseEngineOptions
     web_origins: tuple[str, ...]
     browser_auth_required: bool
-    staff_bootstrap_password: str
+    staff_invitation_code: str
     document_worker_token: str
     demo_tenant_id: str
     demo_student_id: str
@@ -90,6 +90,14 @@ class RuntimeSettings:
             worker_token = LOCAL_WORKER_TOKEN
         if app_environment == "production" and len(worker_token) < 32:
             raise ValueError("DOCUMENT_WORKER_TOKEN must contain at least 32 characters")
+
+        staff_invitation_code = (
+            values.get("VV_STAFF_INVITATION_CODE", "").strip()
+            or values.get("VV_STAFF_BOOTSTRAP_PASSWORD", "").strip()
+            or (LOCAL_STAFF_INVITATION_CODE if app_environment != "production" else "")
+        )
+        if app_environment != "production" and len(staff_invitation_code) < 16:
+            raise ValueError("VV_STAFF_INVITATION_CODE must contain at least 16 characters")
 
         origins = _origins(values.get("WEB_ORIGIN", "http://localhost:3000"))
         storage_secret = values.get("OBJECT_STORAGE_SECRET_KEY", "").strip()
@@ -153,10 +161,7 @@ class RuntimeSettings:
             ),
             web_origins=origins,
             browser_auth_required=_boolean(values.get("BROWSER_AUTH_REQUIRED"), False),
-            staff_bootstrap_password=(
-                values.get("VV_STAFF_BOOTSTRAP_PASSWORD", "").strip()
-                or (LOCAL_STAFF_PASSWORD if app_environment != "production" else "")
-            ),
+            staff_invitation_code=staff_invitation_code,
             document_worker_token=worker_token,
             demo_tenant_id=values.get("DEMO_TENANT_ID", "00000000-0000-7000-8000-000000000001"),
             demo_student_id=values.get("DEMO_STUDENT_ID", "00000000-0000-7000-8000-000000000101"),

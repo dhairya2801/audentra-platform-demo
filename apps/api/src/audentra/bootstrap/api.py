@@ -99,7 +99,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
         auth_service = PostgresDevelopmentAuth(
             engine,
             environment=settings.environment,
-            staff_password=settings.staff_bootstrap_password,
+            staff_invitation_code=settings.staff_invitation_code,
             demo_student_ids=settings.http_settings().demo_student_slug_ids,
         )
         return ApiRuntimeResources(engine, http_client, storage, service, auth_service)

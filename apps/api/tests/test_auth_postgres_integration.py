@@ -38,6 +38,7 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 "OBJECT_STORAGE_ACCESS_KEY": "vv_minio",
                 "OBJECT_STORAGE_SECRET_KEY": "vv_minio_password",
                 "DOCUMENT_WORKER_TOKEN": "integration-document-worker-token",
+                "VV_STAFF_INVITATION_CODE": "integration-private-staff-access-code-2027",
             }
         )
         app = create_production_app(settings)
@@ -141,22 +142,32 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 base_url="http://integration.test",
                 headers={"X-Tenant-Slug": "aster"},
             ) as staff_client:
-                harvard_identity_in_aster = await staff_client.post(
-                    "/v1/auth/staff/sign-in",
-                    json={
-                        "email": "priya.shah@harvard.example.edu",
-                        "password": "AsterStaff2027!",
-                    },
-                )
-                assert harvard_identity_in_aster.status_code == 401
-                staff_sign_in = await staff_client.post(
+                unclaimed_staff = await staff_client.post(
                     "/v1/auth/staff/sign-in",
                     json={
                         "email": "priya.shah@aster.example.edu",
-                        "password": "AsterStaff2027!",
+                        "password": "Individual-Aster-staff-2027",
                     },
                 )
-                assert staff_sign_in.status_code == 200, staff_sign_in.text
+                assert unclaimed_staff.status_code == 401
+                harvard_identity_in_aster = await staff_client.post(
+                    "/v1/auth/staff/sign-up",
+                    json={
+                        "email": "priya.shah@harvard.example.edu",
+                        "password": "Individual-Aster-staff-2027",
+                        "institutionAccessCode": "integration-private-staff-access-code-2027",
+                    },
+                )
+                assert harvard_identity_in_aster.status_code == 401
+                staff_signup = await staff_client.post(
+                    "/v1/auth/staff/sign-up",
+                    json={
+                        "email": "priya.shah@aster.example.edu",
+                        "password": "Individual-Aster-staff-2027",
+                        "institutionAccessCode": "integration-private-staff-access-code-2027",
+                    },
+                )
+                assert staff_signup.status_code == 201, staff_signup.text
                 action_center = await staff_client.get(
                     "/v1/staff/action-center",
                     headers={"X-Demo-Actor-Type": "staff"},
@@ -176,6 +187,32 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                     headers={"X-Demo-Actor-Type": "staff"},
                 )
                 assert denied_staff.status_code == 401, denied_staff.text
+                duplicate = await staff_client.post(
+                    "/v1/auth/staff/sign-up",
+                    json={
+                        "email": "priya.shah@aster.example.edu",
+                        "password": "Individual-Aster-staff-2027",
+                        "institutionAccessCode": "integration-private-staff-access-code-2027",
+                    },
+                )
+                assert duplicate.status_code == 409, duplicate.text
+                invalid_password = await staff_client.post(
+                    "/v1/auth/staff/sign-in",
+                    json={
+                        "email": "priya.shah@aster.example.edu",
+                        "password": "Wrong-individual-password-2027",
+                    },
+                )
+                assert invalid_password.status_code == 401
+                staff_sign_in = await staff_client.post(
+                    "/v1/auth/staff/sign-in",
+                    json={
+                        "email": "priya.shah@aster.example.edu",
+                        "password": "Individual-Aster-staff-2027",
+                    },
+                )
+                assert staff_sign_in.status_code == 200, staff_sign_in.text
+                await staff_client.post("/v1/auth/staff/sign-out")
 
             async with httpx.AsyncClient(
                 transport=transport,
@@ -183,22 +220,24 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 headers={"X-Tenant-Slug": "harvard"},
             ) as harvard_staff_client:
                 aster_identity_in_harvard = await harvard_staff_client.post(
-                    "/v1/auth/staff/sign-in",
+                    "/v1/auth/staff/sign-up",
                     json={
                         "email": "priya.shah@aster.example.edu",
-                        "password": "AsterStaff2027!",
+                        "password": "Individual-Harvard-staff-2027",
+                        "institutionAccessCode": "integration-private-staff-access-code-2027",
                     },
                 )
                 assert aster_identity_in_harvard.status_code == 401
-                harvard_sign_in = await harvard_staff_client.post(
-                    "/v1/auth/staff/sign-in",
+                harvard_signup = await harvard_staff_client.post(
+                    "/v1/auth/staff/sign-up",
                     json={
                         "email": "priya.shah@harvard.example.edu",
-                        "password": "AsterStaff2027!",
+                        "password": "Individual-Harvard-staff-2027",
+                        "institutionAccessCode": "integration-private-staff-access-code-2027",
                     },
                 )
-                assert harvard_sign_in.status_code == 200, harvard_sign_in.text
-                assert harvard_sign_in.json()["staff"]["id"].startswith("80000000-")
+                assert harvard_signup.status_code == 201, harvard_signup.text
+                assert harvard_signup.json()["staff"]["id"].startswith("80000000-")
 
                 harvard_workspace = await harvard_staff_client.get(
                     "/v1/staff/workspace",

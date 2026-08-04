@@ -8,7 +8,6 @@ import hashlib
 import secrets
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -35,14 +34,6 @@ _PASSWORD_P = 1
 _PASSWORD_MAX_MEMORY = 64 * 1024 * 1024
 
 
-@dataclass(frozen=True, slots=True)
-class _StaffSessionRecord:
-    staff_id: str
-    tenant_id: str
-    tenant_slug: str | None
-    expires_at: datetime
-
-
 class PostgresDevelopmentAuth:
     """Local and preview credential adapter that cannot compose for production."""
 
@@ -51,19 +42,17 @@ class PostgresDevelopmentAuth:
         engine: AsyncEngine,
         *,
         environment: str,
-        staff_password: str,
+        staff_invitation_code: str,
         demo_student_ids: Mapping[str, str],
     ) -> None:
         if environment not in {"development", "preview", "test"}:
             raise ValueError("The development authentication adapter is disabled in production")
-        if not staff_password:
-            raise ValueError("A local staff bootstrap password is required")
+        if not staff_invitation_code:
+            raise ValueError("A private staff invitation code is required")
         self._engine = engine
         self._environment = environment
-        self._staff_password = staff_password
+        self._staff_invitation_code = staff_invitation_code
         self._demo_student_ids = dict(demo_student_ids)
-        self._staff_sessions: dict[str, _StaffSessionRecord] = {}
-        self._staff_lock = asyncio.Lock()
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
         if tenant_id == HARVARD_TENANT_ID:
@@ -399,28 +388,147 @@ class PostgresDevelopmentAuth:
         token_hash = _session_token_hash(token)
         if token_hash is None:
             return None
-        async with self._staff_lock:
-            record = self._staff_sessions.get(token_hash)
-            if record is None or record.expires_at <= datetime.now(UTC):
-                self._staff_sessions.pop(token_hash, None)
-                return None
-            if record.tenant_id != tenant_id:
-                return None
-        async with self._engine.connect() as connection:
+        async with self._engine.begin() as connection:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, display_name, email_normalized, component
-                    FROM staff_member
-                    WHERE tenant_id=:tenant_id AND id=:staff_id AND active=true
+                    SELECT member.id, member.display_name,
+                           member.email_normalized, member.component,
+                           session.expires_at
+                    FROM staff_auth_session session
+                    JOIN staff_credential_account account
+                      ON account.id=session.account_id
+                    JOIN staff_member member
+                      ON member.id=account.staff_member_id
+                     AND member.tenant_id=account.tenant_id
+                    WHERE session.token_hash=:token_hash
+                      AND session.revoked_at IS NULL
+                      AND session.expires_at>NOW()
+                      AND account.status='active'
+                      AND account.tenant_id=:tenant_id
+                      AND member.active=true
                     """
                 ),
-                {"tenant_id": UUID(tenant_id), "staff_id": UUID(record.staff_id)},
+                {"token_hash": token_hash, "tenant_id": UUID(tenant_id)},
             )
             row = result.mappings().first()
-        if row is None:
-            return None
+            if row is None:
+                return None
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_auth_session SET last_seen_at=NOW()
+                    WHERE token_hash=:token_hash
+                      AND last_seen_at<NOW()-INTERVAL '5 minutes'
+                    """
+                ),
+                {"token_hash": token_hash},
+            )
         return self._staff_session(dict(row), tenant_id, tenant_slug)
+
+    async def sign_up_staff(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        password: str,
+        institution_access_code: str,
+    ) -> StaffSession:
+        if tenant_id == HARVARD_TENANT_ID:
+            await ensure_harvard_demo_student(
+                self._engine,
+                environment=self._environment,
+            )
+        invitation_matches = secrets.compare_digest(
+            hashlib.sha256(institution_access_code.encode("utf-8")).digest(),
+            hashlib.sha256(self._staff_invitation_code.encode("utf-8")).digest(),
+        )
+        if not invitation_matches:
+            raise UnauthorizedError("Staff account could not be created with these credentials")
+        normalized_email = _normalize_email(email)
+        password_hash = await asyncio.to_thread(_hash_password, password)
+        now = datetime.now(UTC)
+        expires_at = now + _STAFF_SESSION_LIFETIME
+        account_id = uuid4()
+        token = secrets.token_urlsafe(32)
+        token_hash = _required_session_token_hash(token)
+        try:
+            async with self._engine.begin() as connection:
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"staff-auth-sign-up:{tenant_id}:{normalized_email}"},
+                )
+                member_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id, display_name, email_normalized, component
+                        FROM staff_member
+                        WHERE tenant_id=:tenant_id
+                          AND email_normalized=:email
+                          AND active=true
+                        FOR UPDATE
+                        """
+                    ),
+                    {"tenant_id": UUID(tenant_id), "email": normalized_email},
+                )
+                row = member_result.mappings().first()
+                if row is None:
+                    raise UnauthorizedError(
+                        "Staff account could not be created with these credentials"
+                    )
+                existing = await connection.scalar(
+                    text(
+                        """
+                        SELECT 1 FROM staff_credential_account
+                        WHERE tenant_id=:tenant_id AND staff_member_id=:staff_member_id
+                        """
+                    ),
+                    {"tenant_id": UUID(tenant_id), "staff_member_id": row["id"]},
+                )
+                if existing is not None:
+                    raise ConflictError(
+                        "STAFF_AUTH_ACCOUNT_EXISTS",
+                        "A staff account already exists for this email address",
+                    )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_credential_account (
+                          id, tenant_id, staff_member_id, password_hash,
+                          password_algorithm, status
+                        ) VALUES (
+                          :id, :tenant_id, :staff_member_id, :password_hash,
+                          'scrypt-v1', 'active'
+                        )
+                        """
+                    ),
+                    {
+                        "id": account_id,
+                        "tenant_id": UUID(tenant_id),
+                        "staff_member_id": row["id"],
+                        "password_hash": password_hash,
+                    },
+                )
+                await self._insert_staff_session(
+                    connection,
+                    account_id=account_id,
+                    session_id=uuid4(),
+                    token_hash=token_hash,
+                    expires_at=expires_at,
+                )
+        except IntegrityError as error:
+            raise ConflictError(
+                "STAFF_AUTH_ACCOUNT_EXISTS",
+                "A staff account already exists for this email address",
+            ) from error
+        return self._staff_session(
+            dict(row),
+            tenant_id,
+            tenant_slug,
+            token=token,
+            expires_at_epoch=int(expires_at.timestamp()),
+        )
 
     async def sign_in_staff(
         self,
@@ -436,33 +544,61 @@ class PostgresDevelopmentAuth:
                 environment=self._environment,
             )
         normalized_email = _normalize_email(email)
-        async with self._engine.connect() as connection:
+        async with self._engine.begin() as connection:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, display_name, email_normalized, component
-                    FROM staff_member
-                    WHERE tenant_id=:tenant_id AND email_normalized=:email AND active=true
+                    SELECT account.id AS account_id, account.password_hash,
+                           account.status, member.id, member.display_name,
+                           member.email_normalized, member.component
+                    FROM staff_credential_account account
+                    JOIN staff_member member
+                      ON member.id=account.staff_member_id
+                     AND member.tenant_id=account.tenant_id
+                    WHERE account.tenant_id=:tenant_id
+                      AND member.email_normalized=:email
+                      AND member.active=true
+                    FOR UPDATE OF account
                     """
                 ),
                 {"tenant_id": UUID(tenant_id), "email": normalized_email},
             )
             row = result.mappings().first()
-        password_matches = secrets.compare_digest(
-            hashlib.sha256(password.encode("utf-8")).digest(),
-            hashlib.sha256(self._staff_password.encode("utf-8")).digest(),
-        )
-        if row is None or not password_matches:
-            raise UnauthorizedError("Email or password is incorrect")
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(UTC) + _STAFF_SESSION_LIFETIME
-        token_hash = _required_session_token_hash(token)
-        async with self._staff_lock:
-            self._prune_staff_sessions(str(row["id"]), datetime.now(UTC))
-            self._staff_sessions[token_hash] = _StaffSessionRecord(
-                staff_id=str(row["id"]),
-                tenant_id=tenant_id,
-                tenant_slug=tenant_slug,
+            stored_hash = str(row["password_hash"]) if row is not None else "invalid"
+            valid_password = await asyncio.to_thread(_verify_password, password, stored_hash)
+            if row is None or row["status"] != "active" or not valid_password:
+                if row is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE staff_credential_account
+                            SET failed_sign_in_count=LEAST(failed_sign_in_count+1, 100),
+                                updated_at=NOW()
+                            WHERE id=:account_id
+                            """
+                        ),
+                        {"account_id": row["account_id"]},
+                    )
+                raise UnauthorizedError("Email or password is incorrect")
+            expires_at = datetime.now(UTC) + _STAFF_SESSION_LIFETIME
+            token = secrets.token_urlsafe(32)
+            token_hash = _required_session_token_hash(token)
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_credential_account
+                    SET failed_sign_in_count=0, locked_until=NULL,
+                        last_signed_in_at=NOW(), updated_at=NOW()
+                    WHERE id=:account_id
+                    """
+                ),
+                {"account_id": row["account_id"]},
+            )
+            await self._insert_staff_session(
+                connection,
+                account_id=UUID(str(row["account_id"])),
+                session_id=uuid4(),
+                token_hash=token_hash,
                 expires_at=expires_at,
             )
         return self._staff_session(
@@ -477,8 +613,16 @@ class PostgresDevelopmentAuth:
         token_hash = _session_token_hash(token)
         if token_hash is None:
             return
-        async with self._staff_lock:
-            self._staff_sessions.pop(token_hash, None)
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_auth_session SET revoked_at=COALESCE(revoked_at, NOW())
+                    WHERE token_hash=:token_hash
+                    """
+                ),
+                {"token_hash": token_hash},
+            )
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None:
         await reset_relational_data(
@@ -486,8 +630,6 @@ class PostgresDevelopmentAuth:
             environment=self._environment,
             completed_onboarding=completed_onboarding,
         )
-        async with self._staff_lock:
-            self._staff_sessions.clear()
 
     async def _insert_new_student(
         self,
@@ -654,20 +796,43 @@ class PostgresDevelopmentAuth:
             return self._demo_student_ids[tenant_slug]
         return self._demo_student_ids["aster"]
 
-    def _prune_staff_sessions(self, staff_id: str, now: datetime) -> None:
-        for token_hash, record in tuple(self._staff_sessions.items()):
-            if record.expires_at <= now:
-                self._staff_sessions.pop(token_hash, None)
-        active = sorted(
-            (
-                (token_hash, record)
-                for token_hash, record in self._staff_sessions.items()
-                if record.staff_id == staff_id
+    async def _insert_staff_session(
+        self,
+        connection: AsyncConnection,
+        *,
+        account_id: UUID,
+        session_id: UUID,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                UPDATE staff_auth_session SET revoked_at=NOW()
+                WHERE id IN (
+                  SELECT id FROM staff_auth_session
+                  WHERE account_id=:account_id AND revoked_at IS NULL AND expires_at>NOW()
+                  ORDER BY created_at DESC
+                  OFFSET :keep_count
+                )
+                """
             ),
-            key=lambda item: item[1].expires_at,
+            {"account_id": account_id, "keep_count": _MAXIMUM_SESSIONS - 1},
         )
-        for token_hash, _record in active[: max(0, len(active) - _MAXIMUM_SESSIONS + 1)]:
-            self._staff_sessions.pop(token_hash, None)
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_auth_session (id, account_id, token_hash, expires_at)
+                VALUES (:id, :account_id, :token_hash, :expires_at)
+                """
+            ),
+            {
+                "id": session_id,
+                "account_id": account_id,
+                "token_hash": token_hash,
+                "expires_at": expires_at,
+            },
+        )
 
 
 def _credential_session(

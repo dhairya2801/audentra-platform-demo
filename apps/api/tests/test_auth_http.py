@@ -23,7 +23,8 @@ STAFF_ID = "00000000-0000-7000-8000-000000000901"
 STUDENT_TOKEN = "student-session-token-that-is-long-enough"  # noqa: S105
 STAFF_TOKEN = "staff-session-token-that-is-long-enough"  # noqa: S105
 WRONG_PASSWORD = "wrong-password"  # noqa: S105
-STAFF_PASSWORD = "AsterStaff2027!"  # noqa: S105
+STAFF_PASSWORD = "Individual-staff-password-2027"  # noqa: S105
+STAFF_INVITATION_CODE = "institution-private-access-code-2027"
 
 pytestmark = pytest.mark.anyio
 
@@ -43,6 +44,7 @@ class FakeBrowserAuthService:
         self.sign_up_input: dict[str, str | None] | None = None
         self.student_revoked = False
         self.staff_revoked = False
+        self.staff_sign_up_input: dict[str, str | None] | None = None
 
     def student_context(self, method: str = "credentials") -> AuthContext:
         return AuthContext(
@@ -117,6 +119,26 @@ class FakeBrowserAuthService:
     ) -> StaffSession:
         if password != STAFF_PASSWORD:
             raise UnauthorizedError("Email or password is incorrect")
+        return self._staff_session(email=email)
+
+    async def sign_up_staff(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        password: str,
+        institution_access_code: str,
+    ) -> StaffSession:
+        if institution_access_code != STAFF_INVITATION_CODE:
+            raise UnauthorizedError("Staff account could not be created with these credentials")
+        self.staff_sign_up_input = {
+            "tenant_id": tenant_id,
+            "tenant_slug": tenant_slug,
+            "email": email,
+            "password": password,
+            "institution_access_code": institution_access_code,
+        }
         return self._staff_session(email=email)
 
     async def sign_out_staff(self, token: str | None) -> None:
@@ -286,6 +308,45 @@ async def test_staff_cookie_authorizes_staff_routes_and_is_revoked_on_sign_out(
     assert "vv_staff_session=" in signed_in.headers["set-cookie"]
     assert accepted.status_code == 200
     assert denied.status_code == 401
+
+
+async def test_staff_signup_claims_an_approved_identity_and_sets_http_only_cookie(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    response = await client.post(
+        "/v1/auth/staff/sign-up",
+        json={
+            "email": "  PRIYA.SHAH@ASTER.EXAMPLE.EDU  ",
+            "password": STAFF_PASSWORD,
+            "institutionAccessCode": STAFF_INVITATION_CODE,
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["staff"]["email"] == "priya.shah@aster.example.edu"
+    assert auth_service.staff_sign_up_input is not None
+    assert auth_service.staff_sign_up_input["email"] == "priya.shah@aster.example.edu"
+    assert f"vv_staff_session={STAFF_TOKEN}" in response.headers["set-cookie"]
+    assert "HttpOnly" in response.headers["set-cookie"]
+
+
+async def test_staff_signup_rejects_an_invalid_institution_access_code(
+    client: AsyncClient,
+) -> None:
+    response = await client.post(
+        "/v1/auth/staff/sign-up",
+        json={
+            "email": "priya.shah@aster.example.edu",
+            "password": STAFF_PASSWORD,
+            "institutionAccessCode": "not-the-approved-access-code",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == (
+        "Staff account could not be created with these credentials"
+    )
 
 
 async def test_guided_reset_explicitly_selects_completed_browser_fixture(

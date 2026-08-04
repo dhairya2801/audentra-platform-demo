@@ -15,6 +15,7 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.port == 4000
     assert settings.database_url == LOCAL_DATABASE_URL
     assert settings.document_worker_token == LOCAL_WORKER_TOKEN
+    assert len(settings.staff_invitation_code) >= 16
     assert settings.object_storage.endpoint_url == "http://localhost:9000"
     assert settings.object_storage.force_path_style is True
     assert settings.worker.consumer_name == "student-dashboard-v1"
@@ -65,6 +66,15 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
 
     assert settings.environment == "preview"
     assert settings.http_settings().secure_cookies is True
+
+
+def test_staff_invitation_code_supports_the_legacy_secret_name(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {"VV_STAFF_BOOTSTRAP_PASSWORD": "legacy-private-staff-access-code"},
+        package_root=tmp_path,
+    )
+
+    assert settings.staff_invitation_code == "legacy-private-staff-access-code"
 
 
 @pytest.mark.parametrize(
