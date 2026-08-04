@@ -2,8 +2,11 @@
 
 This profile deploys the FastAPI API, outbox worker, PostgreSQL, and MinIO to
 the existing hardened Compute Engine preview VM. GitHub Actions builds the
-immutable Python image off-host, transfers it through IAP, and invokes the
-root-owned deployment command. No long-lived Google key is stored in GitHub.
+immutable Python image off-host, pushes it to the immutable
+`audentra-platform` Artifact Registry repository, transfers only the reviewed
+Compose configuration through IAP, and invokes the root-owned deployment
+command. The VM pulls through its read-only runtime service account. No
+long-lived Google key is stored in GitHub or on the VM.
 
 The runtime uses `AUDENTRA_ENV=preview`: synthetic demo authentication remains
 available, browser authentication is required, and cookies are Secure over
@@ -11,8 +14,10 @@ HTTPS. `AUDENTRA_ENV=production` still rejects the demo identity adapter.
 
 Persistent state is held in the named `audentra-platform-postgres-data` and
 `audentra-platform-minio-data` volumes. `docker compose down` does not delete
-them. The deployment runs checksum-verified migrations and the idempotent demo
-seed before switching the API and worker to the new image.
+them. The deployment always runs checksum-verified migrations. It fingerprints
+the seed implementation, tenant fixtures, media, and migrations and runs the
+idempotent demo seed only when those inputs change, before switching the API
+and worker to the new image.
 
 Bootstrap once from a reviewed checkout on the VM:
 

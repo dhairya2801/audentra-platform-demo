@@ -54,7 +54,7 @@ x-runtime-environment: &runtime-environment
   GROQ_TRANSCRIPT_REASONING_EFFORT: none
 
 x-app-service: &app-service
-  image: audentra-platform:${PLATFORM_IMAGE_TAG}
+  image: ${PLATFORM_IMAGE_URI}
   init: true
   read_only: true
   cap_drop:

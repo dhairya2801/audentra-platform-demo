@@ -6,13 +6,15 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ "$#" -ne 1 || ! "$1" =~ ^[0-9a-f]{40}$ ]]; then
-  echo "Usage: audentra-platform-deploy <40-character git commit SHA>" >&2
+if [[ "$#" -ne 2 || ! "$1" =~ ^[0-9a-f]{40}$ || ! "$2" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Usage: audentra-platform-deploy <40-character git SHA> <64-character seed revision>" >&2
   exit 64
 fi
 
 release_id="$1"
-image_archive="/tmp/audentra-platform-image-${release_id}.tar.gz"
+seed_revision="$2"
+registry_host="us-central1-docker.pkg.dev"
+image_uri="${registry_host}/even-advantage-502610-n1/audentra-platform/api:${release_id}"
 release_archive="/tmp/audentra-platform-release-${release_id}.tar.gz"
 release_root="/opt/audentra-platform/releases"
 shared_root="/opt/audentra-platform/shared"
@@ -21,6 +23,8 @@ current_link="/opt/audentra-platform/current"
 environment_file="${shared_root}/.env"
 deployment_file="${shared_root}/deployment.env"
 next_deployment_file="${deployment_file}.next"
+seed_revision_file="${shared_root}/seed-revision"
+next_seed_revision_file="${seed_revision_file}.next"
 lock_file="/run/lock/audentra-preview-deploy.lock"
 
 exec 9>"$lock_file"
@@ -29,7 +33,7 @@ if ! flock -w 900 9; then
   exit 75
 fi
 
-for required_file in "$image_archive" "$release_archive" "$environment_file"; do
+for required_file in "$release_archive" "$environment_file"; do
   if [[ ! -f "$required_file" ]]; then
     echo "Required deployment file is missing: ${required_file}" >&2
     exit 66
@@ -44,12 +48,8 @@ while IFS= read -r entry; do
 done < <(tar -tzf "$release_archive")
 
 previous_release=""
-previous_tag=""
 if [[ -L "$current_link" ]]; then
   previous_release="$(readlink -f "$current_link")"
-fi
-if [[ -f "$deployment_file" ]]; then
-  previous_tag="$(sed -n 's/^PLATFORM_IMAGE_TAG=//p' "$deployment_file" | tail -n 1)"
 fi
 
 rm -rf "$release_dir"
@@ -65,15 +65,25 @@ if [[ ! -f "$release_dir/infra/preview-vm/compose.yaml" ]]; then
   exit 66
 fi
 
-gzip -t "$image_archive"
-docker load --input "$image_archive"
-docker image inspect "audentra-platform:${release_id}" >/dev/null
+docker_config="$(mktemp -d)"
+trap 'rm -rf "$docker_config"' EXIT
+registry_token="$(
+  curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+    -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
+)"
+printf '%s' "$registry_token" \
+  | docker --config "$docker_config" login \
+      --username oauth2accesstoken --password-stdin "$registry_host" >/dev/null
+docker --config "$docker_config" pull "$image_uri"
+docker image inspect "$image_uri" >/dev/null
 
 if ! docker network inspect audentra-preview >/dev/null 2>&1; then
   docker network create audentra-preview >/dev/null
 fi
 
-printf 'PLATFORM_IMAGE_TAG=%s\n' "$release_id" >"$next_deployment_file"
+printf 'PLATFORM_IMAGE_URI=%s\n' "$image_uri" >"$next_deployment_file"
 chmod 0600 "$next_deployment_file"
 chown root:root "$next_deployment_file"
 chmod 0600 "$environment_file"
@@ -96,19 +106,24 @@ if [[ "$deployment_failed" -eq 0 ]]; then
   "${compose[@]}" run --rm migrate || deployment_failed=1
 fi
 if [[ "$deployment_failed" -eq 0 ]]; then
-  minio_ip="$(
-    docker inspect \
-      --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
-      audentra-platform-preview-minio-1
-  )"
-  if [[ ! "$minio_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-    echo "Could not resolve the MinIO container address for deterministic seeding." >&2
-    deployment_failed=1
+  current_seed_revision="$(cat "$seed_revision_file" 2>/dev/null || true)"
+  if [[ "$current_seed_revision" == "$seed_revision" ]]; then
+    echo "Seed inputs are unchanged; deterministic seeding is skipped."
   else
-    "${compose[@]}" run --rm \
-      -e DB_STATEMENT_TIMEOUT_MS=300000 \
-      -e "OBJECT_STORAGE_ENDPOINT=http://${minio_ip}:9000" \
-      seed || deployment_failed=1
+    minio_ip="$(
+      docker inspect \
+        --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+        audentra-platform-preview-minio-1
+    )"
+    if [[ ! "$minio_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      echo "Could not resolve the MinIO container address for deterministic seeding." >&2
+      deployment_failed=1
+    else
+      "${compose[@]}" run --rm \
+        -e DB_STATEMENT_TIMEOUT_MS=300000 \
+        -e "OBJECT_STORAGE_ENDPOINT=http://${minio_ip}:9000" \
+        seed || deployment_failed=1
+    fi
   fi
 fi
 if [[ "$deployment_failed" -eq 0 ]]; then
@@ -131,9 +146,7 @@ fi
 if [[ "$deployment_failed" -ne 0 ]]; then
   echo "Platform health check failed; restoring the previous application image." >&2
   "${compose[@]}" logs --tail=200 api worker migrate seed >&2 || true
-  if [[ -n "$previous_release" && -n "$previous_tag" && -d "$previous_release" ]]; then
-    printf 'PLATFORM_IMAGE_TAG=%s\n' "$previous_tag" >"$deployment_file"
-    chmod 0600 "$deployment_file"
+  if [[ -n "$previous_release" && -d "$previous_release" && -f "$deployment_file" ]]; then
     rollback_compose=(
       docker compose
       --project-name audentra-platform-preview
@@ -149,9 +162,13 @@ fi
 ln -sfn "$release_dir" "${current_link}.next"
 mv -Tf "${current_link}.next" "$current_link"
 mv -f "$next_deployment_file" "$deployment_file"
+printf '%s\n' "$seed_revision" >"$next_seed_revision_file"
+chmod 0600 "$next_seed_revision_file"
+chown root:root "$next_seed_revision_file"
+mv -f "$next_seed_revision_file" "$seed_revision_file"
 install -m 0755 "$release_dir/infra/preview-vm/deploy-platform.sh" /usr/local/sbin/audentra-platform-deploy
 
-rm -f "$image_archive" "$release_archive"
+rm -f "$release_archive"
 find "$release_root" -mindepth 1 -maxdepth 1 -type d ! -path "$release_dir" -printf '%T@ %p\n' |
   sort -nr | tail -n +4 | cut -d' ' -f2- | xargs --no-run-if-empty rm -rf
 timeout 60 docker image prune --force >/dev/null || true

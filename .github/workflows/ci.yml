@@ -199,8 +199,11 @@ jobs:
       id-token: write
     env:
       GCP_PROJECT_ID: even-advantage-502610-n1
+      GCP_REGION: us-central1
       GCP_ZONE: us-central1-a
       GCP_INSTANCE: deneme-harness
+      ARTIFACT_REPOSITORY: audentra-platform
+      ARTIFACT_IMAGE: api
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39355369148/locations/global/workloadIdentityPools/github-vv-edgent/providers/github
       GCP_SERVICE_ACCOUNT: vv-edgent-cd@even-advantage-502610-n1.iam.gserviceaccount.com
 
@@ -223,17 +226,30 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Build immutable platform image
-        run: >-
-          docker build
-          --file infra/docker/api.Dockerfile
-          --tag "audentra-platform:${GITHUB_SHA}"
-          .
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Package image and reviewed deployment configuration
+      - name: Build and push immutable platform image
         run: |
-          docker save "audentra-platform:${GITHUB_SHA}" \
-            | gzip -1 >"${RUNNER_TEMP}/audentra-platform-image-${GITHUB_SHA}.tar.gz"
+          image_uri="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${ARTIFACT_IMAGE}:${GITHUB_SHA}"
+          docker build \
+            --file infra/docker/api.Dockerfile \
+            --tag "${image_uri}" \
+            .
+          docker push "${image_uri}"
+
+      - name: Package reviewed deployment configuration
+        run: |
+          seed_revision="$(
+            git ls-tree -r --full-tree "${GITHUB_SHA}" -- \
+              apps/api/src/audentra/infrastructure/seeding \
+              apps/api/assets/config/tenants \
+              apps/api/assets/portal-media \
+              apps/api/migrations \
+              | sha256sum | cut -d' ' -f1
+          )"
+          test "${#seed_revision}" -eq 64
+          echo "SEED_REVISION=${seed_revision}" >>"${GITHUB_ENV}"
           git archive \
             --format=tar.gz \
             --output="${RUNNER_TEMP}/audentra-platform-release-${GITHUB_SHA}.tar.gz" \
@@ -243,7 +259,6 @@ jobs:
       - name: Upload immutable release through IAP
         run: >-
           gcloud compute scp
-          "${RUNNER_TEMP}/audentra-platform-image-${GITHUB_SHA}.tar.gz"
           "${RUNNER_TEMP}/audentra-platform-release-${GITHUB_SHA}.tar.gz"
           "${GCP_INSTANCE}:/tmp/"
           --project="${GCP_PROJECT_ID}"
@@ -261,4 +276,4 @@ jobs:
           --tunnel-through-iap
           --ssh-key-expire-after=30m
           --quiet
-          --command="sudo /usr/local/sbin/audentra-platform-deploy ${GITHUB_SHA}"
+          --command="sudo /usr/local/sbin/audentra-platform-deploy ${GITHUB_SHA} ${SEED_REVISION}"
