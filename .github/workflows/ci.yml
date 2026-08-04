@@ -249,6 +249,7 @@ jobs:
           --project="${GCP_PROJECT_ID}"
           --zone="${GCP_ZONE}"
           --tunnel-through-iap
+          --ssh-key-expire-after=30m
           --quiet
 
       - name: Deploy, migrate, seed, and health-check platform
@@ -258,5 +259,6 @@ jobs:
           --project="${GCP_PROJECT_ID}"
           --zone="${GCP_ZONE}"
           --tunnel-through-iap
+          --ssh-key-expire-after=30m
           --quiet
           --command="sudo /usr/local/sbin/audentra-platform-deploy ${GITHUB_SHA}"
