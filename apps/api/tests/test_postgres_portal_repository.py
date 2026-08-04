@@ -327,6 +327,74 @@ def test_signed_document_converts_iso_timestamp_before_database_bind() -> None:
     assert result["signature"]["signedAt"] == signed_at
 
 
+def test_document_upload_authorizes_against_current_published_definition() -> None:
+    created_at = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+    requirement_id = "20000000-0000-7000-8000-000000000020"
+
+    def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "SELECT current_definition.code, sr.status" in sql:
+            return [{"code": "official_transcript", "status": "ready"}]
+        if "INSERT INTO document_record" in sql:
+            return [
+                {
+                    "id": parameters["id"],
+                    "requirement_id": parameters["requirement_id"],
+                    "file_name": parameters["file_name"],
+                    "mime_type": parameters["mime_type"],
+                    "size_bytes": parameters["size_bytes"],
+                    "category": parameters["category"],
+                    "processing_mode": parameters["processing_mode"],
+                    "status": "uploaded",
+                    "storage_key": parameters["storage_key"],
+                    "sha256": parameters["sha256"],
+                    "extraction": None,
+                    "created_at": created_at,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.reserve_student_document_upload(
+            AUTH,
+            {
+                "fileName": "transcript.pdf",
+                "mimeType": "application/pdf",
+                "sizeBytes": 128,
+                "category": "other",
+                "sha256": "a" * 64,
+                "uploadBundleId": "30000000-0000-7000-8000-000000000001",
+            },
+            "upload-idempotency-key",
+            "upload-request-id",
+            requirement_id,
+        )
+    )
+
+    assert result["requirementId"] == requirement_id
+    assert result["category"] == "transcript"
+    requirement_sql, requirement_parameters = next(
+        (sql, parameters)
+        for sql, parameters in engine.connection.calls
+        if "SELECT current_definition.code, sr.status" in sql
+    )
+    assert "evidence_definition.id=sr.requirement_definition_version_id" in requirement_sql
+    assert "current_link.journey_definition_version_id" in requirement_sql
+    assert "j.journey_definition_version_id" in requirement_sql
+    assert "current_definition.code=evidence_definition.code" in requirement_sql
+    assert "current_definition.submission_type='document'" in requirement_sql
+    assert "current_definition.interaction_type='upload_file'" in requirement_sql
+    assert requirement_parameters == {
+        "tenant_id": AUTH.tenant_id,
+        "student_id": AUTH.student_id,
+        "requirement_id": requirement_id,
+    }
+
+
 def test_generic_requirement_response_commits_evidence_progress_and_idempotency() -> None:
     submitted_at = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
     requirement_id = "20000000-0000-7000-8000-000000000010"

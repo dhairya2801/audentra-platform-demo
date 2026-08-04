@@ -2872,17 +2872,31 @@ class PostgresPortalRepository:
         async def handler(connection: AsyncConnection) -> JsonDict:
             category = str(document["category"])
             if requirement_id:
+                # Student rows retain their historical evidence definition after a
+                # journey publication. Authorize against the current definition that
+                # get_student_requirement projects to the portal.
                 result = await connection.execute(
                     text(
                         """
-                        SELECT rdv.code, sr.status FROM student_requirement sr
+                        SELECT current_definition.code, sr.status
+                        FROM student_requirement sr
                         JOIN enrollment_journey j
                           ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
-                        JOIN requirement_definition_version rdv
-                          ON rdv.id=sr.requirement_definition_version_id
-                         AND rdv.tenant_id=sr.tenant_id
+                        JOIN requirement_definition_version evidence_definition
+                          ON evidence_definition.id=sr.requirement_definition_version_id
+                         AND evidence_definition.tenant_id=sr.tenant_id
+                        JOIN journey_requirement_definition current_link
+                          ON current_link.journey_definition_version_id=
+                             j.journey_definition_version_id
+                        JOIN requirement_definition_version current_definition
+                          ON current_definition.id=
+                             current_link.requirement_definition_version_id
+                         AND current_definition.tenant_id=sr.tenant_id
+                         AND current_definition.code=evidence_definition.code
                         WHERE sr.tenant_id=:tenant_id AND j.student_id=:student_id
-                          AND sr.id=:requirement_id AND rdv.submission_type='document'
+                          AND sr.id=:requirement_id
+                          AND current_definition.submission_type='document'
+                          AND current_definition.interaction_type='upload_file'
                           AND sr.retired_at IS NULL
                         LIMIT 1
                         """

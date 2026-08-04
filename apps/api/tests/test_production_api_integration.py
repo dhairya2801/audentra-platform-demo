@@ -199,6 +199,27 @@ def test_real_production_composition_executes_core_mutations_idempotently() -> N
             assert content.status_code == 200, content.text
             assert content.content == source_pdf
 
+            requirements_response = await client.get("/v1/student/requirements")
+            assert requirements_response.status_code == 200, requirements_response.text
+            transcript_requirement = next(
+                item
+                for item in requirements_response.json()["items"]
+                if item["code"] == "official_transcript"
+            )
+            contextual_upload = await client.post(
+                "/v1/student/documents/upload",
+                headers={"Idempotency-Key": key("requirement-upload")},
+                files={"file": ("integration-transcript.pdf", source_pdf, "application/pdf")},
+                data={
+                    "category": "other",
+                    "requirementId": transcript_requirement["id"],
+                    "uploadBundleId": str(uuid4()),
+                },
+            )
+            assert contextual_upload.status_code == 201, contextual_upload.text
+            assert contextual_upload.json()["requirementId"] == transcript_requirement["id"]
+            assert contextual_upload.json()["category"] == "transcript"
+
             processed = await client.post(
                 f"/v1/student/internal/document-extractions/{document_id}",
                 headers={"X-VV-Worker-Token": "integration-document-worker-token"},
