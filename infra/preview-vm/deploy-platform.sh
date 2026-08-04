@@ -96,7 +96,19 @@ if [[ "$deployment_failed" -eq 0 ]]; then
   "${compose[@]}" run --rm migrate || deployment_failed=1
 fi
 if [[ "$deployment_failed" -eq 0 ]]; then
-  "${compose[@]}" run --rm seed || deployment_failed=1
+  minio_ip="$(
+    docker inspect \
+      --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' \
+      audentra-platform-preview-minio-1
+  )"
+  if [[ ! "$minio_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo "Could not resolve the MinIO container address for deterministic seeding." >&2
+    deployment_failed=1
+  else
+    "${compose[@]}" run --rm \
+      -e "OBJECT_STORAGE_ENDPOINT=http://${minio_ip}:9000" \
+      seed || deployment_failed=1
+  fi
 fi
 if [[ "$deployment_failed" -eq 0 ]]; then
   "${compose[@]}" up -d --no-build api worker || deployment_failed=1
