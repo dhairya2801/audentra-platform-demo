@@ -24,8 +24,8 @@ next_deployment_file="${deployment_file}.next"
 lock_file="/run/lock/audentra-preview-deploy.lock"
 
 exec 9>"$lock_file"
-if ! flock -n 9; then
-  echo "Another Audentra preview deployment is already running." >&2
+if ! flock -w 900 9; then
+  echo "Timed out waiting for another Audentra preview deployment to finish." >&2
   exit 75
 fi
 
@@ -141,6 +141,6 @@ install -m 0755 "$release_dir/infra/preview-vm/deploy-platform.sh" /usr/local/sb
 rm -f "$image_archive" "$release_archive"
 find "$release_root" -mindepth 1 -maxdepth 1 -type d ! -path "$release_dir" -printf '%T@ %p\n' |
   sort -nr | tail -n +4 | cut -d' ' -f2- | xargs --no-run-if-empty rm -rf
-docker image prune --force >/dev/null
+timeout 60 docker image prune --force >/dev/null || true
 
 echo "Audentra platform release ${release_id} is healthy."
