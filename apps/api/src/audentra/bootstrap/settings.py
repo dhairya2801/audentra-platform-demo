@@ -91,12 +91,13 @@ class RuntimeSettings:
         if app_environment == "production" and len(worker_token) < 32:
             raise ValueError("DOCUMENT_WORKER_TOKEN must contain at least 32 characters")
 
+        deployed_environment = app_environment in {"preview", "production"}
         staff_invitation_code = (
             values.get("VV_STAFF_INVITATION_CODE", "").strip()
             or values.get("VV_STAFF_BOOTSTRAP_PASSWORD", "").strip()
-            or (LOCAL_STAFF_INVITATION_CODE if app_environment != "production" else "")
+            or (LOCAL_STAFF_INVITATION_CODE if not deployed_environment else "")
         )
-        if app_environment != "production" and len(staff_invitation_code) < 16:
+        if len(staff_invitation_code) < 16:
             raise ValueError("VV_STAFF_INVITATION_CODE must contain at least 16 characters")
 
         origins = _origins(values.get("WEB_ORIGIN", "http://localhost:3000"))

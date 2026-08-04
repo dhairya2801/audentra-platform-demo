@@ -65,6 +65,13 @@ if [[ ! -f "$release_dir/infra/preview-vm/compose.yaml" ]]; then
   exit 66
 fi
 
+bootstrap_script="$release_dir/infra/preview-vm/bootstrap-host.sh"
+if [[ ! -f "$bootstrap_script" ]]; then
+  echo "The platform preview bootstrap script is missing from the release." >&2
+  exit 66
+fi
+bash "$bootstrap_script"
+
 docker_config="$(mktemp -d)"
 trap 'rm -rf "$docker_config"' EXIT
 registry_token="$(

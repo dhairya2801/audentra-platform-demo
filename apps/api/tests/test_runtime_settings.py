@@ -58,6 +58,7 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
             "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+            "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
         },
         package_root=tmp_path,
     )
@@ -66,6 +67,19 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
 
     assert settings.environment == "preview"
     assert settings.http_settings().secure_cookies is True
+
+
+def test_preview_requires_a_private_staff_invitation_code(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="VV_STAFF_INVITATION_CODE"):
+        RuntimeSettings.from_environment(
+            {
+                "AUDENTRA_ENV": "preview",
+                "DATABASE_URL": "postgresql://example/preview",
+                "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+                "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+            },
+            package_root=tmp_path,
+        )
 
 
 def test_staff_invitation_code_supports_the_legacy_secret_name(tmp_path: Path) -> None:
@@ -109,6 +123,7 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
             "DATABASE_URL": "postgresql://example/prod",
             "DOCUMENT_WORKER_TOKEN": "x" * 40,
             "OBJECT_STORAGE_SECRET_KEY": "external-secret",
+            "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
         },
         package_root=tmp_path,
     )
@@ -124,6 +139,7 @@ def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Pa
                 "DATABASE_URL": "postgresql://example/prod",
                 "DOCUMENT_WORKER_TOKEN": "x" * 40,
                 "OBJECT_STORAGE_SECRET_KEY": "external-secret",
+                "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
                 "EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED": "true",
             },
             package_root=tmp_path,
