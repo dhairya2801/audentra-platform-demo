@@ -1,4 +1,4 @@
-"""Development-only PostgreSQL credential and browser-session adapter."""
+"""Non-production PostgreSQL credential and browser-session adapter."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class _StaffSessionRecord:
 
 
 class PostgresDevelopmentAuth:
-    """Local credential adapter that is impossible to compose for production."""
+    """Local and preview credential adapter that cannot compose for production."""
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class PostgresDevelopmentAuth:
         staff_password: str,
         demo_student_ids: Mapping[str, str],
     ) -> None:
-        if environment not in {"development", "test"}:
+        if environment not in {"development", "preview", "test"}:
             raise ValueError("The development authentication adapter is disabled in production")
         if not staff_password:
             raise ValueError("A local staff bootstrap password is required")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Literal
 
-SeedEnvironment = Literal["development", "test"]
+SeedEnvironment = Literal["development", "preview", "test"]
 
 
 class SeedEnvironmentError(RuntimeError):
@@ -16,9 +16,9 @@ def assert_seed_environment(environment: str) -> SeedEnvironment:
     normalized = environment.strip().lower()
     if normalized == "production":
         raise SeedEnvironmentError("Demo seeding is disabled in production")
-    if normalized not in {"development", "test"}:
+    if normalized not in {"development", "preview", "test"}:
         raise SeedEnvironmentError(
-            "AUDENTRA_ENV must explicitly be development or test before seeding"
+            "AUDENTRA_ENV must explicitly be development, preview, or test before seeding"
         )
     return normalized  # type: ignore[return-value]
 

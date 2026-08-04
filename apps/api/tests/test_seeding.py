@@ -172,6 +172,7 @@ def test_packaged_tenant_configurations_match_seeded_workflow_inventory() -> Non
 
 def test_seed_environment_is_explicit_and_production_fails_closed() -> None:
     assert seed_environment({"AUDENTRA_ENV": "development"}) == "development"
+    assert seed_environment({"AUDENTRA_ENV": "preview"}) == "preview"
     assert seed_environment({"NODE_ENV": "test"}) == "test"
     with pytest.raises(SeedEnvironmentError, match="disabled in production"):
         seed_environment({"AUDENTRA_ENV": "production"})

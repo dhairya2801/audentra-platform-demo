@@ -11,6 +11,7 @@ from audentra.bootstrap import api as api_bootstrap
 from audentra.bootstrap.api import ApiRuntimeResources, create_production_app
 from audentra.bootstrap.settings import RuntimeSettings
 from audentra.core.ports import ServiceCall
+from audentra.infrastructure.postgres.auth_repository import PostgresDevelopmentAuth
 
 
 class StubService:
@@ -97,6 +98,27 @@ def test_production_composition_fails_closed_for_demo_auth(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="identity adapter"):
         asyncio.run(start())
+
+
+def test_preview_composes_the_browser_auth_adapter() -> None:
+    auth = PostgresDevelopmentAuth(
+        StubEngine(),  # type: ignore[arg-type]
+        environment="preview",
+        staff_password="x" * 32,
+        demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
+    )
+
+    assert auth is not None
+
+
+def test_browser_auth_adapter_still_rejects_production() -> None:
+    with pytest.raises(ValueError, match="disabled in production"):
+        PostgresDevelopmentAuth(
+            StubEngine(),  # type: ignore[arg-type]
+            environment="production",
+            staff_password="x" * 32,
+            demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
+        )
 
 
 def test_api_resource_close_attempts_storage_and_engine_after_http_failure() -> None:
