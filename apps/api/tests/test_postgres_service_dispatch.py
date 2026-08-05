@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -823,7 +824,9 @@ def test_internal_extraction_redacts_financial_aid_details_before_persistence() 
     assert result["visualRegions"] == []
 
 
-def test_internal_extraction_persists_failure_and_skips_ai_for_stale_command() -> None:
+def test_internal_extraction_persists_failure_and_skips_ai_for_stale_command(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     rig = _rig()
     processing = {
         "id": "document-1",
@@ -843,7 +846,8 @@ def test_internal_extraction_persists_failure_and_skips_ai_for_stale_command() -
             "complete_student_document_extraction": lambda _auth, _id, value, _request: value,
         }
     )
-    rig.storage.get_error = StorageError("unavailable")
+    rig.storage.get_error = StorageError("unavailable sensitive-upstream-detail")
+    caplog.set_level(logging.WARNING, logger=service_module.__name__)
 
     failed = cast(
         dict[str, Any],
@@ -858,6 +862,16 @@ def test_internal_extraction_persists_failure_and_skips_ai_for_stale_command() -
     )
     assert failed["status"] == "failed"
     assert failed["retryable"] is True
+    record = next(
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("document_extraction_failed ")
+    )
+    assert record.getMessage() == (
+        "document_extraction_failed document_id=document-1 request_id=request-1 "
+        "failure_code=provider_unavailable exception_type=ApiError"
+    )
+    assert "sensitive-upstream-detail" not in record.getMessage()
 
     stale = {"id": "document-1", "status": "completed", "extraction": {"status": "completed"}}
     rig.portal.responses["get_student_document"] = stale

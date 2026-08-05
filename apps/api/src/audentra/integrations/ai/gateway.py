@@ -190,7 +190,7 @@ class StudentAIGateway:
         local_classification_candidate = expected_document_type == "financial_aid"
         if not transport.api_key and not local_classification_candidate:
             return pending_extraction(file_name, expected_document_type, provider)
-        options = (
+        options: DocumentPreprocessingOptions | None = (
             DocumentPreprocessingOptions(
                 max_image_pages=8,
                 max_image_dimension=2_048,
@@ -200,7 +200,11 @@ class StudentAIGateway:
                 ),
             )
             if expected_document_type == "transcript"
-            else None
+            else (
+                DocumentPreprocessingOptions(max_image_dimension=2_048, jpeg_quality=88)
+                if mime_type in {"image/jpeg", "image/png"}
+                else None
+            )
         )
         prepared = await preprocess_student_document(content, mime_type, options)
         evidence_type = infer_type_from_evidence(prepared.extracted_text)
@@ -604,6 +608,7 @@ class StudentAIGateway:
             "model": runtime.model,
             "temperature": 0,
             "max_tokens": runtime.max_output_tokens,
+            "response_format": {"type": "json_object"},
             "reasoning": {
                 "max_tokens": self._settings.document_reasoning_tokens,
                 "exclude": True,

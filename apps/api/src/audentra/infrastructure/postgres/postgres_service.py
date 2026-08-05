@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 from collections.abc import Awaitable, Mapping, Sequence
@@ -47,6 +48,7 @@ from .portal_repository import PostgresPortalRepository
 from .staff_repository import PostgresStaffRepository
 
 JsonDict = dict[str, Any]
+LOGGER = logging.getLogger(__name__)
 
 SIGNED_TEMPLATES = (
     {
@@ -1046,6 +1048,15 @@ class PostgresPlatformService:
                 )
                 extraction["warnings"] = [warning, *extraction.get("warnings", [])][:12]
         except BaseException as error:
+            failure = classify_extraction_failure(error)
+            LOGGER.warning(
+                "document_extraction_failed document_id=%s request_id=%s "
+                "failure_code=%s exception_type=%s",
+                document_id,
+                request_id,
+                failure.code,
+                type(error).__name__,
+            )
             extraction = cast(
                 JsonDict,
                 failed_extraction(str(document["fileName"]), str(document["category"]), error),

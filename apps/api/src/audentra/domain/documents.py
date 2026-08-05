@@ -103,7 +103,11 @@ def classify_extraction_failure(error: BaseException) -> ExtractionFailure:
             "The parsing service is temporarily unavailable. You can retry without uploading "
             "the file again.",
         )
-    if re.search(r"empty (?:completion|structured extraction)|no readable content", detail):
+    if re.search(
+        r"empty (?:completion|structured extraction)|no readable content|"
+        r"no valid json extraction|incomplete (?:json|structured) extraction",
+        detail,
+    ):
         return ExtractionFailure(
             "invalid_response",
             True,
@@ -120,6 +124,13 @@ def classify_extraction_failure(error: BaseException) -> ExtractionFailure:
             False,
             "The parsing service returned an unusable result. You can retry without uploading "
             "the file again.",
+        )
+    if "uploaded image is invalid or unreadable" in detail:
+        return ExtractionFailure(
+            "unsupported_capability",
+            False,
+            False,
+            "The uploaded image is invalid or unreadable. Choose a different JPEG or PNG file.",
         )
     if re.search(
         r"\b400\b|\b404\b|\b415\b|\b422\b|unsupported|not supported|capability|file-parser", detail

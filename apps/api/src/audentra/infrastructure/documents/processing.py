@@ -18,7 +18,11 @@ import fitz  # type: ignore[import-untyped]
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 MAXIMUM_INPUT_BYTES = 10 * 1024 * 1024
-MAXIMUM_IMAGE_PIXELS = 50_000_000
+# A 13 MP RGBA image occupies about 52 MB. Even when an EXIF transpose
+# temporarily needs a second raster, this leaves useful headroom for Pillow,
+# the compressed upload, and the constrained preview services. It still
+# admits common 12 MP phone images (up to 4096 x 3072).
+MAXIMUM_IMAGE_PIXELS = 13_000_000
 SIGNED_PDF_MINIMUM_BYTES = 100
 _AUDIT_RECEIPT = re.compile(r"^[A-Za-z0-9._:-]{8,160}$")
 
@@ -27,6 +31,7 @@ PreprocessingErrorCode = Literal[
     "PDF_INVALID",
     "PDF_ENCRYPTED",
     "PDF_PREPROCESSING_FAILED",
+    "IMAGE_INVALID",
 ]
 
 _SAFE_MESSAGES: dict[PreprocessingErrorCode, str] = {
@@ -34,6 +39,7 @@ _SAFE_MESSAGES: dict[PreprocessingErrorCode, str] = {
     "PDF_INVALID": "The uploaded PDF is invalid or unreadable",
     "PDF_ENCRYPTED": "Password-protected PDFs cannot be parsed",
     "PDF_PREPROCESSING_FAILED": "The PDF could not be preprocessed safely",
+    "IMAGE_INVALID": "The uploaded image is invalid or unreadable",
 }
 
 
@@ -223,15 +229,9 @@ def _preprocess_student_document(
             page_count=None,
             rendered_page_numbers=(),
             text_truncated=False,
-            images=(
-                PreparedImage(
-                    page_number=None,
-                    mime_type=mime_type,
-                    data_base64=base64.b64encode(data).decode("ascii"),
-                    width=None,
-                    height=None,
-                ),
-            ),
+            # The original remains in object storage. Only this bounded,
+            # orientation-corrected derivative is sent to the AI provider.
+            images=(_prepare_source_image(data, options),),
         )
 
     document = _open_pdf(data)
@@ -284,6 +284,92 @@ def _preprocess_student_document(
         document.close()
 
 
+def _prepare_source_image(
+    data: bytes,
+    options: DocumentPreprocessingOptions,
+) -> PreparedImage:
+    try:
+        with Image.open(BytesIO(data)) as source:
+            original_width, original_height = source.size
+            if (
+                original_width < 1
+                or original_height < 1
+                or original_width * original_height > MAXIMUM_IMAGE_PIXELS
+            ):
+                raise DocumentPreprocessingError("IMAGE_INVALID")
+
+            # Select a decoder-native JPEG reduction when it stays within 10%
+            # of the requested resolution. Common 12 MP phone photos decode at
+            # half size instead of allocating the full source raster.
+            draft_size = (options.max_image_dimension, options.max_image_dimension)
+            source_ratio = max(source.size) / options.max_image_dimension
+            draft_factor = next(
+                (factor for factor in (8, 4, 2) if source_ratio / factor >= 0.9),
+                1,
+            )
+            if source.format == "JPEG" and draft_factor > 1:
+                draft_size = (
+                    max(1, source.width // draft_factor),
+                    max(1, source.height // draft_factor),
+                )
+            source.draft("RGB", draft_size)
+            ImageOps.exif_transpose(source, in_place=True)
+            has_transparency = source.mode in {"RGBA", "LA"} or "transparency" in source.info
+            intermediate_dimension = options.max_image_dimension * 4 // 3
+            if has_transparency and max(source.size) > intermediate_dimension:
+                # Pillow's high-quality RGBA resize creates a full-size
+                # premultiplied-alpha copy. Bound the source raster first with
+                # an allocation-light in-place pass, then run the final
+                # Lanczos thumbnail at the smaller size.
+                source.thumbnail(
+                    (intermediate_dimension, intermediate_dimension),
+                    Image.Resampling.NEAREST,
+                )
+            source.thumbnail(
+                (options.max_image_dimension, options.max_image_dimension),
+                Image.Resampling.LANCZOS,
+                reducing_gap=2.0,
+            )
+            if has_transparency:
+                rgba = source if source.mode == "RGBA" else source.convert("RGBA")
+                image = Image.new("RGB", rgba.size, "white")
+                alpha = rgba.getchannel("A")
+                try:
+                    image.paste(rgba, mask=alpha)
+                finally:
+                    alpha.close()
+                if rgba is not source:
+                    rgba.close()
+                source.close()
+            elif source.mode == "RGB":
+                image = source
+            else:
+                image = source.convert("RGB")
+                source.close()
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=options.jpeg_quality, optimize=True)
+            normalized = output.getvalue()
+            if not normalized.startswith(b"\xff\xd8\xff"):
+                raise DocumentPreprocessingError("IMAGE_INVALID")
+            return PreparedImage(
+                page_number=None,
+                mime_type="image/jpeg",
+                data_base64=base64.b64encode(normalized).decode("ascii"),
+                width=image.width,
+                height=image.height,
+            )
+    except DocumentPreprocessingError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ) as error:
+        raise DocumentPreprocessingError("IMAGE_INVALID") from error
+
+
 def _render_page(page: fitz.Page, max_dimension: int, jpeg_quality: int) -> PreparedImage:
     source = page.rect
     scale = min(max_dimension / max(source.width, source.height), 4.0)
@@ -329,13 +415,15 @@ def _extract_image_region(
 
     try:
         with Image.open(BytesIO(image_bytes)) as source:
-            image = ImageOps.exif_transpose(source)
-            width, height = image.size
+            width, height = source.size
             if width < 1 or height < 1 or width * height > MAXIMUM_IMAGE_PIXELS:
                 raise DocumentPreprocessingError(
                     "PDF_PREPROCESSING_FAILED",
                     "The identity-photo image has no readable dimensions",
                 )
+            ImageOps.exif_transpose(source, in_place=True)
+            image = source
+            width, height = image.size
             left = min(width - 1, max(0, math.floor(region.x * width)))
             top = min(height - 1, max(0, math.floor(region.y * height)))
             crop_width = max(1, min(width - left, math.ceil(region.width * width)))
@@ -351,7 +439,7 @@ def _extract_image_region(
             return output.getvalue()
     except DocumentPreprocessingError:
         raise
-    except (UnidentifiedImageError, OSError, ValueError) as error:
+    except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError) as error:
         raise DocumentPreprocessingError("PDF_PREPROCESSING_FAILED") from error
 
 

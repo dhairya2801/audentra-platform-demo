@@ -1,8 +1,11 @@
+import base64
 import json
+from io import BytesIO
 
 import fitz  # type: ignore[import-untyped]
 import httpx
 import pytest
+from PIL import Image
 
 from audentra.integrations.ai.gateway import GatewaySettings, StudentAIGateway
 from audentra.integrations.ai.provider import CompletionClient
@@ -17,6 +20,13 @@ def _text_pdf(*lines: str) -> bytes:
         return bytes(document.tobytes())
     finally:
         document.close()
+
+
+def _png_bytes() -> bytes:
+    source = Image.new("RGB", (2_400, 1_200), (32, 96, 160))
+    output = BytesIO()
+    source.save(output, format="PNG")
+    return output.getvalue()
 
 
 @pytest.mark.anyio
@@ -158,3 +168,58 @@ async def test_provider_history_is_quoted_as_untrusted_context() -> None:
     assert "Untrusted prior assistant" in messages[2]["content"]
     assert "javascript" not in messages[1]["content"]
     assert response["provider"] == "openrouter"
+
+
+@pytest.mark.anyio
+async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "test/model",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "documentType": "identity",
+                                    "summary": "Identity document ready for review.",
+                                    "fields": [],
+                                    "courses": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(openrouter_api_key="configured", openrouter_model="test/model"),
+            CompletionClient(http),
+        )
+        extraction = await gateway.extract_document(
+            file_name="identity.png",
+            mime_type="image/png",
+            content=_png_bytes(),
+            expected_document_type="identity",
+        )
+
+    assert captured["response_format"] == {"type": "json_object"}
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    user_content = messages[1]["content"]
+    assert isinstance(user_content, list)
+    image_part = next(part for part in user_content if part["type"] == "image_url")
+    image_url = image_part["image_url"]["url"]
+    assert image_url.startswith("data:image/jpeg;base64,")
+    normalized = base64.b64decode(image_url.partition(",")[2])
+    with Image.open(BytesIO(normalized)) as image:
+        assert image.size == (2_048, 1_024)
+    assert extraction["status"] == "completed"
+    assert extraction["documentType"] == "identity"

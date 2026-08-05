@@ -194,7 +194,7 @@ services:
       retries: 20
       start_period: 15s
     pids_limit: 128
-    mem_limit: 192m
+    mem_limit: 256m
     depends_on:
       postgres:
         condition: service_healthy
