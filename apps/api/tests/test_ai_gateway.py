@@ -1,6 +1,7 @@
 import base64
 import json
 from io import BytesIO
+from typing import cast
 
 import fitz  # type: ignore[import-untyped]
 import httpx
@@ -8,6 +9,11 @@ import pytest
 from PIL import Image
 
 from audentra.integrations.ai.gateway import GatewaySettings, StudentAIGateway
+from audentra.integrations.ai.prompt_runtime import (
+    AiOperation,
+    RuntimeConfig,
+    VersionedPromptRuntime,
+)
 from audentra.integrations.ai.provider import CompletionClient
 
 
@@ -18,6 +24,18 @@ def _text_pdf(*lines: str) -> bytes:
         for index, line in enumerate(lines):
             page.insert_text((72, 72 + index * 24), line)
         return bytes(document.tobytes())
+    finally:
+        document.close()
+
+
+def _multi_page_text_pdf(*pages: tuple[str, ...]) -> bytes:
+    document = fitz.open()
+    try:
+        for lines in pages:
+            page = document.new_page()
+            for index, line in enumerate(lines):
+                page.insert_text((72, 72 + index * 24), line)
+        return bytes(document.tobytes(no_new_id=True))
     finally:
         document.close()
 
@@ -37,6 +55,33 @@ def _blank_pdf(page_count: int) -> bytes:
         return bytes(document.tobytes(no_new_id=True))
     finally:
         document.close()
+
+
+class _StaticDocumentPromptRuntime:
+    def __init__(self, operation: AiOperation = "document_extraction") -> None:
+        self.operation = operation
+
+    async def resolve(self, tenant_id: str, operation: AiOperation) -> RuntimeConfig:
+        assert tenant_id == "tenant-1"
+        assert operation == self.operation
+        return RuntimeConfig(
+            tenant_id=tenant_id,
+            operation=operation,
+            prompt_template_version_id="prompt-1",
+            context_policy_version_id="context-1",
+            output_schema_version_id="schema-1",
+            config_revision=7,
+            updated_at="2026-08-05T00:00:00Z",
+            system_prompt="Published tenant document extraction instructions.",
+            user_prompt_template=None,
+            context_policy={},
+            output_schema=None,
+            provider="openrouter",
+            model="openai/gpt-4o-mini",
+            max_output_tokens=2_000,
+            temperature=0,
+            cache_status="hit",
+        )
 
 
 @pytest.mark.anyio
@@ -177,11 +222,22 @@ async def test_provider_history_is_quoted_as_untrusted_context() -> None:
     assert isinstance(messages, list)
     assert "Untrusted prior assistant" in messages[2]["content"]
     assert "javascript" not in messages[1]["content"]
+    assert captured["model"] == "test/model"
     assert response["provider"] == "openrouter"
 
 
+@pytest.mark.parametrize(
+    ("document_model", "expected_response_format"),
+    [
+        ("qwen/qwen3.7-flash", "json_object"),
+        ("qwen/qwen3.7-flash:free", "json_object"),
+        ("openai/gpt-4o-mini", "json_schema"),
+    ],
+)
 @pytest.mark.anyio
-async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg() -> None:
+async def test_openrouter_document_request_uses_model_supported_json_contract(
+    document_model: str, expected_response_format: str
+) -> None:
     captured: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -216,31 +272,51 @@ async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         gateway = StudentAIGateway(
-            GatewaySettings(openrouter_api_key="configured", openrouter_model="test/model"),
+            GatewaySettings(
+                openrouter_api_key="configured",
+                openrouter_model="test/model",
+                openrouter_document_model=document_model,
+            ),
             CompletionClient(http),
+            cast(VersionedPromptRuntime, _StaticDocumentPromptRuntime()),
         )
         extraction = await gateway.extract_document(
             file_name="identity.png",
             mime_type="image/png",
             content=_png_bytes(),
             expected_document_type="identity",
+            tenant_id="tenant-1",
         )
 
+    assert captured["model"] == document_model
     response_format = captured["response_format"]
     assert isinstance(response_format, dict)
-    assert response_format["type"] == "json_schema"
-    json_schema = response_format["json_schema"]
-    assert json_schema["name"] == "student_document_extraction"
-    assert json_schema["strict"] is True
-    schema = json_schema["schema"]
-    assert schema["type"] == "object"
-    assert schema["additionalProperties"] is False
-    assert set(schema["required"]) == set(schema["properties"])
-    assert schema["properties"]["fields"]["items"]["additionalProperties"] is False
+    assert response_format["type"] == expected_response_format
+    if expected_response_format == "json_object":
+        assert response_format == {"type": "json_object"}
+        assert captured["reasoning"] == {"effort": "none", "exclude": True}
+    else:
+        json_schema = response_format["json_schema"]
+        assert json_schema["name"] == "student_document_extraction"
+        assert json_schema["strict"] is True
+        schema = json_schema["schema"]
+        assert schema["type"] == "object"
+        assert schema["additionalProperties"] is False
+        assert set(schema["required"]) == set(schema["properties"])
+        assert schema["properties"]["fields"]["items"]["additionalProperties"] is False
+        assert "reasoning" not in captured
     assert captured["provider"] == {"require_parameters": True}
-    assert "reasoning" not in captured
     messages = captured["messages"]
     assert isinstance(messages, list)
+    system_prompt = messages[0]["content"]
+    assert "Published tenant document extraction instructions." in system_prompt
+    assert (
+        "use exactly these top-level keys: documentType, summary, studentName, "
+        "institutionName, issueDate, academicTerm, fields, courses, visualRegions, warnings"
+        in system_prompt
+    )
+    assert "Each fields item has exactly key, label, value, confidence" in system_prompt
+    assert "Never wrap the result in metadata or use singular warning" in system_prompt
     user_content = messages[1]["content"]
     assert isinstance(user_content, list)
     image_part = next(part for part in user_content if part["type"] == "image_url")
@@ -312,8 +388,96 @@ async def test_groq_transcript_request_keeps_its_provider_specific_shape() -> No
     assert captured["include_reasoning"] is False
     assert "provider" not in captured
     assert "reasoning" not in captured
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    assert "Canonical output contract" not in messages[0]["content"]
     assert extraction["provider"] == "groq"
     assert extraction["courses"][0]["sourceCode"] == "MATH 101"
+
+
+@pytest.mark.anyio
+async def test_segmented_openrouter_transcript_uses_qwen_json_mode_for_every_segment() -> None:
+    captured: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = cast(dict[str, object], json.loads(request.content))
+        captured.append(body)
+        segment = len(captured)
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen/qwen3.7-flash:free",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "documentType": "transcript",
+                                    "summary": f"Transcript segment {segment} parsed.",
+                                    "studentName": "Ada Example",
+                                    "institutionName": "Aster University",
+                                    "issueDate": None,
+                                    "academicTerm": "Fall 2026",
+                                    "fields": [],
+                                    "courses": [
+                                        {
+                                            "sourceCode": f"COURSE {segment}",
+                                            "title": f"Course {segment}",
+                                            "credits": 3,
+                                            "grade": "A",
+                                            "score": None,
+                                            "term": "Fall 2026",
+                                            "confidence": 0.95,
+                                        }
+                                    ],
+                                    "visualRegions": [],
+                                    "warnings": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(
+                openrouter_api_key="configured",
+                transcript_provider="openrouter",
+                openrouter_document_model="qwen/qwen3.7-flash:free",
+            ),
+            CompletionClient(http),
+            cast(
+                VersionedPromptRuntime,
+                _StaticDocumentPromptRuntime("transcript_segment_extraction"),
+            ),
+        )
+        extraction = await gateway.extract_document(
+            file_name="two-page-transcript.pdf",
+            mime_type="application/pdf",
+            content=_multi_page_text_pdf(
+                ("OFFICIAL TRANSCRIPT", "COURSE 1 First Course 3 A"),
+                ("OFFICIAL TRANSCRIPT", "COURSE 2 Second Course 3 A"),
+            ),
+            expected_document_type="transcript",
+            tenant_id="tenant-1",
+        )
+
+    assert len(captured) == 2
+    for request_body in captured:
+        assert request_body["model"] == "qwen/qwen3.7-flash:free"
+        assert request_body["response_format"] == {"type": "json_object"}
+        assert request_body["reasoning"] == {"effort": "none", "exclude": True}
+        assert request_body["provider"] == {"require_parameters": True}
+        messages = request_body["messages"]
+        assert isinstance(messages, list)
+        user_content = messages[1]["content"]
+        assert isinstance(user_content, list)
+        assert sum(part["type"] == "image_url" for part in user_content) == 1
+    assert {course["title"] for course in extraction["courses"]} == {"Course 1", "Course 2"}
+    assert extraction["provider"] == "openrouter"
 
 
 @pytest.mark.anyio

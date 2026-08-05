@@ -187,6 +187,10 @@ class RuntimeSettings:
                 openrouter_api_key=values.get("OPENROUTER_API_KEY", "").strip(),
                 openrouter_model=values.get("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
                 or "openai/gpt-4o-mini",
+                openrouter_document_model=values.get(
+                    "OPENROUTER_DOCUMENT_MODEL", "qwen/qwen3.7-flash"
+                ).strip()
+                or "qwen/qwen3.7-flash",
                 app_url=values.get("OPENROUTER_APP_URL", "http://localhost:3000").strip(),
                 app_name=values.get("OPENROUTER_APP_NAME", "Aster Student Portal").strip(),
                 document_timeout_seconds=openrouter_timeout_ms / 1_000,

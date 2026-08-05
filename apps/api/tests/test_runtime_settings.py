@@ -8,6 +8,8 @@ from audentra.bootstrap.settings import (
     RuntimeSettings,
 )
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
 
 def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     settings = RuntimeSettings.from_environment({}, package_root=tmp_path)
@@ -20,8 +22,26 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.object_storage.force_path_style is True
     assert settings.worker.consumer_name == "student-dashboard-v1"
     assert settings.worker.worker_id
+    assert settings.ai.openrouter_model == "openai/gpt-4o-mini"
+    assert settings.ai.openrouter_document_model == "qwen/qwen3.7-flash"
     assert settings.onboarding_template_dir == tmp_path / "assets" / "onboarding"
     assert settings.http_settings().tenant_slug_ids["aster"].endswith("0001")
+
+
+def test_document_model_is_wired_through_compose_and_preview_bootstrap() -> None:
+    compose_setting = "OPENROUTER_DOCUMENT_MODEL: ${OPENROUTER_DOCUMENT_MODEL:-qwen/qwen3.7-flash}"
+    for relative_path in ("infra/compose.yaml", "infra/preview-vm/compose.yaml"):
+        manifest = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+        assert compose_setting in manifest
+
+    bootstrap = (REPOSITORY_ROOT / "infra/preview-vm/bootstrap-host.sh").read_text(encoding="utf-8")
+    assert (
+        "printf 'OPENROUTER_DOCUMENT_MODEL=%s\\n' "
+        '"$(from_existing_or_legacy OPENROUTER_DOCUMENT_MODEL qwen/qwen3.7-flash)"' in bootstrap
+    )
+    for relative_path in (".env.example", "apps/api/.env.example", "infra/.env.example"):
+        environment = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+        assert "OPENROUTER_DOCUMENT_MODEL=qwen/qwen3.7-flash" in environment
 
 
 def test_legacy_environment_names_and_bounds_are_supported(tmp_path: Path) -> None:
@@ -33,6 +53,8 @@ def test_legacy_environment_names_and_bounds_are_supported(tmp_path: Path) -> No
             "WEB_ORIGIN": "https://student.example,https://staff.example/",
             "DOCUMENT_WORKER_TOKEN": "test-worker-token-that-is-not-a-production-secret",
             "TRANSCRIPT_PARSING": "groq",
+            "OPENROUTER_MODEL": "test/chat-model",
+            "OPENROUTER_DOCUMENT_MODEL": "test/document-model",
             "GROQ_TRANSCRIPT_TIMEOUT_MS": "90000",
             "DB_POOL_SIZE": "7",
             "WORKER_BATCH_SIZE": "25",
@@ -45,6 +67,8 @@ def test_legacy_environment_names_and_bounds_are_supported(tmp_path: Path) -> No
     assert settings.port == 4100
     assert settings.web_origins == ("https://student.example", "https://staff.example")
     assert settings.ai.transcript_provider == "groq"
+    assert settings.ai.openrouter_model == "test/chat-model"
+    assert settings.ai.openrouter_document_model == "test/document-model"
     assert settings.ai.groq_timeout_seconds == 90
     assert settings.database.pool_size == 7
     assert settings.worker.batch_size == 25

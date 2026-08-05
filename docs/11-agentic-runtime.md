@@ -135,15 +135,27 @@ The upload endpoint accepts PDF, JPEG, and PNG files up to 10 MB. It:
     agentic categories.
 
 Model names and bounds are runtime configuration. The checked-in development
-defaults are `openai/gpt-4o-mini` for OpenRouter and `qwen/qwen3.6-27b` for
-Groq. Only `TRANSCRIPT_PARSING=groq` selects Groq for transcripts; any other
-value selects OpenRouter. Both transcript paths receive bounded text and
-rendered page evidence, and identity documents use the OpenRouter multimodal
-path. The current Groq defaults bound output to 1,400 tokens, input text to
-40,000 characters, and reasoning effort to `none`. The request does not rely
-on a provider-specific PDF-file capability or tool-call endpoint. Production
-must pin evaluated providers/models and retain the same safe retry and human
-review boundary.
+defaults are `openai/gpt-4o-mini` for Edward and other non-extraction OpenRouter
+calls, `qwen/qwen3.7-flash` for OpenRouter document extraction, and
+`qwen/qwen3.6-27b` for Groq. Only `TRANSCRIPT_PARSING=groq` selects Groq for
+transcripts; any other value selects OpenRouter. Both transcript paths receive
+bounded text and rendered page evidence, and identity documents use the
+OpenRouter multimodal path. The current Groq defaults bound output to 1,400
+tokens, input text to 40,000 characters, and reasoning effort to `none`. The
+request does not rely on a provider-specific PDF-file capability or tool-call
+endpoint. Production must pin evaluated providers/models and retain the same
+safe retry and human review boundary.
+
+OpenRouter capability routing is model-aware. The default
+`qwen/qwen3.7-flash` extraction path, including colon-suffixed OpenRouter aliases
+such as `qwen/qwen3.7-flash:free`, uses `json_object`, requires a provider endpoint
+that supports every requested parameter, and disables reasoning in the returned
+completion. Configured non-Qwen document models continue to use strict
+`json_schema` and therefore must be selected only when their endpoint advertises
+`structured_outputs`. Both paths receive the same explicit canonical output
+contract in the system prompt and must pass the same local normalization,
+sensitive-field filtering, usefulness validation, and retry boundary before
+anything reaches the student-facing record.
 
 ### Failure and retry semantics
 
@@ -227,6 +239,7 @@ MAX_DOCUMENT_BYTES=10485760
 
 OPENROUTER_API_KEY=                  # optional, server only
 OPENROUTER_MODEL=openai/gpt-4o-mini
+OPENROUTER_DOCUMENT_MODEL=qwen/qwen3.7-flash
 OPENROUTER_APP_URL=http://localhost:3000
 OPENROUTER_APP_NAME=Audentra Student Portal
 OPENROUTER_DOCUMENT_TIMEOUT_MS=120000

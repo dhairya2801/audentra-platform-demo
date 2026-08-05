@@ -30,6 +30,11 @@ environment, generates new database/storage/worker/staff credentials, creates
 the private `audentra-preview` Docker network, and installs
 `/usr/local/sbin/audentra-platform-deploy`.
 
+It preserves `OPENROUTER_DOCUMENT_MODEL` from the current or legacy protected
+environment and writes `qwen/qwen3.7-flash` when the setting is absent. This is
+separate from `OPENROUTER_MODEL`; `TRANSCRIPT_PARSING=groq` continues to use
+`GROQ_MODEL` for transcript extraction.
+
 The protected environment is `/opt/audentra-platform/shared/.env` with mode
 `0600`. Never commit it. Retrieve the generated preview staff password through
 an authorized IAP/OS Login session when needed.

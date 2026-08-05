@@ -522,19 +522,28 @@ def useful_extraction(extraction: Mapping[str, Any], expected_type: str | None =
             for key in ("studentName", "institutionName", "issueDate")
         )
         return has_identity_field or has_profile_region or has_identity_header
-    if extraction.get("documentType") != "other":
+    # Financial-aid classification is intentionally field-free: a clear local
+    # heading is enough to route the original document to staff review without
+    # retaining financial values.
+    if expected_type == "financial_aid":
         return True
     fields = extraction.get("fields")
-    if isinstance(fields, list) and any(
-        isinstance(field, Mapping) and str(field.get("value", "")).strip() for field in fields
-    ):
-        return True
-    if has_courses:
-        return True
-    return any(
-        bool(str(extraction.get(key) or "").strip())
+    has_material_field = isinstance(fields, list) and any(
+        isinstance(field, Mapping)
+        and (value := str(field.get("value", "")).strip())
+        and value != "[sensitive value redacted]"
+        for field in fields
+    )
+    has_material_header = any(
+        (value := str(extraction.get(key) or "").strip()) and value != "[sensitive value redacted]"
         for key in ("studentName", "institutionName", "issueDate", "academicTerm")
     )
+    has_material_evidence = has_material_field or has_courses or has_material_header
+    if expected_type in {"immunization", "ferpa", "residency", "other"}:
+        return has_material_evidence
+    if extraction.get("documentType") != "other":
+        return True
+    return has_material_evidence
 
 
 def merge_transcript_extractions(extractions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

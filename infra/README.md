@@ -57,6 +57,11 @@ production messaging adapter is still required.
 To override ports or development credentials, copy `infra/.env.example` to
 `infra/.env`, change the values, and pass that file with `--env-file`.
 
+`OPENROUTER_MODEL` configures Edward and other non-extraction OpenRouter calls.
+Document extraction uses the independently configurable
+`OPENROUTER_DOCUMENT_MODEL` (default `qwen/qwen3.7-flash`). Groq transcript
+routing remains controlled only by `TRANSCRIPT_PARSING=groq` and `GROQ_MODEL`.
+
 Run the separately deployed Audentra portals repository on
 `http://localhost:3000`, or set `WEB_ORIGIN` to its actual origin.
 

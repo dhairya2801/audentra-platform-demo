@@ -224,6 +224,38 @@ def test_useful_extraction_rejects_expected_document_type_mismatch() -> None:
     assert result["provider"] == "local"
 
 
+@pytest.mark.parametrize("document_type", ["immunization", "ferpa", "residency", "other"])
+def test_non_financial_extraction_requires_material_evidence(document_type: str) -> None:
+    empty = {
+        "documentType": document_type,
+        "summary": "The document was parsed and is ready for review.",
+        "fields": [],
+        "courses": [],
+    }
+    assert not useful_extraction(empty, document_type)
+    assert useful_extraction(
+        {
+            **empty,
+            "fields": [
+                {
+                    "key": "document_date",
+                    "label": "Document date",
+                    "value": "2026-08-05",
+                }
+            ],
+        },
+        document_type,
+    )
+    assert useful_extraction({**empty, "institutionName": "Aster University"}, document_type)
+
+
+def test_field_free_financial_classification_remains_useful() -> None:
+    assert useful_extraction(
+        {"documentType": "financial_aid", "fields": [], "courses": []},
+        "financial_aid",
+    )
+
+
 def test_local_evidence_classification_retains_no_financial_fields() -> None:
     result = evidence_classification("financial_aid")
     assert result["status"] == "completed"

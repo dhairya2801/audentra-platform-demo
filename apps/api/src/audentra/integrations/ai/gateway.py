@@ -6,7 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from audentra.infrastructure.documents.processing import (
@@ -54,6 +54,7 @@ from .provider import (
 class GatewaySettings:
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
+    openrouter_document_model: str = "qwen/qwen3.7-flash"
     app_url: str = "http://localhost:3000"
     app_name: str = "Aster Student Portal"
     document_timeout_seconds: float = 120.0
@@ -259,7 +260,7 @@ class StudentAIGateway:
             system_prompt="Extract this student document completely and safely.",
             model=self._settings.groq_model
             if provider == "groq"
-            else self._settings.openrouter_model,
+            else self._settings.openrouter_document_model,
             max_output_tokens=(
                 self._settings.groq_max_tokens
                 if provider == "groq"
@@ -267,6 +268,7 @@ class StudentAIGateway:
             ),
             temperature=0,
         )
+        runtime = self._with_document_model(runtime, provider)
         body = self._document_request(
             runtime, prepared, file_name, expected_document_type, provider
         )
@@ -428,7 +430,7 @@ class StudentAIGateway:
                 ),
                 model=self._settings.groq_model
                 if provider == "groq"
-                else self._settings.openrouter_model,
+                else self._settings.openrouter_document_model,
                 max_output_tokens=(
                     self._settings.groq_max_tokens
                     if provider == "groq"
@@ -436,6 +438,7 @@ class StudentAIGateway:
                 ),
                 temperature=0,
             )
+            runtime = self._with_document_model(runtime, provider)
             payload = await self._completions.complete(
                 self._document_request(
                     runtime,
@@ -569,6 +572,14 @@ class StudentAIGateway:
         )
         return self._settings.transcript_provider if is_transcript else "openrouter"
 
+    def _with_document_model(self, runtime: RuntimeConfig, provider: str) -> RuntimeConfig:
+        if provider != "openrouter" or runtime.model == self._settings.openrouter_document_model:
+            return runtime
+        # Published tenant prompts, limits, version identifiers, and audit
+        # receipts remain authoritative. Only the globally selected extraction
+        # model is overridden for the dedicated OpenRouter document path.
+        return replace(runtime, model=self._settings.openrouter_document_model)
+
     def _document_request(
         self,
         runtime: RuntimeConfig,
@@ -625,18 +636,37 @@ class StudentAIGateway:
                     {"role": "user", "content": content},
                 ],
             }
+        system = (
+            f"{system} Canonical output contract: use exactly these top-level keys: "
+            "documentType, summary, studentName, institutionName, issueDate, academicTerm, "
+            "fields, courses, visualRegions, warnings. Each fields item has exactly key, label, "
+            "value, confidence; each courses item has exactly sourceCode, title, credits, grade, "
+            "score, term, confidence; each visualRegions item has exactly kind, pageNumber, x, "
+            "y, width, height, confidence. Use null for unknown nullable scalars and [] for empty "
+            "arrays. Never wrap the result in metadata or use singular warning."
+        )
+        structured_output = (
+            {
+                "response_format": {"type": "json_object"},
+                "reasoning": {"effort": "none", "exclude": True},
+            }
+            if _uses_qwen_37_flash_json_mode(runtime.model)
+            else {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "student_document_extraction",
+                        "strict": True,
+                        "schema": DOCUMENT_EXTRACTION_JSON_SCHEMA,
+                    },
+                }
+            }
+        )
         return {
             "model": runtime.model,
             "temperature": 0,
             "max_tokens": runtime.max_output_tokens,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "student_document_extraction",
-                    "strict": True,
-                    "schema": DOCUMENT_EXTRACTION_JSON_SCHEMA,
-                },
-            },
+            **structured_output,
             "provider": {"require_parameters": True},
             "messages": [
                 {"role": "system", "content": system},
@@ -711,6 +741,11 @@ class StudentAIGateway:
             "supplied for visual review."
         )
         return {**extraction, "warnings": [warning, *extraction.get("warnings", [])][:12]}
+
+
+def _uses_qwen_37_flash_json_mode(model: str) -> bool:
+    base_model = "qwen/qwen3.7-flash"
+    return model == base_model or model.startswith(f"{base_model}:")
 
 
 def _malicious_e2e_provider_response() -> dict[str, Any]:
