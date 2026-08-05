@@ -29,6 +29,16 @@ def _png_bytes() -> bytes:
     return output.getvalue()
 
 
+def _blank_pdf(page_count: int) -> bytes:
+    document = fitz.open()
+    try:
+        for _index in range(page_count):
+            document.new_page()
+        return bytes(document.tobytes(no_new_id=True))
+    finally:
+        document.close()
+
+
 @pytest.mark.anyio
 async def test_unconfigured_gateway_is_deterministic_and_never_calls_network() -> None:
     async def fail(_request: httpx.Request) -> httpx.Response:
@@ -187,8 +197,14 @@ async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg()
                                 {
                                     "documentType": "identity",
                                     "summary": "Identity document ready for review.",
+                                    "studentName": "Ada Example",
+                                    "institutionName": None,
+                                    "issueDate": None,
+                                    "academicTerm": None,
                                     "fields": [],
                                     "courses": [],
+                                    "visualRegions": [],
+                                    "warnings": [],
                                 }
                             )
                         }
@@ -210,7 +226,19 @@ async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg()
             expected_document_type="identity",
         )
 
-    assert captured["response_format"] == {"type": "json_object"}
+    response_format = captured["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["type"] == "json_schema"
+    json_schema = response_format["json_schema"]
+    assert json_schema["name"] == "student_document_extraction"
+    assert json_schema["strict"] is True
+    schema = json_schema["schema"]
+    assert schema["type"] == "object"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["properties"]["fields"]["items"]["additionalProperties"] is False
+    assert captured["provider"] == {"require_parameters": True}
+    assert "reasoning" not in captured
     messages = captured["messages"]
     assert isinstance(messages, list)
     user_content = messages[1]["content"]
@@ -223,3 +251,189 @@ async def test_openrouter_document_request_enforces_json_and_uses_bounded_jpeg()
         assert image.size == (2_048, 1_024)
     assert extraction["status"] == "completed"
     assert extraction["documentType"] == "identity"
+
+
+@pytest.mark.anyio
+async def test_groq_transcript_request_keeps_its_provider_specific_shape() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "test/groq",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "documentType": "transcript",
+                                    "summary": "Transcript parsed.",
+                                    "fields": [],
+                                    "courses": [
+                                        {
+                                            "sourceCode": "MATH 101",
+                                            "title": "Calculus",
+                                            "credits": 3,
+                                            "grade": "A",
+                                            "confidence": 0.95,
+                                        }
+                                    ],
+                                    "warnings": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(
+                transcript_provider="groq",
+                groq_api_key="configured",
+                groq_model="test/groq",
+            ),
+            CompletionClient(http),
+        )
+        extraction = await gateway.extract_document(
+            file_name="transcript.pdf",
+            mime_type="application/pdf",
+            content=_text_pdf("OFFICIAL TRANSCRIPT", "MATH 101 Calculus 3 A"),
+            expected_document_type="transcript",
+        )
+
+    assert captured["response_format"] == {"type": "json_object"}
+    assert captured["max_completion_tokens"] == 1_400
+    assert captured["reasoning_effort"] == "none"
+    assert captured["include_reasoning"] is False
+    assert "provider" not in captured
+    assert "reasoning" not in captured
+    assert extraction["provider"] == "groq"
+    assert extraction["courses"][0]["sourceCode"] == "MATH 101"
+
+
+@pytest.mark.anyio
+async def test_identity_pdf_sends_only_first_and_last_page_at_review_resolution() -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "test/model",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "documentType": "identity",
+                                    "summary": "Identity document ready for review.",
+                                    "studentName": "Ada Example",
+                                    "institutionName": None,
+                                    "issueDate": None,
+                                    "academicTerm": None,
+                                    "fields": [],
+                                    "courses": [],
+                                    "visualRegions": [],
+                                    "warnings": [],
+                                }
+                            )
+                        }
+                    }
+                ],
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(openrouter_api_key="configured", openrouter_model="test/model"),
+            CompletionClient(http),
+        )
+        extraction = await gateway.extract_document(
+            file_name="kimlik-front-back.pdf",
+            mime_type="application/pdf",
+            content=_blank_pdf(4),
+            expected_document_type="identity",
+        )
+
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    user_content = messages[1]["content"]
+    assert isinstance(user_content, list)
+    assert "rendered page images: 1, 4" in user_content[0]["text"]
+    image_parts = [part for part in user_content if part["type"] == "image_url"]
+    assert len(image_parts) == 2
+    for part in image_parts:
+        image_url = part["image_url"]["url"]
+        with Image.open(BytesIO(base64.b64decode(image_url.partition(",")[2]))) as image:
+            assert max(image.size) == 1_400
+    assert extraction["status"] == "completed"
+
+
+@pytest.mark.anyio
+async def test_legacy_identity_wrapper_is_adapted_after_raw_audit_recording() -> None:
+    provider_payload = {
+        "id": "provider-identity-1",
+        "model": "test/model",
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "metadata": {
+                                "date_of_birth": "2000-01-01",
+                                "document_number": "DOC-123456",
+                                "expiry_date": "2030-01-01",
+                                "father_name": "Parent One",
+                                "gender": "F",
+                                "identity_card_number": "CARD-654321",
+                                "issued_by": "Civil Registry",
+                                "mother_name": "Parent Two",
+                                "name": "Ada Example",
+                                "nationality": "Turkish",
+                            },
+                            "warning": (
+                                "Sensitive identity numbers were not retained for student review."
+                            ),
+                        }
+                    )
+                }
+            }
+        ],
+    }
+    records: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=provider_payload, request=request)
+
+    async def recorder(value: dict[str, object]) -> None:
+        records.append(value)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(openrouter_api_key="configured", openrouter_model="test/model"),
+            CompletionClient(http, recorder),
+        )
+        extraction = await gateway.extract_document(
+            file_name="kimlik.png",
+            mime_type="image/png",
+            content=_png_bytes(),
+            expected_document_type="identity",
+            tenant_id="tenant-1",
+            student_id="student-1",
+            document_id="document-1",
+            request_id="request-1",
+        )
+
+    assert records[0]["responseBody"] == provider_payload
+    assert extraction["studentName"] == "Ada Example"
+    assert {field["key"] for field in extraction["fields"]}.isdisjoint(
+        {"document_number", "identity_card_number"}
+    )
+    assert "DOC-123456" not in str(extraction)

@@ -26,6 +26,137 @@ _SHAPE_KEYS = (
     "visualRegions",
     "warnings",
 )
+_ALLOWED_LEGACY_IDENTITY_FIELD_KEYS = frozenset(
+    {
+        "date_of_birth",
+        "expiry_date",
+        "father_name",
+        "gender",
+        "issued_by",
+        "mother_name",
+        "name",
+        "nationality",
+        "valid_until",
+    }
+)
+_ALLOWED_IDENTITY_FIELD_KEYS = frozenset(
+    {
+        "address",
+        "birth_date",
+        "city",
+        "country",
+        "date_of_birth",
+        "expiration_date",
+        "expiry_date",
+        "family_name",
+        "father_name",
+        "first_name",
+        "full_name",
+        "gender",
+        "given_name",
+        "given_names",
+        "issued_by",
+        "issuing_authority",
+        "last_name",
+        "mobile_phone",
+        "mother_name",
+        "name",
+        "nationality",
+        "place_of_birth",
+        "postal_code",
+        "preferred_name",
+        "sex",
+        "state_or_province",
+        "street_address",
+        "surname",
+        "valid_until",
+    }
+)
+
+# OpenRouter follows the OpenAI response-format contract for strict structured
+# output. Keep a provider-independent schema here so tenant prompt wording
+# cannot silently change the extraction envelope consumed by the application.
+DOCUMENT_EXTRACTION_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "documentType": {
+            "type": "string",
+            "enum": sorted(DOCUMENT_TYPES),
+        },
+        "summary": {"type": "string"},
+        "studentName": {"type": ["string", "null"]},
+        "institutionName": {"type": ["string", "null"]},
+        "issueDate": {"type": ["string", "null"]},
+        "academicTerm": {"type": ["string", "null"]},
+        "fields": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "key": {"type": "string"},
+                    "label": {"type": "string"},
+                    "value": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["key", "label", "value", "confidence"],
+            },
+        },
+        "courses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "sourceCode": {"type": ["string", "null"]},
+                    "title": {"type": "string"},
+                    "credits": {"type": ["number", "null"]},
+                    "grade": {"type": ["string", "null"]},
+                    "score": {"type": ["string", "null"]},
+                    "term": {"type": ["string", "null"]},
+                    "confidence": {"type": "number"},
+                },
+                "required": [
+                    "sourceCode",
+                    "title",
+                    "credits",
+                    "grade",
+                    "score",
+                    "term",
+                    "confidence",
+                ],
+            },
+        },
+        "visualRegions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "kind": {"type": "string", "enum": ["profile_photo"]},
+                    "pageNumber": {"type": ["integer", "null"]},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "width": {"type": "number"},
+                    "height": {"type": "number"},
+                    "confidence": {"type": "number"},
+                },
+                "required": [
+                    "kind",
+                    "pageNumber",
+                    "x",
+                    "y",
+                    "width",
+                    "height",
+                    "confidence",
+                ],
+            },
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": list(_SHAPE_KEYS),
+}
 
 
 def parse_extraction_json(content: str) -> dict[str, Any]:
@@ -70,21 +201,114 @@ def parse_extraction_json(content: str) -> dict[str, Any]:
     raise ProviderCompletionError("AI provider returned incomplete JSON extraction")
 
 
+def adapt_legacy_identity_extraction(
+    value: Mapping[str, Any], expected_document_type: str | None
+) -> dict[str, Any]:
+    """Convert the former ``metadata`` identity envelope at the trust boundary.
+
+    Some published prompt versions asked for ``{metadata, warning}`` instead of
+    the canonical extraction contract. Supporting that bounded envelope keeps
+    already-running tenants compatible while strict structured output rolls
+    forward. Government/document identifiers are deliberately discarded before
+    they can enter canonical fields or student-facing persistence.
+    """
+
+    metadata = value.get("metadata")
+    if (
+        expected_document_type != "identity"
+        or not isinstance(metadata, Mapping)
+        or any(key in value for key in _SHAPE_KEYS)
+    ):
+        return dict(value)
+
+    student_name = _first_metadata_text(metadata, ("studentName", "student_name", "name"), 160)
+    institution_name = _first_metadata_text(
+        metadata,
+        ("institutionName", "institution_name", "issuedBy", "issued_by"),
+        200,
+    )
+    issue_date = _first_metadata_text(
+        metadata,
+        ("issueDate", "issue_date", "dateOfIssue", "date_of_issue"),
+        80,
+    )
+    fields: list[dict[str, Any]] = []
+    for raw_key, raw_value in metadata.items():
+        key = _canonical_metadata_key(raw_key)
+        if key not in _ALLOWED_LEGACY_IDENTITY_FIELD_KEYS:
+            continue
+        text = _safe_text(raw_value, "", 500)
+        if not text:
+            continue
+        fields.append(
+            {
+                "key": key,
+                "label": key.replace("_", " ").title(),
+                "value": text,
+                "confidence": 0.0,
+            }
+        )
+
+    warning = value.get("warning")
+    raw_warnings = warning if isinstance(warning, list) else [warning]
+    warnings = [_redact(text) for item in raw_warnings[:12] if (text := _safe_text(item, "", 400))]
+    return {
+        "documentType": "identity",
+        "summary": "Identity document metadata was extracted and is ready for review.",
+        "studentName": student_name,
+        "institutionName": institution_name,
+        "issueDate": issue_date,
+        "academicTerm": None,
+        "fields": fields,
+        "courses": [],
+        "visualRegions": [],
+        "warnings": warnings,
+    }
+
+
 def normalize_extraction(
     value: Mapping[str, Any],
     model: str,
     evidence_document_type: str | None = None,
     provider: str = "openrouter",
 ) -> dict[str, Any]:
+    document_type = normalize_document_type(value.get("documentType"), evidence_document_type)
+    summary = _safe_text(
+        value.get("summary"), "The document was parsed and is ready for review.", 800
+    )
+    student_name = _nullable_text(value.get("studentName"), 160)
+    institution_name = _nullable_text(value.get("institutionName"), 200)
+    issue_date = _nullable_text(value.get("issueDate"), 80)
+    academic_term = _nullable_text(value.get("academicTerm"), 120)
+    if document_type == "identity":
+        summary = "Identity document details were extracted and are ready for review."
+        student_name = _redact_identity(student_name) if student_name is not None else None
+        institution_name = (
+            _redact_identity(institution_name) if institution_name is not None else None
+        )
+        issue_date = _redact_identity(issue_date) if issue_date is not None else None
+        academic_term = _redact_identity(academic_term) if academic_term is not None else None
     raw_fields = _as_list(value.get("fields"))
     fields: list[dict[str, Any]] = []
     for index, candidate in enumerate(raw_fields[:24]):
         field = candidate if isinstance(candidate, Mapping) else {}
+        key = _safe_text(field.get("key"), f"field_{index + 1}", 80)
+        label = _safe_text(field.get("label"), f"Field {index + 1}", 120)
+        field_value = _safe_text(field.get("value"), "", 500)
+        if document_type == "identity":
+            key = _canonical_metadata_key(key)
+            if (
+                key not in _ALLOWED_IDENTITY_FIELD_KEYS
+                or _is_sensitive_identity_key(key)
+                or _is_sensitive_identity_key(label)
+            ):
+                continue
+            field_value = _redact_identity(field_value)
         fields.append(
             {
-                "key": _safe_text(field.get("key"), f"field_{index + 1}", 80),
-                "label": _safe_text(field.get("label"), f"Field {index + 1}", 120),
-                "value": _redact(_safe_text(field.get("value"), "", 500)),
+                "key": key,
+                "label": label,
+                "value": field_value if document_type == "identity" else _redact(field_value),
                 "confidence": _normalized_number(field.get("confidence")),
             }
         )
@@ -110,17 +334,19 @@ def normalize_extraction(
             }
         )
     raw_warnings = _as_list(value.get("warnings"))
-    warnings = [text for item in raw_warnings[:12] if (text := _safe_text(item, "", 400))]
+    warnings = [
+        _redact_identity(text) if document_type == "identity" else text
+        for item in raw_warnings[:12]
+        if (text := _safe_text(item, "", 400))
+    ]
     return {
         "status": "completed",
-        "documentType": normalize_document_type(value.get("documentType"), evidence_document_type),
-        "summary": _safe_text(
-            value.get("summary"), "The document was parsed and is ready for review.", 800
-        ),
-        "studentName": _nullable_text(value.get("studentName"), 160),
-        "institutionName": _nullable_text(value.get("institutionName"), 200),
-        "issueDate": _nullable_text(value.get("issueDate"), 80),
-        "academicTerm": _nullable_text(value.get("academicTerm"), 120),
+        "documentType": document_type,
+        "summary": summary,
+        "studentName": student_name,
+        "institutionName": institution_name,
+        "issueDate": issue_date,
+        "academicTerm": academic_term,
         "fields": fields,
         "courses": courses,
         "visualRegions": normalize_visual_regions(value.get("visualRegions")),
@@ -277,6 +503,25 @@ def useful_extraction(extraction: Mapping[str, Any], expected_type: str | None =
     )
     if expected_type == "transcript":
         return has_courses
+    if expected_type == "identity":
+        fields = extraction.get("fields")
+        has_identity_field = isinstance(fields, list) and any(
+            isinstance(field, Mapping)
+            and (value := str(field.get("value", "")).strip())
+            and value != "[sensitive value redacted]"
+            for field in fields
+        )
+        visual_regions = extraction.get("visualRegions")
+        has_profile_region = isinstance(visual_regions, list) and any(
+            isinstance(region, Mapping) and region.get("kind") == "profile_photo"
+            for region in visual_regions
+        )
+        has_identity_header = any(
+            (value := str(extraction.get(key) or "").strip())
+            and value != "[sensitive value redacted]"
+            for key in ("studentName", "institutionName", "issueDate")
+        )
+        return has_identity_field or has_profile_region or has_identity_header
     if extraction.get("documentType") != "other":
         return True
     fields = extraction.get("fields")
@@ -547,6 +792,84 @@ def _as_list(value: object) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _first_metadata_text(
+    metadata: Mapping[str, Any], keys: Sequence[str], maximum: int
+) -> str | None:
+    for key in keys:
+        value = _nullable_text(metadata.get(key), maximum)
+        if value is not None:
+            return value
+    return None
+
+
+def _canonical_metadata_key(value: object) -> str:
+    raw = str(value or "").strip()
+    snake_case = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw)
+    return re.sub(r"[^a-z0-9]+", "_", snake_case.lower()).strip("_")[:80]
+
+
+def _is_sensitive_identity_key(value: object) -> bool:
+    key = _canonical_metadata_key(value)
+    if not key:
+        return False
+    compact = key.replace("_", "")
+    if compact in {
+        "kimliknumarasi",
+        "tckn",
+        "tckimlikno",
+        "tckimliknumarasi",
+        "socialsecuritynumber",
+        "ssn",
+    }:
+        return True
+    tokens = set(key.split("_"))
+    identity_markers = {
+        "card",
+        "citizen",
+        "document",
+        "government",
+        "id",
+        "identification",
+        "identity",
+        "kimlik",
+        "licence",
+        "license",
+        "national",
+        "passport",
+        "serial",
+    }
+    number_markers = {
+        "id",
+        "identifier",
+        "no",
+        "num",
+        "numarasi",
+        "number",
+        "serial",
+    }
+    if tokens & identity_markers and tokens & number_markers:
+        return True
+    compact_identity_markers = (
+        "citizen",
+        "document",
+        "government",
+        "identification",
+        "identity",
+        "kimlik",
+        "licence",
+        "license",
+        "nationalid",
+        "passport",
+    )
+    has_compact_identity_marker = any(marker in compact for marker in compact_identity_markers)
+    if has_compact_identity_marker and compact.endswith(("id", "no", "num")):
+        return True
+    compact_number_markers = ("identifier", "kimlikno", "numarasi", "number", "serial")
+    return has_compact_identity_marker and any(
+        marker in compact for marker in compact_number_markers
+    )
+
+
 def _safe_text(value: object, fallback: str, maximum: int) -> str:
     if not isinstance(value, str):
         return fallback
@@ -570,7 +893,17 @@ def _normalized_number(value: object) -> float:
 
 
 def _redact(value: str) -> str:
-    if re.search(r"\b\d{3}-?\d{2}-?\d{4}\b", value) or re.search(r"\b(?:\d[ -]*?){13,19}\b", value):
+    if re.search(r"\b\d{3}-?\d{2}-?\d{4}\b", value) or re.search(r"\b(?:\d[ -]*?){9,19}\b", value):
+        return "[sensitive value redacted]"
+    return value
+
+
+def _redact_identity(value: str) -> str:
+    if _redact(value) != value or re.search(
+        r"\b(?=[A-Za-z0-9-]{6,24}\b)(?=[A-Za-z0-9-]*[A-Za-z])(?=[A-Za-z0-9-]*\d)"
+        r"[A-Za-z0-9-]+\b",
+        value,
+    ):
         return "[sensitive value redacted]"
     return value
 

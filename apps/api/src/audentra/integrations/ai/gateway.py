@@ -17,6 +17,8 @@ from audentra.infrastructure.documents.processing import (
 
 from .edward_safety import guarded_response, normalize_page_context, sanitize_prose
 from .extraction import (
+    DOCUMENT_EXTRACTION_JSON_SCHEMA,
+    adapt_legacy_identity_extraction,
     evidence_classification,
     evidence_mismatch,
     infer_type_from_evidence,
@@ -201,9 +203,25 @@ class StudentAIGateway:
             )
             if expected_document_type == "transcript"
             else (
-                DocumentPreprocessingOptions(max_image_dimension=2_048, jpeg_quality=88)
-                if mime_type in {"image/jpeg", "image/png"}
-                else None
+                DocumentPreprocessingOptions(
+                    max_text_characters=12_000,
+                    max_text_pages=2,
+                    max_image_pages=2,
+                    # A two-sided identity scan needs both faces. Keep the PDF
+                    # render at the OCR-safe 1400px baseline: OpenAI's high-
+                    # detail path normalizes both 1024px and 1400px A4 pages to
+                    # the same six 512px tiles, so lowering it would lose detail
+                    # without saving input tokens. Direct image uploads retain
+                    # the higher-resolution normalization path.
+                    max_image_dimension=1_400 if mime_type == "application/pdf" else 2_048,
+                    jpeg_quality=88,
+                )
+                if expected_document_type == "identity"
+                else (
+                    DocumentPreprocessingOptions(max_image_dimension=2_048, jpeg_quality=88)
+                    if mime_type in {"image/jpeg", "image/png"}
+                    else None
+                )
             )
         )
         prepared = await preprocess_student_document(content, mime_type, options)
@@ -274,8 +292,11 @@ class StudentAIGateway:
                 },
             ),
         )
+        parsed = adapt_legacy_identity_extraction(
+            parse_extraction_json(message_content(payload)), expected_document_type
+        )
         result = normalize_extraction(
-            parse_extraction_json(message_content(payload)),
+            parsed,
             str(payload.get("model") or runtime.model),
             evidence_type,
             provider,
@@ -608,11 +629,15 @@ class StudentAIGateway:
             "model": runtime.model,
             "temperature": 0,
             "max_tokens": runtime.max_output_tokens,
-            "response_format": {"type": "json_object"},
-            "reasoning": {
-                "max_tokens": self._settings.document_reasoning_tokens,
-                "exclude": True,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "student_document_extraction",
+                    "strict": True,
+                    "schema": DOCUMENT_EXTRACTION_JSON_SCHEMA,
+                },
             },
+            "provider": {"require_parameters": True},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": content},

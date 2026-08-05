@@ -1,6 +1,7 @@
 import pytest
 
 from audentra.integrations.ai.extraction import (
+    adapt_legacy_identity_extraction,
     evidence_classification,
     evidence_mismatch,
     infer_type_from_evidence,
@@ -55,6 +56,133 @@ def test_normalizes_and_redacts_untrusted_fields() -> None:
     assert result["visualRegions"][0]["width"] == pytest.approx(0.2)
 
 
+@pytest.mark.parametrize(
+    ("metadata", "sensitive_keys"),
+    [
+        (
+            {
+                "date_of_birth": "2000-01-01",
+                "document_number": "DOC-123456",
+                "expiry_date": "2030-01-01",
+                "father_name": "Parent One",
+                "gender": "F",
+                "identity_card_number": "CARD-654321",
+                "issued_by": "Civil Registry",
+                "mother_name": "Parent Two",
+                "name": "Ada Example",
+                "nationality": "Turkish",
+            },
+            {"document_number", "identity_card_number"},
+        ),
+        (
+            {
+                "date_of_birth": "2000-01-01",
+                "document_number": "DOC-123456",
+                "father_name": "Parent One",
+                "gender": "F",
+                "identity_number": "10000000146",
+                "issued_by": "Civil Registry",
+                "mother_name": "Parent Two",
+                "name": "Ada Example",
+                "nationality": "Turkish",
+                "valid_until": "2030-01-01",
+            },
+            {"document_number", "identity_number"},
+        ),
+    ],
+)
+def test_adapts_production_identity_metadata_wrapper_without_identifier_fields(
+    metadata: dict[str, str], sensitive_keys: set[str]
+) -> None:
+    warning = "Sensitive identity numbers were not retained for student review."
+    adapted = adapt_legacy_identity_extraction(
+        {"metadata": metadata, "warning": warning}, "identity"
+    )
+    result = normalize_extraction(adapted, "test/model")
+
+    assert result["documentType"] == "identity"
+    assert result["studentName"] == "Ada Example"
+    assert result["institutionName"] == "Civil Registry"
+    assert result["warnings"] == [warning]
+    field_keys = {field["key"] for field in result["fields"]}
+    assert field_keys.isdisjoint(sensitive_keys)
+    assert {"date_of_birth", "name", "nationality"} <= field_keys
+    assert not any(value in str(result) for value in ("DOC-123456", "CARD-654321", "10000000146"))
+
+
+def test_canonical_identity_fields_drop_document_identifier_aliases() -> None:
+    result = normalize_extraction(
+        {
+            "documentType": "identity",
+            "summary": "Identity number 100 000 001 46 was visible.",
+            "studentName": "Ada Example 100-000-001-46",
+            "institutionName": "Registry AB1234567",
+            "fields": [
+                {
+                    "key": "governmentIdNumber",
+                    "label": "Government ID number",
+                    "value": "ID-123",
+                },
+                {"key": "passport_no", "label": "Passport no", "value": "P-456"},
+                {
+                    "key": "tc_kimlik_numarasi",
+                    "label": "TC Kimlik Numarasi",
+                    "value": "10000000146",
+                },
+                {"key": "nationality", "label": "Nationality", "value": "Turkish"},
+                {
+                    "key": "reference",
+                    "label": "Reference",
+                    "value": "AB1234567",
+                },
+            ],
+            "warnings": [
+                "Identity number 100 000 001 46 requires manual review.",
+                "Passport AB1234567 was visible.",
+            ],
+        },
+        "test/model",
+    )
+
+    assert result["summary"] == (
+        "Identity document details were extracted and are ready for review."
+    )
+    assert result["studentName"] == "[sensitive value redacted]"
+    assert result["institutionName"] == "[sensitive value redacted]"
+    assert result["fields"] == [
+        {"key": "nationality", "label": "Nationality", "value": "Turkish", "confidence": 0.0}
+    ]
+    assert result["warnings"] == [
+        "[sensitive value redacted]",
+        "[sensitive value redacted]",
+    ]
+
+
+def test_legacy_identity_adapter_discards_unexpected_metadata_fields() -> None:
+    adapted = adapt_legacy_identity_extraction(
+        {
+            "metadata": {
+                "name": "Ada Example",
+                "nationality": "Turkish",
+                "signature": "raw-signature-data",
+                "diagnosis": "private diagnosis",
+                "account_number": "ACCT-123",
+                "biometric_template": "private-biometric-data",
+                "unexpected": "untrusted extra value",
+            },
+            "warning": "Review the extracted values.",
+        },
+        "identity",
+    )
+
+    assert {field["key"] for field in adapted["fields"]} == {"name", "nationality"}
+    assert "raw-signature-data" not in str(adapted)
+    assert "private diagnosis" not in str(adapted)
+    assert "ACCT-123" not in str(adapted)
+    assert "private-biometric-data" not in str(adapted)
+    assert "untrusted extra value" not in str(adapted)
+
+
 def test_conservation_merge_never_drops_distinct_courses() -> None:
     first = normalize_extraction(
         {"documentType": "transcript", "courses": [{"title": "Math", "confidence": 0.8}]},
@@ -80,8 +208,15 @@ def test_useful_extraction_rejects_expected_document_type_mismatch() -> None:
         {"documentType": "other", "fields": [], "courses": []},
         "identity",
     )
+    assert not useful_extraction(
+        {"documentType": "identity", "fields": [], "courses": []}, "identity"
+    )
     assert useful_extraction(
-        {"documentType": "identity", "fields": [], "courses": []},
+        {
+            "documentType": "identity",
+            "fields": [{"key": "nationality", "label": "Nationality", "value": "Turkish"}],
+            "courses": [],
+        },
         "identity",
     )
     result = evidence_mismatch("ferpa", "transcript")
