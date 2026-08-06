@@ -41,6 +41,7 @@ from audentra.integrations.ai.edward_safety import (
     guarded_response,
     normalize_response,
 )
+from audentra.integrations.ai.extraction import match_document_to_student_context
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .platform_repository import PostgresPlatformRepository
@@ -176,6 +177,110 @@ def _campus_life_summary(value: Mapping[str, Any]) -> JsonDict:
             if (item := _mapping(raw))
         ],
     }
+
+
+def _student_document_context(
+    profile: Mapping[str, Any],
+    onboarding: Mapping[str, Any],
+    requirements: Mapping[str, Any],
+) -> JsonDict:
+    """Build bounded, authenticated-student candidates for local matching.
+
+    Existing values are deliberately excluded. Only missing field names and
+    actionable upload requirements are retained, and this object never leaves
+    the application process.
+    """
+
+    candidates: list[JsonDict] = []
+    safe_profile_fields = {
+        "preferredName": profile.get("preferredName"),
+        "pronouns": profile.get("pronouns"),
+        "mobilePhone": profile.get("mobilePhone"),
+    }
+    missing_profile_fields = [
+        key for key, value in safe_profile_fields.items() if value in (None, "")
+    ]
+    if missing_profile_fields:
+        candidates.append(
+            {
+                "targetType": "profile",
+                "targetId": "profile",
+                "title": "Your profile",
+                "fieldKeys": missing_profile_fields,
+                "href": "/profile",
+            }
+        )
+
+    if onboarding.get("status") != "completed":
+        onboarding_data = _mapping(onboarding.get("data"))
+        onboarding_fields = (
+            "firstName",
+            "lastName",
+            "preferredName",
+            "personalEmail",
+            "mobilePhone",
+            "citizenshipStatus",
+            "streetAddress",
+            "city",
+            "stateOrProvince",
+            "postalCode",
+            "country",
+            "residencyVerificationPath",
+        )
+        missing_onboarding_fields = [
+            key for key in onboarding_fields if onboarding_data.get(key) in (None, "", [])
+        ]
+        if missing_onboarding_fields:
+            candidates.append(
+                {
+                    "targetType": "onboarding",
+                    "targetId": "about_you",
+                    "title": "Onboarding profile details",
+                    "fieldKeys": missing_onboarding_fields,
+                    "href": "/onboarding",
+                }
+            )
+
+    document_types = {
+        "identity": "identity",
+        "transcript": "transcript",
+        "financial_aid": "financial_aid",
+        "health": "immunization",
+        "consent": "ferpa",
+        "residency": "residency",
+    }
+    for raw in _sequence(requirements.get("items"))[:64]:
+        requirement = _mapping(raw)
+        if (
+            requirement.get("submissionType") != "document"
+            or requirement.get("interactionType") != "upload_file"
+            or requirement.get("status") not in {"ready", "in_progress", "rejected"}
+        ):
+            continue
+        category = requirement.get("documentCategory")
+        if not isinstance(category, str):
+            configured = _sequence(
+                _mapping(requirement.get("inputConfig")).get("documentCategories")
+            )
+            category = next((item for item in configured if isinstance(item, str)), None)
+        expected_type = document_types.get(str(category))
+        if expected_type is None:
+            continue
+        requirement_id = requirement.get("id")
+        if not isinstance(requirement_id, str):
+            continue
+        slug = str(requirement.get("slug") or requirement_id)
+        candidates.append(
+            {
+                "targetType": "requirement",
+                "targetId": requirement_id,
+                "title": str(requirement.get("title") or "Enrollment document"),
+                "fieldKeys": [],
+                "expectedDocumentType": expected_type,
+                "href": f"/enrollment/requirements/{slug}",
+            }
+        )
+    return {"version": 1, "candidates": candidates[:32]}
 
 
 class ObjectStorage(Protocol):
@@ -1047,6 +1152,23 @@ class PostgresPlatformService:
                     "The requirement was not advanced automatically."
                 )
                 extraction["warnings"] = [warning, *extraction.get("warnings", [])][:12]
+            if extraction.get("status") == "completed":
+                try:
+                    profile, onboarding, requirements = await asyncio.gather(
+                        self.repository.portal.get_student_profile(auth),
+                        self.repository.portal.get_student_onboarding(auth),
+                        self.repository.portal.get_student_requirements(auth),
+                    )
+                    extraction["contextMatches"] = match_document_to_student_context(
+                        extraction,
+                        _student_document_context(profile, onboarding, requirements),
+                    )
+                except Exception:
+                    extraction["contextMatches"] = []
+                    extraction.setdefault("warnings", []).append(
+                        "The document was extracted, but automatic record matching is awaiting "
+                        "staff review."
+                    )
         except BaseException as error:
             failure = classify_extraction_failure(error)
             LOGGER.warning(

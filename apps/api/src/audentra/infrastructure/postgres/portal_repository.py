@@ -1652,53 +1652,122 @@ class PostgresPortalRepository:
                     "The document processing state changed before completion",
                 )
             updated = dict(row)
-            required_code = {
-                "identity": "identity_document",
-                "transcript": "official_transcript",
-                "financial_aid": "financial_aid_verification",
-                "health": "immunization_record",
-            }.get(str(updated["category"]))
             classification_matches = (
                 not updated.get("requirement_id")
                 or self._category_for_document_type(str(extraction_data.get("documentType")))
                 == updated["category"]
             )
-            if required_code and completed and classification_matches:
-                if updated.get("requirement_id"):
-                    await connection.execute(
-                        text(
-                            """
-                            UPDATE student_requirement sr SET status='under_review',
-                              progress_percent=80, version=sr.version+1, updated_at=NOW()
-                            FROM enrollment_journey j WHERE sr.tenant_id=:tenant_id
-                              AND sr.journey_id=j.id AND j.student_id=:student_id
-                              AND sr.id=:requirement_id
-                            """
+            linked_requirement: Mapping[str, Any] | None = None
+            candidate_requirement_ids: list[str] = []
+            if completed and classification_matches and updated.get("requirement_id"):
+                candidate_requirement_ids.append(str(updated["requirement_id"]))
+            if completed and not updated.get("requirement_id"):
+                candidate_requirement_ids.extend(
+                    str(match.get("targetId"))
+                    for match in _list(extraction_data.get("contextMatches"))
+                    if isinstance(match, Mapping)
+                    and match.get("targetType") == "requirement"
+                    and match.get("status") == "sufficient"
+                    and isinstance(match.get("targetId"), str)
+                )
+            for requirement_id in dict.fromkeys(candidate_requirement_ids):
+                requirement_result = await connection.execute(
+                    text(
+                        """
+                        SELECT sr.id, sr.status, rdv.code, rdv.title
+                        FROM student_requirement sr
+                        JOIN enrollment_journey journey
+                          ON journey.id=sr.journey_id AND journey.tenant_id=sr.tenant_id
+                        JOIN requirement_definition_version rdv
+                          ON rdv.id=sr.requirement_definition_version_id
+                         AND rdv.tenant_id=sr.tenant_id
+                        WHERE sr.tenant_id=:tenant_id
+                          AND journey.student_id=:student_id
+                          AND sr.id=:requirement_id
+                          AND sr.retired_at IS NULL
+                          AND rdv.submission_type='document'
+                          AND rdv.interaction_type='upload_file'
+                        LIMIT 1 FOR UPDATE OF sr
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "requirement_id": requirement_id,
+                    },
+                )
+                candidate = requirement_result.mappings().first()
+                if candidate is not None:
+                    linked_requirement = dict(candidate)
+                    break
+
+            requirement_transitioned = False
+            if linked_requirement is not None:
+                linked_requirement_id = str(linked_requirement["id"])
+                requirement_update = await connection.execute(
+                    text(
+                        """
+                        UPDATE student_requirement SET status='under_review',
+                          progress_percent=LEAST(80, GREATEST(progress_percent, 80)),
+                          version=version+1, updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:requirement_id
+                          AND status IN ('ready','in_progress','rejected')
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "requirement_id": linked_requirement_id,
+                    },
+                )
+                requirement_transitioned = requirement_update.mappings().first() is not None
+                for raw_match in _list(extraction_data.get("contextMatches")):
+                    if isinstance(raw_match, dict):
+                        raw_match["applied"] = (
+                            raw_match.get("targetType") == "requirement"
+                            and raw_match.get("targetId") == linked_requirement_id
+                            and requirement_transitioned
+                        )
+                linked_document = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE document_record SET
+                          requirement_id=COALESCE(requirement_id, :requirement_id),
+                          extraction=CAST(:extraction AS jsonb), updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND student_id=:student_id
+                          AND id=:document_id
+                        RETURNING {DOCUMENT_SELECT}
+                        """
+                    ),
+                    {
+                        "requirement_id": linked_requirement_id,
+                        "extraction": _json(extraction_data),
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "document_id": document_id,
+                    },
+                )
+                linked_row = linked_document.mappings().first()
+                if linked_row is not None:
+                    updated = dict(linked_row)
+                if requirement_transitioned:
+                    await self._insert_student_message(
+                        connection,
+                        auth,
+                        subject=f"{linked_requirement['title']} submitted for review",
+                        body=(
+                            "Your document matched this enrollment task. Your submission is "
+                            "complete for now and the enrollment team will make the official "
+                            "decision."
                         ),
-                        {
-                            "tenant_id": auth.tenant_id,
-                            "student_id": auth.student_id,
-                            "requirement_id": updated["requirement_id"],
-                        },
-                    )
-                else:
-                    await connection.execute(
-                        text(
-                            """
-                            UPDATE student_requirement sr SET status='under_review',
-                              progress_percent=80, version=sr.version+1, updated_at=NOW()
-                            FROM requirement_definition_version rdv, enrollment_journey j
-                            WHERE sr.tenant_id=:tenant_id
-                              AND sr.requirement_definition_version_id=rdv.id
-                              AND sr.journey_id=j.id AND j.student_id=:student_id
-                              AND rdv.code=:requirement_code
-                            """
+                        kind="requirement_under_review",
+                        href=(
+                            "/enrollment/requirements/"
+                            + REQUIREMENT_SLUGS.get(
+                                str(linked_requirement["code"]),
+                                str(linked_requirement["code"]).replace("_", "-"),
+                            )
                         ),
-                        {
-                            "tenant_id": auth.tenant_id,
-                            "student_id": auth.student_id,
-                            "requirement_code": required_code,
-                        },
                     )
             automatic_transcript = (
                 updated["category"] == "transcript"
@@ -1762,6 +1831,11 @@ class PostgresPortalRepository:
                         "student_id": auth.student_id,
                     },
                 )
+            work_item_created = False
+            if completed:
+                work_item_created = await self._ensure_document_review_work_item(
+                    connection, auth, updated
+                )
             await self._insert_audit(
                 connection,
                 auth,
@@ -1777,6 +1851,8 @@ class PostgresPortalRepository:
                     "failureCode": extraction_data.get("failureCode"),
                     "retryable": extraction_data.get("retryable"),
                     "automaticallyProjectedTranscript": automatic_transcript,
+                    "requirementTransitionedToReview": requirement_transitioned,
+                    "staffWorkItemCreated": work_item_created,
                 },
             )
             await self._insert_outbox(
@@ -1793,6 +1869,12 @@ class PostgresPortalRepository:
                     "extractionStatus": extraction_data.get("status"),
                     "failureCode": extraction_data.get("failureCode"),
                     "retryable": extraction_data.get("retryable"),
+                    "requirementId": (
+                        str(updated["requirement_id"])
+                        if updated.get("requirement_id") is not None
+                        else None
+                    ),
+                    "staffReviewQueued": completed,
                 },
             )
             document = _map_document(updated)
@@ -4484,6 +4566,92 @@ class PostgresPortalRepository:
                 "href": href,
             },
         )
+
+    async def _ensure_document_review_work_item(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        document: Mapping[str, Any],
+    ) -> bool:
+        """Materialize one durable staff task for a reviewable document.
+
+        The unique source index also protects the lazy staff-action-center
+        reconciler, so either path may run first without creating duplicates.
+        """
+
+        category = str(document.get("category") or "other")
+        component, priority = (
+            ("Financial Aid", "urgent")
+            if category == "financial_aid"
+            else (("Student Health", "high") if category == "health" else ("Registrar", "high"))
+        )
+        assignee_result = await connection.execute(
+            text(
+                """
+                SELECT id FROM staff_member
+                WHERE tenant_id=:tenant_id AND active=true
+                ORDER BY CASE WHEN component=:component THEN 0 ELSE 1 END,
+                         display_name, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": auth.tenant_id, "component": component},
+        )
+        assignee = assignee_result.mappings().first()
+        document_id = str(document["id"])
+        work_item_id = str(uuid4())
+        inserted = await connection.execute(
+            text(
+                """
+                INSERT INTO staff_work_item (
+                  id, tenant_id, student_id, key, title, description,
+                  status, priority, work_type, component, due_at,
+                  escalated, assignee_id, source_type, source_id, version
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :key, :title,
+                  'Verify the stored original, extracted evidence, and proposed record matches.',
+                  'todo', :priority, 'document_review', :component,
+                  NOW() + INTERVAL '2 days', false, :assignee_id,
+                  'document', :document_id, 1
+                )
+                ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": work_item_id,
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
+                "title": f"Review {document['file_name']}",
+                "priority": priority,
+                "component": component,
+                "assignee_id": assignee["id"] if assignee is not None else None,
+                "document_id": document_id,
+            },
+        )
+        if inserted.mappings().first() is None:
+            return False
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_work_log (
+                  id, tenant_id, work_item_id, actor_type, actor_id,
+                  actor_name, action, message, occurred_at
+                ) VALUES (
+                  :id, :tenant_id, :work_item_id, 'system', NULL,
+                  'Audentra workflow', 'created',
+                  'Created when the student document entered staff review.', NOW()
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": auth.tenant_id,
+                "work_item_id": work_item_id,
+            },
+        )
+        return True
 
     async def _complete_requirement(
         self, connection: AsyncConnection, auth: AuthContext, requirement_code: str

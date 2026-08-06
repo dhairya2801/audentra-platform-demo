@@ -5,6 +5,7 @@ from audentra.integrations.ai.extraction import (
     evidence_classification,
     evidence_mismatch,
     infer_type_from_evidence,
+    match_document_to_student_context,
     merge_transcript_extractions,
     normalize_course_exemptions,
     normalize_extraction,
@@ -54,6 +55,59 @@ def test_normalizes_and_redacts_untrusted_fields() -> None:
     assert result["fields"][0]["confidence"] == 1
     assert result["courses"][0]["credits"] == 20
     assert result["visualRegions"][0]["width"] == pytest.approx(0.2)
+
+
+def test_document_context_matching_ignores_provider_authored_target_ids() -> None:
+    extraction = normalize_extraction(
+        {
+            "documentType": "transcript",
+            "summary": "Transcript extracted.",
+            "studentName": "Ada Example",
+            "institutionName": "Example Academy",
+            "issueDate": "2026-06-01",
+            "academicTerm": "Spring 2026",
+            "fields": [],
+            "courses": [
+                {
+                    "sourceCode": "MATH-101",
+                    "title": "Calculus",
+                    "credits": 3,
+                    "grade": "A",
+                    "score": None,
+                    "term": "Spring 2026",
+                    "confidence": 0.97,
+                }
+            ],
+            "visualRegions": [],
+            "warnings": [],
+            "contextMatches": [
+                {
+                    "targetType": "requirement",
+                    "targetId": "provider-invented-requirement",
+                    "status": "sufficient",
+                }
+            ],
+        },
+        "test/model",
+    )
+    context = {
+        "candidates": [
+            {
+                "targetType": "requirement",
+                "targetId": "server-owned-requirement",
+                "title": "Submit your transcript",
+                "expectedDocumentType": "transcript",
+                "fieldKeys": [],
+                "href": "/enrollment/requirements/transcript-upload",
+            }
+        ]
+    }
+
+    assert "contextMatches" not in extraction
+    matches = match_document_to_student_context(extraction, context)
+    assert [match["targetId"] for match in matches] == ["server-owned-requirement"]
+    assert matches[0]["status"] == "sufficient"
+    assert matches[0]["reviewRequired"] is True
 
 
 @pytest.mark.parametrize(

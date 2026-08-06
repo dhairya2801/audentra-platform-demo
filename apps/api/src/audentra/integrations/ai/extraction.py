@@ -358,6 +358,100 @@ def normalize_extraction(
     }
 
 
+def match_document_to_student_context(
+    extraction: Mapping[str, Any],
+    context: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Deterministically match extracted evidence to server-owned candidates.
+
+    Account state is intentionally never sent to an external model. The model
+    only extracts the document contract; this local policy joins that result to
+    authenticated-student candidates, so model-authored target identifiers can
+    never choose a record or advance a task.
+    """
+
+    if not isinstance(context, Mapping) or extraction.get("status") != "completed":
+        return []
+    document_type = str(extraction.get("documentType") or "other")
+    fields = [item for item in _as_list(extraction.get("fields")) if isinstance(item, Mapping)]
+    courses = [item for item in _as_list(extraction.get("courses")) if isinstance(item, Mapping)]
+    extracted_field_keys = {
+        _canonical_metadata_key(field.get("key")) for field in fields if field.get("key")
+    }
+    confidence_values = [
+        _normalized_number(field.get("confidence")) for field in fields if field.get("key")
+    ]
+    evidence_keys = {str(field.get("key")) for field in fields if field.get("key")}
+    evidence_keys.add("document_type")
+    if extraction.get("studentName"):
+        evidence_keys.add("student_name")
+    if extraction.get("institutionName"):
+        evidence_keys.add("institution_name")
+    if extraction.get("issueDate"):
+        evidence_keys.add("issue_date")
+    if extraction.get("academicTerm"):
+        evidence_keys.add("academic_term")
+    if courses:
+        evidence_keys.add("courses")
+
+    matches: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in _as_list(context.get("candidates"))[:32]:
+        if not isinstance(raw, Mapping):
+            continue
+        target_type = str(raw.get("targetType"))
+        target_id = str(raw.get("targetId"))
+        key = (target_type, target_id)
+        if (
+            target_type not in {"profile", "onboarding", "requirement"}
+            or not target_id
+            or key in seen
+        ):
+            continue
+        expected_type = raw.get("expectedDocumentType")
+        if isinstance(expected_type, str) and expected_type and expected_type != document_type:
+            continue
+        allowed_fields = [item for item in _as_list(raw.get("fieldKeys")) if isinstance(item, str)]
+        matched_fields = [
+            item for item in allowed_fields if _canonical_metadata_key(item) in extracted_field_keys
+        ][:24]
+        requirement_is_sufficient = (
+            target_type == "requirement"
+            and isinstance(expected_type, str)
+            and expected_type == document_type
+            and useful_extraction(extraction, expected_type)
+        )
+        if target_type != "requirement" and not matched_fields:
+            continue
+        if target_type == "requirement" and not requirement_is_sufficient:
+            continue
+        matched_evidence = sorted(evidence_keys)[:24]
+        confidence = max(confidence_values, default=0.85 if requirement_is_sufficient else 0.7)
+        status = "sufficient" if requirement_is_sufficient else "partial"
+        seen.add(key)
+        matches.append(
+            {
+                "targetType": target_type,
+                "targetId": target_id,
+                "title": _safe_text(raw.get("title"), "Student record", 180),
+                "status": status,
+                "matchedFieldKeys": list(dict.fromkeys(matched_fields)),
+                "evidenceKeys": list(dict.fromkeys(matched_evidence)),
+                "confidence": confidence,
+                "rationale": (
+                    "The extracted document type and evidence satisfy the student's upload "
+                    "submission; an official staff decision is still required."
+                    if requirement_is_sufficient
+                    else "The document contains suggested values for missing, unverified fields."
+                ),
+                "applied": False,
+                "reviewRequired": True,
+                "href": (str(raw["href"])[:500] if isinstance(raw.get("href"), str) else None),
+            }
+        )
+    return matches
+
+
 def normalize_visual_regions(value: object) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []

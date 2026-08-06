@@ -1086,6 +1086,10 @@ describe("contract-compatible development preview API", () => {
     assert.equal(completedBootstrap.payload.rewards.lifetimePoints, 180);
     assert.equal(completedBootstrap.payload.rewards.bookstoreCreditCents, 180);
 
+    const completedDashboard = await api(baseUrl, "/v1/student/dashboard");
+    assert.equal(completedDashboard.response.status, 200);
+    assert.ok(completedDashboard.payload.journey.requirements.length > 0);
+
     const signedDocumentList = await api(
       baseUrl,
       "/v1/student/documents",

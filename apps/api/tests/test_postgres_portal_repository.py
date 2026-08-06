@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime, timedelta
@@ -418,6 +419,247 @@ def test_document_upload_authorizes_against_current_published_definition() -> No
         "student_id": AUTH.student_id,
         "requirement_id": requirement_id,
     }
+
+
+def test_sufficient_document_match_enters_review_without_completing_or_rewarding() -> None:
+    now = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+    document_id = "20000000-0000-7000-8000-000000000030"
+    requirement_id = "20000000-0000-7000-8000-000000000031"
+
+    def document_row(parameters: Mapping[str, Any], *, linked: bool = False) -> Mapping[str, Any]:
+        return {
+            "id": document_id,
+            "requirement_id": requirement_id if linked else None,
+            "file_name": "identity.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 512,
+            "category": "identity",
+            "processing_mode": "agentic",
+            "status": parameters.get("status", "needs_review"),
+            "storage_key": "tenant/student/identity.pdf",
+            "sha256": "a" * 64,
+            "extraction": json.loads(str(parameters["extraction"])),
+            "created_at": now,
+        }
+
+    work_item_insertions = 0
+
+    def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        nonlocal work_item_insertions
+        if "UPDATE document_record SET status=:status" in sql:
+            return [document_row(parameters)]
+        if "SELECT sr.id, sr.status, rdv.code, rdv.title" in sql:
+            return [
+                {
+                    "id": requirement_id,
+                    "status": "ready",
+                    "code": "identity_document",
+                    "title": "Provide identity documentation",
+                }
+            ]
+        if "UPDATE student_requirement SET status='under_review'" in sql:
+            return [{"id": requirement_id}]
+        if "requirement_id=COALESCE(requirement_id, :requirement_id)" in sql:
+            return [document_row(parameters, linked=True)]
+        if "SELECT id FROM staff_member" in sql:
+            return [{"id": "10000000-0000-7000-8000-000000000901"}]
+        if "INSERT INTO staff_work_item" in sql:
+            work_item_insertions += 1
+            return [{"id": parameters["id"]}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+    result = asyncio.run(
+        repository.complete_student_document_extraction(
+            AUTH,
+            document_id,
+            {
+                "status": "completed",
+                "documentType": "identity",
+                "summary": "Identity evidence extracted.",
+                "studentName": "Ada Example",
+                "institutionName": "Civil Registry",
+                "issueDate": "2026-06-01",
+                "academicTerm": None,
+                "fields": [
+                    {
+                        "key": "full_name",
+                        "label": "Full name",
+                        "value": "Ada Example",
+                        "confidence": 0.98,
+                    }
+                ],
+                "courses": [],
+                "visualRegions": [],
+                "warnings": [],
+                "model": "test/model",
+                "provider": "openrouter",
+                "processedAt": "2028-01-15T12:00:00Z",
+                "verifiedAt": None,
+                "contextMatches": [
+                    {
+                        "targetType": "requirement",
+                        "targetId": requirement_id,
+                        "title": "Provide identity documentation",
+                        "status": "sufficient",
+                        "matchedFieldKeys": [],
+                        "evidenceKeys": ["document_type", "full_name"],
+                        "confidence": 0.98,
+                        "rationale": "The identity evidence is sufficient for review.",
+                        "applied": False,
+                        "reviewRequired": True,
+                        "href": "/enrollment/requirements/identity-document-upload",
+                    }
+                ],
+            },
+            "request-1",
+        )
+    )
+
+    assert result["requirementId"] == requirement_id
+    assert result["status"] == "needs_review"
+    assert result["extraction"]["contextMatches"][0]["applied"] is True
+    statements = [sql for sql, _parameters in engine.connection.calls]
+    requirement_update = next(
+        sql for sql in statements if "UPDATE student_requirement SET status='under_review'" in sql
+    )
+    assert "progress_percent=LEAST(80" in requirement_update
+    assert "completed" not in requirement_update
+    assert not any("student_reward_ledger" in sql for sql in statements)
+    assert any("INSERT INTO student_message" in sql for sql in statements)
+    assert work_item_insertions == 1
+    extraction_event = next(
+        parameters
+        for sql, parameters in engine.connection.calls
+        if "INSERT INTO public.outbox_event" in sql
+        and parameters.get("event_name") == "document.extraction_completed.v1"
+    )
+    assert json.loads(str(extraction_event["payload"]))["data"]["staffReviewQueued"] is True
+
+
+def test_failed_document_extraction_does_not_claim_staff_review_was_queued() -> None:
+    now = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+    document_id = "20000000-0000-7000-8000-000000000032"
+
+    def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "UPDATE document_record SET status=:status" in sql:
+            return [
+                {
+                    "id": document_id,
+                    "requirement_id": None,
+                    "file_name": "unreadable.pdf",
+                    "mime_type": "application/pdf",
+                    "size_bytes": 512,
+                    "category": "other",
+                    "processing_mode": "agentic",
+                    "status": "uploaded",
+                    "storage_key": "tenant/student/unreadable.pdf",
+                    "sha256": "b" * 64,
+                    "extraction": json.loads(str(parameters["extraction"])),
+                    "created_at": now,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+    result = asyncio.run(
+        repository.complete_student_document_extraction(
+            AUTH,
+            document_id,
+            {
+                "status": "failed",
+                "documentType": "other",
+                "summary": "Extraction failed.",
+                "fields": [],
+                "courses": [],
+                "visualRegions": [],
+                "warnings": [],
+                "provider": "local",
+                "model": None,
+                "processedAt": "2028-01-15T12:00:00Z",
+                "verifiedAt": None,
+            },
+            "request-2",
+        )
+    )
+
+    assert result["status"] == "uploaded"
+    assert not any("INSERT INTO staff_work_item" in sql for sql, _ in engine.connection.calls)
+    extraction_event = next(
+        parameters
+        for sql, parameters in engine.connection.calls
+        if "INSERT INTO public.outbox_event" in sql
+        and parameters.get("event_name") == "document.extraction_completed.v1"
+    )
+    assert json.loads(str(extraction_event["payload"]))["data"]["staffReviewQueued"] is False
+
+
+def test_document_review_work_item_creation_is_idempotent() -> None:
+    insert_count = 0
+
+    def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        nonlocal insert_count
+        if "SELECT id FROM staff_member" in sql:
+            return []
+        if "INSERT INTO staff_work_item" in sql:
+            insert_count += 1
+            return [{"id": parameters["id"]}] if insert_count == 1 else []
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+    document = {
+        "id": "20000000-0000-7000-8000-000000000033",
+        "file_name": "record.pdf",
+        "category": "other",
+    }
+
+    async def scenario() -> tuple[bool, bool]:
+        connection = cast(AsyncConnection, engine.connection)
+        return (
+            await repository._ensure_document_review_work_item(connection, AUTH, document),
+            await repository._ensure_document_review_work_item(connection, AUTH, document),
+        )
+
+    assert asyncio.run(scenario()) == (True, False)
+    work_sql = next(
+        sql for sql, _ in engine.connection.calls if "INSERT INTO staff_work_item" in sql
+    )
+    assert "ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING" in work_sql
+
+
+def test_reward_summary_is_authoritative_from_the_student_ledger() -> None:
+    def handler(sql: str, _parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "COALESCE(SUM(ledger.points), 0)" in sql:
+            return [
+                {
+                    "point_name": "Aster Points",
+                    "points_per_usd": 100,
+                    "lifetime_points": 190,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(repository._get_reward_summary(AUTH))
+
+    assert result == {
+        "pointName": "Aster Points",
+        "pointsPerUsd": 100,
+        "lifetimePoints": 190,
+        "bookstoreCreditCents": 190,
+    }
+    reward_sql, parameters = next(
+        (sql, params)
+        for sql, params in engine.connection.calls
+        if "COALESCE(SUM(ledger.points), 0)" in sql
+    )
+    assert "LEFT JOIN student_reward_ledger ledger" in reward_sql
+    assert parameters == {"tenant_id": AUTH.tenant_id, "student_id": AUTH.student_id}
 
 
 def test_generic_requirement_response_commits_evidence_progress_and_idempotency() -> None:

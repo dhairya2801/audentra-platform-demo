@@ -18,6 +18,7 @@ from audentra.infrastructure.postgres import postgres_service as service_module
 from audentra.infrastructure.postgres.postgres_service import (
     PostgresPlatformService,
     PostgresRepositoryBundle,
+    _student_document_context,
 )
 from audentra.infrastructure.storage.s3 import StorageError
 
@@ -822,6 +823,108 @@ def test_internal_extraction_redacts_financial_aid_details_before_persistence() 
     assert result["fields"] == []
     assert result["courses"] == []
     assert result["visualRegions"] == []
+
+
+def test_generic_document_is_locally_matched_to_authenticated_missing_requirement() -> None:
+    rig = _rig()
+    requirement_id = "20000000-0000-7000-8000-000000000041"
+    rig.portal.responses.update(
+        {
+            "get_student_document": {
+                "id": "document-1",
+                "status": "processing",
+                "category": "other",
+                "fileName": "student-id.pdf",
+                "extraction": {"status": "processing"},
+            },
+            "get_student_document_content_reference": {
+                "storageKey": "student-id.pdf",
+                "mimeType": "application/pdf",
+                "fileName": "student-id.pdf",
+            },
+            "get_student_profile": {
+                "preferredName": "Ada",
+                "pronouns": None,
+                "mobilePhone": None,
+            },
+            "get_student_onboarding": {"status": "completed", "data": {}},
+            "get_student_requirements": {
+                "items": [
+                    {
+                        "id": requirement_id,
+                        "slug": "identity-document-upload",
+                        "title": "Provide identity documentation",
+                        "status": "ready",
+                        "submissionType": "document",
+                        "interactionType": "upload_file",
+                        "documentCategory": "identity",
+                        "inputConfig": {},
+                    }
+                ]
+            },
+            "complete_student_document_extraction": lambda _auth, _id, value, _request: value,
+        }
+    )
+    rig.storage.objects["student-id.pdf"] = b"%PDF-source"
+    rig.ai.extraction_results.append(
+        {
+            "status": "completed",
+            "documentType": "identity",
+            "studentName": "Ada Example",
+            "institutionName": "Civil Registry",
+            "issueDate": "2026-06-01",
+            "academicTerm": None,
+            "fields": [
+                {
+                    "key": "full_name",
+                    "label": "Full name",
+                    "value": "Ada Example",
+                    "confidence": 0.96,
+                }
+            ],
+            "courses": [],
+            "visualRegions": [],
+            "warnings": [],
+        }
+    )
+
+    result = cast(
+        dict[str, Any],
+        asyncio.run(
+            rig.service.dispatch(
+                _call(
+                    "internal.process_document_extraction",
+                    path={"documentId": "document-1"},
+                )
+            )
+        ),
+    )
+
+    assert result["contextMatches"][0]["targetId"] == requirement_id
+    assert result["contextMatches"][0]["status"] == "sufficient"
+    extraction_call = next(call for call in rig.ai.calls if call.name == "extract_document")
+    assert "document_context" not in extraction_call.kwargs
+
+
+def test_student_document_context_contains_no_existing_profile_values() -> None:
+    context = _student_document_context(
+        {
+            "preferredName": "Sensitive Existing Name",
+            "pronouns": None,
+            "mobilePhone": "+1 555 0100",
+        },
+        {
+            "status": "in_progress",
+            "data": {"firstName": "Sensitive", "personalEmail": "sensitive@example.test"},
+        },
+        {"items": []},
+    )
+
+    serialized = str(context)
+    assert "Sensitive Existing Name" not in serialized
+    assert "+1 555 0100" not in serialized
+    assert "sensitive@example.test" not in serialized
+    assert context["candidates"][0]["fieldKeys"] == ["pronouns"]
 
 
 def test_internal_extraction_persists_failure_and_skips_ai_for_stale_command(

@@ -636,6 +636,30 @@ export interface ExtractedDocumentVisualRegion {
   confidence: number;
 }
 
+export type StudentDocumentContextTargetType =
+  | "profile"
+  | "onboarding"
+  | "requirement";
+
+/**
+ * A reviewable, account-scoped suggestion produced while a document is parsed.
+ * Target identifiers are accepted only when they were supplied by the server
+ * for the authenticated student; model-authored identifiers are discarded.
+ */
+export interface StudentDocumentContextMatch {
+  targetType: StudentDocumentContextTargetType;
+  targetId: string;
+  title: string;
+  status: "sufficient" | "partial";
+  matchedFieldKeys: string[];
+  evidenceKeys: string[];
+  confidence: number;
+  rationale: string;
+  applied: boolean;
+  reviewRequired: true;
+  href: string | null;
+}
+
 export interface CourseExemptionDecision {
   sourceCourseKey: string;
   sourceCode: string | null;
@@ -707,6 +731,7 @@ export interface StudentDocumentExtraction {
   fields: ExtractedDocumentField[];
   courses?: ExtractedTranscriptCourse[];
   visualRegions?: ExtractedDocumentVisualRegion[];
+  contextMatches?: StudentDocumentContextMatch[];
   warnings: string[];
   model: string | null;
   provider: "openrouter" | "groq" | "local";

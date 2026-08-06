@@ -123,7 +123,9 @@ const prohibitedActivityProperty =
   /(password|token|secret|email|phone|address|government|payment|card|ssn)/i;
 
 export function buildDashboard(state, clock = () => new Date()) {
-  const requirements = state.requirements.map(requirementSummary);
+  const requirements = state.requirements.map((requirement) =>
+    requirementSummary(requirement, state),
+  );
   const completionPercent =
     requirements.length === 0
       ? 0
