@@ -2124,6 +2124,16 @@ export function reviewStaffDocument(
   if (requirement) {
     requirement.status = decision === "accepted" ? "completed" : "rejected";
     requirement.progressPercent = decision === "accepted" ? 100 : 60;
+    if (decision === "accepted") {
+      awardRewards(
+        draft,
+        "requirement_completed",
+        requirement.code,
+        requirement.id,
+        {},
+        now,
+      );
+    }
   }
   if (document.category === "financial_aid") {
     const financialDocument = draft.financials.requiredDocuments.find(
@@ -2145,27 +2155,30 @@ export function reviewStaffDocument(
     staffActorName(draft, staffId),
     now,
   );
-  let notification = null;
-  if (notifyStudent) {
-    notification = {
-      id: randomUUID(),
-      subject:
-        decision === "accepted"
-          ? `${document.fileName} was accepted`
-          : `${document.fileName} needs changes`,
-      body: note,
-      sentAt: now.toISOString(),
-      readAt: null,
-      senderName: `${draft.tenant.shortName} Enrollment Team`,
-    };
-    draft.messages.push(notification);
-  }
+  const notification = {
+    id: randomUUID(),
+    subject:
+      decision === "accepted"
+        ? `${document.fileName} was accepted`
+        : `${document.fileName} needs changes`,
+    body: notifyStudent
+      ? note
+      : decision === "accepted"
+        ? "Your document was reviewed and accepted."
+        : "Your document was reviewed and needs changes. Open Documents for details.",
+    kind: "document_review",
+    href: `/documents?document=${documentId}`,
+    sentAt: now.toISOString(),
+    readAt: null,
+    senderName: `${draft.tenant.shortName} Enrollment Team`,
+  };
+  draft.messages.push(notification);
   draft.portalProjectionVersion += 1;
   refreshJourneyStatus(draft);
   return {
     document: structuredClone(document),
     workItem: mapStaffWorkItem(draft, item),
-    notification: notification ? structuredClone(notification) : null,
+    notification: structuredClone(notification),
   };
 }
 
@@ -3357,6 +3370,11 @@ function safeTrackingId(value, name) {
 
 function requirementSummary(requirement, state) {
   const reward = state ? rewardForRequirement(state, requirement) : null;
+  const storedOrder = Number.isInteger(requirement.order)
+    ? requirement.order
+    : state
+      ? state.requirements.indexOf(requirement) + 1
+      : 1;
   return {
     id: requirement.id,
     code: requirement.code,
@@ -3364,10 +3382,23 @@ function requirementSummary(requirement, state) {
     description: requirement.description,
     status: requirement.status,
     blocking: requirement.blocking,
+    priority: Number.isInteger(requirement.priority) ? requirement.priority : 0,
+    order: Math.max(1, storedOrder),
     dueAt: requirement.dueAt,
     progressPercent: requirement.progressPercent,
     ...(reward ? { reward } : {}),
   };
+}
+
+function requirementInteractionType(requirement) {
+  if (typeof requirement.interactionType === "string") {
+    return requirement.interactionType;
+  }
+  if (requirement.submissionType === "document") return "upload_file";
+  if (requirement.submissionType === "payment") return "payment";
+  if (requirement.submissionType === "appointment") return "scheduling";
+  if (requirement.submissionType === "none") return "information";
+  return "form";
 }
 
 function requirementDetailResponse(requirement, state) {
@@ -3375,7 +3406,11 @@ function requirementDetailResponse(requirement, state) {
     ...requirementSummary(requirement, state),
     slug: requirementSlug(requirement.code),
     journeyId: requirement.journeyId ?? ids.journey,
+    version: requirement.version ?? 1,
     submissionType: requirement.submissionType,
+    flowKind: requirement.flowKind ?? "enrollment",
+    interactionType: requirementInteractionType(requirement),
+    inputConfig: structuredClone(requirement.inputConfig ?? {}),
     documentCategory: documentCategoryForRequirement(requirement.code),
     responsibleOffice: requirement.responsibleOffice,
     dependencyCodes: [...requirement.dependsOnCodes],

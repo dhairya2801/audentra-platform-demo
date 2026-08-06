@@ -1134,6 +1134,10 @@ describe("contract-compatible development preview API", () => {
     assert.equal(identity.journeyId, ids.journey);
     assert.equal(identity.slug, "identity-document-upload");
     assert.equal(identity.submissionType, "document");
+    assert.equal(identity.version, 1);
+    assert.equal(identity.flowKind, "enrollment");
+    assert.equal(identity.interactionType, "upload_file");
+    assert.deepEqual(identity.inputConfig, {});
     assert.equal(identity.documentCategory, "identity");
     assert.equal(identity.responsibleOffice, "Enrollment Documentation");
     assert.deepEqual(identity.dependencyCodes, ["profile_verification"]);

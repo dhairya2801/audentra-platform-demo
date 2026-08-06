@@ -109,6 +109,8 @@ class InMemoryPlatformStore:
                 "subject": "Welcome to your enrollment portal",
                 "body": "Your portal keeps every enrollment action in one place.",
                 "senderName": "Enrollment Services",
+                "kind": "general",
+                "href": None,
                 "sentAt": "2026-07-24T09:00:00.000Z",
                 "readAt": None,
             },
@@ -117,6 +119,8 @@ class InMemoryPlatformStore:
                 "subject": "Your next enrollment step",
                 "body": "Review your admission offer and continue when you are ready.",
                 "senderName": "Admissions Office",
+                "kind": "general",
+                "href": "/offer",
                 "sentAt": "2026-07-24T10:00:00.000Z",
                 "readAt": None,
             },
@@ -349,6 +353,18 @@ class InMemoryPlatformStore:
             "awards": [],
             "requiredDocuments": [],
             "paymentPlans": [],
+            "paymentSchedule": [
+                {
+                    "id": f"{self.dashboard['offer']['id']}:enrollment_deposit",
+                    "kind": "deposit",
+                    "label": "Enrollment deposit",
+                    "amountCents": self.dashboard["offer"]["depositAmountCents"],
+                    "enrollmentFeeCents": 0,
+                    "dueAt": self.dashboard["offer"]["responseDeadline"],
+                    "status": "paid" if self.payments else "due",
+                    "projected": False,
+                }
+            ],
             "sap": {
                 "status": "meeting",
                 "cumulativeGpa": 3.42,
@@ -402,7 +418,7 @@ class InMemoryPlatformStore:
                 "nextAction": {
                     "code": "profile_verification",
                     "label": "Verify your profile",
-                    "href": "/enrollment?requirement=profile_verification",
+                    "href": "/enrollment/requirements/profile-verification",
                 },
                 "requirements": [],
             }
@@ -417,6 +433,8 @@ class InMemoryPlatformStore:
                     "description": "Confirm your personal and contact information.",
                     "status": "ready",
                     "blocking": True,
+                    "priority": 0,
+                    "order": 10,
                     "dueAt": "2026-07-31T12:00:00.000Z",
                     "progressPercent": 0,
                     "submissionType": "form",
@@ -539,6 +557,22 @@ class InMemoryPlatformStore:
                     "updatedAt": FIXED_TIME,
                 }
             )
+            self.messages.insert(
+                0,
+                {
+                    "id": str(uuid4()),
+                    "subject": "Onboarding complete",
+                    "body": (
+                        "Your onboarding checklist is complete. "
+                        "You can continue from your dashboard."
+                    ),
+                    "senderName": "Enrollment Team",
+                    "kind": "onboarding",
+                    "href": "/dashboard",
+                    "sentAt": FIXED_TIME,
+                    "readAt": None,
+                },
+            )
         self.idempotency[replay_key] = _clone(self.onboarding)
         return _clone(self.onboarding)
 
@@ -553,6 +587,29 @@ class InMemoryPlatformStore:
         return {
             "preference": preference,
             "residenceOption": residence,
+            "residencePreferences": list(
+                self.onboarding["data"].get("housingResidencePreferences") or []
+            ),
+            "roomType": self.onboarding["data"].get("housingRoomType"),
+            "bathroomPreference": self.onboarding["data"].get("bathroomPreference"),
+            "roommateMatching": self.onboarding["data"].get("roommateMatching"),
+            "knownRoommateName": self.onboarding["data"].get("knownRoommateName"),
+            "knownRoommateEmail": self.onboarding["data"].get("knownRoommateEmail"),
+            "sleepSchedule": self.onboarding["data"].get("sleepSchedule"),
+            "studyHabits": self.onboarding["data"].get("studyHabits"),
+            "roomNoise": self.onboarding["data"].get("roomNoise"),
+            "cleanliness": self.onboarding["data"].get("cleanliness"),
+            "guestPreference": self.onboarding["data"].get("guestPreference"),
+            "temperaturePreference": self.onboarding["data"].get("temperaturePreference"),
+            "smokeVapeCompatibility": self.onboarding["data"].get("smokeVapeCompatibility"),
+            "substanceFreeHousing": self.onboarding["data"].get("substanceFreeHousing"),
+            "genderInclusiveHousing": self.onboarding["data"].get("genderInclusiveHousing"),
+            "accessibleHousingInformation": self.onboarding["data"].get(
+                "accessibleHousingInformation"
+            ),
+            "livingLearningCommunities": list(
+                self.onboarding["data"].get("livingLearningCommunities") or []
+            ),
             "residences": [],
             "version": self.onboarding["version"],
             "updatedAt": self.onboarding["updatedAt"],
@@ -567,12 +624,72 @@ class InMemoryPlatformStore:
         self.onboarding["data"].update(
             {"housingPreference": preference, "housingResidenceOption": residence}
         )
+        housing_fields = {
+            "residencePreferences": "housingResidencePreferences",
+            "roomType": "housingRoomType",
+            "bathroomPreference": "bathroomPreference",
+            "roommateMatching": "roommateMatching",
+            "knownRoommateName": "knownRoommateName",
+            "knownRoommateEmail": "knownRoommateEmail",
+            "sleepSchedule": "sleepSchedule",
+            "studyHabits": "studyHabits",
+            "roomNoise": "roomNoise",
+            "cleanliness": "cleanliness",
+            "guestPreference": "guestPreference",
+            "temperaturePreference": "temperaturePreference",
+            "smokeVapeCompatibility": "smokeVapeCompatibility",
+            "substanceFreeHousing": "substanceFreeHousing",
+            "genderInclusiveHousing": "genderInclusiveHousing",
+            "accessibleHousingInformation": "accessibleHousingInformation",
+            "livingLearningCommunities": "livingLearningCommunities",
+        }
+        for field, onboarding_field in housing_fields.items():
+            if field in update:
+                self.onboarding["data"][onboarding_field] = update[field]
         self.onboarding["version"] += 1
         self.onboarding["updatedAt"] = FIXED_TIME
-        for requirement in self.requirements:
-            if requirement["code"] == "housing_preference":
-                requirement.update({"status": "completed", "progressPercent": 100})
+        self._mark_requirement_completed("housing_preference")
         return self.get_housing_plan(auth)
+
+    def _mark_requirement_completed(self, requirement_code: str) -> None:
+        completed = False
+        for requirement in self.requirements:
+            if requirement["code"] != requirement_code or requirement["status"] in {
+                "completed",
+                "waived",
+                "not_applicable",
+            }:
+                continue
+            requirement.update({"status": "completed", "progressPercent": 100})
+            completed = True
+        if not completed:
+            return
+        is_deposit = requirement_code == "enrollment_deposit"
+        self.messages.insert(
+            0,
+            {
+                "id": str(uuid4()),
+                "subject": (
+                    "Enrollment deposit received"
+                    if is_deposit
+                    else f"{requirement_code.replace('_', ' ').title()} complete"
+                ),
+                "body": (
+                    "Your enrollment deposit was received and the task is complete."
+                    if is_deposit
+                    else "This enrollment task has been marked complete."
+                ),
+                "senderName": "Enrollment Team",
+                "kind": "payment" if is_deposit else "requirement_completed",
+                "href": (
+                    "/financials"
+                    if is_deposit
+                    else f"/enrollment/requirements/{_requirement_slug(requirement_code)}"
+                ),
+                "sentAt": FIXED_TIME,
+                "readAt": None,
+            },
+        )
 
     def get_requirements(self, auth: AuthContext) -> dict[str, Any]:
         self.authorize(auth)
@@ -899,6 +1016,7 @@ class InMemoryPlatformStore:
             "createdAt": FIXED_TIME,
         }
         self.payments.append(payment)
+        self._mark_requirement_completed("enrollment_deposit")
         self.idempotency[replay_key] = _clone(payment)
         return _clone(payment)
 
@@ -918,6 +1036,7 @@ class InMemoryPlatformStore:
         self.profile.update(changes)
         self.profile["version"] += 1
         self.profile["updatedAt"] = FIXED_TIME
+        self._mark_requirement_completed("profile_verification")
         return _clone(self.profile)
 
     def get_help(self, auth: AuthContext) -> dict[str, Any]:
@@ -1215,6 +1334,8 @@ class InMemoryPlatformStore:
                         update.get("note") or "Enrollment Services updated your preferences."
                     ),
                     "senderName": "Enrollment Team",
+                    "kind": "general",
+                    "href": "/onboarding",
                     "sentAt": FIXED_TIME,
                     "readAt": None,
                 },
@@ -1268,19 +1389,25 @@ class InMemoryPlatformStore:
                 "occurredAt": FIXED_TIME,
             },
         )
-        notification = None
-        if review.get("notifyStudent"):
-            notification = {
-                "id": str(uuid4()),
-                "subject": f"{document['fileName']} was accepted"
+        notification = {
+            "id": str(uuid4()),
+            "subject": f"{document['fileName']} was accepted"
+            if decision == "accepted"
+            else f"{document['fileName']} needs changes",
+            "body": str(review["note"]).strip()
+            if review.get("notifyStudent")
+            else (
+                "Your document was reviewed and accepted."
                 if decision == "accepted"
-                else f"{document['fileName']} needs changes",
-                "body": str(review["note"]).strip(),
-                "senderName": "Enrollment Team",
-                "sentAt": FIXED_TIME,
-                "readAt": None,
-            }
-            self.messages.insert(0, notification)
+                else "Your document was reviewed and needs changes. Open Documents for details."
+            ),
+            "senderName": "Enrollment Team",
+            "kind": "document_review",
+            "href": f"/documents?document={document_id}",
+            "sentAt": FIXED_TIME,
+            "readAt": None,
+        }
+        self.messages.insert(0, notification)
         return {
             "document": _clone(document),
             "workItem": _clone(item),

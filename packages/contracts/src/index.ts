@@ -29,6 +29,8 @@ export interface StudentRequirementSummary {
   description: string;
   status: RequirementStatus;
   blocking: boolean;
+  priority?: number;
+  order?: number;
   dueAt: string | null;
   progressPercent: number;
   reward?: {
@@ -113,7 +115,9 @@ export interface AcceptOfferResponse {
   offerId: string;
   offerStatus: "accepted";
   journeyId: string;
-  journeyStatus: "in_progress";
+  journeyStatus: "in_progress" | "completed";
+  onboardingRequired: boolean;
+  initialRoute: "/onboarding" | "/dashboard";
   projectionVersion: number;
   acceptedAt: string;
 }
@@ -244,6 +248,30 @@ export interface StudentOnboardingData {
   signatureConsent?: boolean;
   signedDocumentIds?: string[];
   depositChoice?: "pay_now" | "pay_later" | "waiver_or_deferral";
+  customFields?: Record<string, string | string[] | boolean>;
+}
+
+export type AboutYouConfigurableField =
+  | "firstName"
+  | "lastName"
+  | "preferredName"
+  | "personalEmail"
+  | "mobilePhone"
+  | "citizenshipStatus"
+  | "streetAddress"
+  | "city"
+  | "stateOrProvince"
+  | "postalCode"
+  | "country"
+  | "residencyVerificationPath";
+
+export interface StudentOnboardingScreenConfiguration {
+  label?: string;
+  title: string;
+  description: string;
+  requiredFields?: AboutYouConfigurableField[];
+  identityQuickUpload?: boolean;
+  fields?: StudentRequirementInputField[];
 }
 
 export interface StudentOnboarding {
@@ -252,6 +280,10 @@ export interface StudentOnboarding {
   currentStep: OnboardingStep;
   completedSteps: OnboardingStep[];
   data: StudentOnboardingData;
+  configurationVersion?: number;
+  screenConfigurations?: Partial<
+    Record<OnboardingStep, StudentOnboardingScreenConfiguration>
+  >;
   version: number;
   completedAt: string | null;
   updatedAt: string;
@@ -271,6 +303,23 @@ export interface CompleteStudentOnboardingInput {
 export interface StudentHousingPlan {
   preference: HousingPreference | null;
   residenceOption: HousingResidenceOption;
+  residencePreferences?: Exclude<HousingResidenceOption, null>[];
+  roomType?: string | null;
+  bathroomPreference?: string | null;
+  roommateMatching?: string | null;
+  knownRoommateName?: string | null;
+  knownRoommateEmail?: string | null;
+  sleepSchedule?: string | null;
+  studyHabits?: string | null;
+  roomNoise?: string | null;
+  cleanliness?: string | null;
+  guestPreference?: string | null;
+  temperaturePreference?: string | null;
+  smokeVapeCompatibility?: string | null;
+  substanceFreeHousing?: boolean | null;
+  genderInclusiveHousing?: boolean | null;
+  accessibleHousingInformation?: boolean | null;
+  livingLearningCommunities?: string[];
   residences: StudentHousingResidence[];
   version: number;
   updatedAt: string;
@@ -292,6 +341,46 @@ export interface UpdateStudentHousingPlanInput {
   expectedVersion: number;
   preference: HousingPreference;
   residenceOption?: Exclude<HousingResidenceOption, null>;
+  residencePreferences?: Exclude<HousingResidenceOption, null>[] | null;
+  roomType?: string | null;
+  bathroomPreference?: string | null;
+  roommateMatching?: string | null;
+  knownRoommateName?: string | null;
+  knownRoommateEmail?: string | null;
+  sleepSchedule?: string | null;
+  studyHabits?: string | null;
+  roomNoise?: string | null;
+  cleanliness?: string | null;
+  guestPreference?: string | null;
+  temperaturePreference?: string | null;
+  smokeVapeCompatibility?: string | null;
+  substanceFreeHousing?: boolean | null;
+  genderInclusiveHousing?: boolean | null;
+  accessibleHousingInformation?: boolean | null;
+  livingLearningCommunities?: string[] | null;
+}
+
+export interface StudentExperienceUpdate {
+  id: string;
+  kind: "onboarding" | "enrollment" | "academics" | "campus_life";
+  title: string;
+  description: string;
+  requirementSlug: string | null;
+  status: "pending" | "deferred";
+  version: number;
+  createdAt: string;
+}
+
+export interface DecideStudentExperienceUpdateInput {
+  action: "handle_now" | "later";
+  expectedVersion: number;
+}
+
+export interface StudentExperienceUpdateDecision {
+  id: string;
+  status: "acknowledged" | "deferred";
+  version: number;
+  requirementSlug: string | null;
 }
 
 export interface StudentBootstrap {
@@ -319,15 +408,60 @@ export interface StudentBootstrap {
   };
   rewards?: StudentRewardSummary;
   unreadMessageCount: number;
+  experienceUpdates: StudentExperienceUpdate[];
   initialRoute: "/onboarding" | "/dashboard";
   generatedAt: string;
 }
 
-export interface StudentRequirementDetail
-  extends StudentRequirementSummary {
+export type StudentRequirementInteractionType =
+  | "information"
+  | "approval"
+  | "form"
+  | "single_select"
+  | "multiple_select"
+  | "selection_flow"
+  | "upload_file"
+  | "signature"
+  | "payment"
+  | "scheduling";
+
+export interface StudentRequirementInputField {
+  id: string;
+  title: string;
+  field_type:
+    | "text"
+    | "email"
+    | "phone"
+    | "date"
+    | "checkbox"
+    | "single_select"
+    | "multiple_select";
+  required: boolean;
+  options?: string[];
+  maximum_selections?: number;
+  when?: { field: string; equals: string };
+}
+
+export interface StudentRequirementInputConfig {
+  options?: string[];
+  maximumSelections?: number;
+  fields?: StudentRequirementInputField[];
+  flow?: StudentRequirementInputField[];
+  signatureProvider?: "built_in" | "docusign";
+  docusignTemplateId?: string;
+  acceptedMimeTypes?: string[];
+  documentCategories?: string[];
+  [key: string]: unknown;
+}
+
+export interface StudentRequirementDetail extends StudentRequirementSummary {
   slug: string;
   journeyId: string;
-  submissionType: "form" | "document" | "payment" | "none";
+  version: number;
+  submissionType: "form" | "document" | "payment" | "appointment" | "none";
+  flowKind: "onboarding" | "enrollment";
+  interactionType: StudentRequirementInteractionType;
+  inputConfig: StudentRequirementInputConfig;
   documentCategory: StudentDocumentCategory | null;
   responsibleOffice: string;
   dependencyCodes: string[];
@@ -348,6 +482,44 @@ export interface StudentRequirementDetail
       validityDays: number | null;
     }>;
   };
+}
+
+export type StudentRequirementResponseValue =
+  | string
+  | number
+  | boolean
+  | string[]
+  | null;
+
+export type StudentRequirementResponsePayload =
+  | { acknowledged: true }
+  | { approved: true }
+  | { values: Record<string, StudentRequirementResponseValue> }
+  | { selectedOption: string }
+  | { selectedOptions: string[] }
+  | {
+      accepted: true;
+      signerName: string;
+      signatureMethod?: "typed" | "drawn";
+    }
+  | { appointmentId: string };
+
+export interface SubmitStudentRequirementResponseInput {
+  expectedVersion: number;
+  response: StudentRequirementResponsePayload;
+}
+
+export interface StudentRequirementResponseRecord {
+  id: string;
+  interactionType: StudentRequirementInteractionType;
+  data: Record<string, unknown>;
+  version: number;
+  submittedAt: string;
+}
+
+export interface SubmitStudentRequirementResponseResult
+  extends StudentRequirementDetail {
+  response: StudentRequirementResponseRecord;
 }
 
 const requirementSlugByCode = {
@@ -398,6 +570,8 @@ export interface StudentMessage {
   subject: string;
   body: string;
   senderName: string;
+  kind?: string;
+  href?: string | null;
   sentAt: string;
   readAt: string | null;
 }
@@ -678,6 +852,10 @@ export interface StaffSignInInput {
   password: string;
 }
 
+export interface StaffSignUpInput extends StaffSignInInput {
+  institutionAccessCode: string;
+}
+
 export interface UpdateStaffWorkItemInput {
   expectedVersion: number;
   status?: StaffWorkItemStatus;
@@ -767,7 +945,11 @@ export interface StaffJourneyBlueprintItem {
   owner: string;
   required: boolean;
   published: boolean;
+  /** Defaults to true for configuration versions published before task activation controls. */
+  active?: boolean;
+  priority?: number;
   order: number;
+  dueOffsetDays?: number | null;
   taskType:
     | "information"
     | "form"
@@ -780,6 +962,18 @@ export interface StaffJourneyBlueprintItem {
     | "payment"
     | "scheduling";
   submissionType: "none" | "form" | "document" | "payment" | "appointment";
+  selectionOptions?: string[];
+  maximumSelections?: number | null;
+  signatureProvider?: "built_in" | "docusign" | null;
+  docusignTemplateId?: string | null;
+  /** @deprecated Read only for configuration versions authored before canonical naming. */
+  signatureTemplateId?: string | null;
+  acceptedMimeTypes?: string[];
+  /** @deprecated Read only for configuration versions authored before canonical naming. */
+  acceptedFileTypes?: string[];
+  documentCategories?: string[];
+  interactionType?: StudentRequirementInteractionType;
+  inputConfig?: StudentRequirementInputConfig;
   points: number;
   studentStep: string | null;
   dependsOn: string[];
@@ -1256,7 +1450,19 @@ export interface FinancialDocumentRequirement {
   description: string;
   status: "not_started" | "submitted" | "under_review" | "verified" | "action_required";
   dueAt: string | null;
+  documentId?: string | null;
   href: string;
+}
+
+export interface FinancialPaymentScheduleItem {
+  id: string;
+  kind: "deposit" | "installment";
+  label: string;
+  amountCents: number;
+  enrollmentFeeCents: number;
+  dueAt: string;
+  status: "paid" | "due" | "projected";
+  projected: boolean;
 }
 
 export interface FinancialAward {
@@ -1287,6 +1493,7 @@ export interface StudentFinancials {
     enrollmentFeeCents: number;
     status: "available" | "enrolled";
   }[];
+  paymentSchedule?: FinancialPaymentScheduleItem[];
   sap: {
     status: "meeting" | "warning" | "probation" | "not_meeting" | "appeal_pending";
     cumulativeGpa: number;
@@ -1314,8 +1521,19 @@ export interface CampusEvent {
   imageAlt?: string | null;
   imageAttribution?: string | null;
   imageSourceUrl?: string | null;
+  advertisementStartsAt?: string | null;
+  advertisementEndsAt?: string | null;
   source?: PortalContentSource | null;
   registrationUrl?: string | null;
+}
+
+export interface StaffPortalMediaUpload {
+  fileName: string;
+  mimeType: "image/jpeg" | "image/png" | "image/webp";
+  sizeBytes: number;
+  sha256: string;
+  publicPath: string;
+  publicUrl: string;
 }
 
 export interface StudentClubSocialLink {

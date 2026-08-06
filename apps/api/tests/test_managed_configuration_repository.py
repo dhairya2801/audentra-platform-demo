@@ -78,6 +78,8 @@ flows:
         description: Confirm your contact details.
         task_type: form
         required: true
+        priority: 85
+        due_days_after_acceptance: 14
         points: 30
 """,
         tenant_slug="aster",
@@ -93,7 +95,35 @@ flows:
     assert tasks[0]["dependsOn"] == []
     assert tasks[0]["points"] == 25
     assert tasks[1]["kind"] == "enrollment"
+    assert tasks[1]["priority"] == 85
+    assert tasks[1]["dueOffsetDays"] == 14
     assert tasks[1]["points"] == 30
+
+
+def test_journey_parser_rejects_dependency_cycles_with_the_cycle_path() -> None:
+    with pytest.raises(ApiError, match="first_task -> second_task -> first_task") as error:
+        parse_managed_configuration(
+            "journeys",
+            """
+tenant: aster
+configuration: journeys
+flows:
+  - id: enrollment
+    kind: enrollment
+    tasks:
+      - id: first_task
+        title: First task
+        description: Depends on the second task.
+        depends_on: [second_task]
+      - id: second_task
+        title: Second task
+        description: Depends on the first task.
+        depends_on: [first_task]
+""",
+            tenant_slug="aster",
+        )
+
+    assert error.value.code == "MANAGED_JOURNEY_DEPENDENCY_CYCLE"
 
 
 def test_journey_parser_preserves_order_activity_and_interaction_configuration() -> None:
@@ -584,6 +614,7 @@ def test_material_change_signature_ignores_reorder_only_changes() -> None:
         "description": "Choose one option.",
         "owner": "Housing",
         "required": True,
+        "priority": 20,
         "dependsOn": [],
         "dueOffsetDays": None,
         "initialProgressPercent": 0,
@@ -594,9 +625,11 @@ def test_material_change_signature_ignores_reorder_only_changes() -> None:
     }
     reordered = {**task, "displayOrder": 90}
     retitled = {**task, "title": "Confirm housing"}
+    reprioritized = {**task, "priority": 80}
 
     assert _journey_task_material_signature(task) == _journey_task_material_signature(reordered)
     assert _journey_task_material_signature(task) != _journey_task_material_signature(retitled)
+    assert _journey_task_material_signature(task) != _journey_task_material_signature(reprioritized)
 
 
 def test_journey_parser_rejects_unknown_dependency() -> None:

@@ -175,6 +175,8 @@ def test_dashboard_maps_rewards_next_action_and_js_rounding() -> None:
                 "description": "Review your profile",
                 "status": "blocked",
                 "blocking": 1,
+                "priority": 10,
+                "display_order": 10,
                 "due_at": NOW,
                 "progress_percent": 40,
                 "reward_points": 25,
@@ -187,6 +189,8 @@ def test_dashboard_maps_rewards_next_action_and_js_rounding() -> None:
                 "description": "Upload the official record",
                 "status": "ready",
                 "blocking": 0,
+                "priority": 90,
+                "display_order": 20,
                 "due_at": None,
                 "progress_percent": 41,
                 "reward_points": 0,
@@ -203,8 +207,9 @@ def test_dashboard_maps_rewards_next_action_and_js_rounding() -> None:
     assert result["journey"]["nextAction"] == {
         "code": "transcript",
         "label": "Upload transcript",
-        "href": "/enrollment?requirement=transcript",
+        "href": "/enrollment/requirements/transcript",
     }
+    assert result["journey"]["requirements"][1]["priority"] == 90
     assert result["journey"]["requirements"][0]["reward"] == {
         "points": 25,
         "earned": True,

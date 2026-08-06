@@ -21,7 +21,9 @@ MIGRATION_LOCK_NAME = "vv-api-schema-migrations"
 MIGRATION_FILE_PATTERN = re.compile(r"^\d+.*\.sql$")
 
 # The Nest migrator hashed the bytes present in its deployment checkout. Some
-# Windows/local databases therefore recorded these CRLF hashes.
+# Windows/local databases therefore recorded CRLF hashes. The historically
+# named registry now also pins every immutable Python-era migration through
+# 0025 so accidental edits fail before deployment.
 LEGACY_MIGRATION_CRLF_SHA256: Mapping[str, str] = {
     "0000_initial.sql": ("ac0d554830a7f53897c21823bca33aef3a1cbf89dada5dc44365c21f6690f5f2"),
     "0001_student_portal_core.sql": (
@@ -78,9 +80,30 @@ LEGACY_MIGRATION_CRLF_SHA256: Mapping[str, str] = {
     "0018_staff_action_center.sql": (
         "a2fad346f1ab632e904228ac89f3b4ddbfb3d44ab7a24d466581960296d83eb6"
     ),
+    "0019_student_inquiries.sql": (
+        "9a4edddd36e4e8c1bbea002ae2161d0e5cbe61a61f3ca2b22a28b9b8dbfcad39"
+    ),
+    "0020_staff_inquiry_replies.sql": (
+        "e494e3e07b0da8c72550ba6ff97cfe85f7b15cb8d8269dca5d95d19b5d44cd25"
+    ),
+    "0021_staff_managed_experience.sql": (
+        "6b0ca14dac08135c615d9721e78fb3da9e7e1b12abce9283373b8f3befc83ec6"
+    ),
+    "0022_staff_journey_flow_builder.sql": (
+        "fa82d9ddee2b0e61e783a0ed97d52bbec16ab3784ca68152554f7b125cc205d3"
+    ),
+    "0023_campus_event_advertising.sql": (
+        "d13e40848d58f04ae465c1f8bb701ca88b309a65aff45927789de200f1471baf"
+    ),
+    "0024_staff_credential_identity.sql": (
+        "9ea9ed3717ab6c26a8dd304922b7c201eb907587d6e7642da3f4dad07f9e14f2"
+    ),
+    "0025_student_experience_priorities.sql": (
+        "a44836c3bdacabd2f5493b34d31e72a7dedeb1f96cb4337e0d2c0a96640e6eef"
+    ),
 }
 
-# Canonical LF hashes for immutable migrations 0000-0018. Git pins these files
+# Canonical LF hashes for immutable migrations through 0025. Git pins these files
 # to LF, and discovery normalizes CRLF before hashing so migration identity is
 # independent of the operating-system checkout.
 LEGACY_MIGRATION_SHA256: Mapping[str, str] = {
@@ -138,6 +161,27 @@ LEGACY_MIGRATION_SHA256: Mapping[str, str] = {
     ),
     "0018_staff_action_center.sql": (
         "22ebf9b5ea4c7591a3d76e7dfc2e0a336b34712744f9ef71cbcc474906fc26f4"
+    ),
+    "0019_student_inquiries.sql": (
+        "68d90e01da44238980113c65afa0f43a0cd8f63c76edb6509888073d556beef3"
+    ),
+    "0020_staff_inquiry_replies.sql": (
+        "6440d2e69ef7390b333151b823af21ccd88f18ccb621d71d742de601d88d9498"
+    ),
+    "0021_staff_managed_experience.sql": (
+        "dd8a0fd2e7d2e58caf967808bac7e2e5defbb774aa71fe8cd2a5025aea23c39d"
+    ),
+    "0022_staff_journey_flow_builder.sql": (
+        "661b8aaefceca07b49af8d855e60bc2061d70ea322938eec406c17af16c7d45f"
+    ),
+    "0023_campus_event_advertising.sql": (
+        "bec93de49de5c590309c5e739d2dcc3d2f938bec16e867e8a1df6ea75d14006c"
+    ),
+    "0024_staff_credential_identity.sql": (
+        "ccdfe59c6a91dece4156abe75984e660b1bf8e464afb89dfb052817d580aa29d"
+    ),
+    "0025_student_experience_priorities.sql": (
+        "223eb6fd65fc4fb83f3cfd217a21f2d2e0736be954073fe10730103737954fa5"
     ),
 }
 

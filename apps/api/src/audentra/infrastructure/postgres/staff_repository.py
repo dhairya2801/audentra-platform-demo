@@ -687,7 +687,7 @@ class PostgresStaffRepository:
         )
         decision = str(_read(review, "decision"))
         note = str(_read(review, "note")).strip()
-        notify_student = bool(_read(review, "notifyStudent", "notify_student"))
+        notification_requested = bool(_read(review, "notifyStudent", "notify_student"))
         notification: dict[str, object] | None = None
 
         async with self._engine.begin() as connection:
@@ -764,6 +764,12 @@ class PostgresStaffRepository:
                     },
                 )
                 if decision == "accepted":
+                    await self._award_requirement_rewards(
+                        connection,
+                        auth=auth,
+                        student_id=str(document["student_id"]),
+                        requirement_id=str(requirement_id),
+                    )
                     await self._refresh_requirement_dependencies(
                         connection,
                         auth,
@@ -803,18 +809,25 @@ class PostgresStaffRepository:
                 action="document_decided",
                 message=f"{verb} {document['file_name']}: {note}",
             )
-            if notify_student:
-                notification = await self._insert_student_message(
-                    connection,
-                    auth=auth,
-                    student_id=str(document["student_id"]),
-                    subject=(
-                        f"{document['file_name']} was accepted"
-                        if decision == "accepted"
-                        else f"{document['file_name']} needs changes"
-                    ),
-                    body=note,
-                )
+            notification = await self._insert_student_message(
+                connection,
+                auth=auth,
+                student_id=str(document["student_id"]),
+                subject=(
+                    f"{document['file_name']} was accepted"
+                    if decision == "accepted"
+                    else f"{document['file_name']} needs changes"
+                ),
+                body=note
+                if notification_requested
+                else (
+                    "Your document was reviewed and accepted."
+                    if decision == "accepted"
+                    else "Your document was reviewed and needs changes. Open Documents for details."
+                ),
+                kind="document_review",
+                href=f"/documents?document={document_id}",
+            )
             await self._insert_audit(
                 connection,
                 auth=auth,
@@ -825,7 +838,8 @@ class PostgresStaffRepository:
                 metadata={
                     "decision": decision,
                     "workItemId": work_item_id,
-                    "notifiedStudent": notify_student,
+                    "notifiedStudent": True,
+                    "notificationRequested": notification_requested,
                 },
             )
             await self._insert_outbox(
@@ -841,7 +855,8 @@ class PostgresStaffRepository:
                     "studentId": str(document["student_id"]),
                     "decision": decision,
                     "workItemId": work_item_id,
-                    "notifiedStudent": notify_student,
+                    "notifiedStudent": True,
+                    "notificationRequested": notification_requested,
                 },
             )
 
@@ -1318,6 +1333,8 @@ class PostgresStaffRepository:
         student_id: str,
         subject: str,
         body: str,
+        kind: str = "general",
+        href: str | None = None,
     ) -> dict[str, object]:
         message_id = self._uuid_factory()
         result = await connection.execute(
@@ -1325,11 +1342,11 @@ class PostgresStaffRepository:
                 f"""
                 INSERT INTO {self._table("student_message")} (
                   id, tenant_id, student_id, subject, body, sender_name,
-                  sent_at, read_at, created_at
+                  kind, href, sent_at, read_at, created_at
                 )
                 VALUES (
                   :id, :tenant_id, :student_id, :subject, :body,
-                  'Enrollment Team', NOW(), NULL, NOW()
+                  'Enrollment Team', :kind, :href, NOW(), NULL, NOW()
                 )
                 RETURNING sent_at
                 """
@@ -1340,6 +1357,8 @@ class PostgresStaffRepository:
                 "student_id": _uuid(student_id),
                 "subject": subject,
                 "body": body,
+                "kind": kind,
+                "href": href,
             },
         )
         row = result.mappings().first()
@@ -1354,9 +1373,105 @@ class PostgresStaffRepository:
             "subject": subject,
             "body": body,
             "senderName": "Enrollment Team",
+            "kind": kind,
+            "href": href,
             "sentAt": _iso_timestamp(row["sent_at"]),
             "readAt": None,
         }
+
+    async def _award_requirement_rewards(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        student_id: str,
+        requirement_id: str,
+    ) -> int:
+        definition_result = await connection.execute(
+            text(
+                f"""
+                SELECT definition.code
+                FROM {self._table("student_requirement")} AS requirement
+                JOIN {self._table("requirement_definition_version")} AS definition
+                  ON definition.id = requirement.requirement_definition_version_id
+                 AND definition.tenant_id = requirement.tenant_id
+                WHERE requirement.tenant_id = :tenant_id
+                  AND requirement.id = :requirement_id
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "requirement_id": _uuid(requirement_id),
+            },
+        )
+        definition = definition_result.mappings().first()
+        if definition is None:
+            return 0
+        trigger_key = str(definition["code"])
+        properties: dict[str, object] = {}
+        rule_result = await connection.execute(
+            text(
+                f"""
+                SELECT id, points, max_awards_per_student
+                FROM {self._table("tenant_reward_rule")}
+                WHERE tenant_id = :tenant_id
+                  AND trigger_type = 'requirement_completed'
+                  AND trigger_key = :trigger_key
+                  AND enabled = true
+                  AND (starts_at IS NULL OR starts_at <= NOW())
+                  AND (ends_at IS NULL OR ends_at > NOW())
+                  AND CAST(:properties AS jsonb) @> trigger_properties
+                ORDER BY display_order, id
+                FOR UPDATE
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "trigger_key": trigger_key,
+                "properties": json.dumps(properties, separators=(",", ":")),
+            },
+        )
+        awarded = 0
+        for rule in rule_result.mappings().all():
+            inserted = await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("student_reward_ledger")} (
+                      id, tenant_id, student_id, reward_rule_id, source_type,
+                      source_key, points, metadata, awarded_at
+                    )
+                    SELECT :id, :tenant_id, :student_id, :rule_id,
+                      'requirement_completed', :source_key, :points,
+                      CAST(:metadata AS jsonb), NOW()
+                    WHERE (
+                      SELECT COUNT(*)
+                      FROM {self._table("student_reward_ledger")} AS existing
+                      WHERE existing.tenant_id = :tenant_id
+                        AND existing.student_id = :student_id
+                        AND existing.reward_rule_id = :rule_id
+                    ) < :maximum
+                    ON CONFLICT (
+                      tenant_id, student_id, reward_rule_id, source_key
+                    ) DO NOTHING
+                    RETURNING points
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(student_id),
+                    "rule_id": rule["id"],
+                    "source_key": requirement_id,
+                    "points": int(rule["points"]),
+                    "metadata": json.dumps(
+                        {"triggerKey": trigger_key, "properties": properties},
+                        separators=(",", ":"),
+                    ),
+                    "maximum": int(rule["max_awards_per_student"]),
+                },
+            )
+            awarded += sum(int(row["points"]) for row in inserted.mappings().all())
+        return awarded
 
     async def _refresh_requirement_dependencies(
         self,
@@ -1407,6 +1522,62 @@ class PostgresStaffRepository:
                 "completed_requirement_id": _uuid(completed_requirement_id),
             },
         )
+        journey = self._table("enrollment_journey")
+        journey_definition = self._table("journey_definition_version")
+        onboarding = self._table("student_onboarding")
+        completed = await connection.execute(
+            text(
+                f"""
+                UPDATE {journey} AS journey
+                SET status='completed', version=journey.version+1, updated_at=NOW()
+                WHERE journey.tenant_id=:tenant_id
+                  AND journey.id=(
+                    SELECT journey_id FROM {requirement}
+                    WHERE tenant_id=:tenant_id AND id=:completed_requirement_id
+                  )
+                  AND journey.status NOT IN ('completed','cancelled')
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM {journey_definition} AS journey_definition
+                      WHERE journey_definition.id=journey.journey_definition_version_id
+                        AND journey_definition.tenant_id=journey.tenant_id
+                        AND NOT journey_definition.onboarding_required
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM {onboarding} AS onboarding
+                      WHERE onboarding.tenant_id=journey.tenant_id
+                        AND onboarding.student_id=journey.student_id
+                        AND onboarding.status='completed'
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM {requirement} AS pending
+                    WHERE pending.tenant_id=journey.tenant_id
+                      AND pending.journey_id=journey.id
+                      AND pending.retired_at IS NULL
+                      AND pending.status NOT IN (
+                        'not_applicable','completed','waived','expired'
+                      )
+                  )
+                RETURNING journey.student_id
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "completed_requirement_id": _uuid(completed_requirement_id),
+            },
+        )
+        completed_row = completed.mappings().first()
+        if completed_row is not None:
+            await self._insert_student_message(
+                connection,
+                auth=auth,
+                student_id=str(completed_row["student_id"]),
+                subject="Enrollment complete",
+                body="All required enrollment tasks are complete.",
+                kind="enrollment_completed",
+                href="/dashboard",
+            )
 
     async def _insert_audit(
         self,

@@ -633,12 +633,13 @@ class PostgresManagedConfigurationRepository:
                     """
                     INSERT INTO requirement_definition_version (
                       id, tenant_id, code, title, description, blocking,
-                      display_order, depends_on_codes, due_offset_days, version,
+                      priority, display_order, depends_on_codes, due_offset_days, version,
                       submission_type, responsible_office, flow_kind,
                       interaction_type, input_config, created_at, updated_at
                     ) VALUES (
                       :id, :tenant_id, :code, :title, :description, :blocking,
-                      :display_order, CAST(:depends_on_codes AS text[]), :due_offset_days,
+                      :priority, :display_order, CAST(:depends_on_codes AS text[]),
+                      :due_offset_days,
                       :version, :submission_type, :responsible_office, :flow_kind,
                       :interaction_type, CAST(:input_config AS jsonb), NOW(), NOW()
                     )
@@ -651,6 +652,7 @@ class PostgresManagedConfigurationRepository:
                     "title": task["title"],
                     "description": task["description"],
                     "blocking": 1 if task["required"] else 0,
+                    "priority": task["priority"],
                     "display_order": task["displayOrder"],
                     "depends_on_codes": task["dependsOn"],
                     "due_offset_days": task["dueOffsetDays"],
@@ -1617,6 +1619,12 @@ def materialized_journey_tasks(
             due_offset = raw_task.get("due_days_after_acceptance")
             if due_offset is not None:
                 due_offset = _bounded_integer(due_offset, "due days", minimum=0, maximum=3650)
+            priority = _bounded_integer(
+                raw_task.get("priority", 0),
+                "journey task priority",
+                minimum=0,
+                maximum=100,
+            )
             initial_progress = _bounded_integer(
                 raw_task.get("initial_progress_percent", 0),
                 "initial progress",
@@ -1638,6 +1646,7 @@ def materialized_journey_tasks(
                     "owner": owner,
                     "active": active,
                     "required": bool(raw_task.get("required", False)),
+                    "priority": priority,
                     "displayOrder": display_orders[flow_kind],
                     "dependsOn": list(raw_dependencies),
                     "dueOffsetDays": due_offset,
@@ -1684,6 +1693,33 @@ def materialized_journey_tasks(
             else:
                 continue
         task["dependsOn"] = dependencies
+    active_dependencies = {
+        str(task["code"]): cast(list[str], task["dependsOn"])
+        for task in tasks
+        if task["active"] is True and task["materialized"] is True
+    }
+    visited: set[str] = set()
+    visiting: list[str] = []
+
+    def visit(code: str) -> None:
+        if code in visited:
+            return
+        if code in visiting:
+            cycle_start = visiting.index(code)
+            cycle = [*visiting[cycle_start:], code]
+            raise BadRequestError(
+                "MANAGED_JOURNEY_DEPENDENCY_CYCLE",
+                f"Journey task dependencies contain a cycle: {' -> '.join(cycle)}",
+            )
+        visiting.append(code)
+        for dependency in active_dependencies.get(code, []):
+            if dependency in active_dependencies:
+                visit(dependency)
+        visiting.pop()
+        visited.add(code)
+
+    for task_code in active_dependencies:
+        visit(task_code)
     return (
         tasks
         if include_inactive
@@ -1699,6 +1735,7 @@ def _journey_task_material_signature(task: Mapping[str, Any]) -> str:
             "description": task.get("description"),
             "owner": task.get("owner"),
             "required": task.get("required"),
+            "priority": task.get("priority"),
             "dependsOn": task.get("dependsOn"),
             "dueOffsetDays": task.get("dueOffsetDays"),
             "initialProgressPercent": task.get("initialProgressPercent"),

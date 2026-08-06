@@ -320,6 +320,32 @@ class UpdateStudentHousingPlanRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
     preference: HousingPreference
     residence_option: HousingResidence | None = None
+    residence_preferences: list[HousingResidence] | None = Field(default=None, max_length=3)
+    room_type: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    bathroom_preference: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    roommate_matching: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    known_roommate_name: (
+        Annotated[StrictStr, StringConstraints(min_length=2, max_length=160)] | None
+    ) = None
+    known_roommate_email: StrictStr | None = None
+    sleep_schedule: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    study_habits: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    room_noise: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    cleanliness: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    guest_preference: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    temperature_preference: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    smoke_vape_compatibility: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
+    substance_free_housing: StrictBool | None = None
+    gender_inclusive_housing: StrictBool | None = None
+    accessible_housing_information: StrictBool | None = None
+    living_learning_communities: (
+        list[Annotated[StrictStr, StringConstraints(max_length=80)]] | None
+    ) = Field(default=None, max_length=6)
+
+    @field_validator("known_roommate_email")
+    @classmethod
+    def validate_known_roommate_email(cls, value: str | None) -> str | None:
+        return None if value is None else _ensure_email(value)
 
 
 class DecideStudentExperienceUpdateRequest(StrictRequest):

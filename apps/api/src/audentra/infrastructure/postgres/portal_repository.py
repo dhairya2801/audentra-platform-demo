@@ -8,6 +8,7 @@ together exactly as they did in the Nest implementation.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import math
@@ -87,6 +88,25 @@ _ABOUT_YOU_FIELD_BINDINGS = {
     "country": "country",
     "residency_verification_path": "residencyVerificationPath",
 }
+_HOUSING_PLAN_FIELD_BINDINGS = {
+    "residencePreferences": "housingResidencePreferences",
+    "roomType": "housingRoomType",
+    "bathroomPreference": "bathroomPreference",
+    "roommateMatching": "roommateMatching",
+    "knownRoommateName": "knownRoommateName",
+    "knownRoommateEmail": "knownRoommateEmail",
+    "sleepSchedule": "sleepSchedule",
+    "studyHabits": "studyHabits",
+    "roomNoise": "roomNoise",
+    "cleanliness": "cleanliness",
+    "guestPreference": "guestPreference",
+    "temperaturePreference": "temperaturePreference",
+    "smokeVapeCompatibility": "smokeVapeCompatibility",
+    "substanceFreeHousing": "substanceFreeHousing",
+    "genderInclusiveHousing": "genderInclusiveHousing",
+    "accessibleHousingInformation": "accessibleHousingInformation",
+    "livingLearningCommunities": "livingLearningCommunities",
+}
 _ONBOARDING_SCREEN_DEFAULTS: dict[str, tuple[str, str, str]] = {
     "offer": (
         "Offer",
@@ -164,6 +184,14 @@ def _iso(value: object) -> str:
 
 def _nullable_iso(value: object) -> str | None:
     return None if value is None else _iso(value)
+
+
+def _add_calendar_months(value: date, months: int) -> date:
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
 
 
 def _timestamp(value: object) -> datetime:
@@ -276,13 +304,31 @@ def _map_housing(row: Mapping[str, Any], residences: list[JsonDict] | None = Non
     residence = payload.get("housingResidenceOption")
     if residence not in {"aster_residence_hall", "aster_apartments", "student_village"}:
         residence = None
-    return {
+    mapped: JsonDict = {
         "preference": preference,
         "residenceOption": residence,
+        "residencePreferences": _list(payload.get("housingResidencePreferences")),
+        "roomType": payload.get("housingRoomType"),
+        "bathroomPreference": payload.get("bathroomPreference"),
+        "roommateMatching": payload.get("roommateMatching"),
+        "knownRoommateName": payload.get("knownRoommateName"),
+        "knownRoommateEmail": payload.get("knownRoommateEmail"),
+        "sleepSchedule": payload.get("sleepSchedule"),
+        "studyHabits": payload.get("studyHabits"),
+        "roomNoise": payload.get("roomNoise"),
+        "cleanliness": payload.get("cleanliness"),
+        "guestPreference": payload.get("guestPreference"),
+        "temperaturePreference": payload.get("temperaturePreference"),
+        "smokeVapeCompatibility": payload.get("smokeVapeCompatibility"),
+        "substanceFreeHousing": payload.get("substanceFreeHousing"),
+        "genderInclusiveHousing": payload.get("genderInclusiveHousing"),
+        "accessibleHousingInformation": payload.get("accessibleHousingInformation"),
+        "livingLearningCommunities": _list(payload.get("livingLearningCommunities")),
         "residences": residences or [],
         "version": int(row["version"]),
         "updatedAt": _iso(row["updated_at"]),
     }
+    return mapped
 
 
 def _requirement_code(identifier: str) -> str:
@@ -547,6 +593,7 @@ def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
         "status": row["status"],
         "version": int(row.get("version") or 1),
         "blocking": bool(row["blocking"]),
+        "priority": int(row.get("priority") or 0),
         "dueAt": _nullable_iso(row.get("due_at")),
         "progressPercent": int(row["progress_percent"]),
         "submissionType": row["submission_type"],
@@ -579,6 +626,8 @@ def _map_message(row: Mapping[str, Any]) -> JsonDict:
         "subject": row["subject"],
         "body": row["body"],
         "senderName": row["sender_name"],
+        "kind": row.get("kind") or "general",
+        "href": row.get("href"),
         "sentAt": _iso(row["sent_at"]),
         "readAt": _nullable_iso(row["read_at"]),
     }
@@ -904,6 +953,11 @@ class PostgresPortalRepository:
             payload.update(
                 {"housingPreference": update["preference"], "housingResidenceOption": residence}
             )
+            changed_fields = ["preference", "residenceOption"]
+            for api_field, payload_field in _HOUSING_PLAN_FIELD_BINDINGS.items():
+                if api_field in update:
+                    payload[payload_field] = update[api_field]
+                    changed_fields.append(api_field)
             result = await connection.execute(
                 text(
                     """
@@ -939,6 +993,7 @@ class PostgresPortalRepository:
                 {
                     "preference": update["preference"],
                     "residenceOption": residence,
+                    "changedFields": changed_fields,
                     "version": int(updated["version"]),
                 },
             )
@@ -1177,14 +1232,14 @@ class PostgresPortalRepository:
                 auth.student_id,
                 {},
             )
-            await connection.execute(
+            completed_journeys = await connection.execute(
                 text(
                     """
                     UPDATE enrollment_journey journey
                     SET status='completed', version=journey.version+1, updated_at=NOW()
                     WHERE journey.tenant_id=:tenant_id
                       AND journey.student_id=:student_id
-                      AND journey.status<>'cancelled'
+                      AND journey.status NOT IN ('completed','cancelled')
                       AND NOT EXISTS (
                         SELECT 1 FROM student_requirement requirement
                         WHERE requirement.tenant_id=journey.tenant_id
@@ -1194,10 +1249,20 @@ class PostgresPortalRepository:
                             'not_applicable','completed','waived','expired'
                           )
                       )
+                    RETURNING journey.id
                     """
                 ),
                 {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
             )
+            if completed_journeys.mappings().first() is not None:
+                await self._insert_student_message(
+                    connection,
+                    auth,
+                    subject="Enrollment complete",
+                    body="All required enrollment tasks are complete.",
+                    kind="enrollment_completed",
+                    href="/dashboard",
+                )
             await self._insert_audit(
                 connection,
                 auth,
@@ -1216,6 +1281,14 @@ class PostgresPortalRepository:
                 int(mapped["version"]),
                 request_id,
                 {"studentId": auth.student_id},
+            )
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject="Onboarding complete",
+                body="Your onboarding checklist is complete. You can continue from your dashboard.",
+                kind="onboarding",
+                href="/dashboard",
             )
             return mapped
 
@@ -1967,7 +2040,7 @@ class PostgresPortalRepository:
                    sr.status, sr.version, rdv.blocking, sr.due_at, sr.progress_percent,
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
                    rdv.flow_kind, rdv.interaction_type, rdv.input_config,
-                   rdv.display_order,
+                   rdv.priority, rdv.display_order,
                    submitted_response.id AS response_id,
                    submitted_response.interaction_type AS response_interaction_type,
                    submitted_response.response_data,
@@ -2014,7 +2087,7 @@ class PostgresPortalRepository:
             WHERE sr.tenant_id=:tenant_id AND j.student_id=:student_id
               AND sr.retired_at IS NULL
             ORDER BY CASE rdv.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
-                     rdv.display_order, sr.created_at
+                     rdv.priority DESC, rdv.display_order, sr.created_at
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
@@ -2028,7 +2101,7 @@ class PostgresPortalRepository:
                    sr.status, sr.version, rdv.blocking, sr.due_at, sr.progress_percent,
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
                    rdv.flow_kind, rdv.interaction_type, rdv.input_config,
-                   rdv.display_order,
+                   rdv.priority, rdv.display_order,
                    submitted_response.id AS response_id,
                    submitted_response.interaction_type AS response_interaction_type,
                    submitted_response.response_data,
@@ -2142,7 +2215,7 @@ class PostgresPortalRepository:
                            rdv.code, rdv.title, rdv.description, rdv.blocking,
                            rdv.submission_type, rdv.responsible_office,
                            rdv.depends_on_codes, rdv.flow_kind, rdv.interaction_type,
-                           rdv.input_config, rdv.display_order
+                           rdv.input_config, rdv.priority, rdv.display_order
                     FROM student_requirement sr
                     JOIN enrollment_journey journey
                       ON journey.id=sr.journey_id AND journey.tenant_id=sr.tenant_id
@@ -2307,6 +2380,19 @@ class PostgresPortalRepository:
                 str(current["id"]),
                 {},
             )
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject=f"{current['title']!s} complete",
+                body="Your response was saved and this enrollment task is now complete.",
+                kind="requirement_completed",
+                href=(
+                    "/enrollment/requirements/"
+                    + REQUIREMENT_SLUGS.get(
+                        str(current["code"]), str(current["code"]).replace("_", "-")
+                    )
+                ),
+            )
             await connection.execute(
                 text(
                     """
@@ -2358,12 +2444,13 @@ class PostgresPortalRepository:
                     "requirement_id": current["id"],
                 },
             )
-            await connection.execute(
+            completed_journey = await connection.execute(
                 text(
                     """
                     UPDATE enrollment_journey journey
                     SET status='completed', version=journey.version+1, updated_at=NOW()
                     WHERE journey.id=:journey_id AND journey.tenant_id=:tenant_id
+                      AND journey.status NOT IN ('completed','cancelled')
                       AND (
                         EXISTS (
                           SELECT 1 FROM journey_definition_version definition
@@ -2387,10 +2474,20 @@ class PostgresPortalRepository:
                             'not_applicable','completed','waived','expired'
                           )
                       )
+                    RETURNING journey.id
                     """
                 ),
                 {"journey_id": current["journey_id"], "tenant_id": auth.tenant_id},
             )
+            if completed_journey.mappings().first() is not None:
+                await self._insert_student_message(
+                    connection,
+                    auth,
+                    subject="Enrollment complete",
+                    body="All required enrollment tasks are complete.",
+                    kind="enrollment_completed",
+                    href="/dashboard",
+                )
             updated_version = int(updated_row["version"])
             await self._insert_audit(
                 connection,
@@ -2446,7 +2543,7 @@ class PostgresPortalRepository:
     async def get_student_messages(self, auth: AuthContext) -> JsonDict:
         rows = await self._all(
             """
-            SELECT id, subject, body, sender_name, sent_at, read_at
+            SELECT id, subject, body, sender_name, kind, href, sent_at, read_at
             FROM student_message
             WHERE tenant_id=:tenant_id AND student_id=:student_id
             ORDER BY sent_at DESC, id
@@ -2463,7 +2560,7 @@ class PostgresPortalRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, subject, body, sender_name, sent_at, read_at
+                    SELECT id, subject, body, sender_name, kind, href, sent_at, read_at
                     FROM student_message
                     WHERE tenant_id=:tenant_id AND student_id=:student_id AND id=:message_id
                     FOR UPDATE
@@ -2486,7 +2583,7 @@ class PostgresPortalRepository:
                     """
                     UPDATE student_message SET read_at=NOW()
                     WHERE tenant_id=:tenant_id AND student_id=:student_id AND id=:message_id
-                    RETURNING id, subject, body, sender_name, sent_at, read_at
+                    RETURNING id, subject, body, sender_name, kind, href, sent_at, read_at
                     """
                 ),
                 {
@@ -3583,7 +3680,7 @@ class PostgresPortalRepository:
         )
         document_rows = await self._all(
             """
-            SELECT id, code, title, description, status, due_at
+            SELECT id, code, title, description, status, due_at, document_id
             FROM financial_document_requirement
             WHERE tenant_id=:tenant_id AND student_id=:student_id
             ORDER BY due_at NULLS LAST, code
@@ -3608,6 +3705,26 @@ class PostgresPortalRepository:
             FROM student_sap_status
             WHERE tenant_id=:tenant_id AND student_id=:student_id
               AND academic_year=:academic_year
+            """,
+            common,
+        )
+        offer = await self._one(
+            """
+            SELECT offer.id, offer.response_deadline, offer.deposit_amount_cents,
+                   EXISTS (
+                     SELECT 1 FROM payment_transaction payment
+                     WHERE payment.tenant_id=offer.tenant_id
+                       AND payment.student_id=offer.student_id
+                       AND payment.offer_id=offer.id
+                       AND payment.type='enrollment_deposit'
+                       AND payment.status='succeeded'
+                   ) AS deposit_paid
+            FROM admission_offer offer
+            WHERE offer.tenant_id=:tenant_id AND offer.student_id=:student_id
+              AND offer.status IN ('offered','accepted')
+            ORDER BY CASE offer.status WHEN 'accepted' THEN 0 ELSE 1 END,
+                     offer.created_at DESC
+            LIMIT 1
             """,
             common,
         )
@@ -3639,6 +3756,52 @@ class PostgresPortalRepository:
         )
         payments = int(summary["external_payments_cents"]) + int(summary["portal_payments_cents"])
         remaining = max(0, int(summary["cost_of_attendance_cents"]) - accepted_aid - payments)
+        payment_schedule: list[JsonDict] = []
+        unpaid_deposit = 0
+        schedule_anchor: date | None = None
+        if offer is not None:
+            schedule_anchor = offer["response_deadline"]
+            deposit_paid = offer["deposit_paid"] is True
+            deposit_amount = int(offer["deposit_amount_cents"])
+            unpaid_deposit = 0 if deposit_paid else deposit_amount
+            payment_schedule.append(
+                {
+                    "id": f"{offer['id']}:enrollment_deposit",
+                    "kind": "deposit",
+                    "label": "Enrollment deposit",
+                    "amountCents": deposit_amount,
+                    "enrollmentFeeCents": 0,
+                    "dueAt": _iso(schedule_anchor),
+                    "status": "paid" if deposit_paid else "due",
+                    "projected": False,
+                }
+            )
+        enrolled_plan = next((row for row in plan_rows if row["status"] == "enrolled"), None)
+        if enrolled_plan is not None and schedule_anchor is not None:
+            count = int(enrolled_plan["installment_count"])
+            installment_total = max(0, remaining - unpaid_deposit)
+            base_amount, remainder_cents = divmod(installment_total, count)
+            for installment_index in range(count):
+                payment_schedule.append(
+                    {
+                        "id": f"{enrolled_plan['id']}:installment:{installment_index + 1}",
+                        "kind": "installment",
+                        "label": (
+                            f"{enrolled_plan['name']} installment "
+                            f"{installment_index + 1} of {count}"
+                        ),
+                        "amountCents": base_amount
+                        + (1 if installment_index < remainder_cents else 0),
+                        "enrollmentFeeCents": (
+                            int(enrolled_plan["enrollment_fee_cents"])
+                            if installment_index == 0
+                            else 0
+                        ),
+                        "dueAt": _iso(_add_calendar_months(schedule_anchor, installment_index + 1)),
+                        "status": "projected",
+                        "projected": True,
+                    }
+                )
         return {
             "academicYear": str(summary["academic_year"]).replace("-", "\N{EN DASH}", 1),
             "costOfAttendanceCents": int(summary["cost_of_attendance_cents"]),
@@ -3655,7 +3818,16 @@ class PostgresPortalRepository:
                     "description": row["description"],
                     "status": row["status"],
                     "dueAt": _nullable_iso(row.get("due_at")),
-                    "href": "/financials" if row["code"] == "award_acceptance" else "/documents",
+                    "documentId": (
+                        None if row.get("document_id") is None else str(row["document_id"])
+                    ),
+                    "href": (
+                        f"/documents?document={row['document_id']}"
+                        if row.get("document_id") is not None
+                        else "/financials"
+                        if row["code"] == "award_acceptance"
+                        else "/enrollment/requirements/financial-aid-verification"
+                    ),
                 }
                 for row in document_rows
             ],
@@ -3670,6 +3842,7 @@ class PostgresPortalRepository:
                 }
                 for row in plan_rows
             ],
+            "paymentSchedule": payment_schedule,
             "sap": {
                 "status": sap["status"],
                 "cumulativeGpa": float(sap["cumulative_gpa"]),
@@ -4279,6 +4452,39 @@ class PostgresPortalRepository:
             ),
         )
 
+    async def _insert_student_message(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        *,
+        subject: str,
+        body: str,
+        kind: str = "general",
+        href: str | None = None,
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO student_message (
+                  id, tenant_id, student_id, subject, body, sender_name,
+                  kind, href, sent_at, read_at, created_at
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :subject, :body,
+                  'Enrollment Team', :kind, :href, NOW(), NULL, NOW()
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "subject": subject,
+                "body": body,
+                "kind": kind,
+                "href": href,
+            },
+        )
+
     async def _complete_requirement(
         self, connection: AsyncConnection, auth: AuthContext, requirement_code: str
     ) -> None:
@@ -4303,7 +4509,8 @@ class PostgresPortalRepository:
                 "requirement_code": requirement_code,
             },
         )
-        for row in result.mappings().all():
+        completed_rows = list(result.mappings().all())
+        for row in completed_rows:
             await self._award_rewards(
                 connection,
                 auth,
@@ -4311,6 +4518,27 @@ class PostgresPortalRepository:
                 requirement_code,
                 str(row["id"]),
                 {},
+            )
+        if completed_rows:
+            if requirement_code == "enrollment_deposit":
+                subject = "Enrollment deposit received"
+                body = "Your enrollment deposit was received and the task is complete."
+                kind = "payment"
+                href = "/financials"
+            else:
+                subject = f"{requirement_code.replace('_', ' ').title()} complete"
+                body = "This enrollment task has been marked complete."
+                kind = "requirement_completed"
+                href = "/enrollment/requirements/" + REQUIREMENT_SLUGS.get(
+                    requirement_code, requirement_code.replace("_", "-")
+                )
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject=subject,
+                body=body,
+                kind=kind,
+                href=href,
             )
         await connection.execute(
             text(
@@ -4342,6 +4570,51 @@ class PostgresPortalRepository:
             ),
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
+        completed_journeys = await connection.execute(
+            text(
+                """
+                UPDATE enrollment_journey journey
+                SET status='completed', version=journey.version+1, updated_at=NOW()
+                WHERE journey.tenant_id=:tenant_id
+                  AND journey.student_id=:student_id
+                  AND journey.status NOT IN ('completed','cancelled')
+                  AND (
+                    EXISTS (
+                      SELECT 1 FROM journey_definition_version definition
+                      WHERE definition.id=journey.journey_definition_version_id
+                        AND definition.tenant_id=journey.tenant_id
+                        AND NOT definition.onboarding_required
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM student_onboarding onboarding
+                      WHERE onboarding.tenant_id=journey.tenant_id
+                        AND onboarding.student_id=journey.student_id
+                        AND onboarding.status='completed'
+                    )
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM student_requirement requirement
+                    WHERE requirement.tenant_id=journey.tenant_id
+                      AND requirement.journey_id=journey.id
+                      AND requirement.retired_at IS NULL
+                      AND requirement.status NOT IN (
+                        'not_applicable','completed','waived','expired'
+                      )
+                  )
+                RETURNING journey.id
+                """
+            ),
+            {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+        )
+        if completed_journeys.mappings().first() is not None:
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject="Enrollment complete",
+                body="All required enrollment tasks are complete.",
+                kind="enrollment_completed",
+                href="/dashboard",
+            )
 
     async def _award_rewards(
         self,

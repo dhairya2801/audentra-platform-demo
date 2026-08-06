@@ -3,16 +3,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from audentra.contracts.requests import UpdateStudentHousingPlanRequest
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ConflictError
 from audentra.infrastructure.postgres.portal_repository import (
     PostgresPortalRepository,
+    _add_calendar_months,
     _onboarding_screen_configurations,
 )
 
@@ -91,6 +93,29 @@ def test_onboarding_screen_presentation_and_form_fields_share_one_configuration(
     assert configuration["title"] == "Identity and arrival"
     assert configuration["description"] == "Review the live student form."
     assert configuration["fields"] == fields
+
+
+def test_calendar_month_projection_keeps_date_only_month_end_semantics() -> None:
+    assert _add_calendar_months(date(2027, 8, 31), 1) == date(2027, 9, 30)
+    assert _add_calendar_months(date(2027, 8, 31), 2) == date(2027, 10, 31)
+
+
+def test_housing_plan_request_preserves_explicit_roommate_field_clears() -> None:
+    request = UpdateStudentHousingPlanRequest.model_validate(
+        {
+            "expectedVersion": 4,
+            "preference": "on_campus",
+            "residenceOption": "aster_residence_hall",
+            "roommateMatching": "known_roommate",
+            "knownRoommateName": "Jordan Lee",
+            "knownRoommateEmail": None,
+            "sleepSchedule": "early_bird",
+            "livingLearningCommunities": ["engineering"],
+        }
+    )
+
+    assert request.public_payload()["roommateMatching"] == "known_roommate"
+    assert request.public_payload()["knownRoommateEmail"] is None
 
 
 class FakeResult:
@@ -466,3 +491,114 @@ def test_generic_requirement_response_commits_evidence_progress_and_idempotency(
     assert any("INSERT INTO student_requirement_response" in sql for sql in calls)
     assert any("UPDATE student_experience_update" in sql for sql in calls)
     assert any("INSERT INTO idempotency_record" in sql for sql in calls)
+
+
+def test_financials_link_documents_and_project_enrolled_installments_from_date_deadline() -> None:
+    document_id = "20000000-0000-7000-8000-000000000099"
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "FROM student_financial_summary" in sql:
+            return [
+                {
+                    "academic_year": "2027-2028",
+                    "cost_of_attendance_cents": 1_000,
+                    "external_payments_cents": 0,
+                    "portal_payments_cents": 0,
+                }
+            ]
+        if "FROM student_financial_award" in sql:
+            return []
+        if "FROM financial_document_requirement" in sql:
+            return [
+                {
+                    "id": "financial-document-1",
+                    "code": "verification_worksheet",
+                    "title": "Verification worksheet",
+                    "description": "Upload the requested worksheet.",
+                    "status": "submitted",
+                    "due_at": None,
+                    "document_id": document_id,
+                },
+                {
+                    "id": "financial-document-2",
+                    "code": "tax_transcript",
+                    "title": "Tax transcript",
+                    "description": "Provide a tax transcript.",
+                    "status": "not_started",
+                    "due_at": None,
+                    "document_id": None,
+                },
+            ]
+        if "FROM student_payment_plan" in sql:
+            return [
+                {
+                    "id": "payment-plan-1",
+                    "name": "Two payments",
+                    "installment_count": 2,
+                    "enrollment_fee_cents": 25,
+                    "status": "enrolled",
+                }
+            ]
+        if "FROM student_sap_status" in sql:
+            return [
+                {
+                    "status": "meeting",
+                    "cumulative_gpa": 3.4,
+                    "minimum_gpa": 2.0,
+                    "completion_rate_percent": 80,
+                    "minimum_completion_rate_percent": 67,
+                    "attempted_credits": 30,
+                    "maximum_attempted_credits": 180,
+                }
+            ]
+        if "FROM admission_offer offer" in sql:
+            return [
+                {
+                    "id": "offer-1",
+                    "response_deadline": date(2027, 8, 31),
+                    "deposit_amount_cents": 100,
+                    "deposit_paid": False,
+                }
+            ]
+        return []
+
+    repository = PostgresPortalRepository(cast(AsyncEngine, FakeEngine(handler)))
+    result = asyncio.run(repository.get_student_financials(AUTH))
+
+    assert result["requiredDocuments"][0]["documentId"] == document_id
+    assert result["requiredDocuments"][0]["href"] == f"/documents?document={document_id}"
+    assert result["requiredDocuments"][1]["href"] == (
+        "/enrollment/requirements/financial-aid-verification"
+    )
+    assert result["paymentSchedule"] == [
+        {
+            "id": "offer-1:enrollment_deposit",
+            "kind": "deposit",
+            "label": "Enrollment deposit",
+            "amountCents": 100,
+            "enrollmentFeeCents": 0,
+            "dueAt": "2027-08-31",
+            "status": "due",
+            "projected": False,
+        },
+        {
+            "id": "payment-plan-1:installment:1",
+            "kind": "installment",
+            "label": "Two payments installment 1 of 2",
+            "amountCents": 450,
+            "enrollmentFeeCents": 25,
+            "dueAt": "2027-09-30",
+            "status": "projected",
+            "projected": True,
+        },
+        {
+            "id": "payment-plan-1:installment:2",
+            "kind": "installment",
+            "label": "Two payments installment 2 of 2",
+            "amountCents": 450,
+            "enrollmentFeeCents": 0,
+            "dueAt": "2027-10-31",
+            "status": "projected",
+            "projected": True,
+        },
+    ]

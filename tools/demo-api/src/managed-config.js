@@ -310,12 +310,38 @@ export function enrollmentRequirementsFromConfiguration(
       description: task.description,
       status: dependencies.length ? "blocked" : "ready",
       blocking: task.required,
+      priority: Number.isInteger(task.priority) ? task.priority : 0,
+      order: index + 1,
       dueAt: new Date(
         accepted.getTime() + dueDays * 86_400_000,
       ).toISOString(),
       progressPercent: task.initial_progress_percent ?? 0,
       dependsOnCodes: dependencies,
       submissionType,
+      flowKind: flow.kind,
+      interactionType: task.task_type,
+      inputConfig: {
+        ...(Array.isArray(task.options) ? { options: [...task.options] } : {}),
+        ...(Number.isInteger(task.maximum_selections)
+          ? { maximumSelections: task.maximum_selections }
+          : {}),
+        ...(Array.isArray(task.fields)
+          ? { fields: structuredClone(task.fields) }
+          : {}),
+        ...(Array.isArray(task.flow) ? { flow: structuredClone(task.flow) } : {}),
+        ...(typeof task.signature_provider === "string"
+          ? { signatureProvider: task.signature_provider }
+          : {}),
+        ...(typeof task.docusign_template_id === "string"
+          ? { docusignTemplateId: task.docusign_template_id }
+          : {}),
+        ...(Array.isArray(task.accepted_mime_types)
+          ? { acceptedMimeTypes: [...task.accepted_mime_types] }
+          : {}),
+        ...(Array.isArray(task.document_categories)
+          ? { documentCategories: [...task.document_categories] }
+          : {}),
+      },
       responsibleOffice: task.owner,
       configurationVersion: configuration.version,
     };
@@ -405,6 +431,17 @@ function validateJourneyDocument(document) {
         invalid(`${taskPath}.required must be true or false`);
       }
       requireInteger(task.points, `${taskPath}.points`, 0, 10_000);
+      if (task.priority !== undefined) {
+        requireInteger(task.priority, `${taskPath}.priority`, 0, 100);
+      }
+      if (task.due_days_after_acceptance !== undefined) {
+        requireInteger(
+          task.due_days_after_acceptance,
+          `${taskPath}.due_days_after_acceptance`,
+          0,
+          3_650,
+        );
+      }
       if (task.submission_type !== undefined) {
         requireEnum(
           task.submission_type,
@@ -509,7 +546,11 @@ function projectConfiguration(state, kind, document, options) {
         owner: task.owner,
         required: task.required,
         published: flow.status === "published",
+        priority: Number.isInteger(task.priority) ? task.priority : 0,
         order: order + 1,
+        dueOffsetDays: Number.isInteger(task.due_days_after_acceptance)
+          ? task.due_days_after_acceptance
+          : null,
         taskType: task.task_type,
         submissionType:
           task.submission_type ?? submissionTypeForTaskType(task.task_type),

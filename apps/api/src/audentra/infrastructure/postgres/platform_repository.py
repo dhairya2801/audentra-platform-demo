@@ -258,7 +258,13 @@ class PostgresPlatformRepository:
             next_action = {
                 "code": code,
                 "label": str(next_requirement["title"]),
-                "href": (f"/enrollment?requirement={quote(code, safe=_ENCODE_URI_COMPONENT_SAFE)}"),
+                "href": (
+                    "/enrollment/requirements/"
+                    + quote(
+                        code.lower().replace("_", "-").replace(" ", "-"),
+                        safe=_ENCODE_URI_COMPONENT_SAFE,
+                    )
+                ),
             }
         elif journey_id_value and journey_status == "completed":
             next_action = {
@@ -358,7 +364,8 @@ class PostgresPlatformRepository:
         return f"""
             SELECT
               sr.id, rdv.code, rdv.title, rdv.description, sr.status,
-              rdv.blocking, sr.due_at, sr.progress_percent,
+              rdv.blocking, rdv.priority, rdv.display_order,
+              sr.due_at, sr.progress_percent,
               reward.reward_points, reward.reward_earned
             FROM {self._table("student_requirement")} sr
             JOIN {self._table("enrollment_journey")} journey
@@ -397,7 +404,7 @@ class PostgresPlatformRepository:
             WHERE sr.tenant_id = :tenant_id AND sr.journey_id = :journey_id
               AND sr.retired_at IS NULL
             ORDER BY CASE rdv.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
-                     rdv.display_order, sr.id
+                     rdv.priority DESC, rdv.display_order, sr.id
         """
 
     async def accept_admission_offer(
@@ -1120,6 +1127,8 @@ def _map_requirement(row: Mapping[str, object]) -> dict[str, object]:
         "description": str(row["description"]),
         "status": str(row["status"]),
         "blocking": _database_int(row["blocking"], "requirement.blocking") == 1,
+        "priority": _database_int(row.get("priority") or 0, "requirement.priority"),
+        "order": _database_int(row.get("display_order") or 0, "requirement.display_order"),
         "dueAt": (None if row.get("due_at") is None else _iso_timestamp(row["due_at"])),
         "progressPercent": _database_int(row["progress_percent"], "requirement.progress_percent"),
     }

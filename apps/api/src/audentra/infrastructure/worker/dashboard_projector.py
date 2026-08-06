@@ -65,6 +65,8 @@ SELECT
   definition.description,
   student_requirement.status,
   definition.blocking,
+  definition.priority,
+  definition.display_order,
   student_requirement.due_at,
   student_requirement.progress_percent
 FROM public.student_requirement
@@ -84,7 +86,7 @@ WHERE student_requirement.tenant_id = :tenant_id
   AND student_requirement.journey_id = :journey_id
   AND student_requirement.retired_at IS NULL
 ORDER BY CASE definition.flow_kind WHEN 'onboarding' THEN 0 ELSE 1 END,
-         definition.display_order ASC, student_requirement.id ASC
+         definition.priority DESC, definition.display_order ASC, student_requirement.id ASC
 """
 
 _TERMINAL_REQUIREMENT_STATUSES = {"completed", "waived", "not_applicable"}
@@ -214,6 +216,8 @@ class StudentDashboardProjector:
                 "description": str(row["description"]),
                 "status": str(row["status"]),
                 "blocking": bool(row["blocking"]),
+                "priority": int(row["priority"]),
+                "order": int(row["display_order"]),
                 "dueAt": _iso_timestamp_or_none(row["due_at"]),
                 "progressPercent": int(row["progress_percent"]),
             }
@@ -243,7 +247,13 @@ class StudentDashboardProjector:
             {
                 "code": first_blocking["code"],
                 "label": first_blocking["title"],
-                "href": f"/enrollment?requirement={quote(str(first_blocking['code']), safe='')}",
+                "href": (
+                    "/enrollment/requirements/"
+                    + quote(
+                        str(first_blocking["code"]).lower().replace("_", "-").replace(" ", "-"),
+                        safe="",
+                    )
+                ),
             }
             if first_blocking is not None
             else {

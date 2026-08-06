@@ -143,6 +143,8 @@ def _requirements() -> list[dict[str, object]]:
             "description": "Done",
             "status": "completed",
             "blocking": True,
+            "priority": 10,
+            "display_order": 10,
             "due_at": None,
             "progress_percent": 100,
         },
@@ -153,6 +155,8 @@ def _requirements() -> list[dict[str, object]]:
             "description": "Required",
             "status": "in_progress",
             "blocking": True,
+            "priority": 90,
+            "display_order": 20,
             "due_at": datetime(2026, 8, 20, 12, tzinfo=UTC),
             "progress_percent": 50,
         },
@@ -191,8 +195,9 @@ def test_projector_builds_versioned_dashboard_from_authoritative_rows() -> None:
     assert dashboard["journey"]["nextAction"] == {
         "code": "transcript review",
         "label": "Upload transcript",
-        "href": "/enrollment?requirement=transcript%20review",
+        "href": "/enrollment/requirements/transcript-review",
     }
+    assert dashboard["journey"]["requirements"][1]["priority"] == 90
     assert dashboard["journey"]["requirements"][1]["dueAt"] == ("2026-08-20T12:00:00+00:00")
     assert dashboard["projectionVersion"] == 3
     assert dashboard["generatedAt"].endswith("Z")

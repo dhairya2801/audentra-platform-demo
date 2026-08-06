@@ -26,6 +26,7 @@ STAFF_ID = "00000000-0000-7000-8000-000000000901"
 WORK_ITEM_ID = "00000000-0000-7000-8000-000000000911"
 DOCUMENT_ID = "00000000-0000-7000-8000-000000000701"
 REQUIREMENT_ID = "00000000-0000-7000-8000-000000000401"
+REWARD_RULE_ID = "00000000-0000-7000-8000-000000000461"
 NOW = datetime(2026, 7, 24, 12, tzinfo=UTC)
 
 
@@ -274,7 +275,17 @@ def test_work_item_update_locks_versions_and_writes_log_audit_and_outbox_atomica
     assert json_event(outbox_values)["data"]["studentId"] == STUDENT_ID
 
 
-def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects() -> None:
+@pytest.mark.parametrize(
+    ("notify_student", "expected_body"),
+    [
+        (True, "The stored original matches the student record."),
+        (False, "Your document was reviewed and accepted."),
+    ],
+)
+def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects(
+    notify_student: bool,
+    expected_body: str,
+) -> None:
     def handler(sql: str, values: dict[str, object]) -> FakeResult:
         if "FROM public.staff_work_item" in sql and "FOR UPDATE" in sql:
             return FakeResult(
@@ -305,6 +316,20 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
             )
         if "UPDATE public.staff_work_item" in sql and "RETURNING version" in sql:
             return FakeResult([{"version": 2}])
+        if "SELECT definition.code" in sql:
+            return FakeResult([{"code": "official_transcript"}])
+        if "FROM public.tenant_reward_rule" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": UUID(REWARD_RULE_ID),
+                        "points": 80,
+                        "max_awards_per_student": 1,
+                    }
+                ]
+            )
+        if "INSERT INTO public.student_reward_ledger" in sql:
+            return FakeResult([{"points": 80}])
         if "SELECT display_name" in sql:
             return FakeResult([{"display_name": "Avery Chen"}])
         if "INSERT INTO public.student_message" in sql:
@@ -326,7 +351,7 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
                 "expectedWorkItemVersion": 1,
                 "decision": "accepted",
                 "note": "The stored original matches the student record.",
-                "notifyStudent": True,
+                "notifyStudent": notify_student,
             },
             "request.staff.review",
         )
@@ -335,9 +360,12 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
     statements = [sql for sql, _ in connection.executions]
     assert result["document"]["status"] == "accepted"  # type: ignore[index]
     assert result["notification"]["subject"] == "transcript.pdf was accepted"  # type: ignore[index]
+    assert result["notification"]["body"] == expected_body  # type: ignore[index]
+    assert result["notification"]["kind"] == "document_review"  # type: ignore[index]
     assert engine.begin_count == 1
     assert any("UPDATE public.document_record" in sql for sql in statements)
     assert any("UPDATE public.student_requirement" in sql for sql in statements)
+    assert any("INSERT INTO public.student_reward_ledger" in sql for sql in statements)
     assert any("WITH completed_journey" in sql for sql in statements)
     assert any("INSERT INTO public.staff_work_log" in sql for sql in statements)
     assert any("INSERT INTO public.student_message" in sql for sql in statements)
@@ -346,6 +374,14 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
         values for sql, values in connection.executions if "INSERT INTO public.outbox_event" in sql
     )
     assert outbox_values["event_name"] == "student.document_decided_by_staff.v1"
+    reward_values = next(
+        values
+        for sql, values in connection.executions
+        if "INSERT INTO public.student_reward_ledger" in sql
+    )
+    assert reward_values["student_id"] == UUID(STUDENT_ID)
+    assert reward_values["source_key"] == REQUIREMENT_ID
+    assert reward_values["points"] == 80
 
 
 def test_staff_preferences_lock_both_versions_and_publish_one_atomic_change() -> None:
