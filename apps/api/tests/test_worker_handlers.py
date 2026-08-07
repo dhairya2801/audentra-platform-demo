@@ -187,9 +187,11 @@ class RecordingHandler:
 def test_dispatcher_factory_wires_each_handler_and_preserves_explicit_ignores() -> None:
     projector = RecordingHandler()
     document_runner = RecordingHandler()
+    document_review_projector = RecordingHandler()
     dispatcher = build_event_dispatcher(
         cast(Any, projector),
         cast(Any, document_runner),
+        cast(Any, document_review_projector),
     )
 
     async def exercise() -> list[str]:
@@ -198,6 +200,8 @@ def test_dispatcher_factory_wires_each_handler_and_preserves_explicit_ignores() 
             "enrollment.journey_created.v1",
             "document.upload_reserved.v1",
             "document.extraction_requested.v1",
+            "document.extraction_completed.v1",
+            "document.stored_for_review.v1",
             "student.profile_updated.v1",
         ):
             outcomes.append((await dispatcher.dispatch(_event(name))).status)
@@ -205,9 +209,13 @@ def test_dispatcher_factory_wires_each_handler_and_preserves_explicit_ignores() 
 
     outcomes = asyncio.run(exercise())
 
-    assert outcomes == ["handled", "handled", "handled", "ignored"]
+    assert outcomes == ["handled", "handled", "handled", "handled", "handled", "ignored"]
     assert projector.events == ["enrollment.journey_created.v1"]
     assert document_runner.events == [
         "document.upload_reserved.v1",
         "document.extraction_requested.v1",
+    ]
+    assert document_review_projector.events == [
+        "document.extraction_completed.v1",
+        "document.stored_for_review.v1",
     ]

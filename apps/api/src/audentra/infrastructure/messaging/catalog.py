@@ -11,6 +11,7 @@ HandlerKey = Literal[
     "dashboard_projection",
     "document_reservation_recovery",
     "document_extraction",
+    "document_review_routing",
 ]
 
 
@@ -59,7 +60,6 @@ ALL_EMITTED_EVENT_NAMES = frozenset(
 # They are deliberately ignored instead of repeatedly failing as unknown.
 EXPLICITLY_ADDED_IGNORED_EVENTS = frozenset(
     {
-        "document.stored_for_review.v1",
         "staff.configuration_published.v1",
         "staff.work_item_updated.v1",
         "student.document_decided_by_staff.v1",
@@ -93,6 +93,14 @@ EVENT_CATALOG = MappingProxyType(
         "document.extraction_requested.v1": EventDisposition(
             kind="handler",
             handler_key="document_extraction",
+        ),
+        "document.extraction_completed.v1": EventDisposition(
+            kind="handler",
+            handler_key="document_review_routing",
+        ),
+        "document.stored_for_review.v1": EventDisposition(
+            kind="handler",
+            handler_key="document_review_routing",
         ),
     }
 )

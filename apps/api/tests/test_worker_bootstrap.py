@@ -142,6 +142,7 @@ async def test_worker_builder_wires_independent_worker_runtime(
 
     projector = object()
     runner = object()
+    review_projector = object()
     dispatcher = object()
     monkeypatch.setattr(worker_bootstrap, "create_database_engine", create_engine)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: http)
@@ -158,9 +159,17 @@ async def test_worker_builder_wires_independent_worker_runtime(
     )
     monkeypatch.setattr(
         worker_bootstrap,
+        "DocumentReviewProjector",
+        lambda *_args, **_kwargs: review_projector,
+    )
+    monkeypatch.setattr(
+        worker_bootstrap,
         "build_event_dispatcher",
-        lambda received_projector, received_runner: (
-            dispatcher if (received_projector, received_runner) == (projector, runner) else None
+        lambda received_projector, received_runner, received_review_projector: (
+            dispatcher
+            if (received_projector, received_runner, received_review_projector)
+            == (projector, runner, review_projector)
+            else None
         ),
     )
     monkeypatch.setattr(worker_bootstrap, "WorkerService", create_worker)

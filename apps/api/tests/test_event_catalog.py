@@ -65,7 +65,7 @@ def _event(event_name: str) -> DomainEventEnvelope:
 def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
     assert ALL_EMITTED_EVENT_NAMES == EXPECTED_EVENTS
     assert set(EVENT_CATALOG) == EXPECTED_EVENTS
-    assert sum(item.kind == "handler" for item in EVENT_CATALOG.values()) == 3
+    assert sum(item.kind == "handler" for item in EVENT_CATALOG.values()) == 5
     assert all(
         item.handler_key is not None if item.kind == "handler" else item.reason
         for item in EVENT_CATALOG.values()
@@ -73,7 +73,7 @@ def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
 
 
 def test_canonical_only_events_have_explicit_ignore_dispositions() -> None:
-    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 9
+    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 8
     assert all(EVENT_CATALOG[name].kind == "ignored" for name in EXPLICITLY_ADDED_IGNORED_EVENTS)
 
 

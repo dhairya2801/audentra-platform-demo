@@ -14,6 +14,7 @@ from audentra.infrastructure.worker.document_commands import (
     DocumentCommandSettings,
     DocumentExtractionRunner,
 )
+from audentra.infrastructure.worker.document_review_projector import DocumentReviewProjector
 from audentra.infrastructure.worker.factory import build_event_dispatcher
 from audentra.infrastructure.worker.service import WorkerService
 
@@ -70,7 +71,15 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             ),
             client=http_client,
         )
-        dispatcher = build_event_dispatcher(projector, document_runner)
+        document_review_projector = DocumentReviewProjector(
+            engine,
+            settings.worker.consumer_name + ":document-review",
+        )
+        dispatcher = build_event_dispatcher(
+            projector,
+            document_runner,
+            document_review_projector,
+        )
         worker = WorkerService(
             outbox,
             dispatcher,
