@@ -134,15 +134,20 @@ async def test_worker_builder_wires_independent_worker_runtime(
         dispatcher: object,
         *,
         poll_interval_seconds: float,
+        scheduled_runner: object,
+        scheduled_interval_seconds: float,
     ) -> StubWorker:
         captured["worker_repository"] = outbox
         captured["dispatcher"] = dispatcher
         captured["poll_interval"] = poll_interval_seconds
+        captured["scheduled_runner"] = scheduled_runner
+        captured["scheduled_interval"] = scheduled_interval_seconds
         return worker
 
     projector = object()
     runner = object()
     review_projector = object()
+    scheduled_runner = object()
     dispatcher = object()
     monkeypatch.setattr(worker_bootstrap, "create_database_engine", create_engine)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: http)
@@ -161,6 +166,11 @@ async def test_worker_builder_wires_independent_worker_runtime(
         worker_bootstrap,
         "DocumentReviewProjector",
         lambda *_args, **_kwargs: review_projector,
+    )
+    monkeypatch.setattr(
+        worker_bootstrap,
+        "AgenticWorkflowScheduler",
+        lambda *_args, **_kwargs: scheduled_runner,
     )
     monkeypatch.setattr(
         worker_bootstrap,
@@ -185,6 +195,8 @@ async def test_worker_builder_wires_independent_worker_runtime(
     assert captured["worker_repository"] is repository
     assert captured["dispatcher"] is dispatcher
     assert captured["poll_interval"] == settings.worker.poll_interval_seconds
+    assert captured["scheduled_runner"] is scheduled_runner
+    assert captured["scheduled_interval"] == settings.worker.scheduled_interval_seconds
 
 
 @pytest.mark.anyio

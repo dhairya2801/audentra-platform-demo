@@ -110,6 +110,18 @@ class FakeDispatcher:
         return DispatchOutcome(status="ignored", event_name=event.event_name, reason="canonical")
 
 
+class FakeScheduledRunner:
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.calls = 0
+        self.error = error
+
+    async def run_once(self) -> int:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return 1
+
+
 def _worker(
     repository: FakeOutboxRepository,
     dispatcher: FakeDispatcher,
@@ -165,6 +177,41 @@ def test_worker_records_handler_failure_without_acknowledging_event() -> None:
     assert str(repository.failed[0][1]) == "handler unavailable"
     assert worker.snapshot().failed == 1
     assert worker.snapshot().in_flight == 0
+
+
+def test_worker_runs_scheduled_workflows_once_per_interval() -> None:
+    repository = FakeOutboxRepository()
+    runner = FakeScheduledRunner()
+    worker = WorkerService(
+        cast(Any, repository),
+        cast(Any, FakeDispatcher()),
+        poll_interval_seconds=0.05,
+        scheduled_runner=runner,
+        scheduled_interval_seconds=60,
+    )
+
+    asyncio.run(worker.run_once())
+    asyncio.run(worker.run_once())
+
+    assert runner.calls == 1
+    assert worker.snapshot().scheduled_runs == 1
+    assert worker.snapshot().scheduled_failures == 0
+
+
+def test_worker_records_scheduled_failure_and_still_polls_outbox() -> None:
+    repository = FakeOutboxRepository()
+    runner = FakeScheduledRunner(RuntimeError("scheduler unavailable"))
+    worker = WorkerService(
+        cast(Any, repository),
+        cast(Any, FakeDispatcher()),
+        poll_interval_seconds=0.05,
+        scheduled_runner=runner,
+        scheduled_interval_seconds=60,
+    )
+
+    assert asyncio.run(worker.run_once()) == 0
+    assert repository.claim_count == 1
+    assert worker.snapshot().scheduled_failures == 1
 
 
 def test_worker_survives_failure_recording_error() -> None:

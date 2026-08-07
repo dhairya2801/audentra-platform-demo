@@ -12,6 +12,7 @@ from typing import Literal
 
 InboundAction = Literal[
     "append_to_existing_task",
+    "append_to_existing_inquiry",
     "create_staff_task",
     "create_inquiry",
     "human_triage",
@@ -100,7 +101,7 @@ def decide_inbound_action(
 
     if candidate.existing_inquiry_id:
         return InboundTriageDecision(
-            action="create_inquiry",
+            action="append_to_existing_inquiry",
             priority=priority,
             reason_code="matching_student_inquiry_found",
             requires_human_review=candidate.requires_human_review,

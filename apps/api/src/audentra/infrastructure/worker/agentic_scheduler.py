@@ -1,0 +1,877 @@
+"""Bounded scheduled workflows for inbound communication and engagement signals."""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from audentra.domain.agentic_workflows import InboundTriageCandidate, decide_inbound_action
+
+_PENDING_INBOX_LIMIT = 25
+_INBOX_BODY_LIMIT = 12_000
+_ACTIONABLE_TERMS = (
+    "help",
+    "question",
+    "urgent",
+    "deadline",
+    "deposit",
+    "payment",
+    "invoice",
+    "document",
+    "transcript",
+    "passport",
+    "identity",
+    "upload",
+    "housing",
+    "health",
+    "review",
+)
+_HELP_TERMS = ("help", "question", "please", "can you", "how do i")
+
+
+class AgenticWorkflowScheduler:
+    """Run safe, repeatable scheduled workflows against durable DB records.
+
+    Email/vendor adapters only need to insert ``inbox_event`` rows. This runner
+    performs deterministic identity resolution and triage, records the run and
+    tool evidence, and creates a reversible staff task. It never changes a
+    requirement, payment, profile, or other official student record.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        uuid_factory: Callable[[], UUID] = uuid4,
+        logger: logging.Logger | None = None,
+        inbox_limit: int = _PENDING_INBOX_LIMIT,
+    ) -> None:
+        if not 1 <= inbox_limit <= 100:
+            raise ValueError("inbox_limit must be between 1 and 100")
+        self._engine = engine
+        self._uuid_factory = uuid_factory
+        self._logger = logger or logging.getLogger(__name__)
+        self._inbox_limit = inbox_limit
+
+    async def run_once(self) -> int:
+        processed = await self._process_inbox_events()
+        scanned = await self._scan_engagement()
+        return processed + scanned
+
+    async def _process_inbox_events(self) -> int:
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    WITH pending AS (
+                      SELECT id
+                      FROM public.inbox_event
+                      WHERE status = 'received'
+                         OR (
+                           status = 'processing'
+                           AND updated_at < NOW() - INTERVAL '15 minutes'
+                         )
+                      ORDER BY occurred_at, id
+                      LIMIT :limit
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE public.inbox_event AS event
+                    SET status = 'processing', updated_at = NOW(), failure_code = NULL
+                    FROM pending
+                    WHERE event.id = pending.id
+                    RETURNING event.id, event.tenant_id, event.provider,
+                              event.external_message_id, event.sender_address,
+                              event.subject, event.body_excerpt, event.occurred_at
+                    """
+                ),
+                {"limit": self._inbox_limit},
+            )
+            events = [dict(row) for row in result.mappings().all()]
+
+        processed = 0
+        for event in events:
+            try:
+                await self._triage_inbox_event(event)
+                processed += 1
+            except Exception:
+                self._logger.exception(
+                    "agentic_inbox_triage_failed",
+                    extra={
+                        "inbox_event_id": str(event["id"]),
+                        "tenant_id": str(event["tenant_id"]),
+                    },
+                )
+                await self._mark_inbox_failed(event["id"])
+        return processed
+
+    async def _triage_inbox_event(self, event: dict[str, Any]) -> None:
+        now = datetime.now(UTC)
+        tenant_id = str(event["tenant_id"])
+        inbox_id = str(event["id"])
+        sender = str(event.get("sender_address") or "").strip().lower()
+        subject = _bounded_text(str(event.get("subject") or ""), 500)
+        body = _bounded_text(str(event.get("body_excerpt") or ""), _INBOX_BODY_LIMIT)
+        searchable = f"{subject} {body}".lower()
+        correlation_id = f"inbox:{inbox_id}"[:160]
+
+        async with self._engine.begin() as connection:
+            student_result = await connection.execute(
+                text(
+                    """
+                    SELECT account.student_id
+                    FROM public.credential_account AS account
+                    WHERE account.tenant_id = :tenant_id
+                      AND account.email_normalized = :sender
+                      AND account.status = 'active'
+                    """
+                ),
+                {"tenant_id": tenant_id, "sender": sender},
+            )
+            student_row = student_result.mappings().first()
+            student_id = str(student_row["student_id"]) if student_row is not None else None
+            communication_id = self._uuid_factory()
+            communication_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.communication_event (
+                      id, tenant_id, inbox_event_id, student_id, channel, direction,
+                      external_thread_id, subject, body_excerpt, metadata,
+                      resolution_status, occurred_at
+                    )
+                    SELECT :id, event.tenant_id, event.id, :student_id, 'email', 'inbound',
+                           event.external_thread_id, event.subject, event.body_excerpt,
+                           CAST(:metadata AS jsonb),
+                           CASE WHEN :student_id IS NULL THEN 'ambiguous' ELSE 'unresolved' END,
+                           event.occurred_at
+                    FROM public.inbox_event AS event
+                    WHERE event.id = :inbox_event_id
+                    ON CONFLICT (inbox_event_id) DO UPDATE
+                    SET student_id = EXCLUDED.student_id
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": communication_id,
+                    "tenant_id": tenant_id,
+                    "inbox_event_id": inbox_id,
+                    "student_id": student_id,
+                    "metadata": _json({"classificationMode": "deterministic-v1"}),
+                },
+            )
+            communication_row = communication_result.mappings().first()
+            if communication_row is None:
+                raise RuntimeError(f"Communication event was not created for {inbox_id}")
+            communication_id = communication_row["id"]
+
+            run_id = self._uuid_factory()
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.agent_run (
+                      id, tenant_id, feature, trigger_type, trigger_event_id,
+                      actor_type, student_id, provider, model, status,
+                      correlation_id, created_at, started_at
+                    ) VALUES (
+                      :id, :tenant_id, 'inbound_communication_triage', 'integration',
+                      :trigger_event_id, 'system', :student_id, 'deterministic',
+                      'rules-v1', 'running', :correlation_id, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "tenant_id": tenant_id,
+                    "trigger_event_id": inbox_id,
+                    "student_id": student_id,
+                    "correlation_id": correlation_id,
+                },
+            )
+
+            due_at, blocking, existing_work_item_id, existing_inquiry_id = (None, False, None, None)
+            if student_id is not None:
+                due_at, blocking = await self._student_deadline_facts(
+                    connection, tenant_id, student_id
+                )
+                existing_work_item_id = await self._existing_work_item(
+                    connection, tenant_id, student_id
+                )
+                existing_inquiry_id = await self._existing_inquiry(
+                    connection, tenant_id, student_id
+                )
+
+            candidate = InboundTriageCandidate(
+                student_resolved=student_id is not None,
+                actionable=any(term in searchable for term in _ACTIONABLE_TERMS),
+                existing_work_item_id=existing_work_item_id,
+                existing_inquiry_id=existing_inquiry_id,
+                due_at=due_at,
+                blocking=blocking,
+                explicit_help_request=any(term in searchable for term in _HELP_TERMS),
+                priority_evidence=("requirement_deadline",) if due_at is not None else (),
+                requires_human_review=True,
+            )
+            decision = decide_inbound_action(candidate, now=now)
+            target_id: str | None = None
+            if decision.action == "append_to_existing_task" and existing_work_item_id is not None:
+                target_id = existing_work_item_id
+                await self._append_work_item_context(
+                    connection, tenant_id, existing_work_item_id, communication_id, body
+                )
+            elif (
+                decision.action == "append_to_existing_inquiry"
+                and existing_inquiry_id is not None
+            ):
+                await self._touch_inquiry(
+                    connection, tenant_id, existing_inquiry_id, decision.priority
+                )
+                target_id = await self._create_staff_task(
+                    connection,
+                    tenant_id=tenant_id,
+                    student_id=student_id,
+                    inbox_id=inbox_id,
+                    communication_id=str(communication_id),
+                    subject=subject or "Inbound student communication",
+                    body=body,
+                    priority=decision.priority,
+                    searchable=searchable,
+                    create_inquiry=False,
+                )
+            elif decision.action == "create_staff_task" or decision.action == "create_inquiry":
+                target_id = await self._create_staff_task(
+                    connection,
+                    tenant_id=tenant_id,
+                    student_id=student_id,
+                    inbox_id=inbox_id,
+                    communication_id=str(communication_id),
+                    subject=subject or "Inbound student communication",
+                    body=body,
+                    priority=decision.priority,
+                    searchable=searchable,
+                    create_inquiry=decision.action == "create_inquiry",
+                )
+
+            result = {
+                "action": decision.action,
+                "priority": decision.priority,
+                "reasonCode": decision.reason_code,
+                "requiresHumanReview": decision.requires_human_review,
+                "studentResolved": student_id is not None,
+                "targetId": target_id,
+            }
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.agent_tool_call (
+                      id, tenant_id, agent_run_id, sequence, tool_name,
+                      authorization_scope, arguments_hash, result_status, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :agent_run_id, 1, 'inbox.triage',
+                      'tenant:communication:triage', :arguments_hash, 'succeeded', NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": tenant_id,
+                    "agent_run_id": run_id,
+                    "arguments_hash": _hash_payload({"inboxEventId": inbox_id, "subject": subject}),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.agent_run
+                    SET status = 'succeeded', result = CAST(:result AS jsonb), completed_at = NOW()
+                    WHERE id = :id AND tenant_id = :tenant_id
+                    """
+                ),
+                {"id": run_id, "tenant_id": tenant_id, "result": _json(result)},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.agent_action_proposal (
+                      id, tenant_id, agent_run_id, student_id, action_type,
+                      target_type, target_id, payload, rationale, status, executed_at
+                    ) VALUES (
+                      :id, :tenant_id, :agent_run_id, :student_id, :action_type,
+                      :target_type, :target_id, CAST(:payload AS jsonb), :rationale,
+                      :status, CASE WHEN :status = 'executed' THEN NOW() ELSE NULL END
+                    )
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": tenant_id,
+                    "agent_run_id": run_id,
+                    "student_id": student_id,
+                    "action_type": decision.action,
+                    "target_type": "staff_work_item" if target_id is not None else None,
+                    "target_id": target_id,
+                    "payload": _json(result),
+                    "rationale": decision.reason_code,
+                    "status": "executed" if target_id is not None else "rejected",
+                },
+            )
+            resolution = "ambiguous" if decision.action == "human_triage" else (
+                "ignored" if decision.action == "record_only" else "resolved"
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.communication_event
+                    SET resolution_status = :resolution
+                    WHERE tenant_id = :tenant_id AND id = :communication_id
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "communication_id": communication_id,
+                    "resolution": resolution,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.inbox_event
+                    SET status = CASE
+                                   WHEN :resolution = 'ambiguous' THEN 'needs_triage'
+                                   ELSE 'processed'
+                                 END,
+                        updated_at = NOW(), failure_code = NULL
+                    WHERE tenant_id = :tenant_id AND id = :inbox_id
+                    """
+                ),
+                {"tenant_id": tenant_id, "inbox_id": inbox_id, "resolution": resolution},
+            )
+
+    async def _create_staff_task(
+        self,
+        connection: Any,
+        *,
+        tenant_id: str,
+        student_id: str | None,
+        inbox_id: str,
+        communication_id: str,
+        subject: str,
+        body: str,
+        priority: str,
+        searchable: str,
+        create_inquiry: bool,
+    ) -> str | None:
+        if student_id is None:
+            return None
+        component = _component_for(searchable)
+        assignee_result = await connection.execute(
+            text(
+                """
+                SELECT id FROM public.staff_member
+                WHERE tenant_id = :tenant_id AND active = true
+                ORDER BY CASE WHEN component = :component THEN 0 ELSE 1 END, display_name, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "component": component},
+        )
+        assignee = assignee_result.mappings().first()
+        if create_inquiry:
+            inquiry_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.student_inquiry (
+                      id, tenant_id, student_id, topic_code, subject, message,
+                      status, priority, assignee_id, version
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :topic_code, :subject, :message,
+                      'new', :priority, :assignee_id, 1
+                    ) RETURNING id
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": tenant_id,
+                    "student_id": student_id,
+                    "topic_code": _topic_for(searchable),
+                    "subject": _bounded_text(subject, 240),
+                    "message": _bounded_text(body or subject, 500),
+                    "priority": priority,
+                    "assignee_id": assignee["id"] if assignee is not None else None,
+                },
+            )
+            _ = inquiry_result.mappings().first()
+
+        work_item_id = self._uuid_factory()
+        insert_result = await connection.execute(
+            text(
+                """
+                INSERT INTO public.staff_work_item (
+                  id, tenant_id, student_id, key, title, description, status, priority,
+                  work_type, component, due_at, escalated, assignee_id,
+                  source_type, source_id, version
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :key, :title, :description, 'todo', :priority,
+                  'communication', :component, NULL, false, :assignee_id, 'message', :source_id, 1
+                )
+                ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": work_item_id,
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "key": f"INBOX-{inbox_id.replace('-', '')[:12].upper()}",
+                "title": _bounded_text(subject, 240),
+                "description": _bounded_text(body or "Review the inbound communication.", 4_000),
+                "priority": priority,
+                "component": component,
+                "assignee_id": assignee["id"] if assignee is not None else None,
+                "source_id": inbox_id,
+            },
+        )
+        inserted = insert_result.mappings().first()
+        if inserted is None:
+            existing = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM public.staff_work_item
+                    WHERE tenant_id = :tenant_id
+                      AND source_type = 'message' AND source_id = :source_id
+                    """
+                ),
+                {"tenant_id": tenant_id, "source_id": inbox_id},
+            )
+            existing_row = existing.mappings().first()
+            return str(existing_row["id"]) if existing_row is not None else None
+        work_item_id = inserted["id"]
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.staff_work_item_link (
+                  id, tenant_id, work_item_id, entity_type, entity_id, relationship
+                ) VALUES
+                  (:link_id, :tenant_id, :work_item_id, 'communication',
+                   :communication_id, 'source'),
+                  (:inbox_link_id, :tenant_id, :work_item_id, 'inbox_event', :inbox_id, 'source')
+                ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id) DO NOTHING
+                """
+            ),
+            {
+                "link_id": self._uuid_factory(),
+                "inbox_link_id": self._uuid_factory(),
+                "tenant_id": tenant_id,
+                "work_item_id": work_item_id,
+                "communication_id": communication_id,
+                "inbox_id": inbox_id,
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.staff_work_log (
+                  id, tenant_id, work_item_id, actor_type, actor_id, actor_name,
+                  action, message, occurred_at
+                ) VALUES (
+                  :id, :tenant_id, :work_item_id, 'system', NULL, 'Audentra workflow',
+                  'created', 'Created from inbound communication triage.', NOW()
+                )
+                """
+            ),
+            {"id": self._uuid_factory(), "tenant_id": tenant_id, "work_item_id": work_item_id},
+        )
+        return str(work_item_id)
+
+    async def _touch_inquiry(
+        self, connection: Any, tenant_id: str, inquiry_id: str, priority: str
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                UPDATE public.student_inquiry
+                SET priority = CASE
+                                 WHEN priority = 'urgent' OR :priority = 'urgent' THEN 'urgent'
+                                 WHEN priority = 'high' OR :priority = 'high' THEN 'high'
+                                 WHEN priority = 'medium' OR :priority = 'medium' THEN 'medium'
+                                 ELSE 'low'
+                               END,
+                    updated_at = NOW(), version = version + 1
+                WHERE tenant_id = :tenant_id AND id = :inquiry_id
+                """
+            ),
+            {"tenant_id": tenant_id, "inquiry_id": inquiry_id, "priority": priority},
+        )
+
+    async def _append_work_item_context(
+        self, connection: Any, tenant_id: str, work_item_id: str, communication_id: str, body: str
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.staff_work_item_link (
+                  id, tenant_id, work_item_id, entity_type, entity_id, relationship
+                ) VALUES (:id, :tenant_id, :work_item_id, 'communication',
+                          :communication_id, 'update')
+                ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id) DO NOTHING
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": tenant_id,
+                "work_item_id": work_item_id,
+                "communication_id": communication_id,
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.staff_work_log (
+                  id, tenant_id, work_item_id, actor_type, actor_id, actor_name,
+                  action, message, occurred_at
+                ) VALUES (
+                  :id, :tenant_id, :work_item_id, 'system', NULL, 'Audentra workflow',
+                  'commented', :message, NOW()
+                )
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": tenant_id,
+                "work_item_id": work_item_id,
+                "message": _bounded_text(body or "Received an additional student message.", 4_000),
+            },
+        )
+
+    async def _student_deadline_facts(
+        self, connection: Any, tenant_id: str, student_id: str
+    ) -> tuple[Any, bool]:
+        result = await connection.execute(
+            text(
+                """
+                SELECT MIN(due_at) FILTER (WHERE due_at IS NOT NULL) AS due_at,
+                       COUNT(*) FILTER (WHERE status = 'blocked') > 0 AS blocking
+                FROM public.student_requirement
+                WHERE tenant_id = :tenant_id
+                  AND journey_id IN (
+                    SELECT id FROM public.enrollment_journey
+                    WHERE tenant_id = :tenant_id AND student_id = :student_id
+                  )
+                  AND status NOT IN ('completed', 'waived', 'not_applicable')
+                """
+            ),
+            {"tenant_id": tenant_id, "student_id": student_id},
+        )
+        row = result.mappings().first()
+        return (row["due_at"], bool(row["blocking"])) if row is not None else (None, False)
+
+    async def _existing_work_item(
+        self, connection: Any, tenant_id: str, student_id: str
+    ) -> str | None:
+        result = await connection.execute(
+            text(
+                """
+                SELECT id FROM public.staff_work_item
+                WHERE tenant_id = :tenant_id AND student_id = :student_id
+                  AND status IN ('todo', 'in_progress')
+                  AND work_type = 'communication'
+                ORDER BY updated_at DESC, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "student_id": student_id},
+        )
+        row = result.mappings().first()
+        return str(row["id"]) if row is not None else None
+
+    async def _existing_inquiry(
+        self, connection: Any, tenant_id: str, student_id: str
+    ) -> str | None:
+        result = await connection.execute(
+            text(
+                """
+                SELECT id FROM public.student_inquiry
+                WHERE tenant_id = :tenant_id AND student_id = :student_id
+                  AND status IN ('new', 'open', 'waiting_on_student')
+                ORDER BY updated_at DESC, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "student_id": student_id},
+        )
+        row = result.mappings().first()
+        return str(row["id"]) if row is not None else None
+
+    async def _mark_inbox_failed(self, inbox_id: object) -> None:
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.inbox_event
+                    SET status = 'failed', failure_code = 'triage_failed', updated_at = NOW()
+                    WHERE id = :id AND status = 'processing'
+                    """
+                ),
+                {"id": inbox_id},
+            )
+
+    async def _scan_engagement(self) -> int:
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT s.tenant_id, s.id AS student_id,
+                           activity.last_active_at, activity.last_meaningful_action_at,
+                           activity.current_step_code, activity.recent_upload_failures,
+                           activity.help_requested, requirements.completion_percentage,
+                           requirements.blocking_requirement_count, requirements.next_deadline,
+                           inquiries.open_support_case_count
+                    FROM public.student AS s
+                    LEFT JOIN LATERAL (
+                      SELECT MAX(a.occurred_at) AS last_active_at,
+                             MAX(a.occurred_at) FILTER (
+                               WHERE a.event_name NOT LIKE '%viewed%'
+                                 AND a.event_name NOT LIKE '%visited%'
+                             ) AS last_meaningful_action_at,
+                             (ARRAY_AGG(
+                               COALESCE(a.properties ->> 'stepCode', a.event_name)
+                               ORDER BY a.occurred_at DESC
+                             ))[1] AS current_step_code,
+                             COUNT(*) FILTER (
+                               WHERE a.event_name LIKE '%upload%failed%'
+                                 AND a.occurred_at >= NOW() - INTERVAL '30 days'
+                             )::integer AS recent_upload_failures,
+                             BOOL_OR(
+                               a.event_name LIKE '%help%'
+                               AND a.occurred_at >= NOW() - INTERVAL '30 days'
+                             ) AS help_requested
+                      FROM public.activity_event AS a
+                      WHERE a.tenant_id = s.tenant_id
+                        AND a.student_id = s.id
+                        AND a.occurred_at >= NOW() - INTERVAL '30 days'
+                    ) AS activity ON true
+                    LEFT JOIN LATERAL (
+                      SELECT ROUND(
+                               100.0 * COUNT(*) FILTER (WHERE r.status IN ('completed', 'waived'))
+                               / NULLIF(COUNT(*) FILTER (WHERE r.status <> 'not_applicable'), 0)
+                             )::smallint AS completion_percentage,
+                             COUNT(*) FILTER (WHERE r.status = 'blocked')::integer
+                               AS blocking_requirement_count,
+                             MIN(r.due_at) FILTER (
+                               WHERE r.due_at IS NOT NULL
+                                 AND r.status NOT IN ('completed', 'waived', 'not_applicable')
+                             ) AS next_deadline
+                      FROM public.enrollment_journey AS j
+                      JOIN public.student_requirement AS r
+                        ON r.tenant_id = j.tenant_id AND r.journey_id = j.id
+                      WHERE j.tenant_id = s.tenant_id AND j.student_id = s.id
+                    ) AS requirements ON true
+                    LEFT JOIN LATERAL (
+                      SELECT COUNT(*)::integer AS open_support_case_count
+                      FROM public.student_inquiry AS inquiry
+                      WHERE inquiry.tenant_id = s.tenant_id
+                        AND inquiry.student_id = s.id
+                        AND inquiry.status <> 'resolved'
+                    ) AS inquiries ON true
+                    LEFT JOIN public.student_engagement_snapshot AS snapshot
+                      ON snapshot.tenant_id = s.tenant_id
+                     AND snapshot.student_id = s.id
+                    WHERE snapshot.projected_at IS NULL
+                       OR snapshot.projected_at < NOW() - INTERVAL '1 day'
+                    """
+                )
+            )
+            students = [dict(row) for row in result.mappings().all()]
+
+        scanned = 0
+        for student in students:
+            await self._persist_engagement_snapshot(student)
+            scanned += 1
+        return scanned
+
+    async def _persist_engagement_snapshot(self, student: dict[str, Any]) -> None:
+        tenant_id = str(student["tenant_id"])
+        student_id = str(student["student_id"])
+        now = datetime.now(UTC)
+        last_meaningful = _as_utc(student.get("last_meaningful_action_at"))
+        next_deadline = _as_utc(student.get("next_deadline"))
+        blocking = int(student.get("blocking_requirement_count") or 0)
+        help_requested = bool(student.get("help_requested"))
+        recent_upload_failures = int(student.get("recent_upload_failures") or 0)
+        days_to_deadline = (
+            (next_deadline - now).days if next_deadline is not None else None
+        )
+        inactive = last_meaningful is None or (now - last_meaningful).days >= 7
+        intervention = (inactive and blocking > 0) or (
+            days_to_deadline is not None and days_to_deadline <= 7
+        ) or help_requested
+        reasons: list[str] = []
+        if inactive:
+            reasons.append("inactive")
+        if blocking > 0:
+            reasons.append("blocking_requirement")
+        if days_to_deadline is not None and days_to_deadline <= 7:
+            reasons.append("deadline_within_7_days")
+        if help_requested:
+            reasons.append("help_requested")
+        priority = "urgent" if days_to_deadline is not None and days_to_deadline <= 2 else (
+            "high" if intervention else "low"
+        )
+        run_id = self._uuid_factory()
+        candidate_id = self._uuid_factory()
+        dedupe_key = f"engagement:{now.date().isoformat()}"
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.student_engagement_snapshot (
+                      tenant_id, student_id, snapshot_version, last_active_at,
+                      last_meaningful_action_at, current_step_code, completion_percentage,
+                      blocking_requirement_count, next_deadline, days_to_next_deadline,
+                      recent_upload_failures, help_requested, open_support_case_count,
+                      signals, projected_at
+                    ) VALUES (
+                      :tenant_id, :student_id, 1, :last_active_at,
+                      :last_meaningful_action_at, :current_step_code, :completion_percentage,
+                      :blocking_requirement_count, :next_deadline, :days_to_next_deadline,
+                      :recent_upload_failures, :help_requested, :open_support_case_count,
+                      CAST(:signals AS jsonb), NOW()
+                    )
+                    ON CONFLICT (tenant_id, student_id) DO UPDATE SET
+                      snapshot_version = student_engagement_snapshot.snapshot_version + 1,
+                      last_active_at = EXCLUDED.last_active_at,
+                      last_meaningful_action_at = EXCLUDED.last_meaningful_action_at,
+                      current_step_code = EXCLUDED.current_step_code,
+                      completion_percentage = EXCLUDED.completion_percentage,
+                      blocking_requirement_count = EXCLUDED.blocking_requirement_count,
+                      next_deadline = EXCLUDED.next_deadline,
+                      days_to_next_deadline = EXCLUDED.days_to_next_deadline,
+                      recent_upload_failures = EXCLUDED.recent_upload_failures,
+                      help_requested = EXCLUDED.help_requested,
+                      open_support_case_count = EXCLUDED.open_support_case_count,
+                      signals = EXCLUDED.signals,
+                      projected_at = NOW()
+                    """
+                ),
+                {
+                    "tenant_id": tenant_id,
+                    "student_id": student_id,
+                    "last_active_at": student.get("last_active_at"),
+                    "last_meaningful_action_at": student.get("last_meaningful_action_at"),
+                    "current_step_code": student.get("current_step_code"),
+                    "completion_percentage": student.get("completion_percentage"),
+                    "blocking_requirement_count": blocking,
+                    "next_deadline": student.get("next_deadline"),
+                    "days_to_next_deadline": days_to_deadline,
+                    "recent_upload_failures": recent_upload_failures,
+                    "help_requested": help_requested,
+                    "open_support_case_count": int(student.get("open_support_case_count") or 0),
+                    "signals": _json({"reasons": reasons, "priority": priority}),
+                },
+            )
+            if intervention:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO public.intervention_candidate (
+                          id, tenant_id, student_id, trigger_code, dedupe_key,
+                          priority, reason_codes, evidence, status
+                        ) VALUES (
+                          :id, :tenant_id, :student_id, 'engagement_scan', :dedupe_key,
+                          :priority, CAST(:reason_codes AS jsonb), CAST(:evidence AS jsonb), 'new'
+                        )
+                        ON CONFLICT (tenant_id, student_id, dedupe_key) DO NOTHING
+                        """
+                    ),
+                    {
+                        "id": candidate_id,
+                        "tenant_id": tenant_id,
+                        "student_id": student_id,
+                        "dedupe_key": dedupe_key,
+                        "priority": priority,
+                        "reason_codes": _json(reasons),
+                        "evidence": _json(
+                            {
+                                "lastMeaningfulActionAt": _iso(last_meaningful),
+                                "nextDeadline": _iso(next_deadline),
+                                "blockingRequirementCount": blocking,
+                                "recentUploadFailures": recent_upload_failures,
+                                "helpRequested": help_requested,
+                            }
+                        ),
+                    },
+                )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.agent_run (
+                      id, tenant_id, feature, trigger_type, actor_type, student_id,
+                      provider, model, status, result, correlation_id, started_at, completed_at
+                    ) VALUES (
+                      :id, :tenant_id, 'engagement_scan', 'scheduled', 'system', :student_id,
+                      'deterministic', 'rules-v1', 'succeeded', CAST(:result AS jsonb),
+                      :correlation_id, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "tenant_id": tenant_id,
+                    "student_id": student_id,
+                    "result": _json({"intervention": intervention, "reasons": reasons}),
+                    "correlation_id": f"engagement:{student_id}:{now.date().isoformat()}",
+                },
+            )
+
+
+def _bounded_text(value: str, limit: int) -> str:
+    return value[:limit]
+
+
+def _component_for(searchable: str) -> str:
+    if any(term in searchable for term in ("payment", "deposit", "invoice", "financial", "aid")):
+        return "Financial Aid"
+    if any(
+        term in searchable
+        for term in ("document", "transcript", "passport", "identity", "upload")
+    ):
+        return "Registrar"
+    if any(term in searchable for term in ("health", "vaccine", "immun")):
+        return "Student Health"
+    return "Admissions"
+
+
+def _topic_for(searchable: str) -> str:
+    if any(term in searchable for term in ("payment", "deposit", "invoice", "financial", "aid")):
+        return "payments"
+    if any(
+        term in searchable
+        for term in ("document", "transcript", "passport", "identity", "upload")
+    ):
+        return "documents"
+    return "support"
+
+
+def _json(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), default=str)
+
+
+def _hash_payload(value: object) -> str:
+    import hashlib
+
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _as_utc(value: object) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None

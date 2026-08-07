@@ -66,3 +66,16 @@ def test_model_cannot_create_urgency_without_evidence() -> None:
     )
 
     assert priority == "medium"
+
+
+def test_existing_inquiry_is_appended_instead_of_duplicated() -> None:
+    decision = decide_inbound_action(
+        InboundTriageCandidate(
+            student_resolved=True,
+            actionable=True,
+            existing_inquiry_id="inquiry-1",
+        ),
+        now=NOW,
+    )
+
+    assert decision.action == "append_to_existing_inquiry"

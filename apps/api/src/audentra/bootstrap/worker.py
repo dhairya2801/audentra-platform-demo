@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
+from audentra.infrastructure.worker.agentic_scheduler import AgenticWorkflowScheduler
 from audentra.infrastructure.worker.dashboard_projector import StudentDashboardProjector
 from audentra.infrastructure.worker.document_commands import (
     DocumentCommandSettings,
@@ -75,6 +76,7 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             engine,
             settings.worker.consumer_name + ":document-review",
         )
+        scheduled_workflows = AgenticWorkflowScheduler(engine)
         dispatcher = build_event_dispatcher(
             projector,
             document_runner,
@@ -84,6 +86,8 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             outbox,
             dispatcher,
             poll_interval_seconds=settings.worker.poll_interval_seconds,
+            scheduled_runner=scheduled_workflows,
+            scheduled_interval_seconds=settings.worker.scheduled_interval_seconds,
         )
         return WorkerRuntimeResources(engine, http_client, outbox, worker)
     except BaseException:

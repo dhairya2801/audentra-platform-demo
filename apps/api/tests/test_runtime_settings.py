@@ -21,6 +21,7 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.object_storage.endpoint_url == "http://localhost:9000"
     assert settings.object_storage.force_path_style is True
     assert settings.worker.consumer_name == "student-dashboard-v1"
+    assert settings.worker.scheduled_interval_seconds == 300
     assert settings.worker.worker_id
     assert settings.ai.openrouter_model == "openai/gpt-4o-mini"
     assert settings.ai.openrouter_document_model == "qwen/qwen3.7-flash"

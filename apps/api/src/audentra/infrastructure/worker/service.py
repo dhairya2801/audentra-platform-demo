@@ -8,10 +8,15 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Protocol
 
 from audentra.infrastructure.messaging.dispatcher import EventDispatcher
 from audentra.infrastructure.messaging.envelope import ClaimedOutboxEvent
 from audentra.infrastructure.messaging.outbox import OutboxRepository
+
+
+class ScheduledWorkflowRunner(Protocol):
+    async def run_once(self) -> int: ...
 
 
 @dataclass(slots=True)
@@ -22,7 +27,10 @@ class WorkerStatus:
     in_flight: int = 0
     processed: int = 0
     failed: int = 0
+    scheduled_runs: int = 0
+    scheduled_failures: int = 0
     last_successful_poll_at: datetime | None = None
+    last_scheduled_run_at: datetime | None = None
     last_poll_error: str | None = None
 
 
@@ -33,13 +41,19 @@ class WorkerService:
         dispatcher: EventDispatcher,
         *,
         poll_interval_seconds: float = 1.0,
+        scheduled_runner: ScheduledWorkflowRunner | None = None,
+        scheduled_interval_seconds: float = 300.0,
         logger: logging.Logger | None = None,
     ) -> None:
         if not 0.05 <= poll_interval_seconds <= 60:
             raise ValueError("poll_interval_seconds must be between 0.05 and 60")
+        if not 60 <= scheduled_interval_seconds <= 3_600:
+            raise ValueError("scheduled_interval_seconds must be between 60 and 3600")
         self._repository = repository
         self._dispatcher = dispatcher
         self._poll_interval_seconds = poll_interval_seconds
+        self._scheduled_runner = scheduled_runner
+        self._scheduled_interval_seconds = scheduled_interval_seconds
         self._logger = logger or logging.getLogger(__name__)
         self._stop_event = asyncio.Event()
         self._status = WorkerStatus(started_at=datetime.now(UTC))
@@ -50,6 +64,7 @@ class WorkerService:
     async def run_once(self) -> int:
         """Claim and process one batch; useful for tests and one-shot jobs."""
 
+        await self._run_scheduled_if_due()
         self._status.polling = True
         try:
             batch = await self._repository.claim_batch()
@@ -84,6 +99,23 @@ class WorkerService:
             if await self._process(event):
                 processed_in_batch += 1
         return processed_in_batch
+
+    async def _run_scheduled_if_due(self) -> None:
+        if self._scheduled_runner is None:
+            return
+        last_run = self._status.last_scheduled_run_at
+        now = datetime.now(UTC)
+        if last_run is not None and (
+            now - last_run
+        ).total_seconds() < self._scheduled_interval_seconds:
+            return
+        self._status.last_scheduled_run_at = now
+        try:
+            await self._scheduled_runner.run_once()
+            self._status.scheduled_runs += 1
+        except Exception:
+            self._status.scheduled_failures += 1
+            self._logger.exception("scheduled_agentic_workflow_failed")
 
     async def run(self) -> None:
         self._logger.info(

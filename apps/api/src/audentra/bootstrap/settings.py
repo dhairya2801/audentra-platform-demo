@@ -31,6 +31,7 @@ class WorkerSettings:
     api_internal_url: str
     command_timeout_seconds: float
     poll_interval_seconds: float
+    scheduled_interval_seconds: float
     batch_size: int
     lease_seconds: int
     max_attempts: int
@@ -240,6 +241,9 @@ class RuntimeSettings:
                 command_timeout_seconds=worker_command_timeout,
                 poll_interval_seconds=_bounded_float(
                     values, "WORKER_POLL_INTERVAL_SECONDS", 1.0, 0.05, 60.0
+                ),
+                scheduled_interval_seconds=_bounded_float(
+                    values, "AGENTIC_WORKFLOW_INTERVAL_SECONDS", 300.0, 60.0, 3_600.0
                 ),
                 batch_size=_bounded_int(values, ("WORKER_BATCH_SIZE",), 20, 1, 500),
                 lease_seconds=worker_lease_seconds,
