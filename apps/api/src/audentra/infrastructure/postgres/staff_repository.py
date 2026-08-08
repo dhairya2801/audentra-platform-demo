@@ -948,7 +948,9 @@ class PostgresStaffRepository:
                           NOW() + INTERVAL '2 days', false, :assignee_id,
                           'document', :document_id, 1
                         )
-                        ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+                        ON CONFLICT (tenant_id, source_type, source_id)
+                        WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                        DO NOTHING
                         RETURNING id
                         """
                     ),

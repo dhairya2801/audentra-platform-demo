@@ -145,10 +145,14 @@ class AgenticWorkflowScheduler:
                       external_thread_id, subject, body_excerpt, metadata,
                       resolution_status, occurred_at
                     )
-                    SELECT :id, event.tenant_id, event.id, :student_id, 'email', 'inbound',
+                    SELECT :id, event.tenant_id, event.id, CAST(:student_id AS uuid),
+                           'email', 'inbound',
                            event.external_thread_id, event.subject, event.body_excerpt,
                            CAST(:metadata AS jsonb),
-                           CASE WHEN :student_id IS NULL THEN 'ambiguous' ELSE 'unresolved' END,
+                           CASE
+                             WHEN CAST(:student_id AS uuid) IS NULL THEN 'ambiguous'
+                             ELSE 'unresolved'
+                           END,
                            event.occurred_at
                     FROM public.inbox_event AS event
                     WHERE event.id = :inbox_event_id
@@ -222,7 +226,12 @@ class AgenticWorkflowScheduler:
             if decision.action == "append_to_existing_task" and existing_work_item_id is not None:
                 target_id = existing_work_item_id
                 await self._append_work_item_context(
-                    connection, tenant_id, existing_work_item_id, communication_id, body
+                    connection,
+                    tenant_id,
+                    existing_work_item_id,
+                    communication_id,
+                    body,
+                    decision.priority,
                 )
             elif (
                 decision.action == "append_to_existing_inquiry"
@@ -303,7 +312,11 @@ class AgenticWorkflowScheduler:
                     ) VALUES (
                       :id, :tenant_id, :agent_run_id, :student_id, :action_type,
                       :target_type, :target_id, CAST(:payload AS jsonb), :rationale,
-                      :status, CASE WHEN :status = 'executed' THEN NOW() ELSE NULL END
+                      CAST(:status AS varchar(24)),
+                      CASE
+                        WHEN CAST(:status AS varchar(24)) = 'executed' THEN NOW()
+                        ELSE NULL
+                      END
                     )
                     """
                 ),
@@ -419,7 +432,9 @@ class AgenticWorkflowScheduler:
                   :id, :tenant_id, :student_id, :key, :title, :description, 'todo', :priority,
                   'communication', :component, NULL, false, :assignee_id, 'message', :source_id, 1
                 )
-                ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
+                ON CONFLICT (tenant_id, source_type, source_id)
+                WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                DO NOTHING
                 RETURNING id
                 """
             ),
@@ -509,8 +524,34 @@ class AgenticWorkflowScheduler:
         )
 
     async def _append_work_item_context(
-        self, connection: Any, tenant_id: str, work_item_id: str, communication_id: str, body: str
+        self,
+        connection: Any,
+        tenant_id: str,
+        work_item_id: str,
+        communication_id: str,
+        body: str,
+        priority: str,
     ) -> None:
+        await connection.execute(
+            text(
+                """
+                UPDATE public.staff_work_item
+                SET priority = CASE
+                                 WHEN priority = 'urgent' OR :priority = 'urgent' THEN 'urgent'
+                                 WHEN priority = 'high' OR :priority = 'high' THEN 'high'
+                                 WHEN priority = 'medium' OR :priority = 'medium' THEN 'medium'
+                                 ELSE 'low'
+                               END,
+                    updated_at = NOW(), version = version + 1
+                WHERE tenant_id = :tenant_id AND id = :work_item_id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "work_item_id": work_item_id,
+                "priority": priority,
+            },
+        )
         await connection.execute(
             text(
                 """

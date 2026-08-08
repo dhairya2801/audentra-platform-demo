@@ -627,7 +627,11 @@ def test_document_review_work_item_creation_is_idempotent() -> None:
     work_sql = next(
         sql for sql, _ in engine.connection.calls if "INSERT INTO staff_work_item" in sql
     )
-    assert "ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING" in work_sql
+    normalized_sql = " ".join(work_sql.split())
+    assert (
+        "ON CONFLICT (tenant_id, source_type, source_id) "
+        "WHERE source_type IS NOT NULL AND source_id IS NOT NULL DO NOTHING"
+    ) in normalized_sql
 
 
 def test_reward_summary_is_authoritative_from_the_student_ledger() -> None:
