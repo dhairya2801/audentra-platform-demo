@@ -4,6 +4,7 @@ export type RequirementStatus =
   | "not_applicable"
   | "blocked"
   | "ready"
+  | "help_requested"
   | "in_progress"
   | "submitted"
   | "under_review"
@@ -705,6 +706,7 @@ export interface ImmunizationComplianceEvaluation {
 export type StudentDocumentExtractionFailureCode =
   | "provider_unavailable"
   | "unsupported_capability"
+  | "provider_configuration"
   | "timeout"
   | "invalid_response"
   | "unknown";
@@ -781,12 +783,37 @@ export interface StudentDocumentList {
   total: number;
 }
 
-export type StaffWorkItemStatus = "todo" | "in_progress" | "done";
+export type StaffWorkItemStatus =
+  | "todo"
+  | "in_progress"
+  | "follow_up_required"
+  | "blocked"
+  | "done"
+  | "cancelled";
 export type StaffWorkItemPriority = "urgent" | "high" | "medium" | "low";
 export type StaffWorkItemType =
   | "enrollment"
   | "document_review"
   | "communication";
+export type StaffCommunicationChannel = "email" | "sms" | "voice" | "portal";
+export type StaffActionType =
+  | "enrollment_follow_up"
+  | "onboarding_assistance"
+  | "document_review"
+  | "missing_information"
+  | "external_verification"
+  | "deadline_risk"
+  | "staff_decision"
+  | "communication_response"
+  | "blocked_dependency";
+export type StaffAiProcessingState =
+  | "not_requested"
+  | "pending"
+  | "running"
+  | "ready"
+  | "stale"
+  | "failed_retryable"
+  | "dead_letter";
 
 export interface StaffMemberSummary {
   id: string;
@@ -804,7 +831,21 @@ export interface StaffWorkItemLog {
     | "escalated"
     | "commented"
     | "document_decided"
-    | "student_preferences_updated";
+    | "student_preferences_updated"
+    | "channel_selected"
+    | "interaction_started"
+    | "communication_recorded"
+    | "outcome_recorded"
+    | "follow_up_scheduled"
+    | "blocked"
+    | "cancelled"
+    | "ai_refresh_requested"
+    | "ai_outcome_updated"
+    | "ai_task_insight_updated"
+    | "call_recording_uploaded"
+    | "call_transcription_updated"
+    | "scheduled_rule_matched"
+    | "student_summary_updated";
   message: string;
   actorName: string;
   occurredAt: string;
@@ -818,9 +859,26 @@ export interface StaffWorkItem {
   status: StaffWorkItemStatus;
   priority: StaffWorkItemPriority;
   type: StaffWorkItemType;
+  actionType: StaffActionType;
   component: string;
   dueAt: string | null;
   escalated: boolean;
+  selectedChannel: StaffCommunicationChannel | null;
+  attemptCount: number;
+  followUpAt: string | null;
+  blocker: {
+    code: string;
+    detail: string;
+    reviewAt: string | null;
+  } | null;
+  outcomeCode: string | null;
+  resolutionCode: string | null;
+  nextStep: string | null;
+  terminalReason: string | null;
+  startedAt: string | null;
+  interactionCompletedAt: string | null;
+  completedAt: string | null;
+  cancelledAt: string | null;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -841,13 +899,174 @@ export interface StaffWorkItem {
   history: StaffWorkItemLog[];
 }
 
+export interface StaffWorkComment {
+  id: string;
+  body: string;
+  author: StaffMemberSummary;
+  mentions: StaffMemberSummary[];
+  createdAt: string;
+}
+
+export interface StaffCommunicationEvent {
+  id: string;
+  channel: StaffCommunicationChannel;
+  direction: "inbound" | "outbound";
+  subject: string | null;
+  body: string | null;
+  deliveryStatus:
+    | "draft"
+    | "queued"
+    | "sent"
+    | "delivered"
+    | "failed"
+    | "bounced"
+    | "recorded"
+    | "received";
+  sourceSequence: number;
+  occurredAt: string;
+}
+
+export interface StaffInteractionOutcome {
+  id: string;
+  version: number;
+  finality: "provisional" | "final";
+  summary: string;
+  channelResults: Array<{
+    channel: StaffCommunicationChannel;
+    result: string;
+  }>;
+  outcomeCode: string | null;
+  resolutionCode: string | null;
+  nextStep: string | null;
+  followUpRequired: boolean;
+  sourceIds: string[];
+  coveredSourceVersion: number;
+  confidence: number | null;
+  provider: string;
+  model: string;
+  generatedAt: string;
+}
+
+export interface StaffInteraction {
+  id: string;
+  objective: string;
+  status:
+    | "collecting"
+    | "enrichment_pending"
+    | "provisional"
+    | "completed"
+    | "stale"
+    | "failed_retryable";
+  selectedChannel: StaffCommunicationChannel | null;
+  sourceVersion: number;
+  coveredSourceVersion: number;
+  version: number;
+  quietUntil: string | null;
+  lastActivityAt: string | null;
+  completedAt: string | null;
+  communications: StaffCommunicationEvent[];
+  recordings: StaffCallRecording[];
+  outcome: StaffInteractionOutcome | null;
+  aiState: StaffAiProcessingState;
+}
+
+export type StaffCallRecordingStatus =
+  | "uploading"
+  | "queued"
+  | "transcribing"
+  | "ready"
+  | "upload_failed"
+  | "failed_retryable"
+  | "dead_letter"
+  | "pending_configuration";
+
+export interface StaffCallTranscriptRevision {
+  id: string;
+  version: number;
+  transcript: string;
+  language: string | null;
+  durationSeconds: number | null;
+  segments: Array<{
+    start: number | null;
+    end: number | null;
+    text: string;
+  }>;
+  provider: string;
+  model: string;
+  generatedAt: string;
+}
+
+export interface StaffCallRecording {
+  id: string;
+  interactionId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  status: StaffCallRecordingStatus;
+  attempts: number;
+  version: number;
+  lastError: string | null;
+  uploadedAt: string | null;
+  transcribedAt: string | null;
+  downloadUrl: string;
+  currentTranscript: StaffCallTranscriptRevision | null;
+  transcriptHistory: StaffCallTranscriptRevision[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StaffStudentAiSummary {
+  state: StaffAiProcessingState;
+  version: number | null;
+  summary: string | null;
+  keyFacts: string[];
+  risks: string[];
+  nextSteps: string[];
+  sourceIds: string[];
+  sourceRevision: number;
+  provider: string | null;
+  model: string | null;
+  generatedAt: string | null;
+}
+
+export interface StaffTaskAiInsight {
+  state: StaffAiProcessingState;
+  version: number | null;
+  summary: string | null;
+  whyThisMatters: string | null;
+  objective: string | null;
+  successDefinition: string | null;
+  suggestedApproach: string | null;
+  suggestedChannel: StaffCommunicationChannel | null;
+  sourceIds: string[];
+  sourceRevision: number;
+  provider: string | null;
+  model: string | null;
+  generatedAt: string | null;
+}
+
+export interface StaffWorkItemDetail {
+  workItem: StaffWorkItem;
+  taskInsight: StaffTaskAiInsight;
+  studentSummary: StaffStudentAiSummary;
+  interactions: StaffInteraction[];
+  comments: StaffWorkComment[];
+  relatedItems: StaffWorkItem[];
+  aiState: StaffAiProcessingState;
+  generatedAt: string;
+}
+
 export interface StaffActionCenter {
   items: StaffWorkItem[];
   staff: StaffMemberSummary[];
   counts: {
     todo: number;
     inProgress: number;
+    followUpRequired: number;
+    blocked: number;
     done: number;
+    cancelled: number;
     urgent: number;
     escalated: number;
   };
@@ -886,7 +1105,171 @@ export interface UpdateStaffWorkItemInput {
   status?: StaffWorkItemStatus;
   assigneeId?: string | null;
   escalated?: boolean;
+  selectedChannel?: StaffCommunicationChannel | null;
+  followUpAt?: string | null;
+  blockerCode?: string | null;
+  blockerDetail?: string | null;
+  blockerReviewAt?: string | null;
+  outcomeCode?: string | null;
+  resolutionCode?: string | null;
+  nextStep?: string | null;
+  terminalReason?: string | null;
   note?: string;
+}
+
+export interface CreateStaffWorkItemInput {
+  studentId: string;
+  flowKind: "enrollment" | "onboarding";
+  requirementId?: string | null;
+  title: string;
+  description: string;
+  component: string;
+  assigneeId?: string | null;
+  priority: StaffWorkItemPriority;
+  status?: Exclude<StaffWorkItemStatus, "done" | "cancelled">;
+  dueAt?: string | null;
+  actionType?: StaffActionType | null;
+}
+
+export interface StaffRealtimeEvent {
+  cursor: number;
+  type: string;
+  resourceType: string;
+  resourceId: string;
+  workItemId: string | null;
+  data: Record<string, unknown>;
+  occurredAt: string;
+}
+
+export interface CreateStaffWorkCommentInput {
+  expectedWorkItemVersion: number;
+  body: string;
+  mentionIds?: string[];
+}
+
+export interface StartStaffInteractionInput {
+  expectedWorkItemVersion: number;
+  channel: StaffCommunicationChannel;
+  objective: string;
+}
+
+export interface RecordStaffCommunicationInput {
+  expectedInteractionVersion: number;
+  channel: StaffCommunicationChannel;
+  direction: "inbound" | "outbound";
+  subject?: string | null;
+  body: string;
+  occurredAt?: string;
+}
+
+export interface CompleteStaffInteractionInput {
+  expectedInteractionVersion: number;
+  expectedWorkItemVersion: number;
+  outcomeCode: string;
+  resolutionCode: string;
+  nextStep?: string | null;
+  followUpAt?: string | null;
+}
+
+export interface RequestStaffAiRefreshInput {
+  expectedWorkItemVersion: number;
+  scope: "interaction" | "student_summary" | "task_insight" | "both";
+  interactionId?: string;
+}
+
+export interface RetryStaffCallTranscriptionInput {
+  expectedRecordingVersion: number;
+}
+
+export type StaffActionRuleSignal = "requirement_due" | "student_inactive";
+
+export interface StaffActionRule {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  signalType: StaffActionRuleSignal;
+  flowKind: "enrollment" | "onboarding" | null;
+  requirementCode: string | null;
+  lookaheadDays: number | null;
+  inactivityDays: number | null;
+  cadenceMinutes: number;
+  component: string;
+  priority: StaffWorkItemPriority;
+  actionType: StaffActionType;
+  titleTemplate: string;
+  descriptionTemplate: string;
+  version: number;
+  lastEvaluatedAt: string | null;
+  updatedAt: string;
+  updatedBy: StaffMemberSummary | null;
+}
+
+export interface StaffActionRuleList {
+  items: StaffActionRule[];
+  generatedAt: string;
+}
+
+export interface StaffNotification {
+  id: string;
+  kind: string;
+  title: string;
+  body: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  workItemKey: string | null;
+  target: "staff" | "team";
+  isRead: boolean;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface StaffNotificationList {
+  items: StaffNotification[];
+  unreadCount: number;
+  generatedAt: string;
+}
+
+export interface StaffNotificationReadResult {
+  id: string;
+  isRead: true;
+  readAt: string;
+}
+
+export interface CreateStaffActionRuleInput {
+  code: string;
+  name: string;
+  description: string;
+  enabled?: boolean;
+  signalType: StaffActionRuleSignal;
+  flowKind?: "enrollment" | "onboarding" | null;
+  requirementCode?: string | null;
+  lookaheadDays?: number | null;
+  inactivityDays?: number | null;
+  cadenceMinutes: number;
+  component: string;
+  priority: StaffWorkItemPriority;
+  actionType: StaffActionType;
+  titleTemplate: string;
+  descriptionTemplate: string;
+}
+
+export interface UpdateStaffActionRuleInput {
+  expectedVersion: number;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  flowKind?: "enrollment" | "onboarding" | null;
+  requirementCode?: string | null;
+  lookaheadDays?: number | null;
+  inactivityDays?: number | null;
+  cadenceMinutes?: number;
+  component?: string;
+  priority?: StaffWorkItemPriority;
+  actionType?: StaffActionType;
+  titleTemplate?: string;
+  descriptionTemplate?: string;
 }
 
 export interface UpdateStaffStudentPreferencesInput {
@@ -1685,6 +2068,7 @@ export interface HelpArticle {
 
 export interface StudentHelp {
   articles: HelpArticle[];
+  requests: StudentHelpRequest[];
   support: {
     email: string;
     phone: string;
@@ -1695,6 +2079,7 @@ export interface StudentHelp {
 export interface CreateStudentHelpRequestInput {
   topicCode: HelpArticle["category"];
   message: string;
+  requirementId?: string | null;
 }
 
 export interface StudentHelpRequest {
@@ -1705,9 +2090,26 @@ export interface StudentHelpRequest {
   status: "new" | "open" | "waiting_on_student" | "resolved";
   priority: StaffWorkItemPriority;
   assigneeId: string | null;
+  requirementId?: string | null;
+  workItemId?: string | null;
   createdAt: string;
   updatedAt: string;
   version: number;
+  messages: StudentInquiryMessage[];
+}
+
+export interface StudentInquiryMessage {
+  id: string;
+  direction: "student" | "staff";
+  body: string;
+  authorName: string;
+  deliveryStatus: "received" | "delivered";
+  createdAt: string;
+}
+
+export interface CreateStudentInquiryMessageInput {
+  expectedVersion: number;
+  body: string;
 }
 
 export interface ApiErrorResponse {

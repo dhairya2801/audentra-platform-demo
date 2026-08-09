@@ -136,12 +136,20 @@ async def test_worker_builder_wires_independent_worker_runtime(
         poll_interval_seconds: float,
         scheduled_runner: object,
         scheduled_interval_seconds: float,
+        enrichment_runner: object,
+        enrichment_interval_seconds: float,
+        transcription_runner: object,
+        transcription_interval_seconds: float,
     ) -> StubWorker:
         captured["worker_repository"] = outbox
         captured["dispatcher"] = dispatcher
         captured["poll_interval"] = poll_interval_seconds
         captured["scheduled_runner"] = scheduled_runner
         captured["scheduled_interval"] = scheduled_interval_seconds
+        captured["enrichment_runner"] = enrichment_runner
+        captured["enrichment_interval"] = enrichment_interval_seconds
+        captured["transcription_runner"] = transcription_runner
+        captured["transcription_interval"] = transcription_interval_seconds
         return worker
 
     projector = object()
@@ -190,6 +198,7 @@ async def test_worker_builder_wires_independent_worker_runtime(
     assert cast(Any, resources.http_client) is http
     assert cast(Any, resources.repository) is repository
     assert cast(Any, resources.worker) is worker
+    assert resources.object_storage is not None
     assert cast(Any, captured["database_options"]).application_name == "audentra-worker"
     assert cast(Any, captured["outbox_config"]).worker_id == "worker-test"
     assert captured["worker_repository"] is repository
@@ -197,6 +206,10 @@ async def test_worker_builder_wires_independent_worker_runtime(
     assert captured["poll_interval"] == settings.worker.poll_interval_seconds
     assert captured["scheduled_runner"] is scheduled_runner
     assert captured["scheduled_interval"] == settings.worker.scheduled_interval_seconds
+    assert captured["enrichment_runner"] is not None
+    assert captured["enrichment_interval"] == settings.worker.poll_interval_seconds
+    assert captured["transcription_runner"] is not None
+    assert captured["transcription_interval"] == settings.worker.poll_interval_seconds
 
 
 @pytest.mark.anyio

@@ -4,6 +4,34 @@ This changelog summarizes user-visible releases. Detailed notes are separated
 by persona so students, staff, and implementation teams can review only the
 changes that affect them.
 
+## 2026-08-09 — Functional enrollment action center
+
+### Students
+
+- Added requirement-linked help requests with a visible `Help requested` state.
+- Preserved every uploaded original while making transcript parsing retryable.
+- Added automatic student updates when a transcript is parsed, reviewed, or
+  recovered after a parsing failure.
+
+### Staff
+
+- Added durable work-item creation, assignment, priority, comments, interactions,
+  outcomes, follow-ups, history, and configurable deterministic action rules.
+- Added immediate inquiry and document-review notifications with team and owner
+  routing, plus a resumable tenant-scoped realtime event stream.
+- Added automatic human-review tasks for transcript failures and automatic
+  resolution when a student later supplies a valid document.
+
+### AI and background processing
+
+- Added quiet-window action enrichment that produces task, outcome, and student
+  summaries from one bounded canonical context instead of one LLM call per event.
+- Added OpenRouter multimodal transcript extraction and independent durable call
+  transcription with retry and failure visibility.
+- Kept long-running AI and transcription work out of API request workers.
+
+See [Detailed Action Center changelog](docs/changelog/2026-08-09-action-center-functional.md).
+
 ## 2026-07-31 — Student experience and staff operations
 
 ### Student users

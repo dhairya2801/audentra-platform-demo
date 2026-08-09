@@ -225,6 +225,59 @@ async def test_workspace_merges_canonical_help_requests_into_preview_inquiries()
     assert result["portalInventory"][4 + 1]["recordCount"] == 2
 
 
+async def test_workspace_adds_canonical_students_without_synthetic_risk() -> None:
+    canonical_student = {
+        "id": "70000000-0000-7000-8000-000000000123",
+        "name": "Casey Rivera",
+        "preferredName": "Casey",
+        "programName": "Computer Science",
+        "classYear": 2027,
+        "assignedStaffId": STAFF_ID,
+        "syntheticSeed": False,
+        "journey": {
+            "stage": "Onboarding",
+            "completedTasks": 2,
+            "totalTasks": 8,
+            "lastActivityAt": "2026-08-02T20:00:00.000Z",
+        },
+        "risk": {
+            "score": 0,
+            "band": "low",
+            "category": "administrative",
+            "meltLikelihoodPercent": 0,
+            "recoveryLikelihoodPercent": 0,
+            "reason": "No deterministic risk score has been generated for this student.",
+            "signals": [],
+            "modelVersion": "not-evaluated",
+            "evaluatedAt": "2026-08-02T20:00:00.000Z",
+        },
+        "recommendedAction": {
+            "title": "No staff action required",
+            "rationale": "The student has no open Action Center work.",
+            "channel": "portal",
+            "expectedImpact": "Continue monitoring canonical journey progress",
+            "taskId": None,
+            "recommendedToday": False,
+        },
+        "communicationHistory": [],
+    }
+
+    result = await repository().get_workspace(
+        auth(),
+        action_center=action_center(),
+        student=student_record(),
+        campus_life=campus_life(),
+        canonical_cohort=[canonical_student],
+    )
+
+    assert len(result["cohort"]) == 401
+    casey = next(item for item in result["cohort"] if item["name"] == "Casey Rivera")
+    assert casey["syntheticSeed"] is False
+    assert casey["journey"]["completedTasks"] == 2
+    assert casey["risk"]["modelVersion"] == "not-evaluated"
+    assert casey not in result["personalActionCenter"]["students"]
+
+
 async def test_workspace_composes_canonical_reads_with_deterministic_preview() -> None:
     result = await workspace(repository())
 

@@ -20,6 +20,11 @@ from .base import StrictRequest
 ShortText = Annotated[StrictStr, StringConstraints(min_length=1, max_length=120)]
 NameText = Annotated[StrictStr, StringConstraints(min_length=1, max_length=160)]
 LongText = Annotated[StrictStr, StringConstraints(min_length=1, max_length=500)]
+OperationalCode = Annotated[
+    StrictStr,
+    StringConstraints(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9_]*$"),
+]
+StaffCommunicationChannel = Literal["email", "sms", "voice", "portal"]
 PhoneE164 = Annotated[StrictStr, StringConstraints(pattern=r"^\+[1-9][0-9]{7,14}$")]
 SessionToken = Annotated[
     StrictStr,
@@ -409,6 +414,15 @@ class CreateStudentHelpRequest(StrictRequest):
         StrictStr,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
     ]
+    requirement_id: UUID | None = None
+
+
+class CreateStudentInquiryMessageRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+    body: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+    ]
 
 
 class CreateDepositPaymentRequest(StrictRequest):
@@ -427,10 +441,173 @@ class UpdateStudentProfileRequest(StrictRequest):
 
 class UpdateStaffWorkItemRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
-    status: Literal["todo", "in_progress", "done"] | None = None
+    status: (
+        Literal[
+            "todo",
+            "in_progress",
+            "follow_up_required",
+            "blocked",
+            "done",
+            "cancelled",
+        ]
+        | None
+    ) = None
     assignee_id: UUID | None = None
     escalated: StrictBool | None = None
+    selected_channel: StaffCommunicationChannel | None = None
+    follow_up_at: datetime | None = None
+    blocker_code: OperationalCode | None = None
+    blocker_detail: (
+        Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None
+    ) = None
+    blocker_review_at: datetime | None = None
+    outcome_code: OperationalCode | None = None
+    resolution_code: OperationalCode | None = None
+    next_step: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None = None
+    terminal_reason: OperationalCode | None = None
     note: Annotated[StrictStr, StringConstraints(min_length=1, max_length=500)] | None = None
+
+
+class CreateStaffWorkItemRequest(StrictRequest):
+    student_id: UUID
+    flow_kind: Literal["enrollment", "onboarding"]
+    requirement_id: UUID | None = None
+    title: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=240),
+    ]
+    description: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=2000),
+    ]
+    component: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+    ]
+    assignee_id: UUID | None = None
+    priority: Literal["low", "medium", "high", "urgent"]
+    status: Literal["todo", "in_progress", "follow_up_required", "blocked"] = "todo"
+    due_at: datetime | None = None
+    action_type: (
+        Literal[
+            "enrollment_follow_up",
+            "onboarding_assistance",
+            "document_review",
+            "missing_information",
+            "external_verification",
+            "deadline_risk",
+            "staff_decision",
+            "communication_response",
+            "blocked_dependency",
+        ]
+        | None
+    ) = None
+
+    @field_validator("due_at")
+    @classmethod
+    def _due_at_must_include_timezone(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("must include a timezone offset")
+        return value
+
+
+class CreateStaffWorkCommentRequest(StrictRequest):
+    expected_work_item_version: StrictInt = Field(ge=1)
+    body: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2000)]
+    mention_ids: list[UUID] = Field(default_factory=list, max_length=20)
+
+
+class StartStaffInteractionRequest(StrictRequest):
+    expected_work_item_version: StrictInt = Field(ge=1)
+    channel: StaffCommunicationChannel
+    objective: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)]
+
+
+class RecordStaffCommunicationRequest(StrictRequest):
+    expected_interaction_version: StrictInt = Field(ge=1)
+    channel: StaffCommunicationChannel
+    direction: Literal["inbound", "outbound"]
+    subject: Annotated[StrictStr, StringConstraints(min_length=1, max_length=500)] | None = None
+    body: Annotated[StrictStr, StringConstraints(min_length=1, max_length=12000)]
+    occurred_at: datetime | None = None
+
+
+class CompleteStaffInteractionRequest(StrictRequest):
+    expected_interaction_version: StrictInt = Field(ge=1)
+    expected_work_item_version: StrictInt = Field(ge=1)
+    outcome_code: OperationalCode
+    resolution_code: OperationalCode
+    next_step: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None = None
+    follow_up_at: datetime | None = None
+
+
+class RequestStaffAiRefreshRequest(StrictRequest):
+    expected_work_item_version: StrictInt = Field(ge=1)
+    scope: Literal["interaction", "student_summary", "task_insight", "both"]
+    interaction_id: UUID | None = None
+
+
+class RetryStaffCallTranscriptionRequest(StrictRequest):
+    expected_recording_version: StrictInt = Field(ge=1)
+
+
+StaffActionRuleSignal = Literal["requirement_due", "student_inactive"]
+StaffWorkPriority = Literal["low", "medium", "high", "urgent"]
+StaffWorkActionType = Literal[
+    "enrollment_follow_up",
+    "onboarding_assistance",
+    "document_review",
+    "missing_information",
+    "external_verification",
+    "deadline_risk",
+    "staff_decision",
+    "communication_response",
+    "blocked_dependency",
+]
+
+
+class CreateStaffActionRuleRequest(StrictRequest):
+    code: Annotated[
+        StrictStr,
+        StringConstraints(min_length=1, max_length=80, pattern=r"^[a-z][a-z0-9-]*$"),
+    ]
+    name: NameText
+    description: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)]
+    enabled: StrictBool = True
+    signal_type: StaffActionRuleSignal
+    flow_kind: Literal["enrollment", "onboarding"] | None = None
+    requirement_code: OperationalCode | None = None
+    lookahead_days: StrictInt | None = Field(default=None, ge=0, le=365)
+    inactivity_days: StrictInt | None = Field(default=None, ge=1, le=365)
+    cadence_minutes: StrictInt = Field(ge=5, le=1440)
+    component: NameText
+    priority: StaffWorkPriority
+    action_type: StaffWorkActionType
+    title_template: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)]
+    description_template: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2000)]
+
+
+class UpdateStaffActionRuleRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+    name: NameText | None = None
+    description: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None = (
+        None
+    )
+    enabled: StrictBool | None = None
+    flow_kind: Literal["enrollment", "onboarding"] | None = None
+    requirement_code: OperationalCode | None = None
+    lookahead_days: StrictInt | None = Field(default=None, ge=0, le=365)
+    inactivity_days: StrictInt | None = Field(default=None, ge=1, le=365)
+    cadence_minutes: StrictInt | None = Field(default=None, ge=5, le=1440)
+    component: NameText | None = None
+    priority: StaffWorkPriority | None = None
+    action_type: StaffWorkActionType | None = None
+    title_template: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)] | None = (
+        None
+    )
+    description_template: (
+        Annotated[StrictStr, StringConstraints(min_length=1, max_length=2000)] | None
+    ) = None
 
 
 class UpdateStaffStudentPreferencesRequest(StrictRequest):

@@ -101,6 +101,18 @@ _PORTAL_MEDIA_FILE = re.compile(
     r"^(?P<id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\."
     r"(?P<extension>jpg|png|webp)$"
 )
+_CALL_RECORDING_MIME_EXTENSIONS = {
+    "audio/flac": "flac",
+    "audio/m4a": "m4a",
+    "audio/mp4": "m4a",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/webm": "webm",
+    "audio/x-m4a": "m4a",
+    "video/mp4": "mp4",
+    "video/webm": "webm",
+}
 
 
 def _mapping(value: object) -> Mapping[str, Any]:
@@ -116,6 +128,12 @@ def _integer(value: object) -> int:
         return int(cast(Any, value))
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_upload_file_name(value: str) -> str:
+    file_name = value.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    cleaned = "".join(character for character in file_name if ord(character) >= 32)
+    return (cleaned or "call-recording")[:255]
 
 
 def _academic_summary(value: Mapping[str, Any]) -> JsonDict:
@@ -681,14 +699,23 @@ class PostgresPlatformService:
             return await portal.create_student_help_request(
                 auth, payload, self._key(key), call.request_id
             )
+        if operation == "student.create_inquiry_message":
+            return await portal.create_student_inquiry_message(
+                auth,
+                self._path(call, "inquiryId", "id", "inquiry_id"),
+                payload,
+                self._key(key),
+                call.request_id,
+            )
         if operation == "staff.get_workspace":
             configurations = await self._managed_configurations(auth)
             await self._preview().sync_managed_configurations(auth, configurations)
-            action_center, student, campus_life, inquiries = await asyncio.gather(
+            action_center, student, campus_life, inquiries, cohort = await asyncio.gather(
                 staff.get_action_center(auth),
                 staff.get_student_record(auth, auth.student_id),
                 portal.get_campus_life(auth),
                 portal.list_staff_help_requests(auth),
+                staff.get_student_roster(auth),
             )
             return await self._preview().get_workspace(
                 auth,
@@ -696,6 +723,7 @@ class PostgresPlatformService:
                 student=student,
                 campus_life=campus_life,
                 canonical_inquiries=inquiries,
+                canonical_cohort=cohort,
             )
         if operation == "staff.upload_portal_media":
             return await self._upload_staff_portal_media(auth, call)
@@ -765,10 +793,107 @@ class PostgresPlatformService:
             return await self._preview().preview_edward(auth, payload)
         if operation == "staff.get_action_center":
             return await staff.get_action_center(auth)
+        if operation == "staff.create_work_item":
+            return await staff.create_work_item(
+                auth,
+                payload,
+                self._key(key),
+                call.request_id,
+            )
+        if operation == "staff.get_realtime_events":
+            raw_cursor = payload.get("afterCursor")
+            raw_limit = payload.get("limit", 100)
+            if raw_cursor is not None and (
+                isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int)
+            ):
+                raise BadRequestError(
+                    "INVALID_EVENT_CURSOR",
+                    "The realtime event cursor must be a non-negative integer",
+                )
+            if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+                raise BadRequestError(
+                    "INVALID_EVENT_LIMIT",
+                    "The realtime event limit must be an integer",
+                )
+            return await staff.get_realtime_events(auth, raw_cursor, raw_limit)
+        if operation == "staff.get_work_item_detail":
+            return await staff.get_work_item_detail(
+                auth,
+                self._path(call, "workItemId", "id", "work_item_id"),
+            )
         if operation == "staff.update_work_item":
             return await staff.update_work_item(
                 auth,
                 self._path(call, "workItemId", "id", "work_item_id"),
+                payload,
+                call.request_id,
+            )
+        if operation == "staff.create_work_comment":
+            return await staff.add_work_comment(
+                auth,
+                self._path(call, "workItemId", "id", "work_item_id"),
+                payload,
+                self._key(call.idempotency_key),
+                call.request_id,
+            )
+        if operation == "staff.start_interaction":
+            return await staff.start_interaction(
+                auth,
+                self._path(call, "workItemId", "id", "work_item_id"),
+                payload,
+                self._key(call.idempotency_key),
+                call.request_id,
+            )
+        if operation == "staff.record_interaction_communication":
+            return await staff.record_interaction_communication(
+                auth,
+                self._path(call, "interactionId", "id", "interaction_id"),
+                payload,
+                self._key(call.idempotency_key),
+                call.request_id,
+            )
+        if operation == "staff.upload_call_recording":
+            return await self._upload_staff_call_recording(auth, call)
+        if operation == "staff.get_call_recording_content":
+            return await self._get_staff_call_recording_content(
+                auth,
+                self._path(call, "recordingId", "id", "recording_id"),
+            )
+        if operation == "staff.retry_call_transcription":
+            return await staff.retry_call_transcription(
+                auth,
+                self._path(call, "recordingId", "id", "recording_id"),
+                payload,
+            )
+        if operation == "staff.complete_interaction":
+            return await staff.complete_interaction(
+                auth,
+                self._path(call, "interactionId", "id", "interaction_id"),
+                payload,
+                call.request_id,
+            )
+        if operation == "staff.request_ai_refresh":
+            return await staff.request_ai_refresh(
+                auth,
+                self._path(call, "workItemId", "id", "work_item_id"),
+                payload,
+                call.request_id,
+            )
+        if operation == "staff.get_action_rules":
+            return await staff.get_action_rules(auth)
+        if operation == "staff.get_notifications":
+            return await staff.get_notifications(auth)
+        if operation == "staff.mark_notification_read":
+            return await staff.mark_notification_read(
+                auth,
+                self._path(call, "notificationId", "id", "notification_id"),
+            )
+        if operation == "staff.create_action_rule":
+            return await staff.create_action_rule(auth, payload, call.request_id)
+        if operation == "staff.update_action_rule":
+            return await staff.update_action_rule(
+                auth,
+                self._path(call, "ruleId", "id", "rule_id"),
                 payload,
                 call.request_id,
             )
@@ -942,6 +1067,90 @@ class PostgresPlatformService:
             "publicPath": public_path,
             "publicUrl": f"{public_base_url}{public_path}" if public_base_url else public_path,
         }
+
+    async def _upload_staff_call_recording(
+        self,
+        auth: AuthContext,
+        call: ServiceCall,
+    ) -> JsonDict:
+        if auth.actor_type != "staff":
+            raise UnauthorizedError("Staff authentication is required")
+        upload = call.upload
+        if upload is None:
+            raise BadRequestError("FILE_REQUIRED", "Choose a call recording to upload")
+        extension = _CALL_RECORDING_MIME_EXTENSIONS.get(upload.mime_type)
+        if extension is None or not 1 <= len(upload.content) <= 10 * 1024 * 1024:
+            raise BadRequestError(
+                "INVALID_CALL_RECORDING",
+                "Use a supported call recording no larger than 10 MB",
+            )
+        interaction_id = self._path(call, "interactionId", "id", "interaction_id")
+        recording_id = str(uuid4())
+        digest = hashlib.sha256(upload.content).hexdigest()
+        storage_key = (
+            f"{auth.tenant_id}/staff-call-recordings/{interaction_id}/{recording_id}.{extension}"
+        )
+        reservation = await self.repository.staff.begin_call_recording(
+            auth,
+            interaction_id,
+            recording_id=recording_id,
+            request_key=self._key(call.idempotency_key),
+            file_name=_safe_upload_file_name(upload.file_name),
+            mime_type=upload.mime_type,
+            size_bytes=len(upload.content),
+            storage_key=storage_key,
+            sha256=digest,
+        )
+        recording_id = str(reservation["id"])
+        work_item_id = str(reservation["workItemId"])
+        if bool(reservation["shouldUpload"]):
+            try:
+                await self.storage.put(
+                    str(reservation["storageKey"]),
+                    upload.content,
+                    content_type=upload.mime_type,
+                    sha256=digest,
+                )
+            except (OSError, StorageError) as error:
+                await self.repository.staff.fail_call_recording_upload(
+                    auth,
+                    recording_id,
+                    error,
+                )
+                return cast(
+                    JsonDict,
+                    await self.repository.staff.get_work_item_detail(auth, work_item_id),
+                )
+            work_item_id = await self.repository.staff.confirm_call_recording_upload(
+                auth,
+                recording_id,
+                call.request_id,
+            )
+        return cast(
+            JsonDict,
+            await self.repository.staff.get_work_item_detail(auth, work_item_id),
+        )
+
+    async def _get_staff_call_recording_content(
+        self,
+        auth: AuthContext,
+        recording_id: str,
+    ) -> BinaryPayload:
+        reference = await self.repository.staff.get_call_recording_reference(auth, recording_id)
+        try:
+            content = await self.storage.get(str(reference["storageKey"]))
+        except StorageError as error:
+            raise ApiError(
+                503,
+                "CALL_RECORDING_STORAGE_UNAVAILABLE",
+                "The original call recording is temporarily unavailable",
+            ) from error
+        return BinaryPayload(
+            data=content,
+            media_type=str(reference["mimeType"]),
+            file_name=str(reference["fileName"]),
+            cache_control="private, no-store",
+        )
 
     async def _get_portal_media(self, media_file: str) -> BinaryPayload:
         match = _PORTAL_MEDIA_FILE.fullmatch(media_file.lower())

@@ -128,6 +128,44 @@ EXPECTED_EXTENDED_STAFF_DISPATCH_OPERATIONS = {
     "staff.preview_edward",
 }
 
+EXPECTED_ACTION_CENTER_OPERATIONS = {
+    ("post", "/v1/student/help/requests/{id}/messages"): 200,
+    ("post", "/v1/staff/work-items"): 201,
+    ("get", "/v1/staff/work-items/{id}"): 200,
+    ("post", "/v1/staff/work-items/{id}/comments"): 201,
+    ("post", "/v1/staff/work-items/{id}/interactions"): 201,
+    ("post", "/v1/staff/interactions/{id}/communications"): 201,
+    ("post", "/v1/staff/interactions/{id}/recordings"): 201,
+    ("get", "/v1/staff/call-recordings/{id}/content"): 200,
+    ("post", "/v1/staff/call-recordings/{id}/retry"): 202,
+    ("post", "/v1/staff/interactions/{id}/complete"): 200,
+    ("post", "/v1/staff/work-items/{id}/ai-refresh"): 202,
+    ("get", "/v1/staff/action-rules"): 200,
+    ("post", "/v1/staff/action-rules"): 201,
+    ("patch", "/v1/staff/action-rules/{id}"): 200,
+    ("get", "/v1/staff/notifications"): 200,
+    ("post", "/v1/staff/notifications/{id}/read"): 200,
+}
+
+EXPECTED_ACTION_CENTER_DISPATCH_OPERATIONS = {
+    "student.create_inquiry_message",
+    "staff.create_work_item",
+    "staff.get_work_item_detail",
+    "staff.create_work_comment",
+    "staff.start_interaction",
+    "staff.record_interaction_communication",
+    "staff.upload_call_recording",
+    "staff.get_call_recording_content",
+    "staff.retry_call_transcription",
+    "staff.complete_interaction",
+    "staff.request_ai_refresh",
+    "staff.get_action_rules",
+    "staff.create_action_rule",
+    "staff.update_action_rule",
+    "staff.get_notifications",
+    "staff.mark_notification_read",
+}
+
 
 def test_openapi_preserves_nest_routes_and_registers_extended_staff_preview() -> None:
     schema = create_app().openapi()
@@ -139,7 +177,9 @@ def test_openapi_preserves_nest_routes_and_registers_extended_staff_preview() ->
         if method in methods
     }
 
-    expected = EXPECTED_OPERATIONS | EXPECTED_EXTENDED_STAFF_OPERATIONS
+    expected = (
+        EXPECTED_OPERATIONS | EXPECTED_EXTENDED_STAFF_OPERATIONS | EXPECTED_ACTION_CENTER_OPERATIONS
+    )
     assert {operation: actual.get(operation) for operation in expected} == expected
 
 
@@ -159,7 +199,9 @@ def test_all_routes_dispatch_unique_known_application_operations() -> None:
 
     assert len(dispatched) == len(set(dispatched))
     assert set(dispatched) >= (
-        EXPECTED_DISPATCH_OPERATIONS | EXPECTED_EXTENDED_STAFF_DISPATCH_OPERATIONS
+        EXPECTED_DISPATCH_OPERATIONS
+        | EXPECTED_EXTENDED_STAFF_DISPATCH_OPERATIONS
+        | EXPECTED_ACTION_CENTER_DISPATCH_OPERATIONS
     )
 
 

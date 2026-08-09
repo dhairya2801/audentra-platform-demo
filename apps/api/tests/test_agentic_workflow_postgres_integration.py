@@ -238,28 +238,36 @@ def test_real_postgres_materializes_agentic_workflows_end_to_end() -> None:
                     {"tenant_id": tenant_id, "document_id": document_id},
                 )
                 inbox = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT status FROM inbox_event
                             WHERE tenant_id = :tenant_id AND id = :inbox_id
                             """
-                        ),
-                        {"tenant_id": tenant_id, "inbox_id": inbox_id},
+                            ),
+                            {"tenant_id": tenant_id, "inbox_id": inbox_id},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 communication_task = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT priority, status, work_type, version
                             FROM staff_work_item
                             WHERE tenant_id = :tenant_id AND id = :work_item_id
                             """
-                        ),
-                        {"tenant_id": tenant_id, "work_item_id": existing_task_id},
+                            ),
+                            {"tenant_id": tenant_id, "work_item_id": existing_task_id},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 communication_link_count = await connection.scalar(
                     text(
                         """
@@ -281,48 +289,61 @@ def test_real_postgres_materializes_agentic_workflows_end_to_end() -> None:
                     },
                 )
                 agent_run = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT status, result ->> 'action' AS action
                             FROM agent_run
                             WHERE tenant_id = :tenant_id
                               AND feature = 'inbound_communication_triage'
                               AND trigger_event_id = :inbox_id
                             """
-                        ),
-                        {"tenant_id": tenant_id, "inbox_id": str(inbox_id)},
+                            ),
+                            {"tenant_id": tenant_id, "inbox_id": str(inbox_id)},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 snapshot = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT blocking_requirement_count, days_to_next_deadline
                             FROM student_engagement_snapshot
                             WHERE tenant_id = :tenant_id AND student_id = :student_id
                             """
-                        ),
-                        {"tenant_id": tenant_id, "student_id": student_id},
+                            ),
+                            {"tenant_id": tenant_id, "student_id": student_id},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 intervention = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT priority, reason_codes
                             FROM intervention_candidate
                             WHERE tenant_id = :tenant_id AND student_id = :student_id
                               AND trigger_code = 'engagement_scan'
                             """
-                        ),
-                        {"tenant_id": tenant_id, "student_id": student_id},
+                            ),
+                            {"tenant_id": tenant_id, "student_id": student_id},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 unknown_inbox = (
-                    await connection.execute(
-                        text(
-                            """
+                    (
+                        await connection.execute(
+                            text(
+                                """
                             SELECT event.status, communication.resolution_status,
                                    run.result ->> 'action' AS action
                             FROM inbox_event AS event
@@ -333,10 +354,13 @@ def test_real_postgres_materializes_agentic_workflows_end_to_end() -> None:
                              AND run.trigger_event_id = CAST(event.id AS varchar)
                             WHERE event.tenant_id = :tenant_id AND event.id = :inbox_id
                             """
-                        ),
-                        {"tenant_id": tenant_id, "inbox_id": unknown_inbox_id},
+                            ),
+                            {"tenant_id": tenant_id, "inbox_id": unknown_inbox_id},
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 unknown_work_item_count = await connection.scalar(
                     text(
                         """

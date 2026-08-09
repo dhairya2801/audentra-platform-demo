@@ -9,11 +9,12 @@ either commit together or all roll back.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 from uuid import UUID, uuid4
 
@@ -31,6 +32,28 @@ from audentra.core.errors import (
 _MISSING = object()
 _NO_DEFAULT = object()
 _SQL_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_WORK_ITEM_STATUSES = {
+    "todo",
+    "in_progress",
+    "follow_up_required",
+    "blocked",
+    "done",
+    "cancelled",
+}
+_TERMINAL_WORK_ITEM_STATUSES = {"done", "cancelled"}
+_COMMUNICATION_CHANNELS = {"email", "sms", "voice", "portal"}
+_WORK_ITEM_PRIORITIES = {"low", "medium", "high", "urgent"}
+_WORK_ACTION_TYPES = {
+    "enrollment_follow_up",
+    "onboarding_assistance",
+    "document_review",
+    "missing_information",
+    "external_verification",
+    "deadline_risk",
+    "staff_decision",
+    "communication_response",
+    "blocked_dependency",
+}
 
 
 class StaffStudentReader(Protocol):
@@ -115,12 +138,397 @@ class PostgresStaffRepository:
             "counts": {
                 "todo": sum(item["status"] == "todo" for item in items),
                 "inProgress": sum(item["status"] == "in_progress" for item in items),
+                "followUpRequired": sum(item["status"] == "follow_up_required" for item in items),
+                "blocked": sum(item["status"] == "blocked" for item in items),
                 "done": sum(item["status"] == "done" for item in items),
+                "cancelled": sum(item["status"] == "cancelled" for item in items),
                 "urgent": sum(item["priority"] == "urgent" for item in items),
                 "escalated": sum(bool(item["escalated"]) for item in items),
             },
             "generatedAt": _iso_timestamp(self._clock()),
         }
+
+    async def create_work_item(
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, object],
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        """Create a tenant-scoped manual enrollment/onboarding work item."""
+
+        self._require_staff(auth)
+        student_id = str(_read(payload, "studentId", "student_id"))
+        requirement_value = _read(payload, "requirementId", "requirement_id", default=None)
+        requirement_id = str(requirement_value) if requirement_value is not None else None
+        flow_kind = str(_read(payload, "flowKind", "flow_kind"))
+        title = str(_read(payload, "title")).strip()
+        description = str(_read(payload, "description")).strip()
+        requested_component = str(_read(payload, "component")).strip()
+        assignee_value = _read(payload, "assigneeId", "assignee_id", default=None)
+        assignee_id = str(assignee_value) if assignee_value is not None else None
+        priority = str(_read(payload, "priority"))
+        status = str(_read(payload, "status", default="todo"))
+        due_at = _read(payload, "dueAt", "due_at", default=None)
+        raw_action_type = _read(payload, "actionType", "action_type", default=None)
+        action_type = (
+            str(raw_action_type)
+            if raw_action_type is not None
+            else ("onboarding_assistance" if flow_kind == "onboarding" else "enrollment_follow_up")
+        )
+        if flow_kind not in {"enrollment", "onboarding"}:
+            raise BadRequestError("INVALID_FLOW_KIND", "Choose enrollment or onboarding")
+        if priority not in _WORK_ITEM_PRIORITIES:
+            raise BadRequestError("INVALID_WORK_ITEM_PRIORITY", "Choose a valid task priority")
+        if status not in _WORK_ITEM_STATUSES - _TERMINAL_WORK_ITEM_STATUSES:
+            raise BadRequestError("INVALID_WORK_ITEM_STATUS", "Choose a valid initial task status")
+        if action_type not in _WORK_ACTION_TYPES:
+            raise BadRequestError("INVALID_ACTION_TYPE", "Choose a valid enrollment action type")
+        if isinstance(due_at, str):
+            due_at = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
+        if due_at is not None:
+            if not isinstance(due_at, datetime) or due_at.tzinfo is None:
+                raise BadRequestError("INVALID_DUE_AT", "Task due time must include a timezone")
+            if due_at <= self._clock():
+                raise BadRequestError("INVALID_DUE_AT", "Task due time must be in the future")
+
+        async def handler(connection: AsyncConnection) -> dict[str, object]:
+            student_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id
+                    FROM {self._table("student")}
+                    WHERE tenant_id = :tenant_id AND id = :student_id
+                    FOR SHARE
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "student_id": _uuid(student_id)},
+            )
+            if student_result.mappings().first() is None:
+                raise BadRequestError(
+                    "STAFF_STUDENT_NOT_FOUND",
+                    "Choose a student in the current tenant",
+                )
+
+            if requirement_id is not None:
+                requirement_result = await connection.execute(
+                    text(
+                        f"""
+                        SELECT requirement.id, definition.flow_kind
+                        FROM {self._table("student_requirement")} requirement
+                        JOIN {self._table("enrollment_journey")} journey
+                          ON journey.id = requirement.journey_id
+                         AND journey.tenant_id = requirement.tenant_id
+                        JOIN {self._table("requirement_definition_version")} definition
+                          ON definition.id = requirement.requirement_definition_version_id
+                         AND definition.tenant_id = requirement.tenant_id
+                        WHERE requirement.tenant_id = :tenant_id
+                          AND requirement.id = :requirement_id
+                          AND journey.student_id = :student_id
+                          AND requirement.retired_at IS NULL
+                        FOR SHARE OF requirement
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "requirement_id": _uuid(requirement_id),
+                        "student_id": _uuid(student_id),
+                    },
+                )
+                requirement = requirement_result.mappings().first()
+                if requirement is None:
+                    raise BadRequestError(
+                        "STAFF_REQUIREMENT_NOT_FOUND",
+                        "Choose an active requirement belonging to this student",
+                    )
+                if str(requirement["flow_kind"]) != flow_kind:
+                    raise BadRequestError(
+                        "REQUIREMENT_FLOW_MISMATCH",
+                        "The requirement does not belong to the selected flow",
+                    )
+
+            component_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT component
+                    FROM {self._table("staff_member")}
+                    WHERE tenant_id = :tenant_id AND active = true
+                      AND lower(component) = lower(:component)
+                    ORDER BY component, id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "component": requested_component},
+            )
+            component_row = component_result.mappings().first()
+            if component_row is None:
+                raise BadRequestError(
+                    "STAFF_COMPONENT_NOT_FOUND",
+                    "Choose a component with at least one active tenant staff member",
+                )
+            component = str(component_row["component"])
+
+            assignee: dict[str, object] | None = None
+            if assignee_id is not None:
+                assignee = await self._active_staff_summary(connection, auth, assignee_id)
+                if assignee is None:
+                    raise BadRequestError(
+                        "STAFF_ASSIGNEE_NOT_FOUND",
+                        "Choose an active staff assignee in the current tenant",
+                    )
+                if str(assignee["component"]).casefold() != component.casefold():
+                    raise BadRequestError(
+                        "STAFF_ASSIGNEE_COMPONENT_MISMATCH",
+                        "The assignee must belong to the selected component",
+                    )
+
+            work_item_id = str(self._uuid_factory())
+            key = f"MAN-{work_item_id.replace('-', '')[:8].upper()}"
+            now = self._clock()
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_work_item")} (
+                      id, tenant_id, student_id, key, title, description,
+                      status, priority, work_type, component, due_at, escalated,
+                      assignee_id, source_type, source_id, version, action_type,
+                      started_at, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :key, :title, :description,
+                      CAST(:status AS varchar), :priority, 'enrollment', :component,
+                      :due_at, false,
+                      :assignee_id, NULL, NULL, 1, :action_type,
+                      CASE WHEN CAST(:status AS varchar) = 'in_progress'
+                        THEN CAST(:now AS timestamptz) ELSE NULL::timestamptz END,
+                      CAST(:now AS timestamptz), CAST(:now AS timestamptz)
+                    )
+                    """
+                ),
+                {
+                    "id": _uuid(work_item_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(student_id),
+                    "key": key,
+                    "title": title,
+                    "description": description,
+                    "status": status,
+                    "priority": priority,
+                    "component": component,
+                    "due_at": due_at,
+                    "assignee_id": _uuid(assignee_id) if assignee_id is not None else None,
+                    "action_type": action_type,
+                    "now": now,
+                },
+            )
+            if requirement_id is not None:
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._table("staff_work_item_link")} (
+                          id, tenant_id, work_item_id, entity_type, entity_id,
+                          relationship, created_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'requirement',
+                          :requirement_id, 'manual_scope', :now
+                        )
+                        ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id)
+                        DO NOTHING
+                        """
+                    ),
+                    {
+                        "id": self._uuid_factory(),
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                        "requirement_id": _uuid(requirement_id),
+                        "now": now,
+                    },
+                )
+            actor_name = await self._staff_name(connection, auth, auth.actor_id)
+            await self._insert_work_log(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                actor_name=actor_name,
+                action="created",
+                message=f"Manual {flow_kind} task created by {actor_name}.",
+            )
+            await self._queue_task_insight_refresh(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                student_id=student_id,
+                source_version=1,
+                not_before=now,
+            )
+            notification_id = await self._insert_staff_notification(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                staff_member_id=assignee_id,
+                team_component=None if assignee_id is not None else component,
+                tenant_wide=False,
+                kind="work_item_created",
+                title="New enrollment task",
+                body=f"{key}: {title}",
+                dedupe_key=f"work-item:{work_item_id}:attention",
+            )
+            await self._insert_audit(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff_work_item.created",
+                resource_type="staff_work_item",
+                resource_id=work_item_id,
+                metadata={
+                    "studentId": student_id,
+                    "requirementId": requirement_id,
+                    "flowKind": flow_kind,
+                    "priority": priority,
+                    "status": status,
+                    "component": component,
+                    "assigneeId": assignee_id,
+                },
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.work_item_created.v1",
+                aggregate_type="staff_work_item",
+                aggregate_id=work_item_id,
+                aggregate_version=1,
+                data={
+                    "workItemId": work_item_id,
+                    "studentId": student_id,
+                    "requirementId": requirement_id,
+                    "notificationId": notification_id,
+                    "flowKind": flow_kind,
+                    "priority": priority,
+                    "status": status,
+                },
+            )
+            item_result = await connection.execute(
+                text(self._action_center_items_sql()),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            row = next(
+                (
+                    dict(candidate)
+                    for candidate in item_result.mappings().all()
+                    if str(candidate["id"]) == work_item_id
+                ),
+                None,
+            )
+            if row is None:
+                raise RuntimeError("The newly created work item could not be reloaded")
+            return self._map_work_item(row, [])
+
+        return await self._run_idempotent(
+            auth=auth,
+            idempotency_key=idempotency_key,
+            operation="staff.work_item.create",
+            request_payload=payload,
+            response_status=201,
+            handler=handler,
+        )
+
+    async def get_realtime_events(
+        self,
+        auth: AuthContext,
+        after_cursor: int | None,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        """Read a bounded, lossless staff event replay window."""
+
+        self._require_staff(auth)
+        bounded_limit = max(1, min(limit, 100))
+        async with self._engine.connect() as connection:
+            viewer = await self._active_staff_summary(connection, auth, auth.actor_id)
+            if viewer is None:
+                raise NotFoundError(
+                    "STAFF_MEMBER_NOT_FOUND",
+                    "The active staff member was not found in this tenant",
+                )
+            if after_cursor is None:
+                current_result = await connection.execute(
+                    text(
+                        f"""
+                        SELECT COALESCE(MAX(cursor), 0) AS cursor
+                        FROM {self._table("staff_realtime_event")}
+                        WHERE tenant_id = :tenant_id
+                          AND (
+                            tenant_wide = true
+                            OR staff_member_id = :staff_member_id
+                            OR (
+                              staff_member_id IS NULL
+                              AND team_component = :team_component
+                            )
+                          )
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "staff_member_id": _uuid(auth.actor_id),
+                        "team_component": str(viewer["component"]),
+                    },
+                )
+                current = current_result.mappings().first()
+                return {
+                    "events": [],
+                    "cursor": int(current["cursor"]) if current is not None else 0,
+                }
+            if after_cursor < 0:
+                raise BadRequestError(
+                    "INVALID_EVENT_CURSOR",
+                    "The realtime event cursor must be non-negative",
+                )
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT cursor, event_type, resource_type, resource_id,
+                           work_item_id, payload, created_at
+                    FROM {self._table("staff_realtime_event")}
+                    WHERE tenant_id = :tenant_id
+                      AND cursor > :after_cursor
+                      AND (
+                        tenant_wide = true
+                        OR staff_member_id = :staff_member_id
+                        OR (
+                          staff_member_id IS NULL
+                          AND team_component = :team_component
+                        )
+                      )
+                    ORDER BY cursor
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "after_cursor": after_cursor,
+                    "staff_member_id": _uuid(auth.actor_id),
+                    "team_component": str(viewer["component"]),
+                    "limit": bounded_limit,
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+        events = [
+            {
+                "cursor": int(row["cursor"]),
+                "type": str(row["event_type"]),
+                "resourceType": str(row["resource_type"]),
+                "resourceId": str(row["resource_id"]),
+                "workItemId": (
+                    str(row["work_item_id"]) if row["work_item_id"] is not None else None
+                ),
+                "data": dict(row["payload"]) if isinstance(row["payload"], Mapping) else {},
+                "occurredAt": _iso_timestamp(row["created_at"]),
+            }
+            for row in rows
+        ]
+        next_cursor = after_cursor
+        if events:
+            next_cursor = _database_integer(events[-1]["cursor"], "staff_realtime_event.cursor")
+        return {"events": events, "cursor": next_cursor}
 
     async def get_student_record(
         self,
@@ -151,6 +559,1925 @@ class PostgresStaffRepository:
             "documents": dict(documents),
         }
 
+    async def get_student_roster(self, auth: AuthContext) -> list[dict[str, object]]:
+        """Return canonical students for the CRM, including accounts without risk rows."""
+
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(self._student_roster_sql()),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            rows = result.mappings().all()
+        return [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
+
+    async def get_work_item_detail(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        center = await self.get_action_center(auth)
+        center_items = cast(list[dict[str, object]], center["items"])
+        work_item = next(
+            (item for item in center_items if item["id"] == work_item_id),
+            None,
+        )
+        if work_item is None:
+            raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
+        student_id = str(cast(Mapping[str, object], work_item["student"])["id"])
+
+        async with self._engine.connect() as connection:
+            comment_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT comment.id, comment.body, comment.mentions,
+                           comment.created_at, member.id AS author_id,
+                           member.display_name AS author_name,
+                           member.email_normalized AS author_email,
+                           member.component AS author_component
+                    FROM {self._table("staff_work_comment")} comment
+                    JOIN {self._table("staff_member")} member
+                      ON member.tenant_id = comment.tenant_id
+                     AND member.id = comment.author_id
+                    WHERE comment.tenant_id = :tenant_id
+                      AND comment.work_item_id = :work_item_id
+                    ORDER BY comment.created_at, comment.id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            interaction_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, objective, status, selected_channel, source_version,
+                           covered_source_version, version, quiet_until,
+                           last_activity_at, completed_at, created_at, updated_at
+                    FROM {self._table("staff_interaction")}
+                    WHERE tenant_id = :tenant_id AND work_item_id = :work_item_id
+                    ORDER BY created_at DESC, id DESC
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            communication_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT communication.id, communication.interaction_id,
+                           communication.channel, communication.direction,
+                           communication.subject, communication.body_excerpt,
+                           communication.delivery_status,
+                           communication.source_sequence, communication.occurred_at
+                    FROM {self._table("communication_event")} communication
+                    JOIN {self._table("staff_interaction")} interaction
+                      ON interaction.tenant_id = communication.tenant_id
+                     AND interaction.id = communication.interaction_id
+                    WHERE communication.tenant_id = :tenant_id
+                      AND interaction.work_item_id = :work_item_id
+                    ORDER BY communication.occurred_at, communication.id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            recording_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT recording.id, recording.interaction_id,
+                           recording.file_name, recording.mime_type,
+                           recording.size_bytes, recording.sha256,
+                           recording.status, recording.attempts,
+                           recording.version, recording.last_error_message,
+                           recording.uploaded_at, recording.transcribed_at,
+                           recording.created_at, recording.updated_at
+                    FROM {self._table("staff_call_recording")} recording
+                    WHERE recording.tenant_id = :tenant_id
+                      AND recording.work_item_id = :work_item_id
+                    ORDER BY recording.created_at DESC, recording.id DESC
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            transcript_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT transcript.id, transcript.recording_id,
+                           transcript.version, transcript.transcript,
+                           transcript.language, transcript.duration_seconds,
+                           transcript.segments, transcript.provider,
+                           transcript.model, transcript.is_current,
+                           transcript.generated_at
+                    FROM {self._table("staff_call_transcript_revision")} transcript
+                    JOIN {self._table("staff_call_recording")} recording
+                      ON recording.tenant_id = transcript.tenant_id
+                     AND recording.id = transcript.recording_id
+                    WHERE transcript.tenant_id = :tenant_id
+                      AND recording.work_item_id = :work_item_id
+                    ORDER BY transcript.recording_id, transcript.version DESC
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            outcome_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, interaction_id, version, finality, summary,
+                           channel_results, outcome_code, resolution_code,
+                           next_step, follow_up_required, source_ids,
+                           covered_source_version, confidence_milli,
+                           provider, model, generated_at
+                    FROM {self._table("interaction_outcome_revision")}
+                    WHERE tenant_id = :tenant_id
+                      AND work_item_id = :work_item_id
+                      AND is_current = true
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            task_insight_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT version, summary, why_this_matters, objective,
+                           success_definition, suggested_approach,
+                           suggested_channel, source_ids, source_revision,
+                           provider, model, generated_at
+                    FROM {self._table("task_insight_revision")}
+                    WHERE tenant_id = :tenant_id AND work_item_id = :work_item_id
+                      AND is_current = true
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "work_item_id": _uuid(work_item_id)},
+            )
+            summary_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT version, summary, key_facts, risks, next_steps,
+                           source_ids, source_revision, provider, model, generated_at
+                    FROM {self._table("student_summary_revision")}
+                    WHERE tenant_id = :tenant_id AND student_id = :student_id
+                      AND is_current = true
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "student_id": _uuid(student_id)},
+            )
+            job_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT purpose, interaction_id, status,
+                           requested_source_version, covered_source_version,
+                           updated_at
+                    FROM {self._table("action_center_ai_job")}
+                    WHERE tenant_id = :tenant_id AND student_id = :student_id
+                      AND (work_item_id = :work_item_id OR purpose = 'student_summary')
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(student_id),
+                    "work_item_id": _uuid(work_item_id),
+                },
+            )
+
+        staff_by_id = {
+            str(member["id"]): member for member in cast(list[dict[str, object]], center["staff"])
+        }
+        comments = []
+        for row in comment_result.mappings().all():
+            mention_ids = [str(value) for value in _json_list(row["mentions"], "comment.mentions")]
+            comments.append(
+                {
+                    "id": str(row["id"]),
+                    "body": str(row["body"]),
+                    "author": {
+                        "id": str(row["author_id"]),
+                        "name": str(row["author_name"]),
+                        "email": str(row["author_email"]),
+                        "component": str(row["author_component"]),
+                    },
+                    "mentions": [staff_by_id[item] for item in mention_ids if item in staff_by_id],
+                    "createdAt": _iso_timestamp(row["created_at"]),
+                }
+            )
+
+        communications_by_interaction: dict[str, list[dict[str, object]]] = {}
+        for row in communication_result.mappings().all():
+            interaction_id = str(row["interaction_id"])
+            communications_by_interaction.setdefault(interaction_id, []).append(
+                {
+                    "id": str(row["id"]),
+                    "channel": str(row["channel"]),
+                    "direction": str(row["direction"]),
+                    "subject": str(row["subject"]) if row["subject"] is not None else None,
+                    "body": (str(row["body_excerpt"]) if row["body_excerpt"] is not None else None),
+                    "deliveryStatus": str(row["delivery_status"]),
+                    "sourceSequence": int(row["source_sequence"] or 0),
+                    "occurredAt": _iso_timestamp(row["occurred_at"]),
+                }
+            )
+
+        transcripts_by_recording: dict[str, list[dict[str, object]]] = {}
+        for row in transcript_result.mappings().all():
+            recording_id = str(row["recording_id"])
+            segments = []
+            for value in _json_list(row["segments"], "call_transcript.segments"):
+                if not isinstance(value, Mapping):
+                    continue
+                segments.append(
+                    {
+                        "start": _optional_float(value.get("start")),
+                        "end": _optional_float(value.get("end")),
+                        "text": str(value.get("text") or ""),
+                    }
+                )
+            transcripts_by_recording.setdefault(recording_id, []).append(
+                {
+                    "id": str(row["id"]),
+                    "version": int(row["version"]),
+                    "transcript": str(row["transcript"]),
+                    "language": str(row["language"]) if row["language"] is not None else None,
+                    "durationSeconds": (
+                        float(row["duration_seconds"])
+                        if row["duration_seconds"] is not None
+                        else None
+                    ),
+                    "segments": segments,
+                    "provider": str(row["provider"]),
+                    "model": str(row["model"]),
+                    "generatedAt": _iso_timestamp(row["generated_at"]),
+                    "isCurrent": bool(row["is_current"]),
+                }
+            )
+
+        recordings_by_interaction: dict[str, list[dict[str, object]]] = {}
+        for row in recording_result.mappings().all():
+            recording_id = str(row["id"])
+            transcript_history = transcripts_by_recording.get(recording_id, [])
+            current_transcript = next(
+                (value for value in transcript_history if value.pop("isCurrent", False)),
+                None,
+            )
+            for value in transcript_history:
+                value.pop("isCurrent", None)
+            interaction_id = str(row["interaction_id"])
+            recordings_by_interaction.setdefault(interaction_id, []).append(
+                {
+                    "id": recording_id,
+                    "interactionId": interaction_id,
+                    "fileName": str(row["file_name"]),
+                    "mimeType": str(row["mime_type"]),
+                    "sizeBytes": int(row["size_bytes"]),
+                    "sha256": str(row["sha256"]),
+                    "status": str(row["status"]),
+                    "attempts": int(row["attempts"]),
+                    "version": int(row["version"]),
+                    "lastError": (
+                        str(row["last_error_message"])
+                        if row["last_error_message"] is not None
+                        else None
+                    ),
+                    "uploadedAt": (
+                        _iso_timestamp(row["uploaded_at"])
+                        if row["uploaded_at"] is not None
+                        else None
+                    ),
+                    "transcribedAt": (
+                        _iso_timestamp(row["transcribed_at"])
+                        if row["transcribed_at"] is not None
+                        else None
+                    ),
+                    "downloadUrl": f"/v1/staff/call-recordings/{recording_id}/content",
+                    "currentTranscript": current_transcript,
+                    "transcriptHistory": transcript_history,
+                    "createdAt": _iso_timestamp(row["created_at"]),
+                    "updatedAt": _iso_timestamp(row["updated_at"]),
+                }
+            )
+
+        outcomes: dict[str, dict[str, object]] = {}
+        for row in outcome_result.mappings().all():
+            outcomes[str(row["interaction_id"])] = {
+                "id": str(row["id"]),
+                "version": int(row["version"]),
+                "finality": str(row["finality"]),
+                "summary": str(row["summary"]),
+                "channelResults": _json_list(row["channel_results"], "outcome.channel_results"),
+                "outcomeCode": (
+                    str(row["outcome_code"]) if row["outcome_code"] is not None else None
+                ),
+                "resolutionCode": (
+                    str(row["resolution_code"]) if row["resolution_code"] is not None else None
+                ),
+                "nextStep": str(row["next_step"]) if row["next_step"] is not None else None,
+                "followUpRequired": bool(row["follow_up_required"]),
+                "sourceIds": [
+                    str(value) for value in _json_list(row["source_ids"], "outcome.source_ids")
+                ],
+                "coveredSourceVersion": int(row["covered_source_version"]),
+                "confidence": (
+                    int(row["confidence_milli"]) / 1000
+                    if row["confidence_milli"] is not None
+                    else None
+                ),
+                "provider": str(row["provider"]),
+                "model": str(row["model"]),
+                "generatedAt": _iso_timestamp(row["generated_at"]),
+            }
+
+        jobs = [dict(row) for row in job_result.mappings().all()]
+        interaction_job_states = {
+            str(row["interaction_id"]): _job_public_state(row)
+            for row in jobs
+            if row.get("purpose") == "interaction_enrichment"
+            and row.get("interaction_id") is not None
+        }
+        interactions: list[dict[str, object]] = []
+        for row in interaction_result.mappings().all():
+            interaction_id = str(row["id"])
+            interactions.append(
+                {
+                    "id": interaction_id,
+                    "objective": str(row["objective"]),
+                    "status": str(row["status"]),
+                    "selectedChannel": (
+                        str(row["selected_channel"])
+                        if row["selected_channel"] is not None
+                        else None
+                    ),
+                    "sourceVersion": int(row["source_version"]),
+                    "coveredSourceVersion": int(row["covered_source_version"]),
+                    "version": int(row["version"]),
+                    "quietUntil": (
+                        _iso_timestamp(row["quiet_until"])
+                        if row["quiet_until"] is not None
+                        else None
+                    ),
+                    "lastActivityAt": (
+                        _iso_timestamp(row["last_activity_at"])
+                        if row["last_activity_at"] is not None
+                        else None
+                    ),
+                    "completedAt": (
+                        _iso_timestamp(row["completed_at"])
+                        if row["completed_at"] is not None
+                        else None
+                    ),
+                    "communications": communications_by_interaction.get(interaction_id, []),
+                    "recordings": recordings_by_interaction.get(interaction_id, []),
+                    "outcome": outcomes.get(interaction_id),
+                    "aiState": interaction_job_states.get(interaction_id, "not_requested"),
+                }
+            )
+
+        summary_row = summary_result.mappings().first()
+        task_insight_row = task_insight_result.mappings().first()
+        task_insight_job = next(
+            (row for row in jobs if row.get("purpose") == "task_insight"),
+            None,
+        )
+        task_insight_state = _summary_public_state(
+            dict(task_insight_row) if task_insight_row is not None else None,
+            task_insight_job,
+        )
+        task_insight = {
+            "state": task_insight_state,
+            "version": (int(task_insight_row["version"]) if task_insight_row is not None else None),
+            "summary": (str(task_insight_row["summary"]) if task_insight_row is not None else None),
+            "whyThisMatters": (
+                str(task_insight_row["why_this_matters"]) if task_insight_row is not None else None
+            ),
+            "objective": (
+                str(task_insight_row["objective"]) if task_insight_row is not None else None
+            ),
+            "successDefinition": (
+                str(task_insight_row["success_definition"])
+                if task_insight_row is not None
+                else None
+            ),
+            "suggestedApproach": (
+                str(task_insight_row["suggested_approach"])
+                if task_insight_row is not None
+                else None
+            ),
+            "suggestedChannel": (
+                str(task_insight_row["suggested_channel"])
+                if task_insight_row is not None
+                and task_insight_row["suggested_channel"] is not None
+                else None
+            ),
+            "sourceIds": (
+                [
+                    str(value)
+                    for value in _json_list(
+                        task_insight_row["source_ids"], "task_insight.source_ids"
+                    )
+                ]
+                if task_insight_row is not None
+                else []
+            ),
+            "sourceRevision": (
+                int(task_insight_row["source_revision"]) if task_insight_row is not None else 0
+            ),
+            "provider": (
+                str(task_insight_row["provider"]) if task_insight_row is not None else None
+            ),
+            "model": (str(task_insight_row["model"]) if task_insight_row is not None else None),
+            "generatedAt": (
+                _iso_timestamp(task_insight_row["generated_at"])
+                if task_insight_row is not None
+                else None
+            ),
+        }
+        summary_job = next(
+            (row for row in jobs if row.get("purpose") == "student_summary"),
+            None,
+        )
+        summary_state = _summary_public_state(
+            dict(summary_row) if summary_row is not None else None,
+            summary_job,
+        )
+        student_summary = {
+            "state": summary_state,
+            "version": int(summary_row["version"]) if summary_row is not None else None,
+            "summary": str(summary_row["summary"]) if summary_row is not None else None,
+            "keyFacts": (
+                [str(value) for value in _json_list(summary_row["key_facts"], "summary.key_facts")]
+                if summary_row is not None
+                else []
+            ),
+            "risks": (
+                [str(value) for value in _json_list(summary_row["risks"], "summary.risks")]
+                if summary_row is not None
+                else []
+            ),
+            "nextSteps": (
+                [
+                    str(value)
+                    for value in _json_list(summary_row["next_steps"], "summary.next_steps")
+                ]
+                if summary_row is not None
+                else []
+            ),
+            "sourceIds": (
+                [
+                    str(value)
+                    for value in _json_list(summary_row["source_ids"], "summary.source_ids")
+                ]
+                if summary_row is not None
+                else []
+            ),
+            "sourceRevision": int(summary_row["source_revision"]) if summary_row else 0,
+            "provider": str(summary_row["provider"]) if summary_row is not None else None,
+            "model": str(summary_row["model"]) if summary_row is not None else None,
+            "generatedAt": (
+                _iso_timestamp(summary_row["generated_at"]) if summary_row is not None else None
+            ),
+        }
+        return {
+            "workItem": work_item,
+            "taskInsight": task_insight,
+            "studentSummary": student_summary,
+            "interactions": interactions,
+            "comments": comments,
+            "relatedItems": [
+                item
+                for item in center_items
+                if item["id"] != work_item_id
+                and cast(Mapping[str, object], item["student"])["id"] == student_id
+            ],
+            "aiState": _aggregate_ai_states(
+                [task_insight_state, summary_state, *interaction_job_states.values()]
+            ),
+            "generatedAt": _iso_timestamp(self._clock()),
+        }
+
+    async def get_action_rules(self, auth: AuthContext) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT rule.id, rule.code, rule.name, rule.description,
+                           rule.enabled, rule.signal_type, rule.flow_kind,
+                           rule.requirement_code, rule.lookahead_days,
+                           rule.inactivity_days, rule.cadence_minutes,
+                           rule.component, rule.priority, rule.action_type,
+                           rule.title_template, rule.description_template,
+                           rule.version, rule.last_evaluated_at, rule.updated_at,
+                           member.id AS updated_by_id,
+                           member.display_name AS updated_by_name,
+                           member.email_normalized AS updated_by_email,
+                           member.component AS updated_by_component
+                    FROM {self._table("staff_action_rule")} rule
+                    LEFT JOIN {self._table("staff_member")} member
+                      ON member.tenant_id = rule.tenant_id
+                     AND member.id = rule.updated_by
+                    WHERE rule.tenant_id = :tenant_id
+                    ORDER BY rule.enabled DESC, rule.name, rule.id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            rows = result.mappings().all()
+        return {
+            "items": [_map_action_rule(dict(row)) for row in rows],
+            "generatedAt": _iso_timestamp(self._clock()),
+        }
+
+    async def get_notifications(self, auth: AuthContext) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    WITH accessible AS (
+                      SELECT notification.id, notification.kind,
+                             notification.title, notification.body,
+                             notification.resource_type, notification.resource_id,
+                             notification.staff_member_id,
+                             notification.team_component,
+                             notification.tenant_wide,
+                             notification.created_at,
+                             receipt.read_at,
+                             item.key AS work_item_key
+                      FROM {self._table("staff_notification")} notification
+                      JOIN {self._table("staff_member")} viewer
+                        ON viewer.tenant_id = notification.tenant_id
+                       AND viewer.id = :staff_member_id
+                       AND viewer.active = true
+                      LEFT JOIN {self._table("staff_notification_read_receipt")} receipt
+                        ON receipt.tenant_id = notification.tenant_id
+                       AND receipt.notification_id = notification.id
+                       AND receipt.staff_member_id = viewer.id
+                      LEFT JOIN {self._table("staff_work_item")} item
+                        ON item.tenant_id = notification.tenant_id
+                       AND notification.resource_type = 'staff_work_item'
+                       AND item.id = notification.resource_id
+                      WHERE notification.tenant_id = :tenant_id
+                        AND (
+                          notification.tenant_wide = true
+                          OR
+                          notification.staff_member_id = viewer.id
+                          OR (
+                            notification.staff_member_id IS NULL
+                            AND notification.team_component = viewer.component
+                          )
+                        )
+                    )
+                    SELECT accessible.*,
+                           COUNT(*) FILTER (WHERE read_at IS NULL) OVER () AS unread_count
+                    FROM accessible
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 30
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "staff_member_id": _uuid(auth.actor_id),
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+        return {
+            "items": [
+                {
+                    "id": str(row["id"]),
+                    "kind": str(row["kind"]),
+                    "title": str(row["title"]),
+                    "body": str(row["body"]),
+                    "resourceType": (
+                        str(row["resource_type"]) if row["resource_type"] is not None else None
+                    ),
+                    "resourceId": (
+                        str(row["resource_id"]) if row["resource_id"] is not None else None
+                    ),
+                    "workItemKey": (
+                        str(row["work_item_key"]) if row["work_item_key"] is not None else None
+                    ),
+                    "target": (
+                        "tenant"
+                        if bool(row.get("tenant_wide", False))
+                        else ("staff" if row["staff_member_id"] is not None else "team")
+                    ),
+                    "isRead": row["read_at"] is not None,
+                    "readAt": (
+                        _iso_timestamp(row["read_at"]) if row["read_at"] is not None else None
+                    ),
+                    "createdAt": _iso_timestamp(row["created_at"]),
+                }
+                for row in rows
+            ],
+            "unreadCount": (
+                _database_integer(rows[0]["unread_count"], "staff_notification.unread_count")
+                if rows
+                else 0
+            ),
+            "generatedAt": _iso_timestamp(self._clock()),
+        }
+
+    async def mark_notification_read(
+        self,
+        auth: AuthContext,
+        notification_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.begin() as connection:
+            accessible = await connection.execute(
+                text(
+                    f"""
+                    SELECT notification.id
+                    FROM {self._table("staff_notification")} notification
+                    JOIN {self._table("staff_member")} viewer
+                      ON viewer.tenant_id = notification.tenant_id
+                     AND viewer.id = :staff_member_id
+                     AND viewer.active = true
+                    WHERE notification.tenant_id = :tenant_id
+                      AND notification.id = :notification_id
+                      AND (
+                        notification.tenant_wide = true
+                        OR
+                        notification.staff_member_id = viewer.id
+                        OR (
+                          notification.staff_member_id IS NULL
+                          AND notification.team_component = viewer.component
+                        )
+                      )
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "staff_member_id": _uuid(auth.actor_id),
+                    "notification_id": _uuid(notification_id),
+                },
+            )
+            if accessible.mappings().first() is None:
+                raise NotFoundError(
+                    "STAFF_NOTIFICATION_NOT_FOUND",
+                    "The staff notification was not found",
+                )
+            receipt = await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_notification_read_receipt")} AS receipt (
+                      tenant_id, notification_id, staff_member_id, read_at
+                    ) VALUES (
+                      :tenant_id, :notification_id, :staff_member_id, NOW()
+                    )
+                    ON CONFLICT (tenant_id, notification_id, staff_member_id)
+                    DO UPDATE SET read_at = receipt.read_at
+                    RETURNING read_at
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "staff_member_id": _uuid(auth.actor_id),
+                    "notification_id": _uuid(notification_id),
+                },
+            )
+            read_at = receipt.scalar_one()
+        return {
+            "id": notification_id,
+            "isRead": True,
+            "readAt": _iso_timestamp(read_at),
+        }
+
+    async def _get_action_rule(
+        self,
+        auth: AuthContext,
+        rule_id: str,
+    ) -> dict[str, object]:
+        rules = await self.get_action_rules(auth)
+        for rule in cast(list[dict[str, object]], rules["items"]):
+            if rule["id"] == rule_id:
+                return rule
+        raise NotFoundError("STAFF_ACTION_RULE_NOT_FOUND", "The action rule was not found")
+
+    async def create_action_rule(
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        values = _validated_action_rule_values(payload)
+        rule_id = str(self._uuid_factory())
+        async with self._engine.begin() as connection:
+            duplicate = await connection.execute(
+                text(
+                    f"""
+                    SELECT 1 FROM {self._table("staff_action_rule")}
+                    WHERE tenant_id = :tenant_id AND code = :code
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "code": values["code"]},
+            )
+            if duplicate.first() is not None:
+                raise ConflictError(
+                    "ACTION_RULE_CODE_EXISTS",
+                    "An action rule already uses this code",
+                )
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_action_rule")} (
+                      id, tenant_id, code, name, description, enabled,
+                      signal_type, flow_kind, requirement_code, lookahead_days,
+                      inactivity_days, cadence_minutes, component, priority,
+                      action_type, title_template, description_template,
+                      version, created_by, updated_by, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :code, :name, :description, :enabled,
+                      :signal_type, :flow_kind, :requirement_code,
+                      :lookahead_days, :inactivity_days, :cadence_minutes,
+                      :component, :priority, :action_type, :title_template,
+                      :description_template, 1, :actor_id, :actor_id, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": _uuid(rule_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "actor_id": _uuid(auth.actor_id),
+                    **values,
+                },
+            )
+            await self._insert_audit(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff_action_rule.created",
+                resource_type="staff_action_rule",
+                resource_id=rule_id,
+                metadata={"code": values["code"], "signalType": values["signal_type"]},
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.action_rule_created.v1",
+                aggregate_type="staff_action_rule",
+                aggregate_id=rule_id,
+                aggregate_version=1,
+                data={"ruleId": rule_id, "code": values["code"]},
+            )
+        return await self._get_action_rule(auth, rule_id)
+
+    async def update_action_rule(
+        self,
+        auth: AuthContext,
+        rule_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedVersion", "expected_version"),
+            "expectedVersion",
+        )
+        async with self._engine.begin() as connection:
+            current_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT * FROM {self._table("staff_action_rule")}
+                    WHERE tenant_id = :tenant_id AND id = :rule_id
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "rule_id": _uuid(rule_id)},
+            )
+            current = current_result.mappings().first()
+            if current is None:
+                raise NotFoundError(
+                    "STAFF_ACTION_RULE_NOT_FOUND",
+                    "The action rule was not found",
+                )
+            if (
+                _database_integer(current["version"], "staff_action_rule.version")
+                != expected_version
+            ):
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This action rule changed in another staff session",
+                )
+            merged: dict[str, object] = {
+                "code": current["code"],
+                "name": current["name"],
+                "description": current["description"],
+                "enabled": current["enabled"],
+                "signalType": current["signal_type"],
+                "flowKind": current["flow_kind"],
+                "requirementCode": current["requirement_code"],
+                "lookaheadDays": current["lookahead_days"],
+                "inactivityDays": current["inactivity_days"],
+                "cadenceMinutes": current["cadence_minutes"],
+                "component": current["component"],
+                "priority": current["priority"],
+                "actionType": current["action_type"],
+                "titleTemplate": current["title_template"],
+                "descriptionTemplate": current["description_template"],
+            }
+            for public_name, snake_name in (
+                ("name", "name"),
+                ("description", "description"),
+                ("enabled", "enabled"),
+                ("flowKind", "flow_kind"),
+                ("requirementCode", "requirement_code"),
+                ("lookaheadDays", "lookahead_days"),
+                ("inactivityDays", "inactivity_days"),
+                ("cadenceMinutes", "cadence_minutes"),
+                ("component", "component"),
+                ("priority", "priority"),
+                ("actionType", "action_type"),
+                ("titleTemplate", "title_template"),
+                ("descriptionTemplate", "description_template"),
+            ):
+                if public_name in payload:
+                    merged[public_name] = payload[public_name]
+                elif snake_name in payload:
+                    merged[public_name] = payload[snake_name]
+            values = _validated_action_rule_values(merged)
+            updated = await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_action_rule")}
+                    SET name = :name, description = :description,
+                        enabled = :enabled, flow_kind = :flow_kind,
+                        requirement_code = :requirement_code,
+                        lookahead_days = :lookahead_days,
+                        inactivity_days = :inactivity_days,
+                        cadence_minutes = :cadence_minutes,
+                        component = :component, priority = :priority,
+                        action_type = :action_type,
+                        title_template = :title_template,
+                        description_template = :description_template,
+                        version = version + 1, updated_by = :actor_id,
+                        last_evaluated_at = CASE
+                          WHEN enabled IS DISTINCT FROM :enabled
+                            OR flow_kind IS DISTINCT FROM :flow_kind
+                            OR requirement_code IS DISTINCT FROM :requirement_code
+                            OR lookahead_days IS DISTINCT FROM :lookahead_days
+                            OR inactivity_days IS DISTINCT FROM :inactivity_days
+                          THEN NULL ELSE last_evaluated_at
+                        END,
+                        updated_at = NOW()
+                    WHERE tenant_id = :tenant_id AND id = :rule_id
+                    RETURNING version
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "rule_id": _uuid(rule_id),
+                    "actor_id": _uuid(auth.actor_id),
+                    **values,
+                },
+            )
+            version = int(updated.scalar_one())
+            await self._insert_audit(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff_action_rule.updated",
+                resource_type="staff_action_rule",
+                resource_id=rule_id,
+                metadata={"version": version, "enabled": values["enabled"]},
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.action_rule_updated.v1",
+                aggregate_type="staff_action_rule",
+                aggregate_id=rule_id,
+                aggregate_version=version,
+                data={"ruleId": rule_id, "enabled": values["enabled"]},
+            )
+        return await self._get_action_rule(auth, rule_id)
+
+    async def add_work_comment(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+        payload: Mapping[str, object],
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedWorkItemVersion", "expected_work_item_version"),
+            "expectedWorkItemVersion",
+        )
+        body = str(_read(payload, "body")).strip()
+        mention_ids = [
+            str(value)
+            for value in cast(
+                list[object],
+                _read(payload, "mentionIds", "mention_ids", default=[]),
+            )
+        ]
+        async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    f"""
+                    SELECT id FROM {self._table("staff_work_comment")}
+                    WHERE tenant_id = :tenant_id AND author_id = :author_id
+                      AND request_key = :request_key
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "author_id": _uuid(auth.actor_id),
+                    "request_key": idempotency_key,
+                },
+            )
+            if existing.mappings().first() is None:
+                current = await self._lock_work_item(connection, auth, work_item_id)
+                if (
+                    _database_integer(current["version"], "staff_work_item.version")
+                    != expected_version
+                ):
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This work item changed in another staff session",
+                    )
+                if mention_ids:
+                    mention_result = await connection.execute(
+                        text(
+                            f"""
+                            SELECT id FROM {self._table("staff_member")}
+                            WHERE tenant_id = :tenant_id AND active = true
+                              AND id = ANY(:mention_ids)
+                            """
+                        ),
+                        {
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "mention_ids": [_uuid(value) for value in mention_ids],
+                        },
+                    )
+                    valid_mentions = {str(row["id"]) for row in mention_result.mappings().all()}
+                    if valid_mentions != set(mention_ids):
+                        raise BadRequestError(
+                            "STAFF_MENTION_NOT_FOUND",
+                            "Every mentioned staff member must be active in this university",
+                        )
+                comment_id = self._uuid_factory()
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._table("staff_work_comment")} (
+                          id, tenant_id, work_item_id, author_id, request_key,
+                          body, mentions, created_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, :author_id, :request_key,
+                          :body, :mentions, NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": comment_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                        "author_id": _uuid(auth.actor_id),
+                        "request_key": idempotency_key,
+                        "body": body,
+                        "mentions": json.dumps(mention_ids),
+                    },
+                )
+                updated = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_work_item")}
+                        SET version = version + 1, updated_at = NOW()
+                        WHERE tenant_id = :tenant_id AND id = :work_item_id
+                          AND version = :expected_version
+                        RETURNING version, key, title
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                        "expected_version": expected_version,
+                    },
+                )
+                updated_row = updated.mappings().first()
+                if updated_row is None:
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This work item changed in another staff session",
+                    )
+                actor_name = await self._staff_name(connection, auth, auth.actor_id)
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="commented",
+                    message="Added an internal comment.",
+                )
+                for mention_id in mention_ids:
+                    await connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO {self._table("staff_notification")} (
+                              id, tenant_id, staff_member_id, kind, title, body,
+                              resource_type, resource_id, dedupe_key, created_at
+                            ) VALUES (
+                              :id, :tenant_id, :staff_member_id, 'mention',
+                              :title, :body, 'staff_work_item', :resource_id,
+                              :dedupe_key, NOW()
+                            )
+                            ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                            """
+                        ),
+                        {
+                            "id": self._uuid_factory(),
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "staff_member_id": _uuid(mention_id),
+                            "title": f"Mentioned on {updated_row['key']}",
+                            "body": f"{actor_name} mentioned you on {updated_row['title']}.",
+                            "resource_id": _uuid(work_item_id),
+                            "dedupe_key": f"mention:{comment_id}:{mention_id}",
+                        },
+                    )
+                await self._insert_audit(
+                    connection,
+                    auth=auth,
+                    request_id=request_id,
+                    action="staff_work_comment.created",
+                    resource_type="staff_work_comment",
+                    resource_id=str(comment_id),
+                    metadata={"workItemId": work_item_id, "mentions": len(mention_ids)},
+                )
+                await self._insert_outbox(
+                    connection,
+                    auth=auth,
+                    request_id=request_id,
+                    event_name="staff.work_comment_created.v1",
+                    aggregate_type="staff_work_item",
+                    aggregate_id=work_item_id,
+                    aggregate_version=int(updated_row["version"]),
+                    data={"workItemId": work_item_id, "commentId": str(comment_id)},
+                )
+        return await self.get_work_item_detail(auth, work_item_id)
+
+    async def start_interaction(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+        payload: Mapping[str, object],
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedWorkItemVersion", "expected_work_item_version"),
+            "expectedWorkItemVersion",
+        )
+        channel = str(_read(payload, "channel"))
+        objective = str(_read(payload, "objective")).strip()
+        async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    f"""
+                    SELECT id FROM {self._table("staff_interaction")}
+                    WHERE tenant_id = :tenant_id AND created_by = :actor_id
+                      AND request_key = :request_key
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "actor_id": _uuid(auth.actor_id),
+                    "request_key": idempotency_key,
+                },
+            )
+            if existing.mappings().first() is None:
+                current = await self._lock_work_item(connection, auth, work_item_id)
+                if (
+                    _database_integer(current["version"], "staff_work_item.version")
+                    != expected_version
+                ):
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This work item changed in another staff session",
+                    )
+                if str(current["status"]) in _TERMINAL_WORK_ITEM_STATUSES:
+                    raise ConflictError(
+                        "WORK_ITEM_TERMINAL",
+                        "Closed work cannot start another interaction",
+                    )
+                interaction_id = self._uuid_factory()
+                now = self._clock()
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._table("staff_interaction")} (
+                          id, tenant_id, student_id, work_item_id, objective,
+                          status, selected_channel, source_version,
+                          covered_source_version, version, created_by, request_key,
+                          created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :student_id, :work_item_id, :objective,
+                          'collecting', :channel, 0, 0, 1, :created_by, :request_key,
+                          :now, :now
+                        )
+                        """
+                    ),
+                    {
+                        "id": interaction_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "student_id": current["student_id"],
+                        "work_item_id": _uuid(work_item_id),
+                        "objective": objective,
+                        "channel": channel,
+                        "created_by": _uuid(auth.actor_id),
+                        "request_key": idempotency_key,
+                        "now": now,
+                    },
+                )
+                updated = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_work_item")}
+                        SET status = 'in_progress', selected_channel = :channel,
+                            attempt_count = attempt_count + 1,
+                            started_at = COALESCE(started_at, :now),
+                            version = version + 1, updated_at = :now
+                        WHERE tenant_id = :tenant_id AND id = :work_item_id
+                          AND version = :expected_version
+                        RETURNING version
+                        """
+                    ),
+                    {
+                        "channel": channel,
+                        "now": now,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                        "expected_version": expected_version,
+                    },
+                )
+                updated_row = updated.mappings().first()
+                if updated_row is None:
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This work item changed in another staff session",
+                    )
+                actor_name = await self._staff_name(connection, auth, auth.actor_id)
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="interaction_started",
+                    message=f"Started a {channel} interaction: {objective}",
+                )
+                await self._insert_outbox(
+                    connection,
+                    auth=auth,
+                    request_id=request_id,
+                    event_name="staff.interaction_started.v1",
+                    aggregate_type="staff_interaction",
+                    aggregate_id=str(interaction_id),
+                    aggregate_version=1,
+                    data={
+                        "workItemId": work_item_id,
+                        "studentId": str(current["student_id"]),
+                        "channel": channel,
+                    },
+                )
+        return await self.get_work_item_detail(auth, work_item_id)
+
+    async def record_interaction_communication(
+        self,
+        auth: AuthContext,
+        interaction_id: str,
+        payload: Mapping[str, object],
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedInteractionVersion", "expected_interaction_version"),
+            "expectedInteractionVersion",
+        )
+        channel = str(_read(payload, "channel"))
+        direction = str(_read(payload, "direction"))
+        subject = _optional_text(_read(payload, "subject", default=None))
+        body = str(_read(payload, "body")).strip()
+        occurred_at = (
+            _optional_datetime(
+                _read(payload, "occurredAt", "occurred_at", default=None),
+                "occurredAt",
+            )
+            or self._clock()
+        )
+
+        work_item_id: str | None = None
+        async with self._engine.begin() as connection:
+            existing = await connection.execute(
+                text(
+                    f"""
+                    SELECT interaction.work_item_id
+                    FROM {self._table("communication_event")} communication
+                    JOIN {self._table("staff_interaction")} interaction
+                      ON interaction.tenant_id = communication.tenant_id
+                     AND interaction.id = communication.interaction_id
+                    WHERE communication.tenant_id = :tenant_id
+                      AND communication.request_key = :request_key
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "request_key": idempotency_key},
+            )
+            existing_row = existing.mappings().first()
+            if existing_row is not None:
+                work_item_id = str(existing_row["work_item_id"])
+            else:
+                interaction = await self._lock_interaction(connection, auth, interaction_id)
+                work_item_id = str(interaction["work_item_id"])
+                if (
+                    _database_integer(interaction["version"], "staff_interaction.version")
+                    != expected_version
+                ):
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This interaction changed in another staff session",
+                    )
+                work_item = await self._lock_work_item(connection, auth, work_item_id)
+                if str(work_item["status"]) in _TERMINAL_WORK_ITEM_STATUSES:
+                    raise ConflictError(
+                        "WORK_ITEM_TERMINAL",
+                        "Closed work cannot receive another communication",
+                    )
+
+                sequence = (
+                    _database_integer(
+                        interaction["source_version"], "staff_interaction.source_version"
+                    )
+                    + 1
+                )
+                communication_id = self._uuid_factory()
+                delivery_status = "received" if direction == "inbound" else "recorded"
+                if channel == "portal" and direction == "outbound":
+                    await self._insert_student_message(
+                        connection,
+                        auth=auth,
+                        student_id=str(interaction["student_id"]),
+                        subject=subject or f"Follow-up: {work_item['title']}",
+                        body=body,
+                    )
+                    delivery_status = "delivered"
+                await connection.execute(
+                    text(
+                        f"""
+                        INSERT INTO {self._table("communication_event")} (
+                          id, tenant_id, student_id, channel, direction, subject,
+                          body_excerpt, metadata, resolution_status, occurred_at,
+                          created_at, interaction_id, source_type, source_id,
+                          source_sequence, request_key, delivery_status
+                        ) VALUES (
+                          :id, :tenant_id, :student_id, :channel, :direction,
+                          :subject, :body, :metadata, 'unresolved', :occurred_at,
+                          NOW(), :interaction_id, 'staff_recorded_communication',
+                          :source_id, :source_sequence, :request_key, :delivery_status
+                        )
+                        """
+                    ),
+                    {
+                        "id": communication_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "student_id": interaction["student_id"],
+                        "channel": channel,
+                        "direction": direction,
+                        "subject": subject,
+                        "body": body,
+                        "metadata": json.dumps(
+                            {"recordedByStaffId": auth.actor_id}, separators=(",", ":")
+                        ),
+                        "occurred_at": occurred_at,
+                        "interaction_id": _uuid(interaction_id),
+                        "source_id": communication_id,
+                        "source_sequence": sequence,
+                        "request_key": idempotency_key,
+                        "delivery_status": delivery_status,
+                    },
+                )
+                quiet_until = occurred_at + timedelta(minutes=5)
+                interaction_update = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_interaction")}
+                        SET source_version = :source_version,
+                            status = CASE
+                              WHEN covered_source_version > 0 THEN 'stale'
+                              ELSE 'enrichment_pending'
+                            END,
+                            quiet_until = :quiet_until,
+                            last_activity_at = :occurred_at,
+                            version = version + 1,
+                            updated_at = NOW()
+                        WHERE tenant_id = :tenant_id AND id = :interaction_id
+                          AND version = :expected_version
+                        RETURNING version
+                        """
+                    ),
+                    {
+                        "source_version": sequence,
+                        "quiet_until": quiet_until,
+                        "occurred_at": occurred_at,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "interaction_id": _uuid(interaction_id),
+                        "expected_version": expected_version,
+                    },
+                )
+                if interaction_update.mappings().first() is None:
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "This interaction changed in another staff session",
+                    )
+                work_update = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_work_item")}
+                        SET status = 'in_progress', selected_channel = :channel,
+                            version = version + 1, updated_at = NOW()
+                        WHERE tenant_id = :tenant_id AND id = :work_item_id
+                        RETURNING version
+                        """
+                    ),
+                    {
+                        "channel": channel,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                    },
+                )
+                work_version = _database_integer(
+                    cast(Mapping[str, object], work_update.mappings().one())["version"],
+                    "staff_work_item.version",
+                )
+                await self._queue_interaction_refresh(
+                    connection,
+                    auth=auth,
+                    interaction_id=interaction_id,
+                    work_item_id=work_item_id,
+                    student_id=str(interaction["student_id"]),
+                    source_version=sequence,
+                    not_before=quiet_until,
+                )
+                actor_name = await self._staff_name(connection, auth, auth.actor_id)
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="communication_recorded",
+                    message=(
+                        f"Recorded {direction} {channel} communication"
+                        + (
+                            " and delivered it to the portal inbox."
+                            if delivery_status == "delivered"
+                            else "."
+                        )
+                    ),
+                )
+                await self._insert_outbox(
+                    connection,
+                    auth=auth,
+                    request_id=request_id,
+                    event_name="staff.communication_recorded.v1",
+                    aggregate_type="staff_interaction",
+                    aggregate_id=interaction_id,
+                    aggregate_version=sequence,
+                    data={
+                        "workItemId": work_item_id,
+                        "studentId": str(interaction["student_id"]),
+                        "communicationId": str(communication_id),
+                        "channel": channel,
+                        "direction": direction,
+                        "workItemVersion": work_version,
+                    },
+                )
+        assert work_item_id is not None
+        return await self.get_work_item_detail(auth, work_item_id)
+
+    async def complete_interaction(
+        self,
+        auth: AuthContext,
+        interaction_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_interaction_version = _integer(
+            _read(payload, "expectedInteractionVersion", "expected_interaction_version"),
+            "expectedInteractionVersion",
+        )
+        expected_work_item_version = _integer(
+            _read(payload, "expectedWorkItemVersion", "expected_work_item_version"),
+            "expectedWorkItemVersion",
+        )
+        outcome_code = str(_read(payload, "outcomeCode", "outcome_code"))
+        resolution_code = str(_read(payload, "resolutionCode", "resolution_code"))
+        next_step = _optional_text(_read(payload, "nextStep", "next_step", default=None))
+        follow_up_at = _optional_datetime(
+            _read(payload, "followUpAt", "follow_up_at", default=None),
+            "followUpAt",
+        )
+        now = self._clock()
+        if follow_up_at is not None and follow_up_at <= now:
+            raise BadRequestError(
+                "FOLLOW_UP_TIME_INVALID",
+                "Choose a follow-up time in the future",
+            )
+        if follow_up_at is not None and next_step is None:
+            raise BadRequestError(
+                "FOLLOW_UP_DETAILS_REQUIRED",
+                "A scheduled follow-up requires a clear next step",
+            )
+
+        async with self._engine.begin() as connection:
+            interaction = await self._lock_interaction(connection, auth, interaction_id)
+            work_item_id = str(interaction["work_item_id"])
+            if (
+                _database_integer(interaction["version"], "staff_interaction.version")
+                != expected_interaction_version
+            ):
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This interaction changed in another staff session",
+                )
+            work_item = await self._lock_work_item(connection, auth, work_item_id)
+            if (
+                _database_integer(work_item["version"], "staff_work_item.version")
+                != expected_work_item_version
+            ):
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This work item changed in another staff session",
+                )
+            if str(work_item["status"]) in _TERMINAL_WORK_ITEM_STATUSES:
+                raise ConflictError("WORK_ITEM_TERMINAL", "This work item is already closed")
+
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_interaction")}
+                    SET status = 'enrichment_pending', quiet_until = :now,
+                        completed_at = :now, version = version + 1,
+                        updated_at = :now
+                    WHERE tenant_id = :tenant_id AND id = :interaction_id
+                      AND version = :expected_version
+                    """
+                ),
+                {
+                    "now": now,
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "interaction_id": _uuid(interaction_id),
+                    "expected_version": expected_interaction_version,
+                },
+            )
+            next_status = "follow_up_required" if follow_up_at is not None else "done"
+            updated = await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_work_item")}
+                    SET status = CAST(:status AS varchar), outcome_code = :outcome_code,
+                        resolution_code = :resolution_code, next_step = :next_step,
+                        follow_up_at = :follow_up_at,
+                        interaction_completed_at = :now,
+                        completed_at = CASE
+                          WHEN CAST(:status AS varchar) = 'done' THEN :now
+                          ELSE completed_at
+                        END,
+                        version = version + 1, updated_at = :now
+                    WHERE tenant_id = :tenant_id AND id = :work_item_id
+                      AND version = :expected_version
+                    RETURNING version
+                    """
+                ),
+                {
+                    "status": next_status,
+                    "outcome_code": outcome_code,
+                    "resolution_code": resolution_code,
+                    "next_step": next_step,
+                    "follow_up_at": follow_up_at,
+                    "now": now,
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "work_item_id": _uuid(work_item_id),
+                    "expected_version": expected_work_item_version,
+                },
+            )
+            updated_row = updated.mappings().first()
+            if updated_row is None:
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This work item changed in another staff session",
+                )
+            await self._queue_interaction_refresh(
+                connection,
+                auth=auth,
+                interaction_id=interaction_id,
+                work_item_id=work_item_id,
+                student_id=str(interaction["student_id"]),
+                source_version=_database_integer(
+                    interaction["source_version"], "staff_interaction.source_version"
+                ),
+                not_before=now,
+            )
+            actor_name = await self._staff_name(connection, auth, auth.actor_id)
+            await self._insert_work_log(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                actor_name=actor_name,
+                action="outcome_recorded",
+                message=(
+                    f"Completed the interaction with outcome {outcome_code} and "
+                    f"resolution {resolution_code}."
+                ),
+            )
+            if follow_up_at is not None:
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="follow_up_scheduled",
+                    message=f"Scheduled follow-up for {_iso_timestamp(follow_up_at)}.",
+                )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.interaction_completed.v1",
+                aggregate_type="staff_interaction",
+                aggregate_id=interaction_id,
+                aggregate_version=expected_interaction_version + 1,
+                data={
+                    "workItemId": work_item_id,
+                    "studentId": str(interaction["student_id"]),
+                    "outcomeCode": outcome_code,
+                    "resolutionCode": resolution_code,
+                    "followUpAt": (
+                        _iso_timestamp(follow_up_at) if follow_up_at is not None else None
+                    ),
+                    "workItemVersion": int(updated_row["version"]),
+                },
+            )
+        return await self.get_work_item_detail(auth, work_item_id)
+
+    async def begin_call_recording(
+        self,
+        auth: AuthContext,
+        interaction_id: str,
+        *,
+        recording_id: str,
+        request_key: str,
+        file_name: str,
+        mime_type: str,
+        size_bytes: int,
+        storage_key: str,
+        sha256: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.begin() as connection:
+            existing_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, work_item_id, status, storage_key, sha256
+                    FROM {self._table("staff_call_recording")}
+                    WHERE tenant_id = :tenant_id AND uploaded_by = :uploaded_by
+                      AND request_key = :request_key
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "uploaded_by": _uuid(auth.actor_id),
+                    "request_key": request_key,
+                },
+            )
+            existing = existing_result.mappings().first()
+            if existing is not None:
+                if str(existing["sha256"]) != sha256:
+                    raise ConflictError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "This upload key was already used for a different recording",
+                    )
+                return {
+                    "id": str(existing["id"]),
+                    "workItemId": str(existing["work_item_id"]),
+                    "storageKey": str(existing["storage_key"]),
+                    "shouldUpload": str(existing["status"]) in {"uploading", "upload_failed"},
+                }
+
+            interaction = await self._lock_interaction(connection, auth, interaction_id)
+            if str(interaction["selected_channel"] or "") != "voice":
+                raise BadRequestError(
+                    "VOICE_INTERACTION_REQUIRED",
+                    "Call recordings can only be attached to a voice interaction",
+                )
+            work_item_id = str(interaction["work_item_id"])
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_call_recording")} (
+                      id, tenant_id, interaction_id, work_item_id, student_id,
+                      uploaded_by, request_key, file_name, mime_type, size_bytes,
+                      storage_key, sha256, consent_confirmed, status, attempts,
+                      max_attempts, version, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :interaction_id, :work_item_id, :student_id,
+                      :uploaded_by, :request_key, :file_name, :mime_type,
+                      :size_bytes, :storage_key, :sha256, true, 'uploading', 0,
+                      5, 1, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": _uuid(recording_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "interaction_id": _uuid(interaction_id),
+                    "work_item_id": _uuid(work_item_id),
+                    "student_id": interaction["student_id"],
+                    "uploaded_by": _uuid(auth.actor_id),
+                    "request_key": request_key,
+                    "file_name": file_name,
+                    "mime_type": mime_type,
+                    "size_bytes": size_bytes,
+                    "storage_key": storage_key,
+                    "sha256": sha256,
+                },
+            )
+        return {
+            "id": recording_id,
+            "workItemId": work_item_id,
+            "storageKey": storage_key,
+            "shouldUpload": True,
+        }
+
+    async def confirm_call_recording_upload(
+        self,
+        auth: AuthContext,
+        recording_id: str,
+        request_id: str,
+    ) -> str:
+        self._require_staff(auth)
+        async with self._engine.begin() as connection:
+            recording = await self._lock_call_recording(connection, auth, recording_id)
+            work_item_id = str(recording["work_item_id"])
+            if str(recording["status"]) not in {"queued", "ready"}:
+                updated = await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_call_recording")}
+                        SET status = 'queued', uploaded_at = COALESCE(uploaded_at, NOW()),
+                            last_error_code = NULL, last_error_message = NULL,
+                            version = version + 1, updated_at = NOW()
+                        WHERE tenant_id = :tenant_id AND id = :recording_id
+                        RETURNING version
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "recording_id": _uuid(recording_id),
+                    },
+                )
+                recording_version = int(updated.scalar_one())
+                actor_name = await self._staff_name(connection, auth, auth.actor_id)
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="call_recording_uploaded",
+                    message="Stored a consent-confirmed call recording; transcription queued.",
+                )
+                await self._insert_outbox(
+                    connection,
+                    auth=auth,
+                    request_id=request_id,
+                    event_name="staff.call_recording_uploaded.v1",
+                    aggregate_type="staff_call_recording",
+                    aggregate_id=recording_id,
+                    aggregate_version=recording_version,
+                    data={
+                        "recordingId": recording_id,
+                        "interactionId": str(recording["interaction_id"]),
+                        "workItemId": work_item_id,
+                    },
+                )
+        return work_item_id
+
+    async def fail_call_recording_upload(
+        self,
+        auth: AuthContext,
+        recording_id: str,
+        error: Exception,
+    ) -> str:
+        self._require_staff(auth)
+        async with self._engine.begin() as connection:
+            recording = await self._lock_call_recording(connection, auth, recording_id)
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_call_recording")}
+                    SET status = 'upload_failed', last_error_code = :error_code,
+                        last_error_message = :error_message,
+                        version = version + 1, updated_at = NOW()
+                    WHERE tenant_id = :tenant_id AND id = :recording_id
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "recording_id": _uuid(recording_id),
+                    "error_code": type(error).__name__[:80],
+                    "error_message": (str(error) or "Object storage failed")[:500],
+                },
+            )
+            return str(recording["work_item_id"])
+
+    async def get_call_recording_reference(
+        self,
+        auth: AuthContext,
+        recording_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT storage_key, file_name, mime_type, status
+                    FROM {self._table("staff_call_recording")}
+                    WHERE tenant_id = :tenant_id AND id = :recording_id
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "recording_id": _uuid(recording_id),
+                },
+            )
+            row = result.mappings().first()
+        if row is None:
+            raise NotFoundError(
+                "STAFF_CALL_RECORDING_NOT_FOUND",
+                "The call recording was not found",
+            )
+        if row["status"] in {"uploading", "upload_failed"}:
+            raise ConflictError(
+                "CALL_RECORDING_NOT_STORED",
+                "The call recording has not been stored successfully",
+            )
+        return {
+            "storageKey": str(row["storage_key"]),
+            "fileName": str(row["file_name"]),
+            "mimeType": str(row["mime_type"]),
+        }
+
+    async def retry_call_transcription(
+        self,
+        auth: AuthContext,
+        recording_id: str,
+        payload: Mapping[str, object],
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedRecordingVersion", "expected_recording_version"),
+            "expectedRecordingVersion",
+        )
+        async with self._engine.begin() as connection:
+            recording = await self._lock_call_recording(connection, auth, recording_id)
+            if (
+                _database_integer(recording["version"], "staff_call_recording.version")
+                != expected_version
+            ):
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This recording changed in another staff session",
+                )
+            status = str(recording["status"])
+            if status in {"uploading", "upload_failed"}:
+                raise ConflictError(
+                    "CALL_RECORDING_NOT_STORED",
+                    "Re-upload the original audio before requesting transcription",
+                )
+            if status in {"queued", "transcribing"}:
+                raise ConflictError(
+                    "CALL_TRANSCRIPTION_ALREADY_RUNNING",
+                    "This recording is already queued for transcription",
+                )
+            await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_call_recording")}
+                    SET status = 'queued', attempts = 0, lease_owner = NULL,
+                        lease_expires_at = NULL, next_attempt_at = NULL,
+                        last_error_code = NULL,
+                        last_error_message = NULL, version = version + 1,
+                        updated_at = NOW()
+                    WHERE tenant_id = :tenant_id AND id = :recording_id
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "recording_id": _uuid(recording_id),
+                },
+            )
+            work_item_id = str(recording["work_item_id"])
+        return await self.get_work_item_detail(auth, work_item_id)
+
+    async def request_ai_refresh(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedWorkItemVersion", "expected_work_item_version"),
+            "expectedWorkItemVersion",
+        )
+        scope = str(_read(payload, "scope"))
+        interaction_value = _read(payload, "interactionId", "interaction_id", default=None)
+        now = self._clock()
+        async with self._engine.begin() as connection:
+            work_item = await self._lock_work_item(connection, auth, work_item_id)
+            if (
+                _database_integer(work_item["version"], "staff_work_item.version")
+                != expected_version
+            ):
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This work item changed in another staff session",
+                )
+            if scope in {"interaction", "both"}:
+                if interaction_value is None:
+                    raise BadRequestError(
+                        "INTERACTION_REQUIRED",
+                        "Choose an interaction to regenerate its outcome",
+                    )
+                interaction = await self._lock_interaction(connection, auth, str(interaction_value))
+                if str(interaction["work_item_id"]) != work_item_id:
+                    raise NotFoundError(
+                        "STAFF_INTERACTION_NOT_FOUND",
+                        "The interaction was not found on this work item",
+                    )
+                await self._queue_interaction_refresh(
+                    connection,
+                    auth=auth,
+                    interaction_id=str(interaction_value),
+                    work_item_id=work_item_id,
+                    student_id=str(work_item["student_id"]),
+                    source_version=_database_integer(
+                        interaction["source_version"], "staff_interaction.source_version"
+                    ),
+                    not_before=now,
+                    force=True,
+                )
+            # An interaction enrichment already returns and persists both the
+            # interaction outcome and the canonical student summary. Keep the
+            # explicit `both` scope on that single durable job so a manual
+            # refresh does not spend a second provider call for the same
+            # evidence snapshot.
+            if scope == "student_summary":
+                await self._queue_student_summary_refresh(
+                    connection,
+                    auth=auth,
+                    student_id=str(work_item["student_id"]),
+                    not_before=now,
+                )
+            if scope == "task_insight":
+                await self._queue_task_insight_refresh(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    student_id=str(work_item["student_id"]),
+                    source_version=expected_version,
+                    not_before=now,
+                )
+            actor_name = await self._staff_name(connection, auth, auth.actor_id)
+            await self._insert_work_log(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                actor_name=actor_name,
+                action="ai_refresh_requested",
+                message=f"Requested {scope.replace('_', ' ')} AI refresh.",
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.ai_refresh_requested.v1",
+                aggregate_type="staff_work_item",
+                aggregate_id=work_item_id,
+                aggregate_version=expected_version,
+                data={
+                    "workItemId": work_item_id,
+                    "studentId": str(work_item["student_id"]),
+                    "scope": scope,
+                    "interactionId": (
+                        str(interaction_value) if interaction_value is not None else None
+                    ),
+                },
+            )
+        return await self.get_work_item_detail(auth, work_item_id)
+
     async def update_work_item(
         self,
         auth: AuthContext,
@@ -173,12 +2500,118 @@ class PostgresStaffRepository:
 
             status_value = _read(update, "status", default=None)
             next_status = str(status_value) if status_value is not None else str(current["status"])
+            if next_status not in _WORK_ITEM_STATUSES:
+                raise BadRequestError("INVALID_WORK_ITEM_STATUS", "Choose a supported work status")
+            if str(current["status"]) in _TERMINAL_WORK_ITEM_STATUSES and next_status != str(
+                current["status"]
+            ):
+                raise ConflictError(
+                    "WORK_ITEM_TERMINAL",
+                    "Closed work is immutable; create a linked follow-up instead",
+                )
+
             assignee_value = _read(update, "assigneeId", "assignee_id", default=_MISSING)
             next_assignee = current["assignee_id"] if assignee_value is _MISSING else assignee_value
             escalated_value = _read(update, "escalated", default=None)
             next_escalated = (
                 bool(current["escalated"]) if escalated_value is None else bool(escalated_value)
             )
+
+            channel_value = _read(update, "selectedChannel", "selected_channel", default=_MISSING)
+            next_channel = (
+                current.get("selected_channel") if channel_value is _MISSING else channel_value
+            )
+            if next_channel is not None and str(next_channel) not in _COMMUNICATION_CHANNELS:
+                raise BadRequestError(
+                    "INVALID_COMMUNICATION_CHANNEL",
+                    "Choose email, SMS, voice, or portal messaging",
+                )
+
+            follow_up_value = _read(update, "followUpAt", "follow_up_at", default=_MISSING)
+            next_follow_up = (
+                current.get("follow_up_at")
+                if follow_up_value is _MISSING
+                else _optional_datetime(follow_up_value, "followUpAt")
+            )
+            blocker_code_value = _read(update, "blockerCode", "blocker_code", default=_MISSING)
+            next_blocker_code = (
+                current.get("blocker_code")
+                if blocker_code_value is _MISSING
+                else _optional_text(blocker_code_value)
+            )
+            blocker_detail_value = _read(
+                update, "blockerDetail", "blocker_detail", default=_MISSING
+            )
+            next_blocker_detail = (
+                current.get("blocker_detail")
+                if blocker_detail_value is _MISSING
+                else _optional_text(blocker_detail_value)
+            )
+            blocker_review_value = _read(
+                update, "blockerReviewAt", "blocker_review_at", default=_MISSING
+            )
+            next_blocker_review = (
+                current.get("blocker_review_at")
+                if blocker_review_value is _MISSING
+                else _optional_datetime(blocker_review_value, "blockerReviewAt")
+            )
+            outcome_value = _read(update, "outcomeCode", "outcome_code", default=_MISSING)
+            next_outcome = (
+                current.get("outcome_code")
+                if outcome_value is _MISSING
+                else _optional_text(outcome_value)
+            )
+            resolution_value = _read(update, "resolutionCode", "resolution_code", default=_MISSING)
+            next_resolution = (
+                current.get("resolution_code")
+                if resolution_value is _MISSING
+                else _optional_text(resolution_value)
+            )
+            next_step_value = _read(update, "nextStep", "next_step", default=_MISSING)
+            next_step = (
+                current.get("next_step")
+                if next_step_value is _MISSING
+                else _optional_text(next_step_value)
+            )
+            terminal_reason_value = _read(
+                update, "terminalReason", "terminal_reason", default=_MISSING
+            )
+            next_terminal_reason = (
+                current.get("terminal_reason")
+                if terminal_reason_value is _MISSING
+                else _optional_text(terminal_reason_value)
+            )
+
+            now = self._clock()
+            if next_status == "follow_up_required":
+                if not isinstance(next_follow_up, datetime) or next_step is None:
+                    raise BadRequestError(
+                        "FOLLOW_UP_DETAILS_REQUIRED",
+                        "Follow-up work requires a future time and a clear next step",
+                    )
+                if next_follow_up <= now:
+                    raise BadRequestError(
+                        "FOLLOW_UP_TIME_INVALID",
+                        "Choose a follow-up time in the future",
+                    )
+            if next_status == "blocked" and (
+                next_blocker_code is None or next_blocker_detail is None
+            ):
+                raise BadRequestError(
+                    "BLOCKER_DETAILS_REQUIRED",
+                    "Blocked work requires a blocker code and explanation",
+                )
+            if next_status == "done" and (next_outcome is None or next_resolution is None):
+                raise BadRequestError(
+                    "OUTCOME_REQUIRED",
+                    "Completed work requires an outcome and resolution",
+                )
+            if next_status == "cancelled" and next_terminal_reason is None:
+                raise BadRequestError(
+                    "CANCELLATION_REASON_REQUIRED",
+                    "Cancelled work requires a reason",
+                )
+
             if next_assignee is not None:
                 assignee = await connection.execute(
                     text(
@@ -236,6 +2669,52 @@ class PostgresStaffRepository:
                         else "Cleared the escalation flag.",
                     )
                 )
+            if _optional_text(next_channel) != _optional_text(current.get("selected_channel")):
+                changes.append(
+                    (
+                        "channel_selected",
+                        (
+                            f"Selected {str(next_channel).replace('_', ' ')}."
+                            if next_channel is not None
+                            else "Cleared the selected channel."
+                        ),
+                    )
+                )
+            if next_follow_up != current.get("follow_up_at"):
+                changes.append(
+                    (
+                        "follow_up_scheduled",
+                        (
+                            f"Scheduled follow-up for {_iso_timestamp(next_follow_up)}."
+                            if next_follow_up is not None
+                            else "Cleared the scheduled follow-up."
+                        ),
+                    )
+                )
+            if (
+                _optional_text(next_blocker_code) != _optional_text(current.get("blocker_code"))
+                or _optional_text(next_blocker_detail)
+                != _optional_text(current.get("blocker_detail"))
+                or next_blocker_review != current.get("blocker_review_at")
+            ):
+                changes.append(
+                    (
+                        "blocked",
+                        (
+                            f"Recorded blocker {next_blocker_code}."
+                            if next_blocker_code is not None
+                            else "Cleared blocker details."
+                        ),
+                    )
+                )
+            if (
+                _optional_text(next_outcome) != _optional_text(current.get("outcome_code"))
+                or _optional_text(next_resolution) != _optional_text(current.get("resolution_code"))
+                or _optional_text(next_step) != _optional_text(current.get("next_step"))
+            ):
+                changes.append(("outcome_recorded", "Recorded the interaction outcome."))
+            if next_status == "cancelled" and str(current["status"]) != "cancelled":
+                changes.append(("cancelled", f"Cancelled: {next_terminal_reason}."))
             note = _optional_text(_read(update, "note", default=None))
             if note:
                 changes.append(("commented", note))
@@ -249,11 +2728,35 @@ class PostgresStaffRepository:
                 text(
                     f"""
                     UPDATE {self._table("staff_work_item")}
-                    SET status = :status,
+                    SET status = CAST(:status AS varchar),
                         assignee_id = :assignee_id,
                         escalated = :escalated,
+                        selected_channel = :selected_channel,
+                        follow_up_at = :follow_up_at,
+                        blocker_code = :blocker_code,
+                        blocker_detail = :blocker_detail,
+                        blocker_review_at = :blocker_review_at,
+                        outcome_code = :outcome_code,
+                        resolution_code = :resolution_code,
+                        next_step = :next_step,
+                        terminal_reason = :terminal_reason,
+                        started_at = CASE
+                          WHEN CAST(:status AS varchar) = 'in_progress'
+                          THEN COALESCE(started_at, :now)
+                          ELSE started_at
+                        END,
+                        completed_at = CASE
+                          WHEN CAST(:status AS varchar) = 'done'
+                          THEN COALESCE(completed_at, :now)
+                          ELSE completed_at
+                        END,
+                        cancelled_at = CASE
+                          WHEN CAST(:status AS varchar) = 'cancelled'
+                          THEN COALESCE(cancelled_at, :now)
+                          ELSE cancelled_at
+                        END,
                         version = version + 1,
-                        updated_at = NOW()
+                        updated_at = :now
                     WHERE tenant_id = :tenant_id
                       AND id = :work_item_id
                       AND version = :expected_version
@@ -266,6 +2769,16 @@ class PostgresStaffRepository:
                         _uuid(str(next_assignee)) if next_assignee is not None else None
                     ),
                     "escalated": next_escalated,
+                    "selected_channel": next_channel,
+                    "follow_up_at": next_follow_up,
+                    "blocker_code": next_blocker_code,
+                    "blocker_detail": next_blocker_detail,
+                    "blocker_review_at": next_blocker_review,
+                    "outcome_code": next_outcome,
+                    "resolution_code": next_resolution,
+                    "next_step": next_step,
+                    "terminal_reason": next_terminal_reason,
+                    "now": now,
                     "tenant_id": _uuid(auth.tenant_id),
                     "work_item_id": _uuid(work_item_id),
                     "expected_version": expected_version,
@@ -287,6 +2800,98 @@ class PostgresStaffRepository:
                     actor_name=actor_name,
                     action=action,
                     message=message,
+                )
+            if next_status in _TERMINAL_WORK_ITEM_STATUSES:
+                inquiry_result = await connection.execute(
+                    text(
+                        f"""
+                        SELECT inquiry.id, inquiry.requirement_id,
+                               inquiry.status_before_help
+                        FROM {self._table("student_inquiry")} inquiry
+                        WHERE inquiry.tenant_id = :tenant_id
+                          AND inquiry.status IN ('new','open','waiting_on_student')
+                          AND (
+                            (
+                              :source_type = 'message'
+                              AND inquiry.id = :source_id
+                            )
+                            OR EXISTS (
+                              SELECT 1
+                              FROM {self._table("staff_work_item_link")} link
+                              WHERE link.tenant_id = inquiry.tenant_id
+                                AND link.work_item_id = :work_item_id
+                                AND link.entity_type = 'inquiry'
+                                AND link.entity_id = inquiry.id
+                            )
+                          )
+                        ORDER BY inquiry.created_at, inquiry.id
+                        LIMIT 1
+                        FOR UPDATE OF inquiry
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "source_type": current.get("source_type"),
+                        "source_id": current.get("source_id"),
+                        "work_item_id": _uuid(work_item_id),
+                    },
+                )
+                inquiry = inquiry_result.mappings().first()
+                if inquiry is not None:
+                    await connection.execute(
+                        text(
+                            f"""
+                            UPDATE {self._table("student_inquiry")}
+                            SET status = 'resolved', resolved_at = NOW(),
+                                resolution_reason = :resolution_reason,
+                                version = version + 1, updated_at = NOW()
+                            WHERE tenant_id = :tenant_id AND id = :inquiry_id
+                            """
+                        ),
+                        {
+                            "resolution_reason": f"work_item_{next_status}",
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "inquiry_id": inquiry["id"],
+                        },
+                    )
+                    if inquiry.get("requirement_id") is not None:
+                        restore_status = str(inquiry.get("status_before_help") or "in_progress")
+                        if restore_status == "help_requested":
+                            restore_status = "in_progress"
+                        await connection.execute(
+                            text(
+                                f"""
+                                UPDATE {self._table("student_requirement")}
+                                SET status = CAST(:status AS varchar),
+                                    version = version + 1, updated_at = NOW()
+                                WHERE tenant_id = :tenant_id
+                                  AND id = :requirement_id
+                                  AND status = 'help_requested'
+                                """
+                            ),
+                            {
+                                "status": restore_status,
+                                "tenant_id": _uuid(auth.tenant_id),
+                                "requirement_id": inquiry["requirement_id"],
+                            },
+                        )
+            material_change = any(
+                action
+                in {
+                    "status_changed",
+                    "blocked",
+                    "cancelled",
+                    "outcome_recorded",
+                    "follow_up_scheduled",
+                }
+                for action, _message in changes
+            )
+            if material_change:
+                await self._queue_student_summary_refresh(
+                    connection,
+                    auth=auth,
+                    student_id=str(current["student_id"]),
+                    not_before=now + timedelta(minutes=5),
                 )
             await self._insert_audit(
                 connection,
@@ -311,6 +2916,12 @@ class PostgresStaffRepository:
                     "status": next_status,
                     "assigneeId": _optional_uuid_string(next_assignee),
                     "escalated": next_escalated,
+                    "selectedChannel": next_channel,
+                    "followUpAt": (
+                        _iso_timestamp(next_follow_up) if next_follow_up is not None else None
+                    ),
+                    "outcomeCode": next_outcome,
+                    "resolutionCode": next_resolution,
                 },
             )
         return await self._require_work_item(auth, work_item_id)
@@ -364,6 +2975,13 @@ class PostgresStaffRepository:
                     UPDATE {self._table("student_inquiry")}
                     SET status = :status,
                         assignee_id = :assignee_id,
+                        resolved_at = CASE
+                          WHEN :status = 'resolved' THEN NOW() ELSE NULL
+                        END,
+                        resolution_reason = CASE
+                          WHEN :status = 'resolved' THEN 'resolved_by_staff'
+                          ELSE NULL
+                        END,
                         version = version + 1,
                         updated_at = NOW()
                     WHERE tenant_id = :tenant_id
@@ -389,6 +3007,34 @@ class PostgresStaffRepository:
                     "This inquiry changed in another staff session",
                 )
             version = _database_integer(updated["version"], "student_inquiry.version")
+            if inquiry.get("requirement_id") is not None:
+                restore_status = str(inquiry.get("status_before_help") or "in_progress")
+                if restore_status == "help_requested":
+                    restore_status = "in_progress"
+                requirement_status = (
+                    "help_requested" if next_status != "resolved" else restore_status
+                )
+                await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("student_requirement")}
+                        SET status = CAST(:status AS varchar),
+                            version = version + 1,
+                            updated_at = NOW()
+                        WHERE tenant_id = :tenant_id
+                          AND id = :requirement_id
+                          AND status NOT IN (
+                            'not_applicable','completed','waived','expired'
+                          )
+                          AND status IS DISTINCT FROM CAST(:status AS varchar)
+                        """
+                    ),
+                    {
+                        "status": requirement_status,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "requirement_id": _uuid(str(inquiry["requirement_id"])),
+                    },
+                )
 
             notification: dict[str, object] | None = None
             if response_note is not None and notify_student:
@@ -399,7 +3045,9 @@ class PostgresStaffRepository:
                     subject=f"Reply: {inquiry['subject']}",
                     body=response_note,
                 )
+            reply_id: UUID | None = None
             if response_note is not None:
+                reply_id = self._uuid_factory()
                 await connection.execute(
                     text(
                         f"""
@@ -414,7 +3062,7 @@ class PostgresStaffRepository:
                         """
                     ),
                     {
-                        "id": self._uuid_factory(),
+                        "id": reply_id,
                         "tenant_id": _uuid(auth.tenant_id),
                         "inquiry_id": _uuid(inquiry_id),
                         "student_id": _uuid(str(inquiry["student_id"])),
@@ -426,6 +3074,230 @@ class PostgresStaffRepository:
                         ),
                     },
                 )
+
+            work_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, status, version
+                    FROM {self._table("staff_work_item")}
+                    WHERE tenant_id = :tenant_id
+                      AND source_type = 'message'
+                      AND source_id = :inquiry_id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "inquiry_id": _uuid(inquiry_id),
+                },
+            )
+            work_item = work_result.mappings().first()
+            if work_item is not None:
+                work_item_id = str(work_item["id"])
+                work_status = {
+                    "new": "todo",
+                    "open": "in_progress",
+                    "waiting_on_student": "follow_up_required",
+                    "resolved": "done",
+                }[next_status]
+                await connection.execute(
+                    text(
+                        f"""
+                        UPDATE {self._table("staff_work_item")}
+                        SET status = CAST(:status AS varchar),
+                            assignee_id = :assignee_id,
+                            selected_channel = 'portal',
+                            started_at = CASE
+                              WHEN CAST(:status AS varchar) <> 'todo'
+                              THEN COALESCE(started_at, NOW())
+                              ELSE started_at
+                            END,
+                            follow_up_at = CASE
+                              WHEN CAST(:status AS varchar) = 'follow_up_required'
+                              THEN NOW() + interval '3 days'
+                              ELSE NULL
+                            END,
+                            next_step = CASE
+                              WHEN CAST(:status AS varchar) = 'follow_up_required'
+                              THEN 'Await the student response and follow up if needed.'
+                              WHEN CAST(:status AS varchar) = 'done'
+                              THEN 'No further action is required unless the student responds.'
+                              ELSE next_step
+                            END,
+                            outcome_code = CASE
+                              WHEN CAST(:status AS varchar) = 'done' THEN 'student_reached'
+                              ELSE NULL
+                            END,
+                            resolution_code = CASE
+                              WHEN CAST(:status AS varchar) = 'done' THEN 'resolved_by_staff'
+                              ELSE NULL
+                            END,
+                            completed_at = CASE
+                              WHEN CAST(:status AS varchar) = 'done' THEN NOW()
+                              ELSE NULL
+                            END,
+                            cancelled_at = NULL,
+                            terminal_reason = NULL,
+                            version = version + 1,
+                            updated_at = NOW()
+                        WHERE tenant_id = :tenant_id AND id = :work_item_id
+                        """
+                    ),
+                    {
+                        "status": work_status,
+                        "assignee_id": (
+                            _uuid(str(next_assignee)) if next_assignee is not None else None
+                        ),
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                    },
+                )
+                actor_name = await self._staff_name(connection, auth, auth.actor_id)
+                await self._insert_work_log(
+                    connection,
+                    auth=auth,
+                    work_item_id=work_item_id,
+                    actor_name=actor_name,
+                    action="status_changed",
+                    message=f"Inquiry status changed to {work_status.replace('_', ' ')}.",
+                )
+
+                interaction_result = await connection.execute(
+                    text(
+                        f"""
+                        SELECT id, source_version
+                        FROM {self._table("staff_interaction")}
+                        WHERE tenant_id = :tenant_id AND work_item_id = :work_item_id
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "work_item_id": _uuid(work_item_id),
+                    },
+                )
+                interaction = interaction_result.mappings().first()
+                if interaction is None:
+                    interaction_id = str(self._uuid_factory())
+                    source_version = 1
+                    await connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO {self._table("staff_interaction")} (
+                              id, tenant_id, student_id, work_item_id, objective,
+                              status, selected_channel, source_version,
+                              covered_source_version, version, quiet_until,
+                              last_activity_at, completed_at, created_by,
+                              request_key, created_at, updated_at
+                            ) VALUES (
+                              :id, :tenant_id, :student_id, :work_item_id, :objective,
+                              'collecting', 'portal', 0, 0, 1, NOW(), NOW(),
+                              NULL, :created_by, :request_key, NOW(), NOW()
+                            )
+                            """
+                        ),
+                        {
+                            "id": _uuid(interaction_id),
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "student_id": _uuid(str(inquiry["student_id"])),
+                            "work_item_id": _uuid(work_item_id),
+                            "objective": str(inquiry["subject"]),
+                            "created_by": _uuid(auth.actor_id),
+                            "request_key": f"inquiry:{inquiry_id}:staff-sync",
+                        },
+                    )
+                else:
+                    interaction_id = str(interaction["id"])
+                    source_version = _database_integer(
+                        interaction["source_version"],
+                        "staff_interaction.source_version",
+                    ) + (1 if notification is not None else 0)
+
+                if notification is not None and reply_id is not None:
+                    await connection.execute(
+                        text(
+                            f"""
+                            INSERT INTO {self._table("communication_event")} (
+                              id, tenant_id, student_id, channel, direction,
+                              subject, body_excerpt, metadata, resolution_status,
+                              occurred_at, created_at, interaction_id, source_type,
+                              source_id, source_sequence, request_key, delivery_status
+                            ) VALUES (
+                              :id, :tenant_id, :student_id, 'portal', 'outbound',
+                              :subject, :body, CAST(:metadata AS jsonb), 'unresolved',
+                              NOW(), NOW(), :interaction_id, 'student_inquiry_reply',
+                              :source_id, :source_sequence, :request_key, 'delivered'
+                            )
+                            ON CONFLICT (tenant_id, source_type, source_id)
+                            WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                            DO NOTHING
+                            """
+                        ),
+                        {
+                            "id": self._uuid_factory(),
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "student_id": _uuid(str(inquiry["student_id"])),
+                            "subject": f"Reply: {inquiry['subject']}",
+                            "body": response_note,
+                            "metadata": json.dumps(
+                                {"inquiryId": inquiry_id, "staffMemberId": auth.actor_id}
+                            ),
+                            "interaction_id": _uuid(interaction_id),
+                            "source_id": reply_id,
+                            "source_sequence": source_version,
+                            "request_key": f"inquiry-reply:{reply_id}",
+                        },
+                    )
+                    quiet_until = (
+                        self._clock()
+                        if next_status == "resolved"
+                        else self._clock() + timedelta(minutes=5)
+                    )
+                    await connection.execute(
+                        text(
+                            f"""
+                            UPDATE {self._table("staff_interaction")}
+                            SET status = 'enrichment_pending',
+                                source_version = :source_version,
+                                selected_channel = 'portal',
+                                quiet_until = :quiet_until,
+                                last_activity_at = NOW(),
+                                completed_at = CASE
+                                  WHEN :completed THEN NOW() ELSE completed_at
+                                END,
+                                version = version + 1,
+                                updated_at = NOW()
+                            WHERE tenant_id = :tenant_id AND id = :interaction_id
+                            """
+                        ),
+                        {
+                            "source_version": source_version,
+                            "quiet_until": quiet_until,
+                            "completed": next_status == "resolved",
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "interaction_id": _uuid(interaction_id),
+                        },
+                    )
+                    await self._queue_interaction_refresh(
+                        connection,
+                        auth=auth,
+                        interaction_id=interaction_id,
+                        work_item_id=work_item_id,
+                        student_id=str(inquiry["student_id"]),
+                        source_version=source_version,
+                        not_before=quiet_until,
+                        force=next_status == "resolved",
+                    )
+                    await self._insert_work_log(
+                        connection,
+                        auth=auth,
+                        work_item_id=work_item_id,
+                        actor_name=actor_name,
+                        action="communication_recorded",
+                        message="Portal reply delivered to the student.",
+                    )
 
             await self._insert_audit(
                 connection,
@@ -990,7 +3862,12 @@ class PostgresStaffRepository:
               item.id, item.key, item.student_id, item.title, item.description,
               item.status, item.priority, item.work_type, item.component,
               item.due_at, item.escalated, item.version, item.created_at,
-              item.updated_at, item.assignee_id,
+              item.updated_at, item.assignee_id, item.action_type,
+              item.selected_channel, item.attempt_count, item.follow_up_at,
+              item.blocker_code, item.blocker_detail, item.blocker_review_at,
+              item.outcome_code, item.resolution_code, item.next_step,
+              item.terminal_reason, item.started_at,
+              item.interaction_completed_at, item.completed_at, item.cancelled_at,
               assignee.display_name AS assignee_name,
               assignee.email_normalized AS assignee_email,
               assignee.component AS assignee_component,
@@ -1082,6 +3959,176 @@ class PostgresStaffRepository:
             WHERE student.tenant_id = :tenant_id AND student.id = :student_id
         """
 
+    def _student_roster_sql(self) -> str:
+        student = self._table("student")
+        person = self._table("person")
+        profile = self._table("student_profile")
+        onboarding = self._table("student_onboarding")
+        offer = self._table("admission_offer")
+        program = self._table("program")
+        journey = self._table("enrollment_journey")
+        requirement = self._table("student_requirement")
+        work_item = self._table("staff_work_item")
+        return f"""
+            SELECT student.id, person.first_name, person.last_name,
+              COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
+                AS preferred_name,
+              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              student.class_year,
+              COALESCE(onboarding.status, 'not_started') AS onboarding_status,
+              COALESCE(onboarding.current_step, 'offer') AS onboarding_step,
+              COALESCE(cardinality(onboarding.completed_steps), 0) AS onboarding_completed,
+              COALESCE(requirement_progress.completed_count, 0) AS requirement_completed,
+              COALESCE(requirement_progress.total_count, 0) AS requirement_total,
+              GREATEST(
+                student.updated_at,
+                COALESCE(profile.updated_at, student.updated_at),
+                COALESCE(onboarding.updated_at, student.updated_at)
+              ) AS last_activity_at,
+              next_work.id AS work_item_id,
+              next_work.title AS work_title,
+              next_work.description AS work_description,
+              next_work.assignee_id,
+              next_work.selected_channel,
+              next_work.priority AS work_priority
+            FROM {student} AS student
+            JOIN {person} AS person
+              ON person.id = student.person_id AND person.tenant_id = student.tenant_id
+            LEFT JOIN {profile} AS profile
+              ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+            LEFT JOIN {onboarding} AS onboarding
+              ON onboarding.student_id = student.id AND onboarding.tenant_id = student.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT program.name
+              FROM {offer} AS offer
+              JOIN {program} AS program
+                ON program.id = offer.program_id AND program.tenant_id = offer.tenant_id
+              WHERE offer.tenant_id = student.tenant_id
+                AND offer.student_id = student.id
+              ORDER BY offer.created_at DESC
+              LIMIT 1
+            ) AS offer_program ON true
+            LEFT JOIN LATERAL (
+              SELECT
+                COUNT(requirement.id)::integer AS total_count,
+                COUNT(requirement.id) FILTER (
+                  WHERE requirement.status IN ('completed', 'waived', 'not_applicable')
+                )::integer AS completed_count
+              FROM {journey} AS journey
+              LEFT JOIN {requirement} AS requirement
+                ON requirement.tenant_id = journey.tenant_id
+               AND requirement.journey_id = journey.id
+               AND requirement.retired_at IS NULL
+              WHERE journey.tenant_id = student.tenant_id
+                AND journey.student_id = student.id
+            ) AS requirement_progress ON true
+            LEFT JOIN LATERAL (
+              SELECT item.id, item.title, item.description, item.assignee_id,
+                     item.selected_channel, item.priority
+              FROM {work_item} AS item
+              WHERE item.tenant_id = student.tenant_id
+                AND item.student_id = student.id
+                AND item.status NOT IN ('done', 'cancelled')
+              ORDER BY
+                CASE item.priority
+                  WHEN 'urgent' THEN 1
+                  WHEN 'high' THEN 2
+                  WHEN 'medium' THEN 3
+                  ELSE 4
+                END,
+                item.due_at NULLS LAST,
+                item.updated_at DESC,
+                item.id
+              LIMIT 1
+            ) AS next_work ON true
+            WHERE student.tenant_id = :tenant_id
+            ORDER BY last_activity_at DESC, student.id
+            LIMIT 1000
+        """
+
+    def _map_student_operation(
+        self,
+        row: Mapping[str, object],
+        current_staff_id: str,
+    ) -> dict[str, object]:
+        onboarding_status = str(row["onboarding_status"])
+        onboarding_completed = _database_integer(
+            row["onboarding_completed"], "student_onboarding.completed_steps"
+        )
+        requirement_completed = _database_integer(
+            row["requirement_completed"], "student_requirement.completed_count"
+        )
+        requirement_total = _database_integer(
+            row["requirement_total"], "student_requirement.total_count"
+        )
+        if onboarding_status != "completed":
+            stage = "Onboarding"
+            completed_tasks = onboarding_completed
+            total_tasks = 8
+        else:
+            completed_tasks = requirement_completed
+            total_tasks = requirement_total
+            stage = (
+                "Ready"
+                if requirement_total > 0 and requirement_completed >= requirement_total
+                else "Enrollment"
+            )
+
+        work_item_id = row.get("work_item_id")
+        assigned_staff_id = str(row.get("assignee_id") or current_staff_id)
+        channel = str(row.get("selected_channel") or "portal")
+        if channel not in _COMMUNICATION_CHANNELS:
+            channel = "portal"
+        if work_item_id is None:
+            recommended_action: dict[str, object] = {
+                "title": "No staff action required",
+                "rationale": "The student has no open Action Center work.",
+                "channel": "portal",
+                "expectedImpact": "Continue monitoring canonical journey progress",
+                "taskId": None,
+                "recommendedToday": False,
+            }
+        else:
+            recommended_action = {
+                "title": str(row.get("work_title") or "Review the open student action"),
+                "rationale": str(
+                    row.get("work_description") or "Resolve the linked Action Center work item."
+                ),
+                "channel": channel,
+                "expectedImpact": "Resolve the linked Action Center work item",
+                "taskId": str(work_item_id),
+                "recommendedToday": row.get("assignee_id") is not None,
+            }
+
+        return {
+            "id": str(row["id"]),
+            "name": f"{row['first_name']} {row['last_name']}",
+            "preferredName": str(row["preferred_name"]),
+            "programName": str(row["program_name"]),
+            "classYear": _database_integer(row["class_year"], "student.class_year"),
+            "assignedStaffId": assigned_staff_id,
+            "syntheticSeed": False,
+            "journey": {
+                "stage": stage,
+                "completedTasks": completed_tasks,
+                "totalTasks": total_tasks,
+                "lastActivityAt": _iso_timestamp(row["last_activity_at"]),
+            },
+            "risk": {
+                "score": 0,
+                "band": "low",
+                "category": "administrative",
+                "meltLikelihoodPercent": 0,
+                "recoveryLikelihoodPercent": 0,
+                "reason": "No deterministic risk score has been generated for this student.",
+                "signals": [],
+                "modelVersion": "not-evaluated",
+                "evaluatedAt": _iso_timestamp(row["last_activity_at"]),
+            },
+            "recommendedAction": recommended_action,
+            "communicationHistory": [],
+        }
+
     def _map_work_item(
         self,
         item: Mapping[str, object],
@@ -1125,9 +4172,60 @@ class PostgresStaffRepository:
             "status": str(item["status"]),
             "priority": str(item["priority"]),
             "type": str(item["work_type"]),
+            "actionType": str(item["action_type"]),
             "component": str(item["component"]),
             "dueAt": (_iso_timestamp(item["due_at"]) if item.get("due_at") is not None else None),
             "escalated": bool(item["escalated"]),
+            "selectedChannel": (
+                str(item["selected_channel"]) if item.get("selected_channel") is not None else None
+            ),
+            "attemptCount": int(cast(int, item["attempt_count"])),
+            "followUpAt": (
+                _iso_timestamp(item["follow_up_at"])
+                if item.get("follow_up_at") is not None
+                else None
+            ),
+            "blocker": (
+                {
+                    "code": str(item["blocker_code"]),
+                    "detail": str(item["blocker_detail"]),
+                    "reviewAt": (
+                        _iso_timestamp(item["blocker_review_at"])
+                        if item.get("blocker_review_at") is not None
+                        else None
+                    ),
+                }
+                if item.get("blocker_code") is not None and item.get("blocker_detail") is not None
+                else None
+            ),
+            "outcomeCode": (
+                str(item["outcome_code"]) if item.get("outcome_code") is not None else None
+            ),
+            "resolutionCode": (
+                str(item["resolution_code"]) if item.get("resolution_code") is not None else None
+            ),
+            "nextStep": str(item["next_step"]) if item.get("next_step") is not None else None,
+            "terminalReason": (
+                str(item["terminal_reason"]) if item.get("terminal_reason") is not None else None
+            ),
+            "startedAt": (
+                _iso_timestamp(item["started_at"]) if item.get("started_at") is not None else None
+            ),
+            "interactionCompletedAt": (
+                _iso_timestamp(item["interaction_completed_at"])
+                if item.get("interaction_completed_at") is not None
+                else None
+            ),
+            "completedAt": (
+                _iso_timestamp(item["completed_at"])
+                if item.get("completed_at") is not None
+                else None
+            ),
+            "cancelledAt": (
+                _iso_timestamp(item["cancelled_at"])
+                if item.get("cancelled_at") is not None
+                else None
+            ),
             "version": int(cast(int, item["version"])),
             "createdAt": _iso_timestamp(item["created_at"]),
             "updatedAt": _iso_timestamp(item["updated_at"]),
@@ -1165,8 +4263,11 @@ class PostgresStaffRepository:
         result = await connection.execute(
             text(
                 f"""
-                SELECT id, student_id, status, assignee_id, escalated, version,
-                       source_type, source_id
+                SELECT id, key, title, student_id, status, assignee_id, escalated, version,
+                       source_type, source_id, work_type, selected_channel,
+                       follow_up_at, blocker_code, blocker_detail, blocker_review_at,
+                       outcome_code, resolution_code, next_step, terminal_reason,
+                       started_at, interaction_completed_at, completed_at, cancelled_at
                 FROM {self._table("staff_work_item")}
                 WHERE tenant_id = :tenant_id AND id = :work_item_id
                 FOR UPDATE
@@ -1182,6 +4283,65 @@ class PostgresStaffRepository:
             raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
         return dict(item)
 
+    async def _lock_interaction(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        interaction_id: str,
+    ) -> dict[str, object]:
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT id, student_id, work_item_id, status, selected_channel,
+                       source_version, covered_source_version, version,
+                       quiet_until, last_activity_at, completed_at
+                FROM {self._table("staff_interaction")}
+                WHERE tenant_id = :tenant_id AND id = :interaction_id
+                FOR UPDATE
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "interaction_id": _uuid(interaction_id),
+            },
+        )
+        interaction = result.mappings().first()
+        if interaction is None:
+            raise NotFoundError(
+                "STAFF_INTERACTION_NOT_FOUND",
+                "The interaction was not found",
+            )
+        return dict(interaction)
+
+    async def _lock_call_recording(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        recording_id: str,
+    ) -> dict[str, object]:
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT id, interaction_id, work_item_id, student_id, status,
+                       storage_key, sha256, attempts, version
+                FROM {self._table("staff_call_recording")}
+                WHERE tenant_id = :tenant_id AND id = :recording_id
+                FOR UPDATE
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "recording_id": _uuid(recording_id),
+            },
+        )
+        recording = result.mappings().first()
+        if recording is None:
+            raise NotFoundError(
+                "STAFF_CALL_RECORDING_NOT_FOUND",
+                "The call recording was not found",
+            )
+        return dict(recording)
+
     async def _lock_inquiry(
         self,
         connection: AsyncConnection,
@@ -1193,7 +4353,9 @@ class PostgresStaffRepository:
                 f"""
                 SELECT inquiry.id, inquiry.student_id, inquiry.topic_code,
                        inquiry.subject, inquiry.message, inquiry.status,
-                       inquiry.priority, inquiry.assignee_id, inquiry.version,
+                       inquiry.priority, inquiry.assignee_id,
+                       inquiry.requirement_id, inquiry.status_before_help,
+                       inquiry.version,
                        inquiry.created_at, inquiry.updated_at, student.class_year,
                        person.first_name, person.last_name,
                        COALESCE(profile.preferred_name, person.preferred_name,
@@ -1290,6 +4452,226 @@ class PostgresStaffRepository:
                 "The staff identity is not configured for this university",
             )
         return str(member["display_name"])
+
+    async def _queue_task_insight_refresh(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        work_item_id: str,
+        student_id: str,
+        source_version: int,
+        not_before: datetime,
+    ) -> None:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("action_center_ai_job")} (
+                  id, tenant_id, purpose, dedupe_key, student_id, work_item_id,
+                  status, requested_source_version, covered_source_version,
+                  not_before, attempts, max_attempts, created_at, updated_at
+                ) VALUES (
+                  :id, :tenant_id, 'task_insight', :dedupe_key, :student_id,
+                  :work_item_id, 'pending', :source_version, 0, :not_before,
+                  0, 5, NOW(), NOW()
+                )
+                ON CONFLICT (tenant_id, purpose, dedupe_key)
+                DO UPDATE SET
+                  requested_source_version = GREATEST(
+                    {self._table("action_center_ai_job")}.requested_source_version,
+                    EXCLUDED.requested_source_version
+                  ),
+                  status = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'running'
+                    THEN 'running'
+                    ELSE 'pending'
+                  END,
+                  not_before = EXCLUDED.not_before,
+                  attempts = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'dead_letter'
+                    THEN 0
+                    ELSE {self._table("action_center_ai_job")}.attempts
+                  END,
+                  completed_at = NULL,
+                  last_error_code = NULL,
+                  last_error_message = NULL,
+                  updated_at = NOW()
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": _uuid(auth.tenant_id),
+                "dedupe_key": f"work-item:{work_item_id}",
+                "student_id": _uuid(student_id),
+                "work_item_id": _uuid(work_item_id),
+                "source_version": source_version,
+                "not_before": not_before,
+            },
+        )
+
+    async def _queue_student_summary_refresh(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        student_id: str,
+        not_before: datetime,
+    ) -> None:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("action_center_ai_job")} (
+                  id, tenant_id, purpose, dedupe_key, student_id, status,
+                  requested_source_version, covered_source_version,
+                  base_summary_version, not_before, attempts, max_attempts,
+                  created_at, updated_at
+                )
+                VALUES (
+                  :id, :tenant_id, 'student_summary', :dedupe_key, :student_id,
+                  'pending', 1, 0,
+                  (
+                    SELECT MAX(version)
+                    FROM {self._table("student_summary_revision")}
+                    WHERE tenant_id = :tenant_id AND student_id = :student_id
+                  ),
+                  :not_before, 0, 5, NOW(), NOW()
+                )
+                ON CONFLICT (tenant_id, purpose, dedupe_key)
+                DO UPDATE SET
+                  requested_source_version =
+                    {self._table("action_center_ai_job")}.requested_source_version + 1,
+                  status = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'running'
+                    THEN 'running'
+                    ELSE 'pending'
+                  END,
+                  not_before = CASE
+                    WHEN {self._table("action_center_ai_job")}.status IN (
+                      'succeeded', 'dead_letter', 'cancelled'
+                    ) THEN EXCLUDED.not_before
+                    ELSE LEAST(
+                      GREATEST(
+                        {self._table("action_center_ai_job")}.not_before,
+                        EXCLUDED.not_before
+                      ),
+                      {self._table("action_center_ai_job")}.created_at + interval '15 minutes'
+                    )
+                  END,
+                  created_at = CASE
+                    WHEN {self._table("action_center_ai_job")}.status IN (
+                      'succeeded', 'dead_letter', 'cancelled'
+                    ) THEN NOW()
+                    ELSE {self._table("action_center_ai_job")}.created_at
+                  END,
+                  attempts = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'dead_letter'
+                      OR (
+                        {self._table("action_center_ai_job")}.status <> 'running'
+                        AND {self._table("action_center_ai_job")}.attempts
+                          >= {self._table("action_center_ai_job")}.max_attempts
+                      )
+                    THEN 0
+                    ELSE {self._table("action_center_ai_job")}.attempts
+                  END,
+                  completed_at = NULL,
+                  last_error_code = NULL,
+                  last_error_message = NULL,
+                  updated_at = NOW()
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": _uuid(auth.tenant_id),
+                "dedupe_key": f"student:{student_id}",
+                "student_id": _uuid(student_id),
+                "not_before": not_before,
+            },
+        )
+
+    async def _queue_interaction_refresh(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        interaction_id: str,
+        work_item_id: str,
+        student_id: str,
+        source_version: int,
+        not_before: datetime,
+        force: bool = False,
+    ) -> None:
+        effective_not_before = self._clock() if force else not_before
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("action_center_ai_job")} (
+                  id, tenant_id, purpose, dedupe_key, student_id, work_item_id,
+                  interaction_id, status, requested_source_version,
+                  covered_source_version, not_before, attempts, max_attempts,
+                  created_at, updated_at
+                ) VALUES (
+                  :id, :tenant_id, 'interaction_enrichment', :dedupe_key,
+                  :student_id, :work_item_id, :interaction_id, 'pending',
+                  :source_version, 0, :not_before, 0, 5, NOW(), NOW()
+                )
+                ON CONFLICT (tenant_id, purpose, dedupe_key)
+                DO UPDATE SET
+                  requested_source_version = GREATEST(
+                    {self._table("action_center_ai_job")}.requested_source_version,
+                    EXCLUDED.requested_source_version
+                  ),
+                  status = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'running'
+                    THEN 'running'
+                    ELSE 'pending'
+                  END,
+                  not_before = CASE
+                    WHEN :force THEN NOW()
+                    WHEN {self._table("action_center_ai_job")}.status IN (
+                      'succeeded', 'dead_letter', 'cancelled'
+                    ) THEN EXCLUDED.not_before
+                    ELSE LEAST(
+                      GREATEST(
+                        {self._table("action_center_ai_job")}.not_before,
+                        EXCLUDED.not_before
+                      ),
+                      {self._table("action_center_ai_job")}.created_at + interval '15 minutes'
+                    )
+                  END,
+                  created_at = CASE
+                    WHEN {self._table("action_center_ai_job")}.status IN (
+                      'succeeded', 'dead_letter', 'cancelled'
+                    ) THEN NOW()
+                    ELSE {self._table("action_center_ai_job")}.created_at
+                  END,
+                  attempts = CASE
+                    WHEN {self._table("action_center_ai_job")}.status = 'dead_letter'
+                      OR (
+                        {self._table("action_center_ai_job")}.status <> 'running'
+                        AND {self._table("action_center_ai_job")}.attempts
+                          >= {self._table("action_center_ai_job")}.max_attempts
+                      )
+                    THEN 0
+                    ELSE {self._table("action_center_ai_job")}.attempts
+                  END,
+                  completed_at = NULL,
+                  last_error_code = NULL,
+                  last_error_message = NULL,
+                  updated_at = NOW()
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": _uuid(auth.tenant_id),
+                "dedupe_key": f"interaction:{interaction_id}",
+                "student_id": _uuid(student_id),
+                "work_item_id": _uuid(work_item_id),
+                "interaction_id": _uuid(interaction_id),
+                "source_version": source_version,
+                "not_before": effective_not_before,
+                "force": force,
+            },
+        )
 
     async def _insert_work_log(
         self,
@@ -1581,6 +4963,212 @@ class PostgresStaffRepository:
                 href="/dashboard",
             )
 
+    async def _run_idempotent(
+        self,
+        *,
+        auth: AuthContext,
+        idempotency_key: str,
+        operation: str,
+        request_payload: object,
+        response_status: int,
+        handler: Callable[[AsyncConnection], Awaitable[dict[str, object]]],
+    ) -> dict[str, object]:
+        request_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "tenantId": auth.tenant_id,
+                    "actorId": auth.actor_id,
+                    "requestPayload": request_payload,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        lock_key = f"{auth.tenant_id}:{auth.actor_id}:{operation}:{idempotency_key}"
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
+            existing_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT request_hash, response_body
+                    FROM {self._table("idempotency_record")}
+                    WHERE tenant_id = :tenant_id AND actor_id = :actor_id
+                      AND operation = :operation AND idempotency_key = :idempotency_key
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "actor_id": _uuid(auth.actor_id),
+                    "operation": operation,
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            existing = existing_result.mappings().first()
+            if existing is not None:
+                if str(existing["request_hash"]) != request_hash:
+                    raise ConflictError(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "This idempotency key was already used for a different request",
+                    )
+                response = existing["response_body"]
+                return dict(response) if isinstance(response, Mapping) else {}
+            response = await handler(connection)
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("idempotency_record")} (
+                      tenant_id, actor_id, operation, idempotency_key, request_hash,
+                      response_status, response_body, created_at, expires_at
+                    ) VALUES (
+                      :tenant_id, :actor_id, :operation, :idempotency_key, :request_hash,
+                      :response_status, CAST(:response_body AS jsonb), NOW(),
+                      NOW() + interval '24 hours'
+                    )
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "actor_id": _uuid(auth.actor_id),
+                    "operation": operation,
+                    "idempotency_key": idempotency_key,
+                    "request_hash": request_hash,
+                    "response_status": response_status,
+                    "response_body": json.dumps(response, separators=(",", ":"), default=str),
+                },
+            )
+            return response
+
+    async def _insert_staff_notification(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        work_item_id: str,
+        staff_member_id: str | None,
+        team_component: str | None,
+        tenant_wide: bool,
+        kind: str,
+        title: str,
+        body: str,
+        dedupe_key: str,
+    ) -> str:
+        notification_id = str(self._uuid_factory())
+        inserted_result = await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("staff_notification")} (
+                  id, tenant_id, staff_member_id, team_component, tenant_wide,
+                  kind, title, body, resource_type, resource_id, dedupe_key,
+                  created_at
+                ) VALUES (
+                  :id, :tenant_id, :staff_member_id, :team_component, :tenant_wide,
+                  :kind, :title, :body, 'staff_work_item', :work_item_id,
+                  :dedupe_key, NOW()
+                )
+                ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": _uuid(notification_id),
+                "tenant_id": _uuid(auth.tenant_id),
+                "staff_member_id": (
+                    _uuid(staff_member_id) if staff_member_id is not None else None
+                ),
+                "team_component": team_component,
+                "tenant_wide": tenant_wide,
+                "kind": kind,
+                "title": title,
+                "body": body[:2_000],
+                "work_item_id": _uuid(work_item_id),
+                "dedupe_key": dedupe_key[:240],
+            },
+        )
+        inserted = inserted_result.mappings().first()
+        if inserted is None:
+            existing_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id
+                    FROM {self._table("staff_notification")}
+                    WHERE tenant_id = :tenant_id AND dedupe_key = :dedupe_key
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "dedupe_key": dedupe_key[:240]},
+            )
+            existing = existing_result.mappings().first()
+            if existing is None:
+                raise RuntimeError("The staff notification could not be persisted")
+            return str(existing["id"])
+        notification_id = str(inserted["id"])
+        await self._insert_realtime_event(
+            connection,
+            tenant_id=auth.tenant_id,
+            event_type="staff.notification.created",
+            resource_type="staff_notification",
+            resource_id=notification_id,
+            work_item_id=work_item_id,
+            staff_member_id=staff_member_id,
+            team_component=team_component,
+            tenant_wide=tenant_wide,
+            payload={
+                "notificationId": notification_id,
+                "workItemId": work_item_id,
+                "kind": kind,
+                "invalidate": ["notifications", "workspace"],
+            },
+        )
+        return notification_id
+
+    async def _insert_realtime_event(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        work_item_id: str | None,
+        staff_member_id: str | None,
+        team_component: str | None,
+        tenant_wide: bool,
+        payload: Mapping[str, object],
+    ) -> None:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("staff_realtime_event")} (
+                  id, tenant_id, event_type, resource_type, resource_id,
+                  work_item_id, staff_member_id, team_component, tenant_wide,
+                  payload, created_at
+                ) VALUES (
+                  :id, :tenant_id, :event_type, :resource_type, :resource_id,
+                  :work_item_id, :staff_member_id, :team_component, :tenant_wide,
+                  CAST(:payload AS jsonb), NOW()
+                )
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": _uuid(tenant_id),
+                "event_type": event_type,
+                "resource_type": resource_type,
+                "resource_id": _uuid(resource_id),
+                "work_item_id": _uuid(work_item_id) if work_item_id is not None else None,
+                "staff_member_id": (
+                    _uuid(staff_member_id) if staff_member_id is not None else None
+                ),
+                "team_component": team_component,
+                "tenant_wide": tenant_wide,
+                "payload": json.dumps(dict(payload), separators=(",", ":"), default=str),
+            },
+        )
+
     async def _insert_audit(
         self,
         connection: AsyncConnection,
@@ -1687,6 +5275,147 @@ class PostgresStaffRepository:
             )
 
 
+def _map_action_rule(row: Mapping[str, object]) -> dict[str, object]:
+    updated_by = None
+    if row.get("updated_by_id") is not None:
+        updated_by = {
+            "id": str(row["updated_by_id"]),
+            "name": str(row["updated_by_name"]),
+            "email": str(row["updated_by_email"]),
+            "component": str(row["updated_by_component"]),
+        }
+    return {
+        "id": str(row["id"]),
+        "code": str(row["code"]),
+        "name": str(row["name"]),
+        "description": str(row["description"]),
+        "enabled": bool(row["enabled"]),
+        "signalType": str(row["signal_type"]),
+        "flowKind": str(row["flow_kind"]) if row["flow_kind"] is not None else None,
+        "requirementCode": (
+            str(row["requirement_code"]) if row["requirement_code"] is not None else None
+        ),
+        "lookaheadDays": (
+            _database_integer(row["lookahead_days"], "staff_action_rule.lookahead_days")
+            if row["lookahead_days"] is not None
+            else None
+        ),
+        "inactivityDays": (
+            _database_integer(row["inactivity_days"], "staff_action_rule.inactivity_days")
+            if row["inactivity_days"] is not None
+            else None
+        ),
+        "cadenceMinutes": _database_integer(
+            row["cadence_minutes"], "staff_action_rule.cadence_minutes"
+        ),
+        "component": str(row["component"]),
+        "priority": str(row["priority"]),
+        "actionType": str(row["action_type"]),
+        "titleTemplate": str(row["title_template"]),
+        "descriptionTemplate": str(row["description_template"]),
+        "version": _database_integer(row["version"], "staff_action_rule.version"),
+        "lastEvaluatedAt": (
+            _iso_timestamp(row["last_evaluated_at"])
+            if row["last_evaluated_at"] is not None
+            else None
+        ),
+        "updatedAt": _iso_timestamp(row["updated_at"]),
+        "updatedBy": updated_by,
+    }
+
+
+def _validated_action_rule_values(payload: Mapping[str, object]) -> dict[str, object]:
+    code = str(_read(payload, "code")).strip()
+    name = str(_read(payload, "name")).strip()
+    description = str(_read(payload, "description")).strip()
+    signal_type = str(_read(payload, "signalType", "signal_type"))
+    flow_kind_value = _read(payload, "flowKind", "flow_kind", default=None)
+    flow_kind = str(flow_kind_value) if flow_kind_value is not None else None
+    requirement_code_value = _read(payload, "requirementCode", "requirement_code", default=None)
+    requirement_code = (
+        str(requirement_code_value).strip() if requirement_code_value is not None else None
+    )
+    lookahead_value = _read(payload, "lookaheadDays", "lookahead_days", default=None)
+    inactivity_value = _read(payload, "inactivityDays", "inactivity_days", default=None)
+    if lookahead_value is None:
+        lookahead_days = None
+    elif isinstance(lookahead_value, int) and not isinstance(lookahead_value, bool):
+        lookahead_days = lookahead_value
+    else:
+        raise BadRequestError("VALIDATION_ERROR", "lookaheadDays must be an integer")
+    if inactivity_value is None:
+        inactivity_days = None
+    elif isinstance(inactivity_value, int) and not isinstance(inactivity_value, bool):
+        inactivity_days = inactivity_value
+    else:
+        raise BadRequestError("VALIDATION_ERROR", "inactivityDays must be an integer")
+    cadence_value = _read(payload, "cadenceMinutes", "cadence_minutes")
+    if isinstance(cadence_value, bool) or not isinstance(cadence_value, int):
+        raise BadRequestError("VALIDATION_ERROR", "cadenceMinutes must be an integer")
+    cadence_minutes = cadence_value
+    component = str(_read(payload, "component")).strip()
+    priority = str(_read(payload, "priority"))
+    action_type = str(_read(payload, "actionType", "action_type"))
+    title_template = str(_read(payload, "titleTemplate", "title_template")).strip()
+    description_template = str(
+        _read(payload, "descriptionTemplate", "description_template")
+    ).strip()
+    enabled_value = _read(payload, "enabled", default=True)
+    if not isinstance(enabled_value, bool):
+        raise BadRequestError("VALIDATION_ERROR", "enabled must be a boolean")
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,79}", code):
+        raise BadRequestError("VALIDATION_ERROR", "Choose a valid action rule code")
+    if not name or len(name) > 160 or not description or len(description) > 1000:
+        raise BadRequestError("VALIDATION_ERROR", "Complete the action rule name and description")
+    if signal_type not in {"requirement_due", "student_inactive"}:
+        raise BadRequestError("VALIDATION_ERROR", "Choose a supported action rule signal")
+    if flow_kind not in {None, "enrollment", "onboarding"}:
+        raise BadRequestError("VALIDATION_ERROR", "Choose a valid journey flow")
+    if not 5 <= cadence_minutes <= 1440:
+        raise BadRequestError("VALIDATION_ERROR", "Cadence must be between 5 and 1440 minutes")
+    if priority not in _WORK_ITEM_PRIORITIES or action_type not in _WORK_ACTION_TYPES:
+        raise BadRequestError("VALIDATION_ERROR", "Choose a valid task priority and action type")
+    if not component or len(component) > 160:
+        raise BadRequestError("VALIDATION_ERROR", "Choose the responsible staff component")
+    if not title_template or len(title_template) > 240 or not description_template:
+        raise BadRequestError("VALIDATION_ERROR", "Complete the task title and description")
+    if len(description_template) > 2000:
+        raise BadRequestError("VALIDATION_ERROR", "The task description is too long")
+    if signal_type == "requirement_due":
+        if lookahead_days is None or not 0 <= lookahead_days <= 365 or inactivity_days is not None:
+            raise BadRequestError(
+                "VALIDATION_ERROR",
+                "Requirement rules need a lookahead between 0 and 365 days",
+            )
+    elif (
+        inactivity_days is None
+        or not 1 <= inactivity_days <= 365
+        or lookahead_days is not None
+        or requirement_code is not None
+    ):
+        raise BadRequestError(
+            "VALIDATION_ERROR",
+            "Inactivity rules need an inactivity threshold between 1 and 365 days",
+        )
+    return {
+        "code": code,
+        "name": name,
+        "description": description,
+        "enabled": enabled_value,
+        "signal_type": signal_type,
+        "flow_kind": flow_kind,
+        "requirement_code": requirement_code,
+        "lookahead_days": lookahead_days,
+        "inactivity_days": inactivity_days,
+        "cadence_minutes": cadence_minutes,
+        "component": component,
+        "priority": priority,
+        "action_type": action_type,
+        "title_template": title_template,
+        "description_template": description_template,
+    }
+
+
 def _document_route(category: str) -> tuple[str, str]:
     if category == "financial_aid":
         return "Financial Aid", "urgent"
@@ -1773,6 +5502,31 @@ def _optional_text(value: object) -> str | None:
     return normalized or None
 
 
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _optional_datetime(value: object, field: str) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise BadRequestError(
+                "VALIDATION_ERROR", f"{field} must be an ISO timestamp"
+            ) from error
+    else:
+        raise BadRequestError("VALIDATION_ERROR", f"{field} must be an ISO timestamp")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
 def _json_object(value: object, field: str) -> dict[str, object]:
     parsed = value
     if isinstance(parsed, str):
@@ -1783,6 +5537,70 @@ def _json_object(value: object, field: str) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise RuntimeError(f"Database returned invalid JSON for {field}")
     return {str(key): item for key, item in parsed.items()}
+
+
+def _json_list(value: object, field: str) -> list[object]:
+    parsed = value
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"Database returned invalid JSON for {field}") from error
+    if not isinstance(parsed, list):
+        raise RuntimeError(f"Database returned invalid JSON for {field}")
+    return list(parsed)
+
+
+def _job_public_state(job: Mapping[str, object]) -> str:
+    status = str(job.get("status", ""))
+    requested = int(cast(int, job.get("requested_source_version", 0)))
+    covered = int(cast(int, job.get("covered_source_version", 0)))
+    if status == "running":
+        return "running"
+    if status == "failed_retryable":
+        return "failed_retryable"
+    if status == "dead_letter":
+        return "dead_letter"
+    if status == "pending":
+        return "stale" if covered > 0 and requested > covered else "pending"
+    if status == "succeeded":
+        return "ready"
+    return "not_requested"
+
+
+def _summary_public_state(
+    summary: Mapping[str, object] | None,
+    job: Mapping[str, object] | None,
+) -> str:
+    if job is None:
+        return "ready" if summary is not None else "not_requested"
+    state = _job_public_state(job)
+    if (
+        summary is not None
+        and state in {"pending", "failed_retryable", "dead_letter"}
+        and _iso_timestamp(job["updated_at"]) <= _iso_timestamp(summary["generated_at"])
+    ):
+        # A task or interaction projection can persist the canonical student
+        # summary in the same durable run. An older standalone summary job may
+        # still be dead-lettered, but it must not hide that newer current
+        # revision from staff.
+        return "ready"
+    if summary is not None and state == "pending":
+        return "stale"
+    return state
+
+
+def _aggregate_ai_states(states: list[str]) -> str:
+    precedence = (
+        "dead_letter",
+        "failed_retryable",
+        "running",
+        "pending",
+        "stale",
+        "ready",
+        "not_requested",
+    )
+    return next((state for state in precedence if state in states), "not_requested")
 
 
 def _uuid(value: str) -> UUID:

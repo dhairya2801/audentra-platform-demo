@@ -192,6 +192,10 @@ class RuntimeSettings:
                     "OPENROUTER_DOCUMENT_MODEL", "qwen/qwen3.7-flash"
                 ).strip()
                 or "qwen/qwen3.7-flash",
+                openrouter_transcription_model=values.get(
+                    "OPENROUTER_TRANSCRIPTION_MODEL", "openai/whisper-large-v3"
+                ).strip()
+                or "openai/whisper-large-v3",
                 app_url=values.get("OPENROUTER_APP_URL", "http://localhost:3000").strip(),
                 app_name=values.get("OPENROUTER_APP_NAME", "Aster Student Portal").strip(),
                 document_timeout_seconds=openrouter_timeout_ms / 1_000,

@@ -172,6 +172,7 @@ class PreviewStaffWorkspaceRepository:
         student: Mapping[str, Any],
         campus_life: Mapping[str, Any],
         canonical_inquiries: Sequence[Mapping[str, Any]] = (),
+        canonical_cohort: Sequence[Mapping[str, Any]] = (),
     ) -> JsonDict:
         self._require_preview_staff(auth)
         async with self._lock:
@@ -191,6 +192,7 @@ class PreviewStaffWorkspaceRepository:
         current_student = cast(JsonDict, copy.deepcopy(student))
         cohort = snapshot.cohort
         _project_current_student(cohort, current_student, staff)
+        _merge_canonical_cohort(cohort, canonical_cohort)
         items = _mapping_list(action_center.get("items"))
         if cohort and items:
             cohort[0]["recommendedAction"]["taskId"] = str(items[0]["id"])
@@ -848,6 +850,38 @@ def _project_current_student(
     if len(staff) > 1:
         for entry in cohort[30:]:
             entry["assignedStaffId"] = str(staff[1]["id"])
+
+
+def _merge_canonical_cohort(
+    cohort: list[JsonDict], canonical_cohort: Sequence[Mapping[str, Any]]
+) -> None:
+    """Add real students to the preview roster without inventing risk scores."""
+
+    by_id = {str(entry["id"]): entry for entry in cohort}
+    for canonical_value in canonical_cohort:
+        canonical = copy.deepcopy(dict(canonical_value))
+        student_id = str(canonical.get("id") or "")
+        if not student_id:
+            continue
+        current = by_id.get(student_id)
+        if current is None:
+            cohort.append(canonical)
+            by_id[student_id] = canonical
+            continue
+        for key in (
+            "name",
+            "preferredName",
+            "programName",
+            "classYear",
+            "assignedStaffId",
+            "journey",
+            "syntheticSeed",
+        ):
+            if key in canonical:
+                current[key] = canonical[key]
+        recommendation = cast(Mapping[str, Any], canonical.get("recommendedAction", {}))
+        if recommendation.get("taskId"):
+            current["recommendedAction"] = copy.deepcopy(dict(recommendation))
 
 
 def _configuration_kind(value: str) -> ConfigurationKind:

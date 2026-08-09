@@ -31,11 +31,20 @@ EXPECTED_EVENTS = {
     "enrollment.journey_created.v1",
     "payment.deposit_succeeded.v1",
     "staff.configuration_published.v1",
+    "staff.action_rule_created.v1",
+    "staff.action_rule_updated.v1",
+    "staff.ai_refresh_requested.v1",
+    "staff.call_recording_uploaded.v1",
+    "staff.communication_recorded.v1",
+    "staff.interaction_completed.v1",
+    "staff.interaction_started.v1",
+    "staff.work_comment_created.v1",
     "staff.work_item_updated.v1",
     "student.appointment_scheduled.v1",
     "student.document_decided_by_staff.v1",
     "student.housing_plan_updated.v1",
     "student.help_request_created.v1",
+    "student.inquiry_message_created.v1",
     "student.inquiry_updated_by_staff.v1",
     "student.onboarding_completed.v1",
     "student.preferences_updated_by_staff.v1",
@@ -73,7 +82,7 @@ def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
 
 
 def test_canonical_only_events_have_explicit_ignore_dispositions() -> None:
-    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 8
+    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 17
     assert all(EVENT_CATALOG[name].kind == "ignored" for name in EXPLICITLY_ADDED_IGNORED_EVENTS)
 
 

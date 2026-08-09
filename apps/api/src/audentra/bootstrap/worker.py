@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
+from audentra.infrastructure.postgres.platform_repository import PostgresPlatformRepository
+from audentra.infrastructure.storage.s3 import S3ObjectStorage
+from audentra.infrastructure.worker.action_center_enrichment import ActionCenterEnrichmentRunner
 from audentra.infrastructure.worker.agentic_scheduler import AgenticWorkflowScheduler
+from audentra.infrastructure.worker.call_transcription import CallTranscriptionRunner
 from audentra.infrastructure.worker.dashboard_projector import StudentDashboardProjector
 from audentra.infrastructure.worker.document_commands import (
     DocumentCommandSettings,
@@ -18,6 +22,8 @@ from audentra.infrastructure.worker.document_commands import (
 from audentra.infrastructure.worker.document_review_projector import DocumentReviewProjector
 from audentra.infrastructure.worker.factory import build_event_dispatcher
 from audentra.infrastructure.worker.service import WorkerService
+from audentra.integrations.ai.gateway import StudentAIGateway
+from audentra.integrations.ai.provider import CompletionClient
 
 from .settings import RuntimeSettings
 
@@ -28,6 +34,7 @@ class WorkerRuntimeResources:
     http_client: httpx.AsyncClient
     repository: OutboxRepository
     worker: WorkerService
+    object_storage: S3ObjectStorage | None = None
 
     async def close(self) -> None:
         self.worker.stop()
@@ -37,7 +44,11 @@ class WorkerRuntimeResources:
             try:
                 await self.http_client.aclose()
             finally:
-                await self.engine.dispose()
+                try:
+                    if self.object_storage is not None:
+                        await self.object_storage.close()
+                finally:
+                    await self.engine.dispose()
 
 
 async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResources:
@@ -48,7 +59,9 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
         timeout=httpx.Timeout(settings.worker.command_timeout_seconds, connect=10.0, pool=5.0),
         follow_redirects=False,
     )
+    object_storage: S3ObjectStorage | None = None
     try:
+        object_storage = S3ObjectStorage(settings.object_storage)
         outbox = OutboxRepository(
             engine,
             OutboxRepositoryConfig(
@@ -77,6 +90,26 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             settings.worker.consumer_name + ":document-review",
         )
         scheduled_workflows = AgenticWorkflowScheduler(engine)
+        platform = PostgresPlatformRepository(engine)
+        enrichment_gateway = StudentAIGateway(
+            settings.ai,
+            CompletionClient(http_client, recorder=platform.record_ai_provider_response),
+        )
+        action_center_enrichment = ActionCenterEnrichmentRunner(
+            engine,
+            enrichment_gateway,
+            worker_id=f"{settings.worker.worker_id}:action-center",
+        )
+        call_transcription = CallTranscriptionRunner(
+            engine,
+            object_storage,
+            http_client,
+            api_key=settings.ai.openrouter_api_key,
+            model=settings.ai.openrouter_transcription_model,
+            app_url=settings.ai.app_url,
+            app_name=settings.ai.app_name,
+            worker_id=f"{settings.worker.worker_id}:call-transcription",
+        )
         dispatcher = build_event_dispatcher(
             projector,
             document_runner,
@@ -88,11 +121,25 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             poll_interval_seconds=settings.worker.poll_interval_seconds,
             scheduled_runner=scheduled_workflows,
             scheduled_interval_seconds=settings.worker.scheduled_interval_seconds,
+            enrichment_runner=action_center_enrichment,
+            enrichment_interval_seconds=settings.worker.poll_interval_seconds,
+            transcription_runner=call_transcription,
+            transcription_interval_seconds=settings.worker.poll_interval_seconds,
         )
-        return WorkerRuntimeResources(engine, http_client, outbox, worker)
+        return WorkerRuntimeResources(
+            engine=engine,
+            http_client=http_client,
+            repository=outbox,
+            worker=worker,
+            object_storage=object_storage,
+        )
     except BaseException:
         try:
             await http_client.aclose()
         finally:
-            await engine.dispose()
+            try:
+                if object_storage is not None:
+                    await object_storage.close()
+            finally:
+                await engine.dispose()
         raise

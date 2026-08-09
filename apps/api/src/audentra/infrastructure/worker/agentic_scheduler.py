@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from audentra.domain.agentic_workflows import InboundTriageCandidate, decide_inbound_action
 
 _PENDING_INBOX_LIMIT = 25
+_ACTION_RULE_CANDIDATE_LIMIT = 250
 _INBOX_BODY_LIMIT = 12_000
 _ACTIONABLE_TERMS = (
     "help",
@@ -63,7 +64,506 @@ class AgenticWorkflowScheduler:
     async def run_once(self) -> int:
         processed = await self._process_inbox_events()
         scanned = await self._scan_engagement()
-        return processed + scanned
+        matched = await self._run_action_rules()
+        lifecycle_actions = await self._run_due_work_item_actions()
+        return processed + scanned + matched + lifecycle_actions
+
+    async def _run_due_work_item_actions(self) -> int:
+        """Promote due follow-ups and escalate expired blockers/SLA work without AI."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    WITH due AS (
+                      SELECT item.id,
+                             CASE
+                               WHEN item.status = 'blocked'
+                                AND item.blocker_review_at <= NOW()
+                                 THEN 'blocked_review_due'
+                               WHEN item.due_at <= NOW() AND item.escalated = false
+                                 THEN 'sla_overdue'
+                               ELSE 'follow_up_due'
+                             END AS reason
+                      FROM public.staff_work_item AS item
+                      WHERE item.status NOT IN ('done', 'cancelled')
+                        AND (
+                          (
+                            item.status = 'blocked'
+                            AND item.blocker_review_at IS NOT NULL
+                            AND item.blocker_review_at <= NOW()
+                          )
+                          OR (
+                            item.due_at IS NOT NULL
+                            AND item.due_at <= NOW()
+                            AND item.escalated = false
+                          )
+                          OR (
+                            item.status = 'follow_up_required'
+                            AND item.follow_up_at IS NOT NULL
+                            AND item.follow_up_at <= NOW()
+                          )
+                        )
+                      ORDER BY
+                        COALESCE(item.blocker_review_at, item.due_at, item.follow_up_at),
+                        item.id
+                      LIMIT 100
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE public.staff_work_item AS item
+                    SET status = CASE
+                          WHEN due.reason = 'follow_up_due' THEN 'todo'
+                          ELSE item.status
+                        END,
+                        attempt_count = CASE
+                          WHEN due.reason = 'follow_up_due' THEN item.attempt_count + 1
+                          ELSE item.attempt_count
+                        END,
+                        follow_up_at = CASE
+                          WHEN due.reason = 'follow_up_due' THEN NULL
+                          ELSE item.follow_up_at
+                        END,
+                        blocker_review_at = CASE
+                          WHEN due.reason = 'blocked_review_due' THEN NULL
+                          ELSE item.blocker_review_at
+                        END,
+                        escalated = CASE
+                          WHEN due.reason IN ('blocked_review_due', 'sla_overdue') THEN true
+                          ELSE item.escalated
+                        END,
+                        version = item.version + 1,
+                        updated_at = NOW()
+                    FROM due
+                    WHERE item.id = due.id
+                    RETURNING item.id, item.tenant_id, item.assignee_id,
+                              item.component, item.title, item.version, due.reason
+                    """
+                )
+            )
+            due_items = [dict(row) for row in result.mappings().all()]
+            for item in due_items:
+                reason = str(item["reason"])
+                if reason == "follow_up_due":
+                    action = "status_changed"
+                    title = "Scheduled follow-up is due"
+                    message = (
+                        "Scheduled follow-up returned this action to To Do. Reach out using "
+                        "the selected channel and record the result."
+                    )
+                elif reason == "blocked_review_due":
+                    action = "escalated"
+                    title = "Blocked action needs review"
+                    message = (
+                        "The blocker review time passed. This action is escalated for team "
+                        "or leader attention."
+                    )
+                else:
+                    action = "escalated"
+                    title = "Action SLA is overdue"
+                    message = (
+                        "The due time passed. This action is escalated for team or leader "
+                        "attention."
+                    )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO public.staff_work_log (
+                          id, tenant_id, work_item_id, actor_type, actor_id,
+                          actor_name, action, message, occurred_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'system', NULL,
+                          'Audentra scheduler', :action, :message, NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": self._uuid_factory(),
+                        "tenant_id": item["tenant_id"],
+                        "work_item_id": item["id"],
+                        "action": action,
+                        "message": message,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO public.staff_notification (
+                          id, tenant_id, staff_member_id, team_component, kind,
+                          title, body, resource_type, resource_id, dedupe_key,
+                          created_at
+                        ) VALUES (
+                          :id, :tenant_id, :staff_member_id, :team_component,
+                          :kind, :title, :body, 'staff_work_item', :resource_id,
+                          :dedupe_key, NOW()
+                        )
+                        ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                        """
+                    ),
+                    {
+                        "id": self._uuid_factory(),
+                        "tenant_id": item["tenant_id"],
+                        "staff_member_id": item["assignee_id"],
+                        "team_component": (
+                            None if item["assignee_id"] is not None else item["component"]
+                        ),
+                        "kind": reason,
+                        "title": title,
+                        "body": f"{item['title']}: {message}"[:2_000],
+                        "resource_id": item["id"],
+                        "dedupe_key": (f"work-lifecycle:{item['id']}:{reason}:{item['version']}")[
+                            :240
+                        ],
+                    },
+                )
+        return len(due_items)
+
+    async def _run_action_rules(self) -> int:
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, tenant_id, code, name, signal_type, flow_kind,
+                           requirement_code, lookahead_days, inactivity_days,
+                           cadence_minutes, component, priority, action_type,
+                           title_template, description_template
+                    FROM public.staff_action_rule
+                    WHERE enabled = true
+                      AND (
+                        last_evaluated_at IS NULL
+                        OR last_evaluated_at <= NOW() - make_interval(mins => cadence_minutes)
+                      )
+                    ORDER BY COALESCE(last_evaluated_at, '-infinity'::timestamptz), id
+                    LIMIT 20
+                    """
+                )
+            )
+            rules = [dict(row) for row in result.mappings().all()]
+
+        matched = 0
+        for rule in rules:
+            candidates = await self._action_rule_candidates(rule)
+            for candidate in candidates:
+                if await self._create_rule_work_item(rule, candidate):
+                    matched += 1
+            if len(candidates) < _ACTION_RULE_CANDIDATE_LIMIT:
+                async with self._engine.begin() as connection:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE public.staff_action_rule
+                            SET last_evaluated_at = NOW()
+                            WHERE tenant_id = :tenant_id AND id = :rule_id
+                              AND enabled = true
+                            """
+                        ),
+                        {"tenant_id": rule["tenant_id"], "rule_id": rule["id"]},
+                    )
+        return matched
+
+    async def _action_rule_candidates(self, rule: dict[str, Any]) -> list[dict[str, Any]]:
+        if rule["signal_type"] == "requirement_due":
+            query = """
+                SELECT requirement.id AS subject_id, student.id AS student_id,
+                       COALESCE(profile.preferred_name, person.preferred_name,
+                                person.first_name) AS student_name,
+                       definition.code AS requirement_code,
+                       definition.title AS requirement_title,
+                       requirement.due_at,
+                       GREATEST(
+                         0,
+                         CEIL(EXTRACT(EPOCH FROM (requirement.due_at - NOW())) / 86400.0)
+                       )::integer AS days_remaining,
+                       'requirement:' || requirement.id::text || ':' ||
+                         requirement.due_at::date::text AS window_key
+                FROM public.student_requirement requirement
+                JOIN public.enrollment_journey journey
+                  ON journey.tenant_id = requirement.tenant_id
+                 AND journey.id = requirement.journey_id
+                JOIN public.student student
+                  ON student.tenant_id = journey.tenant_id
+                 AND student.id = journey.student_id
+                JOIN public.person person
+                  ON person.tenant_id = student.tenant_id
+                 AND person.id = student.person_id
+                LEFT JOIN public.student_profile profile
+                  ON profile.tenant_id = student.tenant_id
+                 AND profile.student_id = student.id
+                JOIN public.requirement_definition_version definition
+                  ON definition.tenant_id = requirement.tenant_id
+                 AND definition.id = requirement.requirement_definition_version_id
+                WHERE requirement.tenant_id = :tenant_id
+                  AND requirement.retired_at IS NULL
+                  AND requirement.status NOT IN ('completed', 'waived', 'not_applicable')
+                  AND requirement.due_at >= NOW()
+                  AND requirement.due_at < NOW() + make_interval(days => :lookahead_days + 1)
+                  AND (
+                    CAST(:flow_kind AS varchar) IS NULL
+                    OR definition.flow_kind = CAST(:flow_kind AS varchar)
+                  )
+                  AND (
+                    CAST(:requirement_code AS varchar) IS NULL
+                    OR definition.code = CAST(:requirement_code AS varchar)
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM public.staff_action_rule_execution execution
+                    WHERE execution.tenant_id = requirement.tenant_id
+                      AND execution.rule_id = :rule_id
+                      AND execution.student_id = student.id
+                      AND execution.window_key = 'requirement:' || requirement.id::text || ':' ||
+                        requirement.due_at::date::text
+                  )
+                ORDER BY requirement.due_at, student.id
+                LIMIT :limit
+            """
+            parameters = {
+                "tenant_id": rule["tenant_id"],
+                "rule_id": rule["id"],
+                "lookahead_days": int(rule["lookahead_days"] or 0),
+                "flow_kind": rule["flow_kind"],
+                "requirement_code": rule["requirement_code"],
+                "limit": _ACTION_RULE_CANDIDATE_LIMIT,
+            }
+        else:
+            query = """
+                SELECT NULL::uuid AS subject_id, student.id AS student_id,
+                       COALESCE(profile.preferred_name, person.preferred_name,
+                                person.first_name) AS student_name,
+                       NULL::varchar AS requirement_code,
+                       NULL::varchar AS requirement_title,
+                       NULL::timestamptz AS due_at,
+                       NULL::integer AS days_remaining,
+                       'inactive:' || COALESCE(
+                         to_char(activity.last_meaningful_at AT TIME ZONE 'UTC',
+                                 'YYYY-MM-DD"T"HH24:MI:SS.US'),
+                         'never'
+                       ) AS window_key
+                FROM public.student student
+                JOIN public.person person
+                  ON person.tenant_id = student.tenant_id
+                 AND person.id = student.person_id
+                LEFT JOIN public.student_profile profile
+                  ON profile.tenant_id = student.tenant_id
+                 AND profile.student_id = student.id
+                LEFT JOIN LATERAL (
+                  SELECT MAX(event.occurred_at) FILTER (
+                    WHERE event.event_name NOT LIKE '%viewed%'
+                      AND event.event_name NOT LIKE '%visited%'
+                  ) AS last_meaningful_at
+                  FROM public.activity_event event
+                  WHERE event.tenant_id = student.tenant_id
+                    AND event.student_id = student.id
+                ) activity ON true
+                WHERE student.tenant_id = :tenant_id
+                  AND (
+                    CAST(:flow_kind AS varchar) IS NULL
+                    OR (
+                      CAST(:flow_kind AS varchar) = 'enrollment'
+                      AND EXISTS (
+                        SELECT 1 FROM public.enrollment_journey journey
+                        WHERE journey.tenant_id = student.tenant_id
+                          AND journey.student_id = student.id
+                          AND journey.status NOT IN ('completed', 'cancelled')
+                      )
+                    )
+                    OR (
+                      CAST(:flow_kind AS varchar) = 'onboarding'
+                      AND EXISTS (
+                        SELECT 1 FROM public.student_onboarding onboarding
+                        WHERE onboarding.tenant_id = student.tenant_id
+                          AND onboarding.student_id = student.id
+                          AND onboarding.status <> 'completed'
+                      )
+                    )
+                  )
+                  AND (
+                    activity.last_meaningful_at IS NULL
+                    OR activity.last_meaningful_at <=
+                       NOW() - make_interval(days => :inactivity_days)
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM public.staff_action_rule_execution execution
+                    WHERE execution.tenant_id = student.tenant_id
+                      AND execution.rule_id = :rule_id
+                      AND execution.student_id = student.id
+                      AND execution.window_key = 'inactive:' || COALESCE(
+                        to_char(activity.last_meaningful_at AT TIME ZONE 'UTC',
+                                'YYYY-MM-DD"T"HH24:MI:SS.US'),
+                        'never'
+                      )
+                  )
+                ORDER BY activity.last_meaningful_at NULLS FIRST, student.id
+                LIMIT :limit
+            """
+            parameters = {
+                "tenant_id": rule["tenant_id"],
+                "rule_id": rule["id"],
+                "inactivity_days": int(rule["inactivity_days"] or 1),
+                "flow_kind": rule["flow_kind"],
+                "limit": _ACTION_RULE_CANDIDATE_LIMIT,
+            }
+        async with self._engine.connect() as connection:
+            result = await connection.execute(text(query), parameters)
+            return [dict(row) for row in result.mappings().all()]
+
+    async def _create_rule_work_item(
+        self,
+        rule: dict[str, Any],
+        candidate: dict[str, Any],
+    ) -> bool:
+        execution_id = self._uuid_factory()
+        work_item_id = self._uuid_factory()
+        student_name = str(candidate["student_name"])
+        context = {
+            "studentName": student_name,
+            "requirementTitle": str(candidate.get("requirement_title") or "requirement"),
+            "requirementCode": str(candidate.get("requirement_code") or ""),
+            "dueDate": _iso(_as_utc(candidate.get("due_at"))) or "not set",
+            "daysRemaining": str(candidate.get("days_remaining") or 0),
+            "inactivityDays": str(rule.get("inactivity_days") or 0),
+        }
+        title = _render_rule_template(str(rule["title_template"]), context, 240)
+        description = _render_rule_template(str(rule["description_template"]), context, 2_000)
+        evidence = {
+            "signalType": str(rule["signal_type"]),
+            "ruleCode": str(rule["code"]),
+            "requirementCode": candidate.get("requirement_code"),
+            "dueAt": _iso(_as_utc(candidate.get("due_at"))),
+            "daysRemaining": candidate.get("days_remaining"),
+            "inactivityDays": rule.get("inactivity_days"),
+        }
+        async with self._engine.begin() as connection:
+            execution_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.staff_action_rule_execution (
+                      id, tenant_id, rule_id, student_id, subject_id,
+                      window_key, evidence, matched_at
+                    ) VALUES (
+                      :id, :tenant_id, :rule_id, :student_id, :subject_id,
+                      :window_key, CAST(:evidence AS jsonb), NOW()
+                    )
+                    ON CONFLICT (tenant_id, rule_id, student_id, window_key)
+                    DO NOTHING
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": execution_id,
+                    "tenant_id": rule["tenant_id"],
+                    "rule_id": rule["id"],
+                    "student_id": candidate["student_id"],
+                    "subject_id": candidate.get("subject_id"),
+                    "window_key": candidate["window_key"],
+                    "evidence": _json(evidence),
+                },
+            )
+            if execution_result.first() is None:
+                return False
+            assignee_result = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM public.staff_member
+                    WHERE tenant_id = :tenant_id AND active = true
+                      AND component = :component
+                    ORDER BY display_name, id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": rule["tenant_id"], "component": rule["component"]},
+            )
+            assignee = assignee_result.mappings().first()
+            due_at = candidate.get("due_at") or datetime.now(UTC) + timedelta(days=1)
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.staff_work_item (
+                      id, tenant_id, student_id, key, title, description,
+                      status, priority, work_type, component, due_at, escalated,
+                      assignee_id, source_type, source_id, version, action_type,
+                      created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :key, :title, :description,
+                      'todo', :priority, 'enrollment', :component, :due_at, false,
+                      :assignee_id, 'scheduled_rule', :source_id, 1, :action_type,
+                      NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": work_item_id,
+                    "tenant_id": rule["tenant_id"],
+                    "student_id": candidate["student_id"],
+                    "key": f"RULE-{str(work_item_id).replace('-', '')[:12].upper()}",
+                    "title": title,
+                    "description": description,
+                    "priority": rule["priority"],
+                    "component": rule["component"],
+                    "due_at": due_at,
+                    "assignee_id": assignee["id"] if assignee is not None else None,
+                    "source_id": execution_id,
+                    "action_type": rule["action_type"],
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.staff_action_rule_execution
+                    SET work_item_id = :work_item_id
+                    WHERE tenant_id = :tenant_id AND id = :execution_id
+                    """
+                ),
+                {
+                    "tenant_id": rule["tenant_id"],
+                    "execution_id": execution_id,
+                    "work_item_id": work_item_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.staff_work_log (
+                      id, tenant_id, work_item_id, actor_type, actor_id,
+                      actor_name, action, message, occurred_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'system', NULL, 'System',
+                      'scheduled_rule_matched', :message, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": rule["tenant_id"],
+                    "work_item_id": work_item_id,
+                    "message": f"Scheduled rule {rule['name']} matched current student facts.",
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.staff_notification (
+                      id, tenant_id, staff_member_id, team_component, kind,
+                      title, body, resource_type, resource_id, dedupe_key,
+                      created_at
+                    ) VALUES (
+                      :id, :tenant_id, :staff_member_id, :team_component,
+                      'scheduled_action', :title, :body, 'staff_work_item',
+                      :resource_id, :dedupe_key, NOW()
+                    )
+                    ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": rule["tenant_id"],
+                    "staff_member_id": assignee["id"] if assignee is not None else None,
+                    "team_component": (None if assignee is not None else rule["component"]),
+                    "title": title,
+                    "body": f"{student_name}: {description}"[:2_000],
+                    "resource_id": work_item_id,
+                    "dedupe_key": f"scheduled-rule:{execution_id}",
+                },
+            )
+        return True
 
     async def _process_inbox_events(self) -> int:
         async with self._engine.begin() as connection:
@@ -234,8 +734,7 @@ class AgenticWorkflowScheduler:
                     decision.priority,
                 )
             elif (
-                decision.action == "append_to_existing_inquiry"
-                and existing_inquiry_id is not None
+                decision.action == "append_to_existing_inquiry" and existing_inquiry_id is not None
             ):
                 await self._touch_inquiry(
                     connection, tenant_id, existing_inquiry_id, decision.priority
@@ -264,6 +763,17 @@ class AgenticWorkflowScheduler:
                     priority=decision.priority,
                     searchable=searchable,
                     create_inquiry=decision.action == "create_inquiry",
+                )
+
+            if target_id is not None and student_id is not None:
+                await self._attach_communication_to_interaction(
+                    connection,
+                    tenant_id=tenant_id,
+                    student_id=student_id,
+                    work_item_id=target_id,
+                    communication_id=str(communication_id),
+                    inbox_id=inbox_id,
+                    objective=subject or "Respond to inbound student communication",
                 )
 
             result = {
@@ -333,8 +843,10 @@ class AgenticWorkflowScheduler:
                     "status": "executed" if target_id is not None else "rejected",
                 },
             )
-            resolution = "ambiguous" if decision.action == "human_triage" else (
-                "ignored" if decision.action == "record_only" else "resolved"
+            resolution = (
+                "ambiguous"
+                if decision.action == "human_triage"
+                else ("ignored" if decision.action == "record_only" else "resolved")
             )
             await connection.execute(
                 text(
@@ -503,6 +1015,155 @@ class AgenticWorkflowScheduler:
         )
         return str(work_item_id)
 
+    async def _attach_communication_to_interaction(
+        self,
+        connection: Any,
+        *,
+        tenant_id: str,
+        student_id: str,
+        work_item_id: str,
+        communication_id: str,
+        inbox_id: str,
+        objective: str,
+    ) -> None:
+        interaction_result = await connection.execute(
+            text(
+                """
+                SELECT id, source_version
+                FROM public.staff_interaction
+                WHERE tenant_id = :tenant_id AND work_item_id = :work_item_id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                FOR UPDATE
+                """
+            ),
+            {"tenant_id": tenant_id, "work_item_id": work_item_id},
+        )
+        interaction = interaction_result.mappings().first()
+        if interaction is None:
+            interaction_id = self._uuid_factory()
+            source_version = 1
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO public.staff_interaction (
+                      id, tenant_id, student_id, work_item_id, objective,
+                      status, selected_channel, source_version,
+                      covered_source_version, version, quiet_until,
+                      last_activity_at, created_by, request_key, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :work_item_id, :objective,
+                      'enrichment_pending', 'email', :source_version,
+                      0, 1, NOW() + interval '5 minutes', NOW(), NULL,
+                      :request_key, NOW(), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": interaction_id,
+                    "tenant_id": tenant_id,
+                    "student_id": student_id,
+                    "work_item_id": work_item_id,
+                    "objective": _bounded_text(objective, 1_000),
+                    "source_version": source_version,
+                    "request_key": f"inbox-interaction:{inbox_id}",
+                },
+            )
+        else:
+            interaction_id = interaction["id"]
+            source_version = int(interaction["source_version"]) + 1
+            await connection.execute(
+                text(
+                    """
+                    UPDATE public.staff_interaction
+                    SET status = 'enrichment_pending', selected_channel = 'email',
+                        source_version = :source_version,
+                        quiet_until = LEAST(
+                          NOW() + interval '5 minutes',
+                          created_at + interval '15 minutes'
+                        ),
+                        last_activity_at = NOW(), version = version + 1,
+                        updated_at = NOW()
+                    WHERE tenant_id = :tenant_id AND id = :interaction_id
+                    """
+                ),
+                {
+                    "source_version": source_version,
+                    "tenant_id": tenant_id,
+                    "interaction_id": interaction_id,
+                },
+            )
+
+        await connection.execute(
+            text(
+                """
+                UPDATE public.communication_event
+                SET interaction_id = :interaction_id,
+                    source_type = 'inbox_event',
+                    source_id = :inbox_id,
+                    source_sequence = :source_sequence,
+                    request_key = :request_key,
+                    delivery_status = 'received'
+                WHERE tenant_id = :tenant_id AND id = :communication_id
+                """
+            ),
+            {
+                "interaction_id": interaction_id,
+                "inbox_id": inbox_id,
+                "source_sequence": source_version,
+                "request_key": f"inbox:{inbox_id}",
+                "tenant_id": tenant_id,
+                "communication_id": communication_id,
+            },
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.action_center_ai_job (
+                  id, tenant_id, purpose, dedupe_key, student_id,
+                  work_item_id, interaction_id, status,
+                  requested_source_version, covered_source_version,
+                  not_before, attempts, max_attempts, created_at, updated_at
+                ) VALUES (
+                  :id, :tenant_id, 'interaction_enrichment', :dedupe_key,
+                  :student_id, :work_item_id, :interaction_id, 'pending',
+                  :source_version, 0, NOW() + interval '5 minutes', 0, 5,
+                  NOW(), NOW()
+                )
+                ON CONFLICT (tenant_id, purpose, dedupe_key)
+                DO UPDATE SET
+                  requested_source_version = GREATEST(
+                    action_center_ai_job.requested_source_version,
+                    EXCLUDED.requested_source_version
+                  ),
+                  status = CASE
+                    WHEN action_center_ai_job.status = 'running' THEN 'running'
+                    ELSE 'pending'
+                  END,
+                  not_before = LEAST(
+                    GREATEST(
+                      action_center_ai_job.not_before,
+                      EXCLUDED.not_before
+                    ),
+                    action_center_ai_job.created_at + interval '15 minutes'
+                  ),
+                  completed_at = NULL,
+                  last_error_code = NULL,
+                  last_error_message = NULL,
+                  updated_at = NOW()
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": tenant_id,
+                "dedupe_key": f"interaction:{interaction_id}",
+                "student_id": student_id,
+                "work_item_id": work_item_id,
+                "interaction_id": interaction_id,
+                "source_version": source_version,
+            },
+        )
+
     async def _touch_inquiry(
         self, connection: Any, tenant_id: str, inquiry_id: str, priority: str
     ) -> None:
@@ -619,7 +1280,7 @@ class AgenticWorkflowScheduler:
                 """
                 SELECT id FROM public.staff_work_item
                 WHERE tenant_id = :tenant_id AND student_id = :student_id
-                  AND status IN ('todo', 'in_progress')
+                  AND status IN ('todo', 'in_progress', 'follow_up_required')
                   AND work_type = 'communication'
                 ORDER BY updated_at DESC, id
                 LIMIT 1
@@ -744,13 +1405,13 @@ class AgenticWorkflowScheduler:
         blocking = int(student.get("blocking_requirement_count") or 0)
         help_requested = bool(student.get("help_requested"))
         recent_upload_failures = int(student.get("recent_upload_failures") or 0)
-        days_to_deadline = (
-            (next_deadline - now).days if next_deadline is not None else None
-        )
+        days_to_deadline = (next_deadline - now).days if next_deadline is not None else None
         inactive = last_meaningful is None or (now - last_meaningful).days >= 7
-        intervention = (inactive and blocking > 0) or (
-            days_to_deadline is not None and days_to_deadline <= 7
-        ) or help_requested
+        intervention = (
+            (inactive and blocking > 0)
+            or (days_to_deadline is not None and days_to_deadline <= 7)
+            or help_requested
+        )
         reasons: list[str] = []
         if inactive:
             reasons.append("inactive")
@@ -760,8 +1421,10 @@ class AgenticWorkflowScheduler:
             reasons.append("deadline_within_7_days")
         if help_requested:
             reasons.append("help_requested")
-        priority = "urgent" if days_to_deadline is not None and days_to_deadline <= 2 else (
-            "high" if intervention else "low"
+        priority = (
+            "urgent"
+            if days_to_deadline is not None and days_to_deadline <= 2
+            else ("high" if intervention else "low")
         )
         run_id = self._uuid_factory()
         candidate_id = self._uuid_factory()
@@ -874,12 +1537,18 @@ def _bounded_text(value: str, limit: int) -> str:
     return value[:limit]
 
 
+def _render_rule_template(template: str, context: dict[str, str], limit: int) -> str:
+    rendered = template
+    for key, value in context.items():
+        rendered = rendered.replace("{" + key + "}", value)
+    return " ".join(rendered.split())[:limit]
+
+
 def _component_for(searchable: str) -> str:
     if any(term in searchable for term in ("payment", "deposit", "invoice", "financial", "aid")):
         return "Financial Aid"
     if any(
-        term in searchable
-        for term in ("document", "transcript", "passport", "identity", "upload")
+        term in searchable for term in ("document", "transcript", "passport", "identity", "upload")
     ):
         return "Registrar"
     if any(term in searchable for term in ("health", "vaccine", "immun")):
@@ -891,8 +1560,7 @@ def _topic_for(searchable: str) -> str:
     if any(term in searchable for term in ("payment", "deposit", "invoice", "financial", "aid")):
         return "payments"
     if any(
-        term in searchable
-        for term in ("document", "transcript", "passport", "identity", "upload")
+        term in searchable for term in ("document", "transcript", "passport", "identity", "upload")
     ):
         return "documents"
     return "support"

@@ -64,7 +64,9 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                                (SELECT COUNT(*) FROM enrollment_journey
                                 WHERE enrollment_journey.tenant_id=tenant.id) AS journeys,
                                (SELECT COUNT(*) FROM student_requirement
-                                WHERE student_requirement.tenant_id=tenant.id) AS requirements
+                                WHERE student_requirement.tenant_id=tenant.id) AS requirements,
+                               (SELECT COUNT(*) FROM staff_action_rule
+                                 WHERE staff_action_rule.tenant_id=tenant.id) AS action_rules
                         FROM tenant
                         WHERE tenant.id IN (
                           CAST(:aster_tenant_id AS uuid), CAST(:harvard_tenant_id AS uuid)
@@ -90,6 +92,7 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 assert tenant["ai_operations"] == 9
                 assert tenant["journeys"] == 2
                 assert tenant["requirements"] == 16
+                assert tenant["action_rules"] == 1
 
             harvard_auth = AuthContext(
                 tenant_id=HARVARD_TENANT_ID,

@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 AiOperation = Literal[
+    "action_center_enrichment",
     "edward_chat",
     "document_classification",
     "document_extraction",
