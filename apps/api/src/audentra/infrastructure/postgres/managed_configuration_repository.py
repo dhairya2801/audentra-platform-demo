@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, cast
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import yaml  # type: ignore[import-untyped]
@@ -1063,22 +1064,60 @@ class PostgresManagedConfigurationRepository:
         }
         configured_events = campus_events(document)
         configured_source_ids = {str(item["sourceId"]) for item in configured_events}
-        removed_titles = [
-            title
-            for source_id, title in previous_titles.items()
-            if source_id not in configured_source_ids
+        removed_source_ids = [
+            source_id for source_id in previous_titles if source_id not in configured_source_ids
         ]
-        if removed_titles:
+        for source_id in removed_source_ids:
+            title = previous_titles[source_id]
+            removed_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, title, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id AND active=true
+                      AND source_status='tenant_authored'
+                      AND (source_id=:source_id OR (source_id IS NULL AND title=:title))
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0 ELSE 1 END, id
+                    LIMIT 1 FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": source_id,
+                    "title": title,
+                },
+            )
+            removed = removed_result.mappings().first()
+            if removed is None:
+                continue
+            removed_version = int(removed["version"]) + 1
             await connection.execute(
                 text(
                     """
-                    UPDATE campus_event SET active=false, updated_at=NOW()
-                    WHERE tenant_id=:tenant_id
-                      AND source_status='tenant_authored'
-                      AND title=ANY(CAST(:removed_titles AS text[]))
+                    UPDATE campus_event
+                    SET active=false, source_id=:source_id, version=:version, updated_at=NOW()
+                    WHERE id=:id AND tenant_id=:tenant_id
                     """
                 ),
-                {"tenant_id": _uuid(auth.tenant_id), "removed_titles": removed_titles},
+                {
+                    "id": removed["id"],
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": source_id,
+                    "version": removed_version,
+                },
+            )
+            await self._notify_event_registrants(
+                connection,
+                auth,
+                event_id=removed["id"],
+                event_version=removed_version,
+                subject=f"Event cancelled: {removed['title']}",
+                body=(
+                    f"{removed['title']} is no longer scheduled. Your registration was "
+                    "cancelled automatically; no action is required."
+                ),
+                kind="campus_event_cancelled",
+                cancel=True,
             )
         count = 0
         for event in configured_events:
@@ -1086,49 +1125,69 @@ class PostgresManagedConfigurationRepository:
             existing = await connection.execute(
                 text(
                     """
-                    SELECT id FROM campus_event
-                    WHERE tenant_id=:tenant_id AND title IN (:old_title, :title)
-                    ORDER BY CASE WHEN title=:old_title THEN 0 ELSE 1 END, id
+                    SELECT id, source_id, title, description, starts_at, ends_at,
+                           location, category, featured, accent, active,
+                           registration_url, visual_theme, image_url, image_alt,
+                           image_attribution, image_source_url,
+                           advertisement_starts_at, advertisement_ends_at, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id
+                      AND (
+                        source_id=:source_id
+                        OR (source_id IS NULL AND title IN (:old_title, :title))
+                      )
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0
+                                  WHEN title=:old_title THEN 1 ELSE 2 END, id
                     LIMIT 1 FOR UPDATE
                     """
                 ),
                 {
                     "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": event["sourceId"],
                     "old_title": old_title,
                     "title": event["title"],
                 },
             )
-            event_id = existing.scalar_one_or_none()
-            if event_id is None:
+            existing_row = existing.mappings().first()
+            if existing_row is None:
                 event_id = self._uuid_factory()
                 await connection.execute(
                     text(
                         """
                         INSERT INTO campus_event (
-                          id, tenant_id, title, description, starts_at, ends_at,
+                          id, tenant_id, source_id, title, description, starts_at, ends_at,
                           location, category, featured, accent, active, source_label,
                           source_status, registration_url, visual_theme,
                           image_url, image_alt, image_attribution, image_source_url,
                           advertisement_starts_at, advertisement_ends_at,
-                          created_at, updated_at
+                          version, created_at, updated_at
                         ) VALUES (
-                          :id, :tenant_id, :title, :description, :starts_at, :ends_at,
+                          :id, :tenant_id, :source_id, :title, :description, :starts_at, :ends_at,
                           :location, :category, :featured, :accent, true,
                           'Staff managed campus life', 'tenant_authored',
                           :registration_url, :visual_theme,
                           :image_url, :image_alt, :image_attribution, :image_source_url,
-                          :advertisement_starts_at, :advertisement_ends_at, NOW(), NOW()
+                          :advertisement_starts_at, :advertisement_ends_at, 1, NOW(), NOW()
                         )
                         """
                     ),
-                    {"id": event_id, "tenant_id": _uuid(auth.tenant_id), **event},
+                    {
+                        "id": event_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "source_id": event["sourceId"],
+                        **event,
+                    },
                 )
             else:
+                event_id = existing_row["id"]
+                changed_fields = _campus_event_changed_fields(dict(existing_row), event)
+                version = int(existing_row["version"]) + (1 if changed_fields else 0)
                 await connection.execute(
                     text(
                         """
                         UPDATE campus_event SET
-                          title=:title, description=:description, starts_at=:starts_at,
+                          source_id=:source_id, title=:title, description=:description,
+                          starts_at=:starts_at,
                           ends_at=:ends_at, location=:location, category=:category,
                           featured=:featured, accent=:accent, active=true,
                           source_label='Staff managed campus life',
@@ -1137,14 +1196,100 @@ class PostgresManagedConfigurationRepository:
                           image_alt=:image_alt, image_attribution=:image_attribution,
                           image_source_url=:image_source_url,
                           advertisement_starts_at=:advertisement_starts_at,
-                          advertisement_ends_at=:advertisement_ends_at, updated_at=NOW()
+                          advertisement_ends_at=:advertisement_ends_at,
+                          version=:version, updated_at=NOW()
                         WHERE id=:id AND tenant_id=:tenant_id
                         """
                     ),
-                    {"id": event_id, "tenant_id": _uuid(auth.tenant_id), **event},
+                    {
+                        "id": event_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "source_id": event["sourceId"],
+                        "version": version,
+                        **event,
+                    },
                 )
+                if changed_fields and bool(existing_row["active"]):
+                    await self._notify_event_registrants(
+                        connection,
+                        auth,
+                        event_id=event_id,
+                        event_version=version,
+                        subject=f"Event updated: {event['title']}",
+                        body=_campus_event_change_message(event, changed_fields),
+                        kind="campus_event_changed",
+                    )
             count += 1
         return count
+
+    async def _notify_event_registrants(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        *,
+        event_id: object,
+        event_version: int,
+        subject: str,
+        body: str,
+        kind: str,
+        cancel: bool = False,
+    ) -> None:
+        registrations = await connection.execute(
+            text(
+                """
+                SELECT id, student_id
+                FROM campus_event_registration
+                WHERE tenant_id=:tenant_id AND event_id=:event_id
+                  AND status='registered'
+                ORDER BY registered_at, id
+                FOR UPDATE
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "event_id": event_id},
+        )
+        rows = registrations.mappings().all()
+        for registration in rows:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_message (
+                      id, tenant_id, student_id, subject, body, sender_name,
+                      kind, href, sent_at, read_at, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :subject, :body,
+                      'Campus Life', :kind, '/campus-life', NOW(), NULL, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": registration["student_id"],
+                    "subject": subject[:240],
+                    "body": body,
+                    "kind": kind,
+                },
+            )
+        if rows:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE campus_event_registration
+                    SET event_version=:event_version,
+                        status=CASE WHEN :cancel THEN 'cancelled_by_event' ELSE status END,
+                        cancelled_at=CASE WHEN :cancel THEN NOW() ELSE cancelled_at END,
+                        updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND event_id=:event_id
+                      AND status='registered'
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "event_id": event_id,
+                    "event_version": event_version,
+                    "cancel": cancel,
+                },
+            )
 
     async def _materialize_academics(
         self,
@@ -1189,46 +1334,113 @@ class PostgresManagedConfigurationRepository:
         course_ids: dict[str, object] = {}
         courses = academic_courses(document)
         for course in courses:
-            result = await connection.execute(
+            existing_result = await connection.execute(
                 text(
                     """
-                    INSERT INTO catalog_course (
-                      id, tenant_id, catalog_version_id, code, title, description,
-                      credits, level, active, availability_label, instructor_names,
-                      meeting_pattern, resources, source_url, created_at, updated_at
-                    ) VALUES (
-                      :id, :tenant_id, :catalog_id, :code, :title, :description,
-                      :credits, :level, true, :availability_label,
-                      CAST(:instructor_names AS text[]), :meeting_pattern,
-                      CAST(:resources AS jsonb), :source_url, NOW(), NOW()
-                    ) ON CONFLICT (catalog_version_id, code) DO UPDATE SET
-                      title=EXCLUDED.title, description=EXCLUDED.description,
-                      credits=EXCLUDED.credits, level=EXCLUDED.level, active=true,
-                      availability_label=EXCLUDED.availability_label,
-                      instructor_names=EXCLUDED.instructor_names,
-                      meeting_pattern=EXCLUDED.meeting_pattern,
-                      resources=EXCLUDED.resources, source_url=EXCLUDED.source_url,
-                      updated_at=NOW()
-                    RETURNING id
+                    SELECT id FROM catalog_course
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND (source_id=:source_id OR code=:code)
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0 ELSE 1 END, id
+                    LIMIT 1 FOR UPDATE
                     """
                 ),
                 {
-                    "id": self._uuid_factory(),
                     "tenant_id": _uuid(auth.tenant_id),
                     "catalog_id": catalog_id,
+                    "source_id": course["sourceId"],
                     "code": course["code"],
-                    "title": course["title"],
-                    "description": course["description"],
-                    "credits": course["credits"],
-                    "level": course["level"],
-                    "availability_label": course["availabilityLabel"],
-                    "instructor_names": course["instructorNames"],
-                    "meeting_pattern": course["meetingPattern"],
-                    "resources": _json(course["resources"]),
-                    "source_url": course["sourceUrl"],
                 },
             )
-            course_ids[str(course["code"])] = result.scalar_one()
+            course_id = existing_result.scalar_one_or_none()
+            parameters = {
+                "id": course_id or self._uuid_factory(),
+                "tenant_id": _uuid(auth.tenant_id),
+                "catalog_id": catalog_id,
+                "source_id": course["sourceId"],
+                "code": course["code"],
+                "title": course["title"],
+                "description": course["description"],
+                "credits": course["credits"],
+                "level": course["level"],
+                "availability_label": course["availabilityLabel"],
+                "instructor_names": course["instructorNames"],
+                "meeting_pattern": course["meetingPattern"],
+                "resources": _json(course["resources"]),
+                "related_videos": _json(course["relatedVideos"]),
+                "source_url": course["sourceUrl"],
+            }
+            if course_id is None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO catalog_course (
+                          id, tenant_id, catalog_version_id, source_id, code, title,
+                          description, credits, level, active, availability_label,
+                          instructor_names, meeting_pattern, resources, related_videos,
+                          source_url, version, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :catalog_id, :source_id, :code, :title,
+                          :description, :credits, :level, true, :availability_label,
+                          CAST(:instructor_names AS text[]), :meeting_pattern,
+                          CAST(:resources AS jsonb), CAST(:related_videos AS jsonb),
+                          :source_url, 1, NOW(), NOW()
+                        )
+                        """
+                    ),
+                    parameters,
+                )
+                course_id = parameters["id"]
+            else:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE catalog_course SET
+                          source_id=:source_id, code=:code, title=:title,
+                          description=:description, credits=:credits, level=:level,
+                          active=true, availability_label=:availability_label,
+                          instructor_names=CAST(:instructor_names AS text[]),
+                          meeting_pattern=:meeting_pattern,
+                          resources=CAST(:resources AS jsonb),
+                          related_videos=CAST(:related_videos AS jsonb),
+                          source_url=:source_url, version=version+1, updated_at=NOW()
+                        WHERE id=:id AND tenant_id=:tenant_id
+                          AND catalog_version_id=:catalog_id
+                        """
+                    ),
+                    parameters,
+                )
+            course_ids[str(course["code"])] = course_id
+
+        configured_source_ids = [str(course["sourceId"]) for course in courses]
+        if configured_source_ids:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE catalog_course
+                    SET active=false, version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND active=true AND source_id IS NOT NULL
+                      AND NOT (source_id=ANY(CAST(:source_ids AS text[])))
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "catalog_id": catalog_id,
+                    "source_ids": configured_source_ids,
+                },
+            )
+        else:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE catalog_course
+                    SET active=false, version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND active=true AND source_id IS NOT NULL
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "catalog_id": catalog_id},
+            )
 
         for course in courses:
             course_id = course_ids[str(course["code"])]
@@ -2204,10 +2416,79 @@ def campus_events(document: Mapping[str, Any]) -> list[JsonDict]:
     return events
 
 
+def _campus_event_changed_fields(
+    current: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> set[str]:
+    fields = {
+        "title",
+        "description",
+        "starts_at",
+        "ends_at",
+        "location",
+        "category",
+        "featured",
+        "accent",
+        "registration_url",
+        "visual_theme",
+        "image_url",
+        "image_alt",
+        "image_attribution",
+        "image_source_url",
+        "advertisement_starts_at",
+        "advertisement_ends_at",
+    }
+    return {
+        field
+        for field in fields
+        if _comparable_content_value(current.get(field))
+        != _comparable_content_value(incoming.get(field))
+    }
+
+
+def _campus_event_change_message(incoming: Mapping[str, Any], changed_fields: set[str]) -> str:
+    title = str(incoming["title"])
+    details: list[str] = []
+    if changed_fields & {"starts_at", "ends_at"}:
+        details.append(
+            "The schedule is now "
+            f"{_content_datetime_label(cast(datetime, incoming['starts_at']))} to "
+            f"{_content_datetime_label(cast(datetime, incoming['ends_at']))}."
+        )
+    if "location" in changed_fields:
+        details.append(f"The location is now {incoming['location']}.")
+    if "registration_url" in changed_fields:
+        details.append("The registration details were updated.")
+    if not details:
+        details.append("The event details were updated by Campus Life staff.")
+    if "title" in changed_fields:
+        details.insert(0, f"The event is now titled {title}.")
+    return f"You are registered for {title}. {' '.join(details)}"
+
+
+def _comparable_content_value(value: object) -> object:
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return normalized.astimezone(UTC)
+    return value
+
+
+def _content_datetime_label(value: datetime) -> str:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC).strftime("%b %d, %Y at %H:%M UTC")
+
+
 def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
     courses: list[JsonDict] = []
     seen: set[str] = set()
+    seen_source_ids: set[str] = set()
     for raw in _mapping_list(document.get("courses")):
+        source_id = _required_string(raw.get("id"), "course id", maximum=160)
+        if source_id in seen_source_ids:
+            raise BadRequestError(
+                "DUPLICATE_CATALOG_COURSE",
+                f"Course id {source_id} is duplicated",
+            )
+        seen_source_ids.add(source_id)
         code = _required_string(raw.get("code"), "course code", maximum=32).upper()
         if code in seen:
             raise BadRequestError("DUPLICATE_CATALOG_COURSE", f"Course {code} is duplicated")
@@ -2215,6 +2496,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
         instructors = raw.get("instructor_names", [])
         prerequisites = raw.get("prerequisites", [])
         resources = raw.get("resources", [])
+        related_videos = raw.get("related_videos", [])
         if not isinstance(instructors, list) or not all(
             isinstance(item, str) for item in instructors
         ):
@@ -2231,6 +2513,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
             )
         if not isinstance(resources, list):
             raise BadRequestError("INVALID_CATALOG_COURSE", f"Course {code} has invalid resources")
+        mapped_videos = _course_videos(related_videos, course_code=code)
         mapped_prerequisites: list[JsonDict] = []
         for item in cast(list[dict[str, object]], prerequisites):
             mapped_prerequisites.append(
@@ -2243,6 +2526,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
             )
         courses.append(
             {
+                "sourceId": source_id,
                 "code": code,
                 "title": _required_string(raw.get("title"), "course title", maximum=180),
                 "description": _required_string(
@@ -2261,10 +2545,71 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
                 "meetingPattern": _optional_string(raw.get("meeting_pattern"), maximum=240),
                 "prerequisites": mapped_prerequisites,
                 "resources": copy.deepcopy(resources),
+                "relatedVideos": mapped_videos,
                 "sourceUrl": _optional_string(raw.get("source_url"), maximum=1_000),
             }
         )
     return courses
+
+
+def _course_videos(value: object, *, course_code: str) -> list[JsonDict]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 5:
+        raise BadRequestError(
+            "INVALID_CATALOG_COURSE",
+            f"Course {course_code} must have zero to five related videos",
+        )
+    videos: list[JsonDict] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise BadRequestError(
+                "INVALID_CATALOG_COURSE",
+                f"Course {course_code} has an invalid related video",
+            )
+        video_id = _required_string(raw.get("id"), "related video id", maximum=120)
+        url = _youtube_url(raw.get("url"), course_code=course_code)
+        if video_id in seen or url in seen:
+            raise BadRequestError(
+                "INVALID_CATALOG_COURSE",
+                f"Course {course_code} has a duplicate related video",
+            )
+        seen.update({video_id, url})
+        videos.append(
+            {
+                "id": video_id,
+                "title": _required_string(raw.get("title"), "related video title", maximum=180),
+                "description": _optional_string(raw.get("description"), maximum=500),
+                "url": url,
+                "provider": "YouTube",
+                "sourceLabel": _optional_string(raw.get("source_label"), maximum=180),
+            }
+        )
+    return videos
+
+
+def _youtube_url(value: object, *, course_code: str) -> str:
+    url = _required_string(value, "related video URL", maximum=1_000)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    query = parse_qs(parsed.query)
+    youtube_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com"}
+    valid = False
+    if parsed.scheme == "https" and host == "youtu.be":
+        valid = bool(parsed.path.strip("/"))
+    elif parsed.scheme == "https" and host in youtube_hosts:
+        valid = (
+            (parsed.path == "/watch" and bool(query.get("v")))
+            or (parsed.path == "/playlist" and bool(query.get("list")))
+            or parsed.path.startswith("/embed/")
+        )
+    if not valid:
+        raise BadRequestError(
+            "INVALID_CATALOG_COURSE",
+            f"Course {course_code} related videos must use a valid HTTPS YouTube URL",
+        )
+    return url
 
 
 def _configuration_kind(value: str) -> ManagedConfigurationKind:

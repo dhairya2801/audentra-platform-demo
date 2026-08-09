@@ -13,6 +13,12 @@ courses:
     instructor_names: [Dr. Maya Patel]
     meeting_pattern: Mon/Wed 10:00 AM
     availability_label: Fall and Spring
+    related_videos:
+      - id: mit-6-100l-introduction
+        title: Introduction to Computer Science and Programming Using Python
+        description: An open introductory programming lecture from MIT OpenCourseWare.
+        url: https://www.youtube.com/watch?v=xAcTmDO6NTI
+        source_label: MIT OpenCourseWare
   - id: cs-201
     code: CS 201
     title: Data Structures
@@ -47,6 +53,12 @@ courses:
     instructor_names: [Prof. Owen Brooks]
     meeting_pattern: Mon/Wed/Fri 9:00 AM
     availability_label: Fall and Spring
+    related_videos:
+      - id: mit-18-01-calculus
+        title: Single Variable Calculus
+        description: An open single-variable calculus lecture from MIT OpenCourseWare.
+        url: https://www.youtube.com/watch?v=7K1sB05pE0A
+        source_label: MIT OpenCourseWare
   - id: math-152
     code: MATH 152
     title: Calculus II

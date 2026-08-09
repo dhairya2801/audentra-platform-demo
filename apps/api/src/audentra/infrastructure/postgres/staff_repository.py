@@ -148,6 +148,589 @@ class PostgresStaffRepository:
             "generatedAt": _iso_timestamp(self._clock()),
         }
 
+    async def get_managed_content(self, auth: AuthContext) -> dict[str, object]:
+        """Read durable staff-only content used by the workspace editors."""
+
+        self._require_staff(auth)
+        async with self._engine.begin() as connection:
+            await self._ensure_managed_content_defaults(connection, auth)
+            knowledge_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, title, summary, body, category, audience, status,
+                           owner_name, version, updated_at
+                    FROM {self._table("staff_knowledge_card")}
+                    WHERE tenant_id=:tenant_id
+                    ORDER BY updated_at DESC, title, id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            play_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, title, description, trigger_description, audience,
+                           steps, status, owner_name, version, updated_at
+                    FROM {self._table("staff_core_play")}
+                    WHERE tenant_id=:tenant_id
+                    ORDER BY updated_at DESC, title, id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            return {
+                "knowledgeBase": [
+                    _map_knowledge_card(dict(row)) for row in knowledge_result.mappings().all()
+                ],
+                "corePlays": [_map_core_play(dict(row)) for row in play_result.mappings().all()],
+            }
+
+    async def _ensure_managed_content_defaults(
+        self, connection: AsyncConnection, auth: AuthContext
+    ) -> None:
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("staff_knowledge_card")} (
+                  id, tenant_id, title, summary, body, category, audience,
+                  status, owner_name, version, created_at, updated_at
+                )
+                SELECT md5(
+                         concat(
+                           CAST(:tenant_text AS text), chr(58),
+                           'knowledge', chr(58), seed.key
+                         )
+                       )::uuid,
+                       :tenant_id, seed.title, seed.summary, seed.body,
+                       seed.category, seed.audience, seed.status, seed.owner,
+                       1, NOW(), NOW()
+                FROM (VALUES
+                  ('deposit', 'Enrollment deposit policy',
+                   'Approved guidance for deposit deadlines, waivers, and escalation.',
+                   'Verify the offer deadline before discussing extensions or waivers.',
+                   'Enrollment', 'internal', 'published', 'Admissions Operations'),
+                  ('transcript', 'Transcript review expectations',
+                   'What students and reviewers should expect after an upload.',
+                   'Extracted fields remain suggestions until a reviewer confirms a decision.',
+                   'Documents', 'student', 'published', 'Registrar'),
+                  ('housing', 'Housing follow-up guide',
+                   'Routing notes for undecided and off-campus students.',
+                   'Use housing and accommodation preferences to select the advising queue.',
+                   'Housing', 'internal', 'draft', 'Student Life')
+                ) AS seed(key, title, summary, body, category, audience, status, owner)
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "tenant_text": auth.tenant_id},
+        )
+        await connection.execute(
+            text(
+                f"""
+                INSERT INTO {self._table("staff_core_play")} (
+                  id, tenant_id, title, description, trigger_description,
+                  audience, steps, status, owner_name, version, created_at, updated_at
+                )
+                SELECT md5(
+                         concat(
+                           CAST(:tenant_text AS text), chr(58),
+                           'core-play', chr(58), seed.key
+                         )
+                       )::uuid,
+                       :tenant_id, seed.title, seed.description, seed.trigger,
+                       seed.audience, CAST(seed.steps AS jsonb), seed.status,
+                       seed.owner, 1, NOW(), NOW()
+                FROM (VALUES
+                  ('deposit', 'Deposit deadline rescue',
+                   'A coordinated sequence for an approaching deposit deadline.',
+                   'Deposit due within 72 hours and requirement incomplete',
+                   'Admitted students with incomplete deposits',
+                   '["Verify offer", "Check waiver", "Draft payment reminder"]',
+                   'active', 'Admissions Operations'),
+                  ('documents', 'Missing document recovery',
+                   'A follow-up path for blocking enrollment documents.',
+                   'Blocking document is rejected or seven days overdue',
+                   'Students with blocking document requirements',
+                   '["Confirm the rejection reason", "Draft resubmission instructions"]',
+                   'draft', 'Registrar')
+                ) AS seed(key, title, description, trigger, audience, steps, status, owner)
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "tenant_text": auth.tenant_id},
+        )
+
+    async def create_knowledge_card(
+        self, auth: AuthContext, payload: Mapping[str, object], request_id: str
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        card_id = str(self._uuid_factory())
+        async with self._engine.begin() as connection:
+            owner = await self._staff_display_name(connection, auth)
+            result = await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_knowledge_card")} (
+                      id, tenant_id, title, summary, body, category, audience,
+                      status, owner_name, version, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :title, :summary, :body, :category,
+                      :audience, :status, :owner, 1, NOW(), NOW()
+                    )
+                    RETURNING id, title, summary, body, category, audience, status,
+                              owner_name, version, updated_at
+                    """
+                ),
+                {
+                    "id": _uuid(card_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "title": str(_read(payload, "title")),
+                    "summary": str(_read(payload, "summary")),
+                    "body": str(_read(payload, "body")),
+                    "category": str(_read(payload, "category")),
+                    "audience": str(_read(payload, "audience")),
+                    "status": str(_read(payload, "status")),
+                    "owner": owner,
+                },
+            )
+            row = result.mappings().one()
+            await self._insert_audit(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.knowledge_card_created",
+                resource_type="staff_knowledge_card",
+                resource_id=card_id,
+                metadata={"version": 1},
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.knowledge_card_created.v1",
+                aggregate_type="staff_knowledge_card",
+                aggregate_id=card_id,
+                aggregate_version=1,
+                data={"status": str(row["status"])},
+            )
+            return _map_knowledge_card(dict(row))
+
+    async def update_knowledge_card(
+        self,
+        auth: AuthContext,
+        card_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedVersion", "expected_version"), "expectedVersion"
+        )
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_knowledge_card")} SET
+                      title=:title, summary=:summary, body=:body, category=:category,
+                      audience=:audience, status=:status, version=version+1,
+                      updated_at=NOW()
+                    WHERE id=:id AND tenant_id=:tenant_id AND version=:expected_version
+                    RETURNING id, title, summary, body, category, audience, status,
+                              owner_name, version, updated_at
+                    """
+                ),
+                {
+                    "id": _uuid(card_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "expected_version": expected_version,
+                    "title": str(_read(payload, "title")),
+                    "summary": str(_read(payload, "summary")),
+                    "body": str(_read(payload, "body")),
+                    "category": str(_read(payload, "category")),
+                    "audience": str(_read(payload, "audience")),
+                    "status": str(_read(payload, "status")),
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await self._raise_content_write_error(
+                    connection,
+                    table="staff_knowledge_card",
+                    tenant_id=auth.tenant_id,
+                    resource_id=card_id,
+                    not_found_code="STAFF_KNOWLEDGE_CARD_NOT_FOUND",
+                    label="Knowledge card",
+                )
+            assert row is not None
+            version = int(row["version"])
+            await self._record_content_change(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.knowledge_card_updated",
+                event_name="staff.knowledge_card_updated.v1",
+                resource_type="staff_knowledge_card",
+                resource_id=card_id,
+                version=version,
+                data={"status": str(row["status"])},
+            )
+            return _map_knowledge_card(dict(row))
+
+    async def create_core_play(
+        self, auth: AuthContext, payload: Mapping[str, object], request_id: str
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        play_id = str(self._uuid_factory())
+        async with self._engine.begin() as connection:
+            owner = await self._staff_display_name(connection, auth)
+            result = await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("staff_core_play")} (
+                      id, tenant_id, title, description, trigger_description,
+                      audience, steps, status, owner_name, version, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :title, :description, :trigger,
+                      :audience, CAST(:steps AS jsonb), :status, :owner, 1, NOW(), NOW()
+                    )
+                    RETURNING id, title, description, trigger_description, audience,
+                              steps, status, owner_name, version, updated_at
+                    """
+                ),
+                {
+                    "id": _uuid(play_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "title": str(_read(payload, "title")),
+                    "description": str(_read(payload, "description")),
+                    "trigger": str(_read(payload, "trigger")),
+                    "audience": str(_read(payload, "audience")),
+                    "steps": json.dumps(list(cast(list[object], _read(payload, "steps")))),
+                    "status": str(_read(payload, "status")),
+                    "owner": owner,
+                },
+            )
+            row = result.mappings().one()
+            await self._record_content_change(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.core_play_created",
+                event_name="staff.core_play_created.v1",
+                resource_type="staff_core_play",
+                resource_id=play_id,
+                version=1,
+                data={"status": str(row["status"])},
+            )
+            return _map_core_play(dict(row))
+
+    async def update_core_play(
+        self,
+        auth: AuthContext,
+        play_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedVersion", "expected_version"), "expectedVersion"
+        )
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("staff_core_play")} SET
+                      title=:title, description=:description,
+                      trigger_description=:trigger, audience=:audience,
+                      steps=CAST(:steps AS jsonb), status=:status,
+                      version=version+1, updated_at=NOW()
+                    WHERE id=:id AND tenant_id=:tenant_id AND version=:expected_version
+                    RETURNING id, title, description, trigger_description, audience,
+                              steps, status, owner_name, version, updated_at
+                    """
+                ),
+                {
+                    "id": _uuid(play_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "expected_version": expected_version,
+                    "title": str(_read(payload, "title")),
+                    "description": str(_read(payload, "description")),
+                    "trigger": str(_read(payload, "trigger")),
+                    "audience": str(_read(payload, "audience")),
+                    "steps": json.dumps(list(cast(list[object], _read(payload, "steps")))),
+                    "status": str(_read(payload, "status")),
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await self._raise_content_write_error(
+                    connection,
+                    table="staff_core_play",
+                    tenant_id=auth.tenant_id,
+                    resource_id=play_id,
+                    not_found_code="STAFF_CORE_PLAY_NOT_FOUND",
+                    label="Core play",
+                )
+            assert row is not None
+            version = int(row["version"])
+            await self._record_content_change(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.core_play_updated",
+                event_name="staff.core_play_updated.v1",
+                resource_type="staff_core_play",
+                resource_id=play_id,
+                version=version,
+                data={"status": str(row["status"])},
+            )
+            return _map_core_play(dict(row))
+
+    async def create_club(
+        self, auth: AuthContext, payload: Mapping[str, object], request_id: str
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        club_id = str(self._uuid_factory())
+        async with self._engine.begin() as connection:
+            media_id = await self._portal_media_id(
+                connection,
+                auth,
+                _read(payload, "imageUrl", "image_url", default=None),
+            )
+            result = await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("student_club")} (
+                      id, tenant_id, name, category, description, contact_name,
+                      contact_role, contact_channel, latest_update, next_activity,
+                      active, media_asset_id, source_label, source_status,
+                      social_links, long_description, membership_open, version,
+                      created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :name, :category, :description, :contact_name,
+                      :contact_role, :contact_channel, :latest_update, NULL, true,
+                      :media_id, 'Staff managed campus life', 'tenant_authored',
+                      '[]'::jsonb, :description, :membership_open, 1, NOW(), NOW()
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": _uuid(club_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "name": str(_read(payload, "name")),
+                    "category": str(_read(payload, "category")),
+                    "description": str(_read(payload, "description")),
+                    "contact_name": str(_read(payload, "contactName", "contact_name")),
+                    "contact_role": str(_read(payload, "contactRole", "contact_role")),
+                    "contact_channel": str(_read(payload, "contactChannel", "contact_channel")),
+                    "latest_update": str(_read(payload, "latestUpdate", "latest_update")),
+                    "membership_open": bool(_read(payload, "membershipOpen", "membership_open")),
+                    "media_id": media_id,
+                },
+            )
+            result.one()
+            await self._record_content_change(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.club_created",
+                event_name="staff.club_created.v1",
+                resource_type="student_club",
+                resource_id=club_id,
+                version=1,
+                data={"active": True},
+            )
+            return await self._staff_club(connection, auth, club_id)
+
+    async def update_club(
+        self,
+        auth: AuthContext,
+        club_id: str,
+        payload: Mapping[str, object],
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_version = _integer(
+            _read(payload, "expectedVersion", "expected_version"), "expectedVersion"
+        )
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    UPDATE {self._table("student_club")} SET
+                      name=:name, category=:category, description=:description,
+                      long_description=:description, contact_name=:contact_name,
+                      contact_role=:contact_role, contact_channel=:contact_channel,
+                      latest_update=:latest_update, membership_open=:membership_open,
+                      source_label='Staff managed campus life',
+                      source_status='tenant_authored', version=version+1,
+                      updated_at=NOW()
+                    WHERE id=:id AND tenant_id=:tenant_id AND version=:expected_version
+                    RETURNING id, version
+                    """
+                ),
+                {
+                    "id": _uuid(club_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "expected_version": expected_version,
+                    "name": str(_read(payload, "name")),
+                    "category": str(_read(payload, "category")),
+                    "description": str(_read(payload, "description")),
+                    "contact_name": str(_read(payload, "contactName", "contact_name")),
+                    "contact_role": str(_read(payload, "contactRole", "contact_role")),
+                    "contact_channel": str(_read(payload, "contactChannel", "contact_channel")),
+                    "latest_update": str(_read(payload, "latestUpdate", "latest_update")),
+                    "membership_open": bool(_read(payload, "membershipOpen", "membership_open")),
+                },
+            )
+            row = result.mappings().first()
+            if row is None:
+                await self._raise_content_write_error(
+                    connection,
+                    table="student_club",
+                    tenant_id=auth.tenant_id,
+                    resource_id=club_id,
+                    not_found_code="STAFF_CLUB_NOT_FOUND",
+                    label="Campus club",
+                )
+            assert row is not None
+            version = int(row["version"])
+            await self._record_content_change(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                action="staff.club_updated",
+                event_name="staff.club_updated.v1",
+                resource_type="student_club",
+                resource_id=club_id,
+                version=version,
+                data={"active": True},
+            )
+            return await self._staff_club(connection, auth, club_id)
+
+    async def _staff_display_name(self, connection: AsyncConnection, auth: AuthContext) -> str:
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT display_name FROM {self._table("staff_member")}
+                WHERE tenant_id=:tenant_id AND id=:id AND active=true
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "id": _uuid(auth.actor_id)},
+        )
+        name = result.scalar_one_or_none()
+        return str(name) if name else "Staff member"
+
+    async def _portal_media_id(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        value: object,
+    ) -> object | None:
+        image_url = _optional_text(value)
+        if image_url is None:
+            return None
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT id FROM {self._table("media_asset")}
+                WHERE tenant_id=:tenant_id AND active=true
+                  AND (public_path=:image_url OR :image_url LIKE '%%' || public_path)
+                ORDER BY updated_at DESC, id LIMIT 1
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "image_url": image_url},
+        )
+        media_id = result.scalar_one_or_none()
+        if media_id is None:
+            raise BadRequestError(
+                "STAFF_CLUB_IMAGE_NOT_FOUND",
+                "Choose an image uploaded to this tenant before publishing the club",
+            )
+        return cast(object, media_id)
+
+    async def _staff_club(
+        self, connection: AsyncConnection, auth: AuthContext, club_id: str
+    ) -> dict[str, object]:
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT club.id, club.name, club.category, club.description,
+                       club.contact_name, club.contact_role, club.contact_channel,
+                       club.latest_update, club.next_activity, club.source_label,
+                       club.source_url, club.source_status, club.social_links,
+                       club.long_description, club.meeting_schedule,
+                       club.membership_open, club.version, club.updated_at,
+                       COALESCE(media.public_path, '/media/clubs/code-collective.jpg') image_url,
+                       COALESCE(
+                         media.alt_text, 'Students collaborating in a campus club'
+                       ) image_alt,
+                       COALESCE(media.attribution, 'Default Aster club image') image_attribution,
+                       COALESCE(media.source_url, '') image_source_url
+                FROM {self._table("student_club")} club
+                LEFT JOIN {self._table("media_asset")} media
+                  ON media.id=club.media_asset_id AND media.tenant_id=club.tenant_id
+                 AND media.active=true
+                WHERE club.id=:id AND club.tenant_id=:tenant_id
+                """
+            ),
+            {"id": _uuid(club_id), "tenant_id": _uuid(auth.tenant_id)},
+        )
+        row = result.mappings().first()
+        if row is None:
+            raise NotFoundError("STAFF_CLUB_NOT_FOUND", "The campus club was not found")
+        return _map_staff_club(dict(row))
+
+    async def _raise_content_write_error(
+        self,
+        connection: AsyncConnection,
+        *,
+        table: str,
+        tenant_id: str,
+        resource_id: str,
+        not_found_code: str,
+        label: str,
+    ) -> None:
+        result = await connection.execute(
+            text(f"SELECT version FROM {self._table(table)} WHERE tenant_id=:tenant_id AND id=:id"),
+            {"tenant_id": _uuid(tenant_id), "id": _uuid(resource_id)},
+        )
+        if result.scalar_one_or_none() is None:
+            raise NotFoundError(not_found_code, f"The {label.lower()} was not found")
+        raise ConflictError("VERSION_CONFLICT", f"The {label.lower()} changed in another session")
+
+    async def _record_content_change(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        request_id: str,
+        action: str,
+        event_name: str,
+        resource_type: str,
+        resource_id: str,
+        version: int,
+        data: Mapping[str, object],
+    ) -> None:
+        await self._insert_audit(
+            connection,
+            auth=auth,
+            request_id=request_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            metadata={"version": version, **dict(data)},
+        )
+        await self._insert_outbox(
+            connection,
+            auth=auth,
+            request_id=request_id,
+            event_name=event_name,
+            aggregate_type=resource_type,
+            aggregate_id=resource_id,
+            aggregate_version=version,
+            data=data,
+        )
+
     async def create_work_item(
         self,
         auth: AuthContext,
@@ -5273,6 +5856,69 @@ class PostgresStaffRepository:
                 "STAFF_ACCESS_REQUIRED",
                 "This route requires a staff identity",
             )
+
+
+def _map_knowledge_card(row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": str(row["id"]),
+        "title": str(row["title"]),
+        "summary": str(row["summary"]),
+        "body": str(row["body"]),
+        "category": str(row["category"]),
+        "audience": str(row["audience"]),
+        "status": str(row["status"]),
+        "owner": str(row["owner_name"]),
+        "version": int(cast(int, row["version"])),
+        "updatedAt": _iso_timestamp(row["updated_at"]),
+    }
+
+
+def _map_core_play(row: Mapping[str, object]) -> dict[str, object]:
+    return {
+        "id": str(row["id"]),
+        "title": str(row["title"]),
+        "description": str(row["description"]),
+        "trigger": str(row["trigger_description"]),
+        "audience": str(row["audience"]),
+        "steps": [str(item) for item in _json_list(row["steps"], "core play steps")],
+        "status": str(row["status"]),
+        "owner": str(row["owner_name"]),
+        "version": int(cast(int, row["version"])),
+        "updatedAt": _iso_timestamp(row["updated_at"]),
+    }
+
+
+def _map_staff_club(row: Mapping[str, object]) -> dict[str, object]:
+    source = None
+    if row.get("source_label") and row.get("source_url") and row.get("source_status"):
+        source = {
+            "label": str(row["source_label"]),
+            "url": str(row["source_url"]),
+            "dataStatus": str(row["source_status"]),
+        }
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "category": str(row["category"]),
+        "description": str(row["description"]),
+        "contactName": str(row["contact_name"]),
+        "contactRole": str(row["contact_role"]),
+        "contactChannel": str(row["contact_channel"]),
+        "latestUpdate": str(row["latest_update"]),
+        "nextActivity": _optional_text(row.get("next_activity")),
+        "imageUrl": str(row["image_url"]),
+        "imageAlt": str(row["image_alt"]),
+        "imageAttribution": str(row["image_attribution"]),
+        "imageSourceUrl": str(row["image_source_url"]),
+        "source": source,
+        "socialLinks": _json_list(row.get("social_links", []), "club social links"),
+        "longDescription": _optional_text(row.get("long_description")),
+        "meetingSchedule": _optional_text(row.get("meeting_schedule")),
+        "membershipOpen": bool(row["membership_open"]),
+        "events": [],
+        "version": int(cast(int, row["version"])),
+        "updatedAt": _iso_timestamp(row["updated_at"]),
+    }
 
 
 def _map_action_rule(row: Mapping[str, object]) -> dict[str, object]:

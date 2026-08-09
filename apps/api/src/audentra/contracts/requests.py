@@ -173,6 +173,10 @@ class ActivityEventBatchRequest(StrictRequest):
     events: list[ActivityEventRequest] = Field(min_length=1, max_length=100)
 
 
+class RegisterCampusEventRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+
+
 class OnboardingEmergencyContactRequest(StrictRequest):
     full_name: NameText
     relationship: Literal["parent", "guardian", "partner", "sibling", "relative", "friend", "other"]

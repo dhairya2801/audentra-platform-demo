@@ -4,6 +4,32 @@ This changelog summarizes user-visible releases. Detailed notes are separated
 by persona so students, staff, and implementation teams can review only the
 changes that affect them.
 
+## 2026-08-10 — Durable tenant content management
+
+### Students
+
+- Added persistent Campus Life event registration with duplicate, stale,
+  inactive, past-event, reschedule, and cancellation handling.
+- Added notifications when a registered event changes or is cancelled while
+  preserving canonical refresh behavior for the page itself.
+- Added optional staff-curated course videos to informational Classrooms course
+  details.
+
+### Staff
+
+- Made Campus Life events and clubs, academic courses, Knowledge Base cards,
+  and Core Plays durable, tenant-scoped, versioned database content.
+- Added audited CRUD and publication events without coupling deterministic
+  content updates to an LLM.
+
+### Data and lifecycle safety
+
+- Added stable source identities, event-version checks, serialized registration
+  writes, soft retirement, registration history, and affected-student messages.
+- Added bounded HTTPS YouTube metadata validation and nullable per-course media.
+
+See [Detailed content-management changelog](docs/changelog/2026-08-10-content-management-functional.md).
+
 ## 2026-08-09 — Functional enrollment action center
 
 ### Students

@@ -1762,6 +1762,7 @@ export interface CatalogCourse {
   meetingPattern?: string | null;
   source?: PortalContentSource | null;
   resources?: CourseResource[];
+  relatedVideos?: CourseVideo[];
   prerequisites: {
     courseCode: string;
     minimumGrade: string | null;
@@ -1776,6 +1777,15 @@ export interface CourseResource {
   format: "pdf";
   provider: string;
   licenseLabel: string;
+}
+
+export interface CourseVideo {
+  id: string;
+  title: string;
+  description?: string | null;
+  url: string;
+  provider: "YouTube";
+  sourceLabel?: string | null;
 }
 
 export interface PortalContentSource {
@@ -1933,6 +1943,24 @@ export interface CampusEvent {
   advertisementEndsAt?: string | null;
   source?: PortalContentSource | null;
   registrationUrl?: string | null;
+  version: number;
+  registrationStatus?:
+    | "registered"
+    | "cancelled_by_event"
+    | "cancelled_by_student"
+    | null;
+}
+
+export interface RegisterCampusEventInput {
+  expectedVersion: number;
+}
+
+export interface CampusEventRegistration {
+  id: string;
+  eventId: string;
+  status: "registered";
+  eventVersion: number;
+  registeredAt: string;
 }
 
 export interface StaffPortalMediaUpload {

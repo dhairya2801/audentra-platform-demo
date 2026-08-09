@@ -31,6 +31,30 @@ sibling `Audentra-portals` repository.
   student-facing content.
 - Production-facing writes must not depend on the in-memory preview repository.
 
+## Managed-content invariants
+
+- PostgreSQL is canonical for published Campus Life, academic catalog,
+  Knowledge Base, Core Play, and club records. Tenant YAML is seed/import input,
+  not a second runtime source of truth.
+- Keep event and course `source_id` values stable across publications. Never
+  hard-delete an event that may have registrations; retire it, cancel active
+  registrations, preserve history, notify affected students, and omit it from
+  subsequent student reads.
+- Event registration must lock and re-read the current event version before
+  writing. Reject missing, inactive, past, or stale events and make duplicate
+  registration requests idempotent.
+- Notify registered students when an event's date, time, location, availability,
+  or cancellation state changes. Commit the content change, registration
+  transition, message, audit entry, and outbox record atomically.
+- Course media is optional. Accept only bounded HTTPS YouTube video or playlist
+  metadata; never fetch, proxy, or store third-party media in the API.
+- Knowledge Base, Core Play, and club CRUD must remain tenant-scoped, versioned,
+  audited, and outbox-backed. These records do not enter LLM context until a
+  separately reviewed retrieval policy is implemented.
+- Enrollment and onboarding journey definitions are a separate, versioned graph
+  and form-builder domain. Content-management changes must not rewrite completed
+  journey work or bypass dependency-cycle and input-type validation.
+
 ## Validation
 
 Run the relevant subset while developing and the full gates before handoff:

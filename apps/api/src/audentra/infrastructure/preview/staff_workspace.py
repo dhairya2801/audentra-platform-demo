@@ -173,6 +173,8 @@ class PreviewStaffWorkspaceRepository:
         campus_life: Mapping[str, Any],
         canonical_inquiries: Sequence[Mapping[str, Any]] = (),
         canonical_cohort: Sequence[Mapping[str, Any]] = (),
+        canonical_knowledge: Sequence[Mapping[str, Any]] | None = None,
+        canonical_core_plays: Sequence[Mapping[str, Any]] | None = None,
     ) -> JsonDict:
         self._require_preview_staff(auth)
         async with self._lock:
@@ -217,6 +219,16 @@ class PreviewStaffWorkspaceRepository:
         journey_blueprint = _journey_blueprint(snapshot.configurations["journeys"])
         academic_catalog = _academic_catalog(snapshot.configurations["academics"])
         merged_campus = _merge_campus_life(snapshot, campus_life)
+        knowledge_base = (
+            copy.deepcopy(snapshot.knowledge_base)
+            if canonical_knowledge is None
+            else [copy.deepcopy(dict(item)) for item in canonical_knowledge]
+        )
+        core_plays = (
+            copy.deepcopy(snapshot.core_plays)
+            if canonical_core_plays is None
+            else [copy.deepcopy(dict(item)) for item in canonical_core_plays]
+        )
         inquiry_by_id = {str(item["id"]): item for item in snapshot.inquiries}
         inquiry_by_id.update(
             {
@@ -254,8 +266,8 @@ class PreviewStaffWorkspaceRepository:
             "cohort": cohort,
             "cohortSeed": snapshot.cohort_seed,
             "student": current_student,
-            "knowledgeBase": snapshot.knowledge_base,
-            "corePlays": snapshot.core_plays,
+            "knowledgeBase": knowledge_base,
+            "corePlays": core_plays,
             "inquiries": inquiries,
             "journeyBlueprint": journey_blueprint,
             "academicCatalog": academic_catalog,
@@ -270,7 +282,7 @@ class PreviewStaffWorkspaceRepository:
                 academic_catalog,
                 merged_campus,
                 inquiries,
-                snapshot.knowledge_base,
+                knowledge_base,
             ),
             "outreachRuns": snapshot.outreach_runs,
             "capabilities": {
@@ -1203,6 +1215,18 @@ def _academic_catalog(configuration: Mapping[str, Any]) -> JsonDict:
                 "availabilityLabel": course.get("availability_label"),
                 "instructorNames": list(course.get("instructor_names", [])),
                 "meetingPattern": course.get("meeting_pattern"),
+                "resources": copy.deepcopy(course.get("resources", [])),
+                "relatedVideos": [
+                    {
+                        "id": video.get("id"),
+                        "title": video.get("title"),
+                        "description": video.get("description"),
+                        "url": video.get("url"),
+                        "provider": "YouTube",
+                        "sourceLabel": video.get("source_label"),
+                    }
+                    for video in _mapping_list(course.get("related_videos"))
+                ],
                 "prerequisites": prerequisites,
             }
         )
@@ -1253,6 +1277,8 @@ def _campus_event(item: Mapping[str, Any]) -> JsonDict:
             else None
         ),
         "registrationUrl": item.get("registration_url"),
+        "version": int(item.get("version", 1)),
+        "registrationStatus": None,
     }
 
 

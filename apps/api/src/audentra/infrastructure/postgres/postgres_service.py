@@ -562,6 +562,14 @@ class PostgresPlatformService:
             )
         if operation == "student.get_campus_life":
             return await portal.get_campus_life(auth)
+        if operation == "student.register_campus_event":
+            return await portal.register_campus_event(
+                auth,
+                self._path(call, "eventId", "id"),
+                payload,
+                self._key(key),
+                call.request_id,
+            )
         if operation == "admission.accept_offer":
             return await platform.accept_admission_offer(
                 auth,
@@ -710,12 +718,20 @@ class PostgresPlatformService:
         if operation == "staff.get_workspace":
             configurations = await self._managed_configurations(auth)
             await self._preview().sync_managed_configurations(auth, configurations)
-            action_center, student, campus_life, inquiries, cohort = await asyncio.gather(
+            (
+                action_center,
+                student,
+                campus_life,
+                inquiries,
+                cohort,
+                managed_content,
+            ) = await asyncio.gather(
                 staff.get_action_center(auth),
                 staff.get_student_record(auth, auth.student_id),
                 portal.get_campus_life(auth),
                 portal.list_staff_help_requests(auth),
                 staff.get_student_roster(auth),
+                staff.get_managed_content(auth),
             )
             return await self._preview().get_workspace(
                 auth,
@@ -724,6 +740,12 @@ class PostgresPlatformService:
                 campus_life=campus_life,
                 canonical_inquiries=inquiries,
                 canonical_cohort=cohort,
+                canonical_knowledge=cast(
+                    Sequence[Mapping[str, Any]], managed_content.get("knowledgeBase", [])
+                ),
+                canonical_core_plays=cast(
+                    Sequence[Mapping[str, Any]], managed_content.get("corePlays", [])
+                ),
             )
         if operation == "staff.upload_portal_media":
             return await self._upload_staff_portal_media(auth, call)
@@ -749,16 +771,16 @@ class PostgresPlatformService:
             await self._preview().sync_managed_configurations(auth, {kind: current})
             return await self._preview().draft_managed_configuration(auth, payload)
         if operation == "staff.create_knowledge_card":
-            return await self._preview().create_knowledge_card(auth, payload)
+            return await staff.create_knowledge_card(auth, payload, call.request_id)
         if operation == "staff.update_knowledge_card":
-            return await self._preview().update_knowledge_card(
-                auth, self._path(call, "cardId", "id"), payload
+            return await staff.update_knowledge_card(
+                auth, self._path(call, "cardId", "id"), payload, call.request_id
             )
         if operation == "staff.create_core_play":
-            return await self._preview().create_core_play(auth, payload)
+            return await staff.create_core_play(auth, payload, call.request_id)
         if operation == "staff.update_core_play":
-            return await self._preview().update_core_play(
-                auth, self._path(call, "playId", "id"), payload
+            return await staff.update_core_play(
+                auth, self._path(call, "playId", "id"), payload, call.request_id
             )
         if operation == "staff.update_inquiry":
             inquiry_id = self._path(call, "inquiryId", "id")
@@ -778,14 +800,10 @@ class PostgresPlatformService:
                 staff=cast(list[Mapping[str, Any]], center.get("staff", [])),
             )
         if operation == "staff.create_club":
-            return await self._preview().create_club(auth, payload)
+            return await staff.create_club(auth, payload, call.request_id)
         if operation == "staff.update_club":
-            campus_life = await portal.get_campus_life(auth)
-            return await self._preview().update_club(
-                auth,
-                self._path(call, "clubId", "id"),
-                payload,
-                campus_life=campus_life,
+            return await staff.update_club(
+                auth, self._path(call, "clubId", "id"), payload, call.request_id
             )
         if operation == "staff.simulate_outreach":
             return await self._preview().simulate_outreach(auth, payload)

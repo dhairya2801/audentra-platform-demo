@@ -770,6 +770,7 @@ def _map_course(row: Mapping[str, Any]) -> JsonDict:
         "instructorNames": _list(row.get("instructor_names")),
         "meetingPattern": row.get("meeting_pattern"),
         "resources": _list(row.get("resources")),
+        "relatedVideos": _list(row.get("related_videos")),
         "source": _map_source(row),
     }
 
@@ -794,6 +795,11 @@ class PostgresPortalRepository:
         self.outbox = outbox or OutboxRepository(
             engine, OutboxRepositoryConfig(worker_id="audentra-api")
         )
+
+    @staticmethod
+    def _require_student(auth: AuthContext) -> None:
+        if auth.actor_type != "student":
+            raise ApiError(403, "STUDENT_ACCESS_REQUIRED", "Student access is required")
 
     async def _all(self, statement: str, params: Mapping[str, Any]) -> list[JsonDict]:
         async with self.engine.connect() as connection:
@@ -3614,7 +3620,8 @@ class PostgresPortalRepository:
             """
             SELECT cc.id, cc.code, cc.title, cc.description, cc.credits, cc.level,
                    cc.availability_label, cc.instructor_names, cc.meeting_pattern,
-                   cc.resources, COALESCE(cc.source_url, ccv.source_url) AS source_url,
+                   cc.resources, cc.related_videos,
+                   COALESCE(cc.source_url, ccv.source_url) AS source_url,
                    ccv.source_label, ccv.source_status,
                    COALESCE(json_agg(json_build_object(
                      'courseCode', prerequisite.code,
@@ -3769,7 +3776,8 @@ class PostgresPortalRepository:
             """
             SELECT cc.id, cc.code, cc.title, cc.description, cc.credits, cc.level,
                    cc.availability_label, cc.instructor_names, cc.meeting_pattern,
-                   cc.resources, COALESCE(cc.source_url, ccv.source_url) AS source_url,
+                   cc.resources, cc.related_videos,
+                   COALESCE(cc.source_url, ccv.source_url) AS source_url,
                    ccv.source_label, ccv.source_status, ccv.code AS catalog_code,
                    COALESCE(json_agg(json_build_object(
                      'courseCode', prerequisite.code,
@@ -4092,7 +4100,13 @@ class PostgresPortalRepository:
                    category, featured, accent, source_label, source_url,
                    source_status, registration_url, visual_theme, image_url,
                    image_alt, image_attribution, image_source_url,
-                   advertisement_starts_at, advertisement_ends_at
+                   advertisement_starts_at, advertisement_ends_at, version,
+                   (SELECT registration.status
+                    FROM campus_event_registration registration
+                    WHERE registration.tenant_id=campus_event.tenant_id
+                      AND registration.event_id=campus_event.id
+                      AND registration.student_id=:student_id
+                    LIMIT 1) AS registration_status
             FROM campus_event WHERE tenant_id=:tenant_id AND active=true
               AND (
                 :include_scheduled
@@ -4105,6 +4119,7 @@ class PostgresPortalRepository:
             """,
             {
                 "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
                 "include_scheduled": auth.actor_type == "staff",
             },
         )
@@ -4115,6 +4130,7 @@ class PostgresPortalRepository:
                    club.latest_update, club.next_activity, club.source_label,
                    club.source_url, club.source_status, club.social_links,
                    club.long_description, club.meeting_schedule, club.membership_open,
+                   club.version, club.updated_at,
                    COALESCE(media.public_path, '/media/clubs/code-collective.jpg') AS image_url,
                    COALESCE(media.alt_text, 'Students collaborating in a campus club') AS image_alt,
                    COALESCE(media.attribution, 'Default Aster club image') AS image_attribution,
@@ -4156,6 +4172,8 @@ class PostgresPortalRepository:
                 "advertisementEndsAt": _nullable_iso(row.get("advertisement_ends_at")),
                 "source": _map_source(row),
                 "registrationUrl": row.get("registration_url"),
+                "version": int(row["version"]),
+                "registrationStatus": row.get("registration_status"),
             }
             for row in event_rows
         ]
@@ -4181,6 +4199,8 @@ class PostgresPortalRepository:
                     "longDescription": row.get("long_description"),
                     "meetingSchedule": row.get("meeting_schedule"),
                     "membershipOpen": bool(row["membership_open"]),
+                    "version": int(row["version"]),
+                    "updatedAt": _iso(row["updated_at"]),
                     "events": [
                         {
                             "id": str(event["id"]),
@@ -4198,6 +4218,159 @@ class PostgresPortalRepository:
                 }
             )
         return {"events": events, "clubs": clubs, "generatedAt": _iso(_utc_now())}
+
+    async def register_campus_event(
+        self,
+        auth: AuthContext,
+        event_id: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+        request_id: str,
+    ) -> JsonDict:
+        self._require_student(auth)
+
+        async def handler(connection: AsyncConnection) -> JsonDict:
+            event_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, title, starts_at, ends_at, location, active, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id AND id=:event_id
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "event_id": event_id},
+            )
+            campus_event = event_result.mappings().first()
+            if campus_event is None:
+                raise NotFoundError("CAMPUS_EVENT_NOT_FOUND", "The campus event was not found")
+            if not bool(campus_event["active"]) or campus_event["ends_at"] <= _utc_now():
+                raise ConflictError(
+                    "CAMPUS_EVENT_UNAVAILABLE",
+                    "This event is no longer accepting registrations",
+                )
+            expected_version = int(payload["expectedVersion"])
+            actual_version = int(campus_event["version"])
+            if expected_version != actual_version:
+                raise ConflictError(
+                    "CAMPUS_EVENT_CHANGED",
+                    "This event changed. Refresh the page and review the latest details.",
+                )
+
+            registration_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, status, registered_at
+                    FROM campus_event_registration
+                    WHERE tenant_id=:tenant_id AND event_id=:event_id
+                      AND student_id=:student_id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "event_id": event_id,
+                    "student_id": auth.student_id,
+                },
+            )
+            existing = registration_result.mappings().first()
+            if existing is not None and existing["status"] == "registered":
+                return {
+                    "id": str(existing["id"]),
+                    "eventId": event_id,
+                    "status": "registered",
+                    "eventVersion": actual_version,
+                    "registeredAt": _iso(existing["registered_at"]),
+                }
+
+            registration_id = str(existing["id"]) if existing is not None else str(uuid4())
+            if existing is None:
+                registration_write = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO campus_event_registration (
+                          id, tenant_id, event_id, student_id, status, event_version,
+                          registered_at, cancelled_at, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :event_id, :student_id, 'registered',
+                          :event_version, NOW(), NULL, NOW(), NOW()
+                        )
+                        RETURNING registered_at
+                        """
+                    ),
+                    {
+                        "id": registration_id,
+                        "tenant_id": auth.tenant_id,
+                        "event_id": event_id,
+                        "student_id": auth.student_id,
+                        "event_version": actual_version,
+                    },
+                )
+            else:
+                registration_write = await connection.execute(
+                    text(
+                        """
+                        UPDATE campus_event_registration
+                        SET status='registered', event_version=:event_version,
+                            registered_at=NOW(), cancelled_at=NULL, updated_at=NOW()
+                        WHERE id=:id AND tenant_id=:tenant_id
+                        RETURNING registered_at
+                        """
+                    ),
+                    {
+                        "id": registration_id,
+                        "tenant_id": auth.tenant_id,
+                        "event_version": actual_version,
+                    },
+                )
+            registered_at = registration_write.scalar_one()
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject=f"Registration confirmed: {campus_event['title']}",
+                body=(
+                    f"You are registered for {campus_event['title']} at "
+                    f"{campus_event['location']}. We will notify you if the event changes."
+                ),
+                kind="campus_event_registered",
+                href="/campus-life",
+            )
+            await self._insert_audit(
+                connection,
+                auth,
+                "campus_event.registered",
+                "campus_event_registration",
+                registration_id,
+                request_id,
+                {"eventId": event_id, "eventVersion": actual_version},
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "student.campus_event_registered.v1",
+                "campus_event_registration",
+                registration_id,
+                1,
+                request_id,
+                {"studentId": auth.student_id, "eventId": event_id},
+            )
+            return {
+                "id": registration_id,
+                "eventId": event_id,
+                "status": "registered",
+                "eventVersion": actual_version,
+                "registeredAt": _iso(registered_at),
+            }
+
+        return await self._run_idempotent(
+            auth,
+            idempotency_key,
+            request_id,
+            "student_campus_event.register",
+            {"eventId": event_id, **dict(payload)},
+            200,
+            handler,
+        )
 
     async def get_student_help(self, auth: AuthContext) -> JsonDict:
         rows = await self._all(

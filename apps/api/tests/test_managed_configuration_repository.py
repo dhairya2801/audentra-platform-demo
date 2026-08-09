@@ -710,7 +710,8 @@ def test_academic_course_parser_keeps_prerequisites_and_resources() -> None:
 tenant: aster
 configuration: academics
 courses:
-  - code: CS 201
+  - id: cs-201
+    code: CS 201
     title: Data Structures
     description: Trees, graphs, hashing, and algorithm analysis.
     credits: 4
@@ -722,6 +723,12 @@ courses:
     resources:
       - label: Course handbook
         url: https://example.edu/cs-201
+    related_videos:
+      - id: data-structures-overview
+        title: Data structures overview
+        description: Optional review material.
+        url: https://www.youtube.com/watch?v=2Lg0W1_JMs4
+        source_label: CS50
 """,
         tenant_slug="aster",
     )
@@ -733,6 +740,17 @@ courses:
     assert course["resources"] == [
         {"label": "Course handbook", "url": "https://example.edu/cs-201"}
     ]
+    assert course["sourceId"] == "cs-201"
+    assert course["relatedVideos"] == [
+        {
+            "id": "data-structures-overview",
+            "title": "Data structures overview",
+            "description": "Optional review material.",
+            "url": "https://www.youtube.com/watch?v=2Lg0W1_JMs4",
+            "provider": "YouTube",
+            "sourceLabel": "CS50",
+        }
+    ]
 
 
 def test_academic_course_parser_returns_public_error_for_invalid_credits() -> None:
@@ -743,7 +761,8 @@ def test_academic_course_parser_returns_public_error_for_invalid_credits() -> No
 tenant: aster
 configuration: academics
 courses:
-  - code: CS 201
+  - id: cs-201
+    code: CS 201
     title: Data Structures
     description: Trees, graphs, hashing, and algorithm analysis.
     credits: many
@@ -753,6 +772,31 @@ courses:
         )
 
     assert error.value.code == "INVALID_MANAGED_CONFIGURATION"
+
+
+def test_academic_course_parser_rejects_non_youtube_embeds() -> None:
+    with pytest.raises(ApiError, match="valid HTTPS YouTube URL") as error:
+        parse_managed_configuration(
+            "academics",
+            """
+tenant: aster
+configuration: academics
+courses:
+  - id: cs-101
+    code: CS 101
+    title: Programming Fundamentals
+    description: Introductory programming.
+    credits: 4
+    level: 100
+    related_videos:
+      - id: unsafe
+        title: Untrusted embed
+        url: https://video.example.edu/watch/123
+""",
+            tenant_slug="aster",
+        )
+
+    assert error.value.code == "INVALID_CATALOG_COURSE"
 
 
 def test_staff_managed_experience_migration_is_tenant_scoped_and_versioned() -> None:

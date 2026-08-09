@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.contracts.requests import UpdateStudentHousingPlanRequest
 from audentra.core.auth import AuthContext
-from audentra.core.errors import ConflictError
+from audentra.core.errors import ConflictError, NotFoundError
 from audentra.infrastructure.postgres.portal_repository import (
     PostgresPortalRepository,
     _add_calendar_months,
@@ -313,6 +313,179 @@ def test_idempotency_key_reuse_with_different_payload_conflicts() -> None:
             )
         )
     assert raised.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def _campus_event_row(*, active: bool = True, version: int = 3) -> dict[str, Any]:
+    starts_at = datetime.now(UTC) + timedelta(days=7)
+    return {
+        "id": "event-1",
+        "title": "Welcome Week Block Party",
+        "starts_at": starts_at,
+        "ends_at": starts_at + timedelta(hours=2),
+        "location": "University Green",
+        "active": active,
+        "version": version,
+    }
+
+
+def test_campus_event_registration_is_durable_notified_audited_and_idempotent() -> None:
+    registered_at = datetime.now(UTC)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row()]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return []
+        if "INSERT INTO campus_event_registration" in sql:
+            return [{"registered_at": registered_at}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 3},
+            "event-registration-key",
+            "request-1",
+        )
+    )
+
+    assert result["eventId"] == "event-1"
+    assert result["eventVersion"] == 3
+    assert result["status"] == "registered"
+    assert result["registeredAt"] == registered_at.isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    sql_calls = [sql for sql, _params in engine.connection.calls]
+    assert any("INSERT INTO campus_event_registration" in sql for sql in sql_calls)
+    assert any("INSERT INTO student_message" in sql for sql in sql_calls)
+    assert any("INSERT INTO audit_event" in sql for sql in sql_calls)
+    assert any("outbox_event" in sql and "INSERT INTO" in sql for sql in sql_calls)
+    assert any("INSERT INTO idempotency_record" in sql for sql in sql_calls)
+    message_params = next(
+        params for sql, params in engine.connection.calls if "INSERT INTO student_message" in sql
+    )
+    assert message_params["kind"] == "campus_event_registered"
+    assert message_params["href"] == "/campus-life"
+
+
+def test_campus_event_registration_returns_existing_without_duplicate_side_effects() -> None:
+    registered_at = datetime.now(UTC) - timedelta(minutes=10)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row()]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return [
+                {
+                    "id": "registration-1",
+                    "status": "registered",
+                    "registered_at": registered_at,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 3},
+            "repeat-registration-key",
+            "request-2",
+        )
+    )
+
+    assert result["id"] == "registration-1"
+    assert result["status"] == "registered"
+    sql_calls = [sql for sql, _params in engine.connection.calls]
+    assert not any("INSERT INTO student_message" in sql for sql in sql_calls)
+    assert not any("INSERT INTO audit_event" in sql for sql in sql_calls)
+    assert any("INSERT INTO idempotency_record" in sql for sql in sql_calls)
+
+
+def test_cancelled_event_registration_can_be_reactivated_after_event_returns() -> None:
+    registered_at = datetime.now(UTC)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row(version=4)]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return [
+                {
+                    "id": "registration-1",
+                    "status": "cancelled_by_event",
+                    "registered_at": registered_at - timedelta(days=1),
+                }
+            ]
+        if "UPDATE campus_event_registration" in sql:
+            return [{"registered_at": registered_at}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 4},
+            "reactivate-registration-key",
+            "request-3",
+        )
+    )
+
+    assert result["id"] == "registration-1"
+    assert result["eventVersion"] == 4
+    assert any(
+        "UPDATE campus_event_registration" in sql for sql, _params in engine.connection.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_rows", "expected_code"),
+    [
+        ([], "CAMPUS_EVENT_NOT_FOUND"),
+        ([_campus_event_row(active=False)], "CAMPUS_EVENT_UNAVAILABLE"),
+        ([_campus_event_row(version=5)], "CAMPUS_EVENT_CHANGED"),
+    ],
+)
+def test_campus_event_registration_rejects_missing_retired_and_stale_events(
+    event_rows: list[Mapping[str, Any]], expected_code: str
+) -> None:
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return event_rows
+        return []
+
+    repository = PostgresPortalRepository(cast(AsyncEngine, FakeEngine(handler)))
+    error_type = NotFoundError if expected_code == "CAMPUS_EVENT_NOT_FOUND" else ConflictError
+
+    with pytest.raises(error_type) as raised:
+        asyncio.run(
+            repository.register_campus_event(
+                AUTH,
+                "event-1",
+                {"expectedVersion": 3},
+                f"rejected-{expected_code}",
+                "request-4",
+            )
+        )
+
+    assert raised.value.code == expected_code
 
 
 def test_profile_optimistic_lock_reports_version_conflict() -> None:

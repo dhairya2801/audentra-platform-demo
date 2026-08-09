@@ -44,6 +44,11 @@ class FakeMappings:
     def first(self) -> dict[str, object] | None:
         return self._rows[0] if self._rows else None
 
+    def one(self) -> dict[str, object]:
+        if len(self._rows) != 1:
+            raise AssertionError("Expected exactly one mapping row")
+        return self._rows[0]
+
 
 class FakeResult:
     def __init__(self, rows: list[dict[str, object]] | None = None) -> None:
@@ -56,6 +61,14 @@ class FakeResult:
         if len(self._rows) != 1 or len(self._rows[0]) != 1:
             raise AssertionError("Expected exactly one scalar result")
         return next(iter(self._rows[0].values()))
+
+    def scalar_one_or_none(self) -> object | None:
+        if not self._rows:
+            return None
+        return self.scalar_one()
+
+    def one(self) -> dict[str, object]:
+        return self.mappings().one()
 
 
 FakeHandler = Callable[[str, dict[str, object]], FakeResult]
@@ -180,6 +193,244 @@ def test_staff_guard_runs_before_any_database_access() -> None:
 
     assert raised.value.code == "STAFF_ACCESS_REQUIRED"
     assert connection.executions == []
+
+
+def _knowledge_row(*, version: int = 1) -> dict[str, object]:
+    return {
+        "id": UUID(WORK_ITEM_ID),
+        "title": "Transcript review expectations",
+        "summary": "How document review works.",
+        "body": "Review extracted fields before confirming a decision.",
+        "category": "Documents",
+        "audience": "student",
+        "status": "published",
+        "owner_name": "Marcus Lee",
+        "version": version,
+        "updated_at": NOW,
+    }
+
+
+def _core_play_row(*, version: int = 1) -> dict[str, object]:
+    return {
+        "id": UUID(WORK_ITEM_ID),
+        "title": "Missing document recovery",
+        "description": "Recover a blocking enrollment document.",
+        "trigger_description": "A blocking document is overdue",
+        "audience": "Students with blocking documents",
+        "steps": ["Confirm the reason", "Send resubmission guidance"],
+        "status": "active",
+        "owner_name": "Marcus Lee",
+        "version": version,
+        "updated_at": NOW,
+    }
+
+
+def _club_row(*, version: int = 1) -> dict[str, object]:
+    return {
+        "id": UUID(WORK_ITEM_ID),
+        "name": "Code Collective",
+        "category": "Technology",
+        "description": "Build useful software with other students.",
+        "contact_name": "Jordan Lee",
+        "contact_role": "Club president",
+        "contact_channel": "code@example.edu",
+        "latest_update": "Applications are open.",
+        "next_activity": None,
+        "source_label": "Staff managed campus life",
+        "source_url": None,
+        "source_status": "tenant_authored",
+        "social_links": [],
+        "long_description": "Build useful software with other students.",
+        "meeting_schedule": None,
+        "membership_open": True,
+        "version": version,
+        "updated_at": NOW,
+        "image_url": "/media/clubs/code-collective.jpg",
+        "image_alt": "Students collaborating in a campus club",
+        "image_attribution": "Aster University",
+        "image_source_url": "",
+    }
+
+
+def test_managed_content_read_seeds_defaults_and_maps_durable_rows() -> None:
+    def handler(sql: str, _values: dict[str, object]) -> FakeResult:
+        if "FROM public.staff_knowledge_card" in sql:
+            return FakeResult([_knowledge_row()])
+        if "FROM public.staff_core_play" in sql:
+            return FakeResult([_core_play_row()])
+        return FakeResult()
+
+    connection = FakeConnection(handler)
+    engine = FakeEngine(connection)
+    repository = PostgresStaffRepository(cast(AsyncEngine, engine), FakeStudentReader())
+
+    result = asyncio.run(repository.get_managed_content(staff_auth()))
+
+    knowledge = cast(list[dict[str, object]], result["knowledgeBase"])
+    core_plays = cast(list[dict[str, object]], result["corePlays"])
+    assert knowledge[0]["title"] == "Transcript review expectations"
+    assert knowledge[0]["updatedAt"] == "2026-07-24T12:00:00.000Z"
+    assert core_plays[0]["steps"] == [
+        "Confirm the reason",
+        "Send resubmission guidance",
+    ]
+    assert engine.begin_count == 1
+    seed_sql = [sql for sql, _values in connection.executions if "ON CONFLICT (id)" in sql]
+    assert len(seed_sql) == 2
+    assert all("CAST(:tenant_text AS text), chr(58)" in sql for sql in seed_sql)
+    assert all(":core-play" not in sql and ":knowledge:" not in sql for sql in seed_sql)
+
+
+def test_staff_managed_content_crud_is_versioned_audited_and_emits_outbox() -> None:
+    club_version = 1
+
+    def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        nonlocal club_version
+        if "SELECT display_name FROM public.staff_member" in sql:
+            return FakeResult([{"display_name": "Marcus Lee"}])
+        if "INSERT INTO public.staff_knowledge_card" in sql:
+            return FakeResult([_knowledge_row()])
+        if "UPDATE public.staff_knowledge_card" in sql:
+            return FakeResult([_knowledge_row(version=2)])
+        if "INSERT INTO public.staff_core_play" in sql:
+            return FakeResult([_core_play_row()])
+        if "UPDATE public.staff_core_play" in sql:
+            return FakeResult([_core_play_row(version=2)])
+        if "INSERT INTO public.student_club" in sql:
+            club_version = 1
+            return FakeResult([{"id": values["id"]}])
+        if "UPDATE public.student_club" in sql:
+            club_version = 2
+            return FakeResult([{"id": values["id"], "version": club_version}])
+        if "FROM public.student_club" in sql:
+            return FakeResult([_club_row(version=club_version)])
+        return FakeResult()
+
+    connection = FakeConnection(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, FakeEngine(connection)),
+        FakeStudentReader(),
+        clock=lambda: NOW,
+        uuid_factory=lambda: UUID(WORK_ITEM_ID),
+    )
+    knowledge_payload: dict[str, object] = {
+        "title": "Transcript review expectations",
+        "summary": "How document review works.",
+        "body": "Review extracted fields before confirming a decision.",
+        "category": "Documents",
+        "audience": "student",
+        "status": "published",
+    }
+    core_play_payload: dict[str, object] = {
+        "title": "Missing document recovery",
+        "description": "Recover a blocking enrollment document.",
+        "trigger": "A blocking document is overdue",
+        "audience": "Students with blocking documents",
+        "steps": ["Confirm the reason", "Send resubmission guidance"],
+        "status": "active",
+    }
+    club_payload: dict[str, object] = {
+        "name": "Code Collective",
+        "category": "Technology",
+        "description": "Build useful software with other students.",
+        "contactName": "Jordan Lee",
+        "contactRole": "Club president",
+        "contactChannel": "code@example.edu",
+        "latestUpdate": "Applications are open.",
+        "membershipOpen": True,
+    }
+
+    created_knowledge = asyncio.run(
+        repository.create_knowledge_card(staff_auth(), knowledge_payload, "request-1")
+    )
+    updated_knowledge = asyncio.run(
+        repository.update_knowledge_card(
+            staff_auth(),
+            WORK_ITEM_ID,
+            {**knowledge_payload, "expectedVersion": 1},
+            "request-2",
+        )
+    )
+    created_play = asyncio.run(
+        repository.create_core_play(staff_auth(), core_play_payload, "request-3")
+    )
+    updated_play = asyncio.run(
+        repository.update_core_play(
+            staff_auth(),
+            WORK_ITEM_ID,
+            {**core_play_payload, "expectedVersion": 1},
+            "request-4",
+        )
+    )
+    created_club = asyncio.run(repository.create_club(staff_auth(), club_payload, "request-5"))
+    updated_club = asyncio.run(
+        repository.update_club(
+            staff_auth(),
+            WORK_ITEM_ID,
+            {**club_payload, "expectedVersion": 1},
+            "request-6",
+        )
+    )
+
+    assert created_knowledge["version"] == 1
+    assert updated_knowledge["version"] == 2
+    assert created_play["steps"] == ["Confirm the reason", "Send resubmission guidance"]
+    assert updated_play["version"] == 2
+    assert created_club["version"] == 1
+    assert updated_club["version"] == 2
+    audit_actions = {
+        values["action"]
+        for sql, values in connection.executions
+        if "INSERT INTO public.audit_event" in sql
+    }
+    assert audit_actions == {
+        "staff.knowledge_card_created",
+        "staff.knowledge_card_updated",
+        "staff.core_play_created",
+        "staff.core_play_updated",
+        "staff.club_created",
+        "staff.club_updated",
+    }
+    outbox_events = {
+        values["event_name"]
+        for sql, values in connection.executions
+        if "INSERT INTO public.outbox_event" in sql
+    }
+    assert outbox_events == {f"{action}.v1" for action in audit_actions}
+
+
+def test_club_create_rejects_images_outside_tenant_media_library() -> None:
+    def handler(sql: str, _values: dict[str, object]) -> FakeResult:
+        if "FROM public.media_asset" in sql:
+            return FakeResult()
+        raise AssertionError(sql)
+
+    connection = FakeConnection(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, FakeEngine(connection)), FakeStudentReader()
+    )
+
+    with pytest.raises(ApiError) as raised:
+        asyncio.run(
+            repository.create_club(
+                staff_auth(),
+                {
+                    "name": "Code Collective",
+                    "category": "Technology",
+                    "description": "Build useful software with other students.",
+                    "contactName": "Jordan Lee",
+                    "contactRole": "Club president",
+                    "contactChannel": "code@example.edu",
+                    "latestUpdate": "Applications are open.",
+                    "membershipOpen": True,
+                    "imageUrl": "https://untrusted.example/club.jpg",
+                },
+                "request-7",
+            )
+        )
+
+    assert raised.value.code == "STAFF_CLUB_IMAGE_NOT_FOUND"
+    assert all("INSERT INTO public.student_club" not in sql for sql, _ in connection.executions)
 
 
 def test_manual_work_item_insert_types_status_consistently_for_postgres() -> None:

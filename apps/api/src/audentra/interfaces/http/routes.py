@@ -34,6 +34,7 @@ from audentra.contracts.requests import (
     DraftStaffManagedConfigurationRequest,
     PreviewStaffEdwardRequest,
     RecordStaffCommunicationRequest,
+    RegisterCampusEventRequest,
     RequestStaffAiRefreshRequest,
     RetryStaffCallTranscriptionRequest,
     ReviewStaffDocumentRequest,
@@ -483,6 +484,30 @@ async def get_campus_life(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="student.get_campus_life", auth=auth
+    )
+
+
+@router.post(
+    "/v1/student/campus-life/events/{eventId}/register",
+    status_code=200,
+    response_model=None,
+)
+async def register_campus_event(
+    event_id: Annotated[UUID, Path(alias="eventId")],
+    body: RegisterCampusEventRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.register_campus_event",
+        auth=auth,
+        path_params={"eventId": _uuid(event_id)},
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
     )
 
 
