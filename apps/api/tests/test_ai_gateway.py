@@ -9,6 +9,7 @@ import pytest
 from PIL import Image
 
 from audentra.integrations.ai.gateway import (
+    ACTION_CENTER_ENRICHMENT_JSON_SCHEMA,
     GatewaySettings,
     StudentAIGateway,
     _deterministic_action_center_enrichment,
@@ -121,8 +122,17 @@ def test_action_center_result_redacts_technical_identifiers_from_staff_projectio
     assert result["keyFacts"] == ["Offer status: accepted"]
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_response_format", "requires_parameters"),
+    [
+        ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "json_object", False),
+        ("openai/gpt-5.6-luna-pro", "json_schema", True),
+    ],
+)
 @pytest.mark.anyio
-async def test_action_center_enrichment_uses_portable_json_object_contract() -> None:
+async def test_action_center_enrichment_uses_model_supported_json_contract(
+    model: str, expected_response_format: str, requires_parameters: bool
+) -> None:
     captured: dict[str, object] = {}
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -149,6 +159,15 @@ async def test_action_center_enrichment_uses_portable_json_object_contract() -> 
                                     "nextStep": "Wait for the official transcript.",
                                     "followUpRequired": False,
                                     "confidence": 0.9,
+                                    "conversationSignals": {
+                                        "sentiment": {"label": "Neutral", "score": 0.55},
+                                        "engagement": {"label": "Medium", "score": 0.62},
+                                        "intent": "Completing transcript requirements",
+                                        "likelihoodToProgress": {
+                                            "label": "High",
+                                            "score": 0.82,
+                                        },
+                                    },
                                     "studentSummary": "Alex still needs an official transcript.",
                                     "keyFacts": ["Program: Computer Science"],
                                     "risks": [],
@@ -179,7 +198,7 @@ async def test_action_center_enrichment_uses_portable_json_object_contract() -> 
         gateway = StudentAIGateway(
             GatewaySettings(
                 openrouter_api_key="configured",
-                openrouter_model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                openrouter_model=model,
             ),
             CompletionClient(http),
         )
@@ -190,8 +209,20 @@ async def test_action_center_enrichment_uses_portable_json_object_contract() -> 
             request_id="request-1",
         )
 
-    assert captured["response_format"] == {"type": "json_object"}
-    assert "provider" not in captured
+    response_format = captured["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["type"] == expected_response_format
+    if expected_response_format == "json_schema":
+        json_schema = response_format["json_schema"]
+        assert json_schema["name"] == "action_center_enrichment"
+        assert json_schema["strict"] is True
+        assert json_schema["schema"] == ACTION_CENTER_ENRICHMENT_JSON_SCHEMA
+    else:
+        assert response_format == {"type": "json_object"}
+    if requires_parameters:
+        assert captured["provider"] == {"require_parameters": True}
+    else:
+        assert "provider" not in captured
     messages = captured["messages"]
     assert isinstance(messages, list)
     system_prompt = messages[0]["content"]
@@ -201,6 +232,10 @@ async def test_action_center_enrichment_uses_portable_json_object_contract() -> 
     assert result["provider"] == "openrouter"
     assert result["taskSummary"] == "Confirm Alex's transcript plan."
     assert result["studentSummary"] == "Alex still needs an official transcript."
+    assert result["conversationSignals"]["likelihoodToProgress"] == {
+        "label": "High",
+        "score": 0.82,
+    }
 
 
 class _StaticDocumentPromptRuntime:
@@ -415,7 +450,8 @@ async def test_provider_history_is_quoted_as_untrusted_context() -> None:
     [
         ("qwen/qwen3.7-flash", "json_object", False),
         ("qwen/qwen3.7-flash:free", "json_object", False),
-        ("openai/gpt-5.6-luna-pro", "json_object", False),
+        ("openai/gpt-5.6-luna", "json_schema", True),
+        ("openai/gpt-5.6-luna-pro", "json_schema", True),
         ("openai/gpt-4o-mini", "json_schema", True),
     ],
 )

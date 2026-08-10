@@ -602,6 +602,17 @@ class PostgresPlatformService:
                 payload,
                 call.request_id,
             )
+        if operation == "student.defer_experience_updates":
+            if self.repository.managed is None:
+                raise NotFoundError(
+                    "STUDENT_EXPERIENCE_UPDATE_NOT_FOUND",
+                    "The student experience update was not found",
+                )
+            return await self.repository.managed.defer_student_updates(
+                auth,
+                payload,
+                call.request_id,
+            )
         if operation == "student.get_onboarding":
             return await portal.get_student_onboarding(auth)
         if operation == "student.update_onboarding":
@@ -632,6 +643,22 @@ class PostgresPlatformService:
             )
         if operation == "student.list_messages":
             return await portal.get_student_messages(auth)
+        if operation == "student.get_realtime_events":
+            raw_cursor = payload.get("afterCursor")
+            raw_limit = payload.get("limit", 100)
+            if raw_cursor is not None and (
+                isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int)
+            ):
+                raise BadRequestError(
+                    "INVALID_EVENT_CURSOR",
+                    "The realtime event cursor must be a non-negative integer",
+                )
+            if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+                raise BadRequestError(
+                    "INVALID_EVENT_LIMIT",
+                    "The realtime event limit must be an integer",
+                )
+            return await portal.get_student_realtime_events(auth, raw_cursor, raw_limit)
         if operation == "student.mark_message_read":
             return await portal.mark_student_message_read(
                 auth, self._path(call, "messageId", "id", "message_id"), call.request_id
@@ -933,6 +960,11 @@ class PostgresPlatformService:
                 payload,
                 call.request_id,
             )
+        if operation == "staff.get_document_content":
+            return await self._get_staff_document_content(
+                auth,
+                self._path(call, "documentId", "id", "document_id"),
+            )
         raise ApiError(
             500,
             "PLATFORM_OPERATION_NOT_IMPLEMENTED",
@@ -1211,6 +1243,27 @@ class PostgresPlatformService:
             media_type=str(reference["mimeType"]),
             file_name=str(reference["fileName"]),
             cache_control=cache_control,
+        )
+
+    async def _get_staff_document_content(
+        self,
+        auth: AuthContext,
+        document_id: str,
+    ) -> BinaryPayload:
+        reference = await self.repository.staff.get_document_content_reference(auth, document_id)
+        try:
+            content = await self.storage.get(str(reference["storageKey"]))
+        except (OSError, StorageError) as error:
+            raise ApiError(
+                503,
+                "DOCUMENT_STORAGE_UNAVAILABLE",
+                "The document content is temporarily unavailable",
+            ) from error
+        return BinaryPayload(
+            data=content,
+            media_type=str(reference["mimeType"]),
+            file_name=str(reference["fileName"]),
+            cache_control="private, no-store",
         )
 
     async def _get_document_profile_photo(

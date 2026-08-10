@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.infrastructure.postgres.journey_routing import (
+    reconcile_student_journey_routes,
+)
 
 JsonDict = dict[str, Any]
 ManagedConfigurationKind = Literal["journeys", "campus_life", "academics"]
@@ -51,6 +54,21 @@ _CORE_ONBOARDING_STEPS = frozenset(
 )
 _TERMINAL_REQUIREMENT_STATUSES = frozenset({"not_applicable", "completed", "waived", "expired"})
 _SUPPORTED_UPLOAD_MIME_TYPES = frozenset({"application/pdf", "image/jpeg", "image/png"})
+_ROUTE_OPERATORS = frozenset(
+    {
+        "equals",
+        "not_equals",
+        "one_of",
+        "none_of",
+        "contains",
+        "not_contains",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+    }
+)
+_ROUTABLE_FIELD_TYPES = frozenset({"checkbox", "single_select", "multiple_select", "number"})
 _INTERACTION_TYPE_ALIASES = {
     "information": "information",
     "approval": "approval",
@@ -432,6 +450,136 @@ class PostgresManagedConfigurationRepository:
                 "requirementSlug": requirement_slug,
             }
 
+    async def defer_student_updates(
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+    ) -> JsonDict:
+        """Defer a displayed update bundle in one version-checked transaction."""
+
+        self._require_student(auth)
+        raw_updates = payload.get("updates")
+        if not isinstance(raw_updates, Sequence) or isinstance(raw_updates, (str, bytes)):
+            raise BadRequestError(
+                "INVALID_EXPERIENCE_UPDATE_BATCH",
+                "Choose one or more updates to defer",
+            )
+        requested: list[tuple[str, int]] = []
+        for raw_update in raw_updates:
+            if not isinstance(raw_update, Mapping):
+                raise BadRequestError(
+                    "INVALID_EXPERIENCE_UPDATE_BATCH",
+                    "Every update needs an identifier and version",
+                )
+            try:
+                update_id = str(_uuid(raw_update.get("id")))
+            except BadRequestError as error:
+                raise BadRequestError(
+                    "INVALID_EXPERIENCE_UPDATE_BATCH",
+                    "Every update needs a valid identifier",
+                ) from error
+            requested.append(
+                (
+                    update_id,
+                    _positive_integer(raw_update.get("expectedVersion"), "expectedVersion"),
+                )
+            )
+        if not requested or len(requested) > 20 or len({item[0] for item in requested}) != len(
+            requested
+        ):
+            raise BadRequestError(
+                "INVALID_EXPERIENCE_UPDATE_BATCH",
+                "Choose up to twenty different updates to defer",
+            )
+
+        update_ids = [_uuid(update_id) for update_id, _version in requested]
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, requirement_id, status, version
+                    FROM student_experience_update
+                    WHERE tenant_id=:tenant_id
+                      AND student_id=:student_id
+                      AND id = ANY(:update_ids)
+                    ORDER BY id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(auth.student_id),
+                    "update_ids": update_ids,
+                },
+            )
+            rows_by_id = {str(row["id"]): row for row in result.mappings().all()}
+            if len(rows_by_id) != len(requested):
+                raise NotFoundError(
+                    "STUDENT_EXPERIENCE_UPDATE_NOT_FOUND",
+                    "One or more student experience updates were not found",
+                )
+            for update_id, expected_version in requested:
+                row = rows_by_id[update_id]
+                if int(row["version"]) != expected_version:
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "An update changed in another session",
+                    )
+                if row["status"] == "acknowledged":
+                    raise ConflictError(
+                        "EXPERIENCE_UPDATE_ALREADY_ACKNOWLEDGED",
+                        "An update has already been acknowledged",
+                    )
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE student_experience_update
+                    SET status='deferred',
+                        acknowledged_at=NULL,
+                        deferred_at=NOW(),
+                        version=version+1,
+                        updated_at=NOW()
+                    WHERE tenant_id=:tenant_id
+                      AND student_id=:student_id
+                      AND id = ANY(:update_ids)
+                    RETURNING id, requirement_id, status, version
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(auth.student_id),
+                    "update_ids": update_ids,
+                },
+            )
+            updated_by_id = {str(row["id"]): row for row in updated.mappings().all()}
+            decisions: list[JsonDict] = []
+            for update_id, _expected_version in requested:
+                row = updated_by_id[update_id]
+                requirement_slug = await self._requirement_slug(
+                    connection,
+                    auth,
+                    row.get("requirement_id"),
+                )
+                version = int(row["version"])
+                await self._insert_student_decision_audit(
+                    connection,
+                    auth,
+                    update_id,
+                    "later",
+                    version,
+                    request_id,
+                )
+                decisions.append(
+                    {
+                        "id": update_id,
+                        "status": str(row["status"]),
+                        "version": version,
+                        "requirementSlug": requirement_slug,
+                    }
+                )
+            return {"updates": decisions}
+
     async def _active_row(
         self,
         connection: AsyncConnection,
@@ -634,12 +782,14 @@ class PostgresManagedConfigurationRepository:
                     """
                     INSERT INTO requirement_definition_version (
                       id, tenant_id, code, title, description, blocking,
-                      priority, display_order, depends_on_codes, due_offset_days, version,
+                      priority, display_order, depends_on_codes, activation_rules,
+                      due_offset_days, version,
                       submission_type, responsible_office, flow_kind,
                       interaction_type, input_config, created_at, updated_at
                     ) VALUES (
                       :id, :tenant_id, :code, :title, :description, :blocking,
                       :priority, :display_order, CAST(:depends_on_codes AS text[]),
+                      CAST(:activation_rules AS jsonb),
                       :due_offset_days,
                       :version, :submission_type, :responsible_office, :flow_kind,
                       :interaction_type, CAST(:input_config AS jsonb), NOW(), NOW()
@@ -656,6 +806,7 @@ class PostgresManagedConfigurationRepository:
                     "priority": task["priority"],
                     "display_order": task["displayOrder"],
                     "depends_on_codes": task["dependsOn"],
+                    "activation_rules": _json(task["activation"]),
                     "due_offset_days": task["dueOffsetDays"],
                     "version": int(result.scalar_one()) + 1,
                     "submission_type": task["submissionType"],
@@ -751,7 +902,7 @@ class PostgresManagedConfigurationRepository:
                       AND previous_definition.code=:code
                       AND requirement.retired_at IS NULL
                       AND requirement.status NOT IN (
-                        'not_applicable', 'completed', 'waived', 'expired'
+                        'completed', 'waived', 'expired'
                       )
                     """
                 ),
@@ -955,66 +1106,13 @@ class PostgresManagedConfigurationRepository:
                     },
                 )
                 inserted += 1
-        await connection.execute(
-            text(
-                """
-                WITH desired AS (
-                  SELECT candidate.id,
-                    CASE
-                      WHEN EXISTS (
-                        SELECT 1
-                        FROM unnest(current_definition.depends_on_codes) dependency(code)
-                        WHERE NOT EXISTS (
-                          SELECT 1
-                          FROM student_requirement prerequisite
-                          JOIN requirement_definition_version prerequisite_definition
-                            ON prerequisite_definition.id=
-                               prerequisite.requirement_definition_version_id
-                           AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                          WHERE prerequisite.tenant_id=candidate.tenant_id
-                            AND prerequisite.journey_id=candidate.journey_id
-                            AND prerequisite.retired_at IS NULL
-                            AND prerequisite_definition.code=dependency.code
-                            AND prerequisite.status IN (
-                              'not_applicable','completed','waived'
-                            )
-                        )
-                      ) THEN 'blocked'
-                      WHEN candidate.progress_percent>0 THEN 'in_progress'
-                      ELSE 'ready'
-                    END AS status
-                  FROM student_requirement candidate
-                  JOIN enrollment_journey journey
-                    ON journey.id=candidate.journey_id
-                   AND journey.tenant_id=candidate.tenant_id
-                  JOIN requirement_definition_version evidence_definition
-                    ON evidence_definition.id=
-                       candidate.requirement_definition_version_id
-                   AND evidence_definition.tenant_id=candidate.tenant_id
-                  JOIN journey_requirement_definition current_link
-                    ON current_link.journey_definition_version_id=
-                       journey.journey_definition_version_id
-                  JOIN requirement_definition_version current_definition
-                    ON current_definition.id=current_link.requirement_definition_version_id
-                   AND current_definition.tenant_id=candidate.tenant_id
-                   AND current_definition.code=evidence_definition.code
-                  WHERE candidate.tenant_id=:tenant_id
-                    AND candidate.retired_at IS NULL
-                    AND candidate.status IN ('blocked','ready','in_progress','rejected')
-                )
-                UPDATE student_requirement requirement
-                SET status=desired.status, version=requirement.version+1,
-                    updated_at=:published_at
-                FROM desired
-                WHERE requirement.id=desired.id
-                  AND requirement.status<>desired.status
-                """
-            ),
-            {
-                "tenant_id": _uuid(auth.tenant_id),
-                "published_at": published_at,
-            },
-        )
+        for journey in journeys:
+            await reconcile_student_journey_routes(
+                connection,
+                tenant_id=_uuid(auth.tenant_id),
+                student_id=journey["student_id"],
+                journey_id=journey["id"],
+            )
         await connection.execute(
             text(
                 """
@@ -1249,6 +1347,7 @@ class PostgresManagedConfigurationRepository:
         )
         rows = registrations.mappings().all()
         for registration in rows:
+            message_id = self._uuid_factory()
             await connection.execute(
                 text(
                     """
@@ -1259,15 +1358,46 @@ class PostgresManagedConfigurationRepository:
                       :id, :tenant_id, :student_id, :subject, :body,
                       'Campus Life', :kind, '/campus-life', NOW(), NULL, NOW()
                     )
+                """
+                ),
+                {
+                    "id": message_id,
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": registration["student_id"],
+                    "subject": subject[:240],
+                    "body": body,
+                    "kind": kind,
+                },
+            )
+            # A content publication must not refresh the Campus Life page under a
+            # student. The event only invalidates the inbox/bootstrap so an
+            # enrolled student sees the cancellation or revision notification;
+            # their next explicit Campus Life refresh reads the canonical list.
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_realtime_event (
+                      id, tenant_id, student_id, event_type, resource_type,
+                      resource_id, payload, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, 'student.message.created',
+                      'student_message', :resource_id, CAST(:payload AS jsonb), NOW()
+                    )
                     """
                 ),
                 {
                     "id": self._uuid_factory(),
                     "tenant_id": _uuid(auth.tenant_id),
                     "student_id": registration["student_id"],
-                    "subject": subject[:240],
-                    "body": body,
-                    "kind": kind,
+                    "resource_id": message_id,
+                    "payload": _json(
+                        {
+                            "messageId": str(message_id),
+                            "kind": kind,
+                            "href": "/campus-life",
+                            "invalidate": ["messages", "bootstrap"],
+                        }
+                    ),
                 },
             )
         if rows:
@@ -1809,6 +1939,7 @@ def materialized_journey_tasks(
                 task_code=code,
                 materialized=not core_onboarding_task and validate_materialized_inputs,
             )
+            activation = _journey_activation(raw_task, task_code=code)
             title = _required_string(raw_task.get("title"), "journey task title", maximum=180)
             description = _required_string(
                 raw_task.get("description"),
@@ -1861,6 +1992,7 @@ def materialized_journey_tasks(
                     "priority": priority,
                     "displayOrder": display_orders[flow_kind],
                     "dependsOn": list(raw_dependencies),
+                    "activation": activation,
                     "dueOffsetDays": due_offset,
                     "initialProgressPercent": initial_progress,
                     "submissionType": submission_type,
@@ -1905,6 +2037,9 @@ def materialized_journey_tasks(
             else:
                 continue
         task["dependsOn"] = dependencies
+    task_by_code = {str(task["code"]): task for task in tasks}
+    for task in tasks:
+        _validate_journey_activation(task, task_by_code)
     active_dependencies = {
         str(task["code"]): cast(list[str], task["dependsOn"])
         for task in tasks
@@ -1939,6 +2074,251 @@ def materialized_journey_tasks(
     )
 
 
+def _journey_activation(raw_task: Mapping[str, Any], *, task_code: str) -> JsonDict:
+    raw_activation = raw_task.get("activation")
+    if raw_activation is None:
+        return {"match": "all", "rules": []}
+    if not isinstance(raw_activation, Mapping):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation must be an object",
+        )
+    activation = _mapping(raw_activation)
+    match = str(activation.get("match") or "all")
+    if match not in {"all", "any"}:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation match must be all or any",
+        )
+    raw_rules = activation.get("rules", [])
+    if not isinstance(raw_rules, Sequence) or isinstance(raw_rules, (str, bytes)):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation rules must be a list",
+        )
+    if len(raw_rules) > 20:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} has too many activation rules",
+        )
+    rules: list[JsonDict] = []
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, Mapping):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} has an invalid activation rule",
+            )
+        rule = _mapping(raw_rule)
+        source_task_id = _required_string(
+            rule.get("source_task", rule.get("sourceTaskId")),
+            "activation source task",
+            maximum=100,
+        )
+        field_id = _required_string(
+            rule.get("field", rule.get("fieldId")),
+            "activation answer field",
+            maximum=100,
+        )
+        operator = str(rule.get("operator") or "equals")
+        value = rule.get("value")
+        if operator not in _ROUTE_OPERATORS:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} has an unsupported activation operator",
+            )
+        if not _TASK_CODE.fullmatch(source_task_id):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation source is invalid",
+            )
+        if field_id != "$answer" and not _TASK_CODE.fullmatch(field_id):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation field is invalid",
+            )
+        if isinstance(value, str):
+            value = value.strip()
+            if not value or len(value) > 200:
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} activation value is invalid",
+                )
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            normalized_values: list[str] = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip() or len(item.strip()) > 200:
+                    raise BadRequestError(
+                        "INVALID_MANAGED_JOURNEY_ROUTE",
+                        f"Journey task {task_code} activation case value is invalid",
+                    )
+                normalized = item.strip()
+                if normalized in normalized_values:
+                    raise BadRequestError(
+                        "INVALID_MANAGED_JOURNEY_ROUTE",
+                        f"Journey task {task_code} activation case values must be unique",
+                    )
+                normalized_values.append(normalized)
+            if not normalized_values or len(normalized_values) > 100:
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} activation case values are invalid",
+                )
+            value = normalized_values
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = _bounded_float(
+                value,
+                "activation threshold",
+                minimum=-1_000_000_000_000,
+                maximum=1_000_000_000_000,
+            )
+        elif not isinstance(value, bool):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation value has an unsupported type",
+            )
+        rules.append(
+            {
+                "sourceTaskId": source_task_id,
+                "fieldId": field_id,
+                "operator": operator,
+                "value": value,
+            }
+        )
+    return {"match": match, "rules": rules}
+
+
+def _journey_route_fields(task: Mapping[str, Any]) -> dict[str, JsonDict]:
+    interaction_type = str(task.get("interactionType") or "")
+    input_config = _mapping(task.get("inputConfig"))
+    if interaction_type in {"single_select", "multiple_select"}:
+        return {
+            "$answer": {
+                "fieldType": interaction_type,
+                "options": cast(list[str], input_config.get("options", [])),
+            }
+        }
+    if interaction_type not in {"form", "selection_flow"}:
+        return {}
+    form = _mapping(input_config.get("form"))
+    pages = _mapping_list(form.get("pages"))
+    fields = (
+        [field for page in pages for field in _mapping_list(page.get("fields"))]
+        if pages
+        else _mapping_list(input_config.get("fields" if interaction_type == "form" else "flow"))
+    )
+    return {
+        str(field["id"]): {
+            "fieldType": str(field.get("field_type") or ""),
+            "options": cast(list[str], field.get("options", [])),
+            "minimum": field.get("minimum"),
+            "maximum": field.get("maximum"),
+        }
+        for field in fields
+        if str(field.get("field_type") or "") in _ROUTABLE_FIELD_TYPES
+        and (str(field.get("field_type") or "") == "checkbox" or field.get("required") is True)
+    }
+
+
+def _validate_journey_activation(
+    task: Mapping[str, Any],
+    task_by_code: Mapping[str, Mapping[str, Any]],
+) -> None:
+    activation = _mapping(task.get("activation"))
+    rules = _mapping_list(activation.get("rules"))
+    if not rules:
+        return
+    task_code = str(task["code"])
+    dependencies = set(cast(list[str], task.get("dependsOn", [])))
+    signatures: set[str] = set()
+    for rule in rules:
+        source_task_id = str(rule.get("sourceTaskId") or "")
+        field_id = str(rule.get("fieldId") or "")
+        operator = str(rule.get("operator") or "")
+        value = rule.get("value")
+        if source_task_id not in dependencies:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_SOURCE_NOT_PREREQUISITE",
+                f"Journey task {task_code} route source {source_task_id} "
+                "must also be a prerequisite",
+            )
+        source_task = task_by_code.get(source_task_id)
+        if source_task is None or source_task.get("materialized") is not True:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_SOURCE_NOT_FOUND",
+                f"Journey task {task_code} route source {source_task_id} is unavailable",
+            )
+        route_field = _journey_route_fields(source_task).get(field_id)
+        if route_field is None:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_FIELD_NOT_FOUND",
+                f"Journey task {task_code} route field {field_id} is not a "
+                f"selectable answer on {source_task_id}",
+            )
+        field_type = str(route_field["fieldType"])
+        if field_type == "multiple_select":
+            expected_operators = {"contains", "not_contains"}
+        elif field_type == "single_select":
+            expected_operators = {"equals", "not_equals", "one_of", "none_of"}
+        elif field_type == "number":
+            expected_operators = {
+                "equals",
+                "not_equals",
+                "greater_than",
+                "greater_than_or_equal",
+                "less_than",
+                "less_than_or_equal",
+            }
+        else:
+            expected_operators = {"equals", "not_equals"}
+        if operator not in expected_operators:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} route operator does not match field {field_id}",
+            )
+        if field_type == "checkbox":
+            if not isinstance(value, bool):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route field {field_id} requires a yes/no value",
+                )
+        elif field_type == "number":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route field {field_id} requires a number",
+                )
+            minimum = route_field.get("minimum")
+            maximum = route_field.get("maximum")
+            if (isinstance(minimum, (int, float)) and float(value) < float(minimum)) or (
+                isinstance(maximum, (int, float)) and float(value) > float(maximum)
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route threshold is outside field {field_id}",
+                )
+        else:
+            options = cast(list[str], route_field.get("options", []))
+            values = value if isinstance(value, list) else [value]
+            if (
+                not values
+                or any(not isinstance(item, str) or item not in options for item in values)
+                or (operator in {"one_of", "none_of"} and not isinstance(value, list))
+                or (operator not in {"one_of", "none_of"} and not isinstance(value, str))
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route value is not a published "
+                    f"option for {field_id}",
+                )
+        signature = _json(rule)
+        if signature in signatures:
+            raise BadRequestError(
+                "DUPLICATE_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} contains a duplicate activation rule",
+            )
+        signatures.add(signature)
+
+
 def _journey_task_material_signature(task: Mapping[str, Any]) -> str:
     return _json(
         {
@@ -1949,6 +2329,7 @@ def _journey_task_material_signature(task: Mapping[str, Any]) -> str:
             "required": task.get("required"),
             "priority": task.get("priority"),
             "dependsOn": task.get("dependsOn"),
+            "activation": task.get("activation"),
             "dueOffsetDays": task.get("dueOffsetDays"),
             "initialProgressPercent": task.get("initialProgressPercent"),
             "submissionType": task.get("submissionType"),
@@ -2042,6 +2423,16 @@ def _journey_input_config(
                 f"Journey task {task_code} form fields require a form interaction",
             )
         config["fields"] = _journey_input_flow(fields_value, task_code=task_code)
+
+    form_value = config.get("form")
+    if form_value is not None:
+        if interaction_type not in {"form", "selection_flow"}:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} multi-page form requires a form "
+                "or guided-choice interaction",
+            )
+        config["form"] = _journey_input_form(form_value, task_code=task_code)
 
     options_value = config.pop("options", raw_task.get("options"))
     if options_value is not None:
@@ -2265,6 +2656,7 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
             "email",
             "phone",
             "date",
+            "number",
             "checkbox",
             "single_select",
             "multiple_select",
@@ -2313,6 +2705,34 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
                     f"Journey task {task_code} field {field_id} maximum selections "
                     "exceeds its options",
                 )
+        number_constraints = {
+            key: field.get(key)
+            for key in ("minimum", "maximum", "step")
+            if field.get(key) is not None
+        }
+        if number_constraints and field_type != "number":
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} numeric limits require a number field",
+            )
+        if field_type == "number":
+            for key, raw_value in number_constraints.items():
+                mapped[key] = _bounded_float(
+                    raw_value,
+                    f"{field_id} {key}",
+                    minimum=0 if key == "step" else -1_000_000_000_000,
+                    maximum=1_000_000_000_000,
+                    exclusive_minimum=key == "step",
+                )
+            if (
+                "minimum" in mapped
+                and "maximum" in mapped
+                and float(mapped["minimum"]) > float(mapped["maximum"])
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_INPUT",
+                    f"Journey task {task_code} field {field_id} minimum exceeds maximum",
+                )
         if (
             field_type in {"single_select", "multiple_select"}
             and len(cast(list[str], mapped.get("options", []))) < 2
@@ -2342,6 +2762,69 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
             f"Journey task {task_code} has too many choice-flow fields",
         )
     return fields
+
+
+def _journey_input_form(value: object, *, task_code: str) -> JsonDict:
+    if not isinstance(value, Mapping):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} multi-page form must be an object",
+        )
+    form = _mapping(value)
+    version = form.get("version", 1)
+    if version != 1:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} has an unsupported form version",
+        )
+    raw_pages = form.get("pages")
+    if not isinstance(raw_pages, Sequence) or isinstance(raw_pages, (str, bytes)):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} form pages must be a list",
+        )
+    if not raw_pages or len(raw_pages) > 20:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} must define between 1 and 20 form pages",
+        )
+
+    pages: list[JsonDict] = []
+    page_ids: set[str] = set()
+    field_ids: set[str] = set()
+    for raw_page in raw_pages:
+        if not isinstance(raw_page, Mapping):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has an invalid form page",
+            )
+        page = _mapping(raw_page)
+        page_id = _required_string(page.get("id"), "form page id", maximum=100)
+        if not _TASK_CODE.fullmatch(page_id) or page_id in page_ids:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has an invalid or duplicate form page id",
+            )
+        page_ids.add(page_id)
+        fields = _journey_input_flow(page.get("fields"), task_code=task_code)
+        duplicate_field = next((field["id"] for field in fields if field["id"] in field_ids), None)
+        if duplicate_field is not None:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has duplicate form field {duplicate_field} across pages",
+            )
+        field_ids.update(str(field["id"]) for field in fields)
+        mapped: JsonDict = {
+            "id": page_id,
+            "title": _required_string(page.get("title"), "form page title", maximum=180),
+            "fields": fields,
+        }
+        description = _optional_string(page.get("description"), maximum=600)
+        if description is not None:
+            mapped["description"] = description
+        pages.append(mapped)
+
+    return {"version": 1, "pages": pages}
 
 
 def campus_events(document: Mapping[str, Any]) -> list[JsonDict]:

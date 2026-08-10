@@ -500,6 +500,28 @@ def test_dispatch_routes_every_direct_operation_with_auth_and_contract_arguments
         assert len(rig.signed.calls) == 1
 
 
+def test_dispatch_defers_a_grouped_student_experience_update_bundle() -> None:
+    rig = _rig()
+    managed = RecordingRepository()
+    object.__setattr__(rig.service.repository, "managed", cast(Any, managed))
+    payload = {
+        "updates": [
+            {"id": "20000000-0000-7000-8000-000000000001", "expectedVersion": 4},
+            {"id": "20000000-0000-7000-8000-000000000002", "expectedVersion": 7},
+        ]
+    }
+
+    result = asyncio.run(
+        rig.service.dispatch(_call("student.defer_experience_updates", payload=payload))
+    )
+
+    assert result == {"method": "defer_student_updates"}
+    assert len(managed.calls) == 1
+    routed = managed.calls[0]
+    assert routed.name == "defer_student_updates"
+    assert routed.args == (AUTH, payload, "request-1")
+
+
 def test_document_upload_persists_original_before_claiming_processing() -> None:
     rig = _rig()
     rig.portal.responses.update(

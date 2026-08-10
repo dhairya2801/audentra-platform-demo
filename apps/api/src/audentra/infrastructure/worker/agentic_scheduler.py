@@ -184,7 +184,7 @@ class AgenticWorkflowScheduler:
                         "message": message,
                     },
                 )
-                await connection.execute(
+                notification_result = await connection.execute(
                     text(
                         """
                         INSERT INTO public.staff_notification (
@@ -197,6 +197,7 @@ class AgenticWorkflowScheduler:
                           :dedupe_key, NOW()
                         )
                         ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                        RETURNING id
                         """
                     ),
                     {
@@ -215,6 +216,44 @@ class AgenticWorkflowScheduler:
                         ],
                     },
                 )
+                notification = notification_result.mappings().first()
+                if notification is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO public.staff_realtime_event (
+                              id, tenant_id, event_type, resource_type, resource_id,
+                              work_item_id, staff_member_id, team_component, tenant_wide,
+                              payload, created_at
+                            ) VALUES (
+                              :id, :tenant_id, 'staff.notification.created',
+                              'staff_notification', :notification_id, :work_item_id,
+                              :staff_member_id, :team_component, false,
+                              CAST(:payload AS jsonb), NOW()
+                            )
+                            """
+                        ),
+                        {
+                            "id": self._uuid_factory(),
+                            "tenant_id": item["tenant_id"],
+                            "notification_id": notification["id"],
+                            "work_item_id": item["id"],
+                            "staff_member_id": item["assignee_id"],
+                            "team_component": (
+                                None if item["assignee_id"] is not None else item["component"]
+                            ),
+                            "payload": _json(
+                                {
+                                    "notificationId": str(notification["id"]),
+                                    "workItemId": str(item["id"]),
+                                    "kind": reason,
+                                    "title": title,
+                                    "body": f"{item['title']}: {message}"[:2_000],
+                                    "invalidate": ["notifications", "workspace"],
+                                }
+                            ),
+                        },
+                    )
         return len(due_items)
 
     async def _run_action_rules(self) -> int:

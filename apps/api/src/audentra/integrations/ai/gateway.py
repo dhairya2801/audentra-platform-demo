@@ -88,6 +88,7 @@ ACTION_CENTER_ENRICHMENT_JSON_SCHEMA: dict[str, Any] = {
         "nextStep",
         "followUpRequired",
         "confidence",
+        "conversationSignals",
         "studentSummary",
         "keyFacts",
         "risks",
@@ -125,6 +126,41 @@ ACTION_CENTER_ENRICHMENT_JSON_SCHEMA: dict[str, Any] = {
         "nextStep": {"type": ["string", "null"], "maxLength": 800},
         "followUpRequired": {"type": "boolean"},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "conversationSignals": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["sentiment", "engagement", "intent", "likelihoodToProgress"],
+            "properties": {
+                "sentiment": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["label", "score"],
+                    "properties": {
+                        "label": {"type": "string", "maxLength": 80},
+                        "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                },
+                "engagement": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["label", "score"],
+                    "properties": {
+                        "label": {"type": "string", "maxLength": 80},
+                        "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                },
+                "intent": {"type": "string", "maxLength": 160},
+                "likelihoodToProgress": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["label", "score"],
+                    "properties": {
+                        "label": {"type": "string", "maxLength": 80},
+                        "score": {"type": "number", "minimum": 0, "maximum": 1},
+                    },
+                },
+            },
+        },
         "studentSummary": {"type": "string", "maxLength": 1600},
         "keyFacts": {
             "type": "array",
@@ -287,6 +323,8 @@ class StudentAIGateway:
                 "do not invent activity, and do not expose sensitive identifiers. Produce "
                 "(1) a task-specific summary, objective, success definition, and suggested "
                 "approach, (2) the current result of the selected interaction across channels, "
+                "including evidence-grounded sentiment, engagement, intent, and likelihood to "
+                "progress signals, "
                 "and (3) a concise canonical student summary covering enrollment/onboarding "
                 "progress, open work, risks, and next steps. Newer evidence overrides stale "
                 "evidence only "
@@ -302,16 +340,30 @@ class StudentAIGateway:
             "Markdown. Its output must conform to this code-owned Action Center schema; do not "
             f"add metadata or omit keys: {output_schema}"
         )
+        if _supports_strict_json_schema(runtime.model):
+            structured_output: dict[str, Any] = {
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "action_center_enrichment",
+                        "strict": True,
+                        "schema": ACTION_CENTER_ENRICHMENT_JSON_SCHEMA,
+                    },
+                },
+                # Do not silently route a schema-capable operation through a
+                # provider that does not honor its declared output contract.
+                "provider": {"require_parameters": True},
+            }
+        else:
+            # Keep Action Center portable for tenant-selected models that do
+            # not support strict JSON Schema. Normalization below remains the
+            # application validation boundary for this compatibility path.
+            structured_output = {"response_format": {"type": "json_object"}}
         body = {
             "model": runtime.model,
             "temperature": runtime.temperature,
             "max_tokens": runtime.max_output_tokens,
-            # Action Center is deliberately portable across a tenant's selected
-            # OpenRouter models. Some capable reasoning models accept JSON-object
-            # mode but do not advertise strict JSON-schema routing, which otherwise
-            # makes OpenRouter reject the request before inference. The code-owned
-            # prompt contract plus normalization below remain the validation boundary.
-            "response_format": {"type": "json_object"},
+            **structured_output,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {
@@ -844,7 +896,7 @@ class StudentAIGateway:
             "y, width, height, confidence. Use null for unknown nullable scalars and [] for empty "
             "arrays. Never wrap the result in metadata or use singular warning."
         )
-        if _supports_strict_document_schema(runtime.model):
+        if _supports_strict_json_schema(runtime.model):
             structured_output: dict[str, Any] = {
                 "response_format": {
                     "type": "json_schema",
@@ -857,9 +909,9 @@ class StudentAIGateway:
                 "provider": {"require_parameters": True},
             }
         else:
-            # OpenRouter routes portable/unknown models (including Luna) more
-            # reliably with JSON mode. The response is still parsed,
-            # normalized, and validated by our extraction code below.
+            # OpenRouter routes portable/unknown models more reliably with
+            # JSON mode. The response is still parsed, normalized, and
+            # validated by our extraction code below.
             structured_output = {"response_format": {"type": "json_object"}}
             if _uses_qwen_37_flash_json_mode(runtime.model):
                 structured_output["reasoning"] = {"effort": "none", "exclude": True}
@@ -948,10 +1000,19 @@ def _uses_qwen_37_flash_json_mode(model: str) -> bool:
     return model == base_model or model.startswith(f"{base_model}:")
 
 
-def _supports_strict_document_schema(model: str) -> bool:
-    """Return true only for document routes verified with strict schema mode."""
+_STRICT_JSON_SCHEMA_MODELS = frozenset(
+    {
+        "openai/gpt-4o-mini",
+        "openai/gpt-5.6-luna",
+        "openai/gpt-5.6-luna-pro",
+    }
+)
 
-    return model in {"openai/gpt-4o-mini"}
+
+def _supports_strict_json_schema(model: str) -> bool:
+    """Return true only for OpenRouter routes verified for strict JSON Schema."""
+
+    return model in _STRICT_JSON_SCHEMA_MODELS
 
 
 def _normalize_action_center_enrichment(
@@ -973,6 +1034,10 @@ def _normalize_action_center_enrichment(
         normalized_confidence = min(1.0, max(0.0, float(confidence)))
     else:
         normalized_confidence = 0.5
+    raw_signals = value.get("conversationSignals")
+    signals = raw_signals if isinstance(raw_signals, Mapping) else {}
+    fallback_signals = fallback["conversationSignals"]
+    assert isinstance(fallback_signals, Mapping)
     return {
         "taskSummary": _bounded_ai_text(value.get("taskSummary"), 1_200) or fallback["taskSummary"],
         "whyThisMatters": _bounded_ai_text(value.get("whyThisMatters"), 800)
@@ -996,6 +1061,20 @@ def _normalize_action_center_enrichment(
         "nextStep": _bounded_ai_text(value.get("nextStep"), 800) or None,
         "followUpRequired": bool(value.get("followUpRequired")),
         "confidence": normalized_confidence,
+        "conversationSignals": {
+            "sentiment": _normalize_conversation_signal_metric(
+                signals.get("sentiment"), fallback_signals["sentiment"]
+            ),
+            "engagement": _normalize_conversation_signal_metric(
+                signals.get("engagement"), fallback_signals["engagement"]
+            ),
+            "intent": _bounded_ai_text(signals.get("intent"), 160)
+            or str(fallback_signals["intent"]),
+            "likelihoodToProgress": _normalize_conversation_signal_metric(
+                signals.get("likelihoodToProgress"),
+                fallback_signals["likelihoodToProgress"],
+            ),
+        },
         "studentSummary": _bounded_ai_text(value.get("studentSummary"), 1_600)
         or fallback["studentSummary"],
         "keyFacts": _bounded_ai_list(value.get("keyFacts"), 8, 300),
@@ -1052,6 +1131,30 @@ def _deterministic_action_center_enrichment(context: Mapping[str, Any]) -> dict[
     )
     follow_up_required = task_status in {"follow_up_required", "blocked"} or (
         bool(latest_outbound) and not latest_inbound
+    )
+    inbound_count = sum(1 for item in communications if item.get("direction") == "inbound")
+    if inbound_count:
+        engagement_score = min(0.95, 0.6 + (inbound_count * 0.08))
+        engagement_label = "High" if engagement_score >= 0.75 else "Medium"
+        intent = "Responding to enrollment outreach"
+    elif communications:
+        engagement_score = 0.35
+        engagement_label = "Low"
+        intent = "Awaiting student response"
+    else:
+        engagement_score = 0.2
+        engagement_label = "Not enough evidence"
+        intent = "No communication evidence yet"
+    if task_status == "done":
+        likelihood_score = 0.95
+    elif task_status == "blocked":
+        likelihood_score = 0.25
+    elif latest_inbound:
+        likelihood_score = 0.7
+    else:
+        likelihood_score = 0.45
+    likelihood_label = (
+        "High" if likelihood_score >= 0.7 else "Medium" if likelihood_score >= 0.4 else "Low"
     )
     channel_results = [
         {
@@ -1139,6 +1242,15 @@ def _deterministic_action_center_enrichment(context: Mapping[str, Any]) -> dict[
         "nextStep": next_step or None,
         "followUpRequired": follow_up_required,
         "confidence": 0.35,
+        "conversationSignals": {
+            "sentiment": {"label": "Neutral", "score": 0.5},
+            "engagement": {"label": engagement_label, "score": engagement_score},
+            "intent": intent,
+            "likelihoodToProgress": {
+                "label": likelihood_label,
+                "score": likelihood_score,
+            },
+        },
         "studentSummary": " ".join(student_summary_parts)
         or f"{display_name}'s enrollment and onboarding record is available for staff review.",
         "keyFacts": list(dict.fromkeys(key_facts))[:8],
@@ -1157,6 +1269,28 @@ def _bounded_ai_text(value: object, limit: int) -> str:
     normalized = " ".join(value.replace("\x00", "").split())
     normalized = _AI_TECHNICAL_IDENTIFIER_PATTERN.sub("[redacted identifier]", normalized)
     return normalized[:limit]
+
+
+def _normalize_conversation_signal_metric(
+    value: object,
+    fallback: object,
+) -> dict[str, object]:
+    fallback_value = fallback if isinstance(fallback, Mapping) else {}
+    metric = value if isinstance(value, Mapping) else {}
+    label = _bounded_ai_text(metric.get("label"), 80) or _bounded_ai_text(
+        fallback_value.get("label"), 80
+    )
+    raw_score = metric.get("score")
+    if isinstance(raw_score, int | float) and not isinstance(raw_score, bool):
+        score = min(1.0, max(0.0, float(raw_score)))
+    else:
+        fallback_score = fallback_value.get("score")
+        score = (
+            min(1.0, max(0.0, float(fallback_score)))
+            if isinstance(fallback_score, int | float) and not isinstance(fallback_score, bool)
+            else 0.5
+        )
+    return {"label": label or "Not enough evidence", "score": score}
 
 
 def _bounded_ai_list(value: object, item_limit: int, character_limit: int) -> list[str]:

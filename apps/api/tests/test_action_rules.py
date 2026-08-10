@@ -59,6 +59,8 @@ class FakeConnection:
             return FakeResult([{"student_id": "student-1"}])
         if "INSERT INTO public.communication_event" in sql and "RETURNING id" in sql:
             return FakeResult([{"id": values["id"]}])
+        if "INSERT INTO public.staff_notification" in sql and "RETURNING id" in sql:
+            return FakeResult([{"id": values["id"]}])
         if "INSERT INTO public.staff_action_rule_execution" in sql:
             return FakeResult([] if self.duplicate_execution else [{"id": values["id"]}])
         if "SELECT id FROM public.staff_member" in sql:
@@ -359,6 +361,16 @@ def test_due_lifecycle_actions_remind_follow_ups_and_escalate_blockers_without_a
     assert notifications[0]["team_component"] is None
     assert notifications[1]["staff_member_id"] is None
     assert notifications[1]["team_component"] == "Registrar"
+    realtime = [
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.staff_realtime_event" in sql
+    ]
+    assert len(realtime) == 2
+    assert realtime[0]["staff_member_id"] == "staff-1"
+    assert realtime[1]["team_component"] == "Registrar"
+    assert '"kind":"follow_up_due"' in str(realtime[0]["payload"])
+    assert '"kind":"blocked_review_due"' in str(realtime[1]["payload"])
 
 
 def test_due_action_rules_are_evaluated_and_checkpointed_after_a_bounded_scan() -> None:

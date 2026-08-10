@@ -31,6 +31,9 @@ from audentra.domain.onboarding import (
 )
 from audentra.infrastructure.messaging.envelope import DomainEventActor, DomainEventEnvelope
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
+from audentra.infrastructure.postgres.journey_routing import (
+    reconcile_student_journey_routes,
+)
 
 JsonDict = dict[str, Any]
 IdempotentHandler = Callable[[AsyncConnection], Awaitable[JsonDict]]
@@ -161,7 +164,7 @@ def _json(value: object) -> str:
 
 
 def _json_default(value: object) -> str:
-    if isinstance(value, (date, datetime, Decimal)):
+    if isinstance(value, (date, datetime, Decimal, UUID)):
         return str(value)
     raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
@@ -269,6 +272,9 @@ def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
                 configuration["fields"] = [
                     dict(field) for field in raw_fields if isinstance(field, Mapping)
                 ]
+            raw_form = input_config.get("form")
+            if isinstance(raw_form, Mapping):
+                configuration["form"] = dict(raw_form)
             if step == "about_you":
                 raw_required = input_config.get(
                     "required_fields", input_config.get("requiredFields")
@@ -465,6 +471,28 @@ def _validate_configured_values(values: JsonDict, fields_value: object) -> JsonD
                     raise _invalid_requirement_response(
                         f"Field {field_id} must be an ISO date"
                     ) from error
+        elif field_type == "number":
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+            ):
+                raise _invalid_requirement_response(f"Field {field_id} must be a number")
+            numeric_value = float(value)
+            minimum = field.get("minimum")
+            maximum = field.get("maximum")
+            step = field.get("step")
+            if isinstance(minimum, (int, float)) and numeric_value < float(minimum):
+                raise _invalid_requirement_response(f"Field {field_id} is below its minimum")
+            if isinstance(maximum, (int, float)) and numeric_value > float(maximum):
+                raise _invalid_requirement_response(f"Field {field_id} exceeds its maximum")
+            if isinstance(step, (int, float)) and float(step) > 0:
+                origin = float(minimum) if isinstance(minimum, (int, float)) else 0.0
+                increments = (numeric_value - origin) / float(step)
+                if not math.isclose(increments, round(increments), abs_tol=1e-9):
+                    raise _invalid_requirement_response(
+                        f"Field {field_id} does not match its allowed step"
+                    )
         elif field_type == "checkbox":
             if not isinstance(value, bool):
                 raise _invalid_requirement_response(f"Field {field_id} must be true or false")
@@ -518,10 +546,17 @@ def _normalize_requirement_response(
         _response_keys(response, required={"values"})
         if not isinstance(response["values"], dict):
             raise _invalid_requirement_response("Form values must be an object")
-        fields = input_config.get(
-            "fields" if interaction_type == "form" else "flow",
-            [],
-        )
+        fields = input_config.get("fields" if interaction_type == "form" else "flow", [])
+        form = _mapping(input_config.get("form"))
+        pages = _list(form.get("pages"))
+        if pages:
+            fields = [
+                field
+                for page in pages
+                if isinstance(page, Mapping)
+                for field in _list(page.get("fields"))
+                if isinstance(field, Mapping)
+            ]
         return {"values": _validate_configured_values(response["values"], fields)}
     if interaction_type == "single_select":
         _response_keys(response, required={"selectedOption"})
@@ -2531,6 +2566,12 @@ class PostgresPortalRepository:
                 },
             )
             response_row = inserted_response.mappings().one()
+            route_transitions = await reconcile_student_journey_routes(
+                connection,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                journey_id=current["journey_id"],
+            )
             await self._award_rewards(
                 connection,
                 auth,
@@ -2551,40 +2592,6 @@ class PostgresPortalRepository:
                         str(current["code"]), str(current["code"]).replace("_", "-")
                     )
                 ),
-            )
-            await connection.execute(
-                text(
-                    """
-                    UPDATE student_requirement candidate SET status='ready',
-                      version=candidate.version+1, updated_at=NOW()
-                    FROM requirement_definition_version definition,
-                         enrollment_journey journey
-                    WHERE candidate.tenant_id=:tenant_id
-                      AND candidate.journey_id=journey.id
-                      AND journey.student_id=:student_id
-                      AND candidate.requirement_definition_version_id=definition.id
-                      AND candidate.retired_at IS NULL
-                      AND candidate.status='blocked'
-                      AND NOT EXISTS (
-                        SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
-                        WHERE NOT EXISTS (
-                          SELECT 1 FROM student_requirement prerequisite
-                          JOIN requirement_definition_version prerequisite_definition
-                            ON prerequisite_definition.id=
-                               prerequisite.requirement_definition_version_id
-                           AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                          WHERE prerequisite.tenant_id=:tenant_id
-                            AND prerequisite.journey_id=candidate.journey_id
-                            AND prerequisite.retired_at IS NULL
-                            AND prerequisite_definition.code=dependency.code
-                            AND prerequisite.status IN (
-                              'completed','waived','not_applicable'
-                            )
-                        )
-                      )
-                    """
-                ),
-                {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
             )
             await connection.execute(
                 text(
@@ -2659,6 +2666,14 @@ class PostgresPortalRepository:
                     "interactionType": interaction_type,
                     "requirementVersion": updated_version,
                     "responseVersion": response_version,
+                    "routeTransitions": [
+                        {
+                            "requirementCode": transition.code,
+                            "from": transition.previous_status,
+                            "to": transition.status,
+                        }
+                        for transition in route_transitions
+                    ],
                 },
             )
             await self._insert_outbox(
@@ -2711,6 +2726,75 @@ class PostgresPortalRepository:
         )
         items = [_map_message(row) for row in rows]
         return {"items": items, "unreadCount": sum(x["readAt"] is None for x in items)}
+
+    async def get_student_realtime_events(
+        self,
+        auth: AuthContext,
+        after_cursor: int | None,
+        limit: int = 100,
+    ) -> JsonDict:
+        """Read a bounded, tenant- and student-scoped invalidation window."""
+
+        self._require_student(auth)
+        bounded_limit = max(1, min(limit, 100))
+        if after_cursor is not None and after_cursor < 0:
+            raise BadRequestError(
+                "INVALID_EVENT_CURSOR",
+                "The realtime event cursor must be non-negative",
+            )
+        async with self.engine.connect() as connection:
+            if after_cursor is None:
+                current_result = await connection.execute(
+                    text(
+                        """
+                        SELECT COALESCE(MAX(cursor), 0) AS cursor
+                        FROM student_realtime_event
+                        WHERE tenant_id=:tenant_id AND student_id=:student_id
+                        """
+                    ),
+                    {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+                )
+                current = current_result.mappings().first()
+                return {
+                    "events": [],
+                    "cursor": int(current["cursor"]) if current is not None else 0,
+                }
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT cursor, event_type, resource_type, resource_id,
+                           payload, created_at
+                    FROM student_realtime_event
+                    WHERE tenant_id=:tenant_id AND student_id=:student_id
+                      AND cursor>:after_cursor
+                    ORDER BY cursor
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "after_cursor": after_cursor,
+                    "limit": bounded_limit,
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+        events = [
+            {
+                "cursor": int(row["cursor"]),
+                "type": str(row["event_type"]),
+                "resourceType": str(row["resource_type"]),
+                "resourceId": str(row["resource_id"]),
+                "data": dict(row["payload"]) if isinstance(row["payload"], Mapping) else {},
+                "occurredAt": _iso(row["created_at"]),
+            }
+            for row in rows
+        ]
+        next_cursor = int(rows[-1]["cursor"]) if rows else after_cursor
+        return {
+            "events": events,
+            "cursor": next_cursor,
+        }
 
     async def mark_student_message_read(
         self, auth: AuthContext, message_id: str, request_id: str
@@ -5973,6 +6057,7 @@ class PostgresPortalRepository:
         kind: str = "general",
         href: str | None = None,
     ) -> None:
+        message_id = str(uuid4())
         await connection.execute(
             text(
                 """
@@ -5986,13 +6071,59 @@ class PostgresPortalRepository:
                 """
             ),
             {
-                "id": str(uuid4()),
+                "id": message_id,
                 "tenant_id": auth.tenant_id,
                 "student_id": auth.student_id,
                 "subject": subject,
                 "body": body,
                 "kind": kind,
                 "href": href,
+            },
+        )
+        await self._insert_student_realtime_event(
+            connection,
+            auth=auth,
+            event_type="student.message.created",
+            resource_type="student_message",
+            resource_id=message_id,
+            payload={
+                "messageId": message_id,
+                "kind": kind,
+                "href": href,
+                "invalidate": ["messages", "bootstrap"],
+            },
+        )
+
+    async def _insert_student_realtime_event(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO student_realtime_event (
+                  id, tenant_id, student_id, event_type, resource_type,
+                  resource_id, payload, created_at
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :event_type, :resource_type,
+                  :resource_id, CAST(:payload AS jsonb), NOW()
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "event_type": event_type,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "payload": _json(dict(payload)),
             },
         )
 
@@ -6546,7 +6677,7 @@ class PostgresPortalRepository:
                   AND rdv.code=:requirement_code
                   AND sr.retired_at IS NULL
                   AND sr.status NOT IN ('completed','waived','not_applicable')
-                RETURNING sr.id
+                RETURNING sr.id, sr.journey_id
                 """
             ),
             {
@@ -6586,36 +6717,13 @@ class PostgresPortalRepository:
                 kind=kind,
                 href=href,
             )
-        await connection.execute(
-            text(
-                """
-                UPDATE student_requirement candidate SET status='ready',
-                  version=candidate.version+1, updated_at=NOW()
-                FROM requirement_definition_version definition,
-                     enrollment_journey journey
-                WHERE candidate.tenant_id=:tenant_id
-                  AND candidate.journey_id=journey.id AND journey.student_id=:student_id
-                  AND candidate.requirement_definition_version_id=definition.id
-                  AND candidate.retired_at IS NULL
-                  AND candidate.status='blocked'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
-                    WHERE NOT EXISTS (
-                      SELECT 1 FROM student_requirement prerequisite
-                      JOIN requirement_definition_version prerequisite_definition
-                        ON prerequisite_definition.id=prerequisite.requirement_definition_version_id
-                       AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                      WHERE prerequisite.tenant_id=:tenant_id
-                        AND prerequisite.journey_id=candidate.journey_id
-                        AND prerequisite_definition.code=dependency.code
-                        AND prerequisite.retired_at IS NULL
-                        AND prerequisite.status IN ('completed','waived','not_applicable')
-                    )
-                  )
-                """
-            ),
-            {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
-        )
+        for journey_id in {row["journey_id"] for row in completed_rows}:
+            await reconcile_student_journey_routes(
+                connection,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                journey_id=journey_id,
+            )
         completed_journeys = await connection.execute(
             text(
                 """

@@ -45,6 +45,8 @@ EXPECTED_EVENTS = {
     "staff.knowledge_card_created.v1",
     "staff.knowledge_card_updated.v1",
     "staff.work_comment_created.v1",
+    "staff.work_item_auto_resolved_by_document.v1",
+    "staff.work_item_created.v1",
     "staff.work_item_updated.v1",
     "student.appointment_scheduled.v1",
     "student.campus_event_registered.v1",
@@ -89,7 +91,7 @@ def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
 
 
 def test_canonical_only_events_have_explicit_ignore_dispositions() -> None:
-    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 24
+    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 26
     assert all(EVENT_CATALOG[name].kind == "ignored" for name in EXPLICITLY_ADDED_IGNORED_EVENTS)
 
 

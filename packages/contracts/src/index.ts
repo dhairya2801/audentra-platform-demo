@@ -273,6 +273,7 @@ export interface StudentOnboardingScreenConfiguration {
   requiredFields?: AboutYouConfigurableField[];
   identityQuickUpload?: boolean;
   fields?: StudentRequirementInputField[];
+  form?: StudentRequirementFormDefinition;
 }
 
 export interface StudentOnboarding {
@@ -377,11 +378,22 @@ export interface DecideStudentExperienceUpdateInput {
   expectedVersion: number;
 }
 
+export interface DeferStudentExperienceUpdatesInput {
+  updates: Array<{
+    id: string;
+    expectedVersion: number;
+  }>;
+}
+
 export interface StudentExperienceUpdateDecision {
   id: string;
   status: "acknowledged" | "deferred";
   version: number;
   requirementSlug: string | null;
+}
+
+export interface DeferStudentExperienceUpdatesResult {
+  updates: StudentExperienceUpdateDecision[];
 }
 
 export interface StudentBootstrap {
@@ -434,13 +446,53 @@ export interface StudentRequirementInputField {
     | "email"
     | "phone"
     | "date"
+    | "number"
     | "checkbox"
     | "single_select"
     | "multiple_select";
   required: boolean;
   options?: string[];
   maximum_selections?: number;
+  minimum?: number;
+  maximum?: number;
+  step?: number;
   when?: { field: string; equals: string };
+}
+
+export interface StudentRequirementFormPage {
+  id: string;
+  title: string;
+  description?: string;
+  fields: StudentRequirementInputField[];
+}
+
+export interface StudentRequirementFormDefinition {
+  version: 1;
+  pages: StudentRequirementFormPage[];
+}
+
+export type JourneyRouteOperator =
+  | "equals"
+  | "not_equals"
+  | "one_of"
+  | "none_of"
+  | "contains"
+  | "not_contains"
+  | "greater_than"
+  | "greater_than_or_equal"
+  | "less_than"
+  | "less_than_or_equal";
+
+export interface JourneyRouteRule {
+  sourceTaskId: string;
+  fieldId: string;
+  operator: JourneyRouteOperator;
+  value: string | number | boolean | string[];
+}
+
+export interface JourneyRouteActivation {
+  match: "all" | "any";
+  rules: JourneyRouteRule[];
 }
 
 export interface StudentRequirementInputConfig {
@@ -448,6 +500,7 @@ export interface StudentRequirementInputConfig {
   maximumSelections?: number;
   fields?: StudentRequirementInputField[];
   flow?: StudentRequirementInputField[];
+  form?: StudentRequirementFormDefinition;
   signatureProvider?: "built_in" | "docusign";
   docusignTemplateId?: string;
   acceptedMimeTypes?: string[];
@@ -926,6 +979,18 @@ export interface StaffCommunicationEvent {
   occurredAt: string;
 }
 
+export interface StaffConversationSignalMetric {
+  label: string;
+  score: number | null;
+}
+
+export interface StaffConversationSignals {
+  sentiment: StaffConversationSignalMetric;
+  engagement: StaffConversationSignalMetric;
+  intent: string;
+  likelihoodToProgress: StaffConversationSignalMetric;
+}
+
 export interface StaffInteractionOutcome {
   id: string;
   version: number;
@@ -942,10 +1007,24 @@ export interface StaffInteractionOutcome {
   sourceIds: string[];
   coveredSourceVersion: number;
   confidence: number | null;
+  conversationSignals: StaffConversationSignals;
   provider: string;
   model: string;
   generatedAt: string;
 }
+
+export type StaffRelatedDocument = Pick<
+  StudentDocument,
+  | "id"
+  | "fileName"
+  | "mimeType"
+  | "sizeBytes"
+  | "category"
+  | "processingMode"
+  | "status"
+  | "contentUrl"
+  | "createdAt"
+>;
 
 export interface StaffInteraction {
   id: string;
@@ -1053,6 +1132,7 @@ export interface StaffWorkItemDetail {
   interactions: StaffInteraction[];
   comments: StaffWorkComment[];
   relatedItems: StaffWorkItem[];
+  relatedDocuments: StaffRelatedDocument[];
   aiState: StaffAiProcessingState;
   generatedAt: string;
 }
@@ -1382,9 +1462,12 @@ export interface StaffJourneyBlueprintItem {
   documentCategories?: string[];
   interactionType?: StudentRequirementInteractionType;
   inputConfig?: StudentRequirementInputConfig;
+  form?: StudentRequirementFormDefinition;
   points: number;
   studentStep: string | null;
   dependsOn: string[];
+  /** Answer-driven conditions that decide whether this path applies. */
+  activation?: JourneyRouteActivation;
   flow: Array<{
     id: string;
     title: string;

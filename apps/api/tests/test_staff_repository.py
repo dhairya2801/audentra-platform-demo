@@ -30,6 +30,8 @@ STAFF_ID = "00000000-0000-7000-8000-000000000901"
 WORK_ITEM_ID = "00000000-0000-7000-8000-000000000911"
 DOCUMENT_ID = "00000000-0000-7000-8000-000000000701"
 REQUIREMENT_ID = "00000000-0000-7000-8000-000000000401"
+DEPENDENT_REQUIREMENT_ID = "00000000-0000-7000-8000-000000000402"
+JOURNEY_ID = "00000000-0000-7000-8000-000000000301"
 REWARD_RULE_ID = "00000000-0000-7000-8000-000000000461"
 NOW = datetime(2026, 7, 24, 12, tzinfo=UTC)
 
@@ -1016,6 +1018,14 @@ def test_combined_ai_refresh_queues_one_interaction_job_for_outcome_and_student_
     assert "status = 'dead_letter'" in jobs[0]
 
 
+def test_completed_interaction_forces_immediate_combined_enrichment() -> None:
+    source = inspect.getsource(PostgresStaffRepository.complete_interaction)
+
+    assert "await self._queue_interaction_refresh(" in source
+    assert "not_before=now," in source
+    assert "force=True," in source
+
+
 def test_student_summary_refresh_resets_exhausted_dead_letter_attempts() -> None:
     def handler(sql: str, values: dict[str, object]) -> FakeResult:
         if "FROM public.staff_work_item" in sql and "FOR UPDATE" in sql:
@@ -1124,6 +1134,38 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
             )
         if "INSERT INTO public.student_reward_ledger" in sql:
             return FakeResult([{"points": 80}])
+        if "SELECT requirement.journey_id, journey.student_id" in sql:
+            return FakeResult(
+                [
+                    {
+                        "journey_id": UUID(JOURNEY_ID),
+                        "student_id": UUID(STUDENT_ID),
+                    }
+                ]
+            )
+        if "current_definition.activation_rules" in sql:
+            return FakeResult(
+                [
+                    {
+                        "id": UUID(REQUIREMENT_ID),
+                        "status": "completed",
+                        "progress_percent": 100,
+                        "code": "official_transcript",
+                        "depends_on_codes": [],
+                        "activation_rules": {"match": "all", "rules": []},
+                        "response_data": None,
+                    },
+                    {
+                        "id": UUID(DEPENDENT_REQUIREMENT_ID),
+                        "status": "blocked",
+                        "progress_percent": 0,
+                        "code": "orientation_registration",
+                        "depends_on_codes": ["official_transcript"],
+                        "activation_rules": {"match": "all", "rules": []},
+                        "response_data": None,
+                    },
+                ]
+            )
         if "SELECT display_name" in sql:
             return FakeResult([{"display_name": "Avery Chen"}])
         if "INSERT INTO public.student_message" in sql:
@@ -1160,7 +1202,13 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
     assert any("UPDATE public.document_record" in sql for sql in statements)
     assert any("UPDATE public.student_requirement" in sql for sql in statements)
     assert any("INSERT INTO public.student_reward_ledger" in sql for sql in statements)
-    assert any("WITH completed_journey" in sql for sql in statements)
+    assert any("current_definition.activation_rules" in sql for sql in statements)
+    route_update = next(
+        values
+        for sql, values in connection.executions
+        if "UPDATE public.student_requirement" in sql and values.get("status") == "ready"
+    )
+    assert route_update["requirement_id"] == UUID(DEPENDENT_REQUIREMENT_ID)
     assert any("INSERT INTO public.staff_work_log" in sql for sql in statements)
     assert any("INSERT INTO public.student_message" in sql for sql in statements)
     assert any("INSERT INTO public.audit_event" in sql for sql in statements)

@@ -519,6 +519,12 @@ class _Gateway:
             "nextStep": "Registrar completes final review.",
             "followUpRequired": False,
             "confidence": 1.2,
+            "conversationSignals": {
+                "sentiment": {"label": "Positive", "score": 0.8},
+                "engagement": {"label": "High", "score": 0.9},
+                "intent": "Document completion",
+                "likelihoodToProgress": {"label": "High", "score": 0.85},
+            },
             "keyFacts": ["Transcript parsed", "Student notified"],
             "risks": ["Registrar review pending"],
             "nextSteps": ["Complete final review"],
@@ -590,6 +596,14 @@ def test_interaction_enrichment_persists_one_outcome_and_canonical_student_summa
     assert "[redacted identifier]" in gateway.contexts[0]["previousStudentSummary"]["summary"]
     statements = [sql for sql, _ in connection.executions]
     assert any("INSERT INTO public.interaction_outcome_revision" in sql for sql in statements)
+    outcome_values = next(
+        values
+        for sql, values in connection.executions
+        if "INSERT INTO public.interaction_outcome_revision" in sql
+    )
+    assert json.loads(str(outcome_values["conversation_signals"]))["intent"] == (
+        "Document completion"
+    )
     assert any("INSERT INTO public.student_summary_revision" in sql for sql in statements)
     assert any("INSERT INTO public.staff_realtime_event" in sql for sql in statements)
     assert any("INSERT INTO public.model_usage" in sql for sql in statements)

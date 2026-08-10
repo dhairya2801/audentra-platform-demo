@@ -18,6 +18,8 @@ EXPECTED_OPERATIONS = {
     ("post", "/v1/admission-offers/{offerId}/accept"): 200,
     ("post", "/v1/activity-events/batch"): 202,
     ("get", "/v1/student/bootstrap"): 200,
+    ("post", "/v1/student/experience-updates/defer"): 200,
+    ("post", "/v1/student/experience-updates/{id}/decision"): 200,
     ("get", "/v1/student/onboarding"): 200,
     ("put", "/v1/student/onboarding"): 200,
     ("post", "/v1/student/onboarding/complete"): 200,
@@ -63,6 +65,8 @@ EXPECTED_DISPATCH_OPERATIONS = {
     "admission.accept_offer",
     "activity.ingest_batch",
     "student.get_bootstrap",
+    "student.defer_experience_updates",
+    "student.decide_experience_update",
     "student.get_onboarding",
     "student.update_onboarding",
     "student.complete_onboarding",
@@ -223,12 +227,15 @@ def test_openapi_request_models_are_strict_and_camel_case() -> None:
     schemas = create_app().openapi()["components"]["schemas"]
     profile = schemas["UpdateStudentProfileRequest"]
     onboarding = schemas["UpdateStudentOnboardingRequest"]
+    experience_deferral = schemas["DeferStudentExperienceUpdatesRequest"]
 
     assert profile["additionalProperties"] is False
     assert "expectedVersion" in profile["properties"]
     assert "expected_version" not in profile["properties"]
     assert onboarding["additionalProperties"] is False
     assert "currentStep" in onboarding["properties"]
+    assert experience_deferral["additionalProperties"] is False
+    assert experience_deferral["required"] == ["updates"]
 
 
 def test_openapi_multipart_schema_includes_upload_bundle_id() -> None:

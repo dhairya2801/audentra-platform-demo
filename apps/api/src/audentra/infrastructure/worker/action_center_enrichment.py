@@ -818,14 +818,16 @@ class ActionCenterEnrichmentRunner:
                 """
                 INSERT INTO public.interaction_outcome_revision (
                   id, tenant_id, interaction_id, work_item_id, student_id,
-                  version, finality, summary, channel_results, outcome_code,
+                  version, finality, summary, channel_results, conversation_signals,
+                  outcome_code,
                   resolution_code, next_step, follow_up_required, source_ids,
                   covered_source_version, confidence_milli, provider, model,
                   prompt_version, agent_run_id, is_current, generated_at
                 ) VALUES (
                   :id, :tenant_id, :interaction_id, :work_item_id, :student_id,
                   :version, :finality, :summary, CAST(:channel_results AS jsonb),
-                  :outcome_code, :resolution_code, :next_step,
+                  CAST(:conversation_signals AS jsonb), :outcome_code,
+                  :resolution_code, :next_step,
                   :follow_up_required, CAST(:source_ids AS jsonb),
                   :covered_source_version, :confidence_milli, :provider, :model,
                   :prompt_version, :agent_run_id, true, NOW()
@@ -842,6 +844,9 @@ class ActionCenterEnrichmentRunner:
                 "finality": "final" if interaction["completed_at"] is not None else "provisional",
                 "summary": summary,
                 "channel_results": _json(_channel_results(result.get("channelResults"))),
+                "conversation_signals": _json(
+                    _conversation_signals(result.get("conversationSignals"))
+                ),
                 "outcome_code": _code(result.get("outcomeCode")),
                 "resolution_code": _code(result.get("resolutionCode")),
                 "next_step": _bounded_text(result.get("nextStep"), 800) or None,
@@ -1297,6 +1302,8 @@ class ActionCenterEnrichmentRunner:
                     {
                         "notificationId": str(notification_id),
                         "workItemId": job.work_item_id,
+                        "workItemKey": str(target["key"]),
+                        "purpose": job.purpose,
                         "summaryVersion": summary_version,
                         "sourceVersion": job.processing_source_version,
                         "invalidate": ["notifications", "workspace", "action-center"],
@@ -1397,6 +1404,7 @@ def _outcome_context(value: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "summary": _bounded_text(value.get("summary"), 1_600),
         "channelResults": _json_list(value.get("channel_results"))[:8],
+        "conversationSignals": _json_object(value.get("conversation_signals")),
         "outcomeCode": value["outcome_code"],
         "resolutionCode": value["resolution_code"],
         "nextStep": _bounded_text(value.get("next_step"), 800),
@@ -1417,6 +1425,29 @@ def _channel_results(value: object) -> list[dict[str, str]]:
         if channel in {"email", "sms", "voice", "portal"} and description:
             results.append({"channel": channel, "result": description})
     return results
+
+
+def _conversation_signals(value: object) -> dict[str, object]:
+    source = value if isinstance(value, Mapping) else {}
+
+    def metric(name: str) -> dict[str, object]:
+        raw = source.get(name)
+        item = raw if isinstance(raw, Mapping) else {}
+        label = _bounded_text(item.get("label"), 80) or "Not enough evidence"
+        score_value = item.get("score")
+        score = (
+            min(1.0, max(0.0, float(score_value)))
+            if isinstance(score_value, int | float) and not isinstance(score_value, bool)
+            else None
+        )
+        return {"label": label, "score": score}
+
+    return {
+        "sentiment": metric("sentiment"),
+        "engagement": metric("engagement"),
+        "intent": _bounded_text(source.get("intent"), 160) or "Not enough evidence",
+        "likelihoodToProgress": metric("likelihoodToProgress"),
+    }
 
 
 def _text_list(value: object, limit: int, character_limit: int) -> list[str]:

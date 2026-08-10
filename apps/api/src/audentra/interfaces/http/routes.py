@@ -31,6 +31,7 @@ from audentra.contracts.requests import (
     CreateStudentHelpRequest,
     CreateStudentInquiryMessageRequest,
     DecideStudentExperienceUpdateRequest,
+    DeferStudentExperienceUpdatesRequest,
     DraftStaffManagedConfigurationRequest,
     PreviewStaffEdwardRequest,
     RecordStaffCommunicationRequest,
@@ -623,6 +624,28 @@ async def update_housing_plan(
 
 
 @router.post(
+    "/v1/student/experience-updates/defer",
+    status_code=200,
+    response_model=None,
+)
+async def defer_student_experience_updates(
+    body: DeferStudentExperienceUpdatesRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    """Save a grouped reminder without exposing partial client-side writes."""
+
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.defer_experience_updates",
+        auth=auth,
+        payload=body.public_payload(),
+    )
+
+
+@router.post(
     "/v1/student/experience-updates/{id}/decision",
     status_code=200,
     response_model=None,
@@ -699,6 +722,95 @@ async def list_messages(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="student.list_messages", auth=auth
+    )
+
+
+def _student_sse_message(event: Mapping[str, object]) -> str:
+    cursor_value = event["cursor"]
+    if not isinstance(cursor_value, int):
+        raise TypeError("Student realtime event cursor must be an integer")
+    event_type = str(event["type"]).replace("\r", "").replace("\n", "")
+    return (
+        f"id: {cursor_value}\n"
+        f"event: {event_type}\n"
+        f"data: {json.dumps(dict(event), separators=(',', ':'), default=str)}\n\n"
+    )
+
+
+@router.get("/v1/student/events", status_code=200, response_model=None)
+async def stream_student_events(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    after: Annotated[int | None, Query(ge=0)] = None,
+) -> StreamingResponse:
+    cursor = after
+    header_cursor = request.headers.get("last-event-id")
+    if cursor is None and header_cursor:
+        if not header_cursor.isascii() or not header_cursor.isdecimal():
+            raise BadRequestError(
+                "INVALID_EVENT_CURSOR",
+                "Last-Event-ID must be a non-negative numeric cursor",
+            )
+        cursor = int(header_cursor)
+
+    async def events() -> Any:
+        bootstrap = cursor is None or cursor == 0
+        current = None if bootstrap else cursor
+        heartbeat_at = time.monotonic()
+        yield "retry: 2000\n\n"
+        ready_sent = False
+        while not await request.is_disconnected():
+            batch = await service.dispatch(
+                ServiceCall(
+                    operation="student.get_realtime_events",
+                    auth=auth,
+                    request_id=request.state.request_id,
+                    payload={"afterCursor": current, "limit": 100},
+                )
+            )
+            if not isinstance(batch, Mapping):
+                raise ApiError(
+                    500,
+                    "INVALID_EVENT_STREAM_RESPONSE",
+                    "The platform service returned an invalid event stream response",
+                )
+            raw_events = batch.get("events")
+            if isinstance(raw_events, list):
+                for raw_event in raw_events:
+                    if not isinstance(raw_event, Mapping):
+                        continue
+                    current = int(raw_event["cursor"])
+                    yield _student_sse_message(raw_event)
+                    heartbeat_at = time.monotonic()
+            if current is None and batch.get("cursor") is not None:
+                current = int(batch["cursor"])
+            if bootstrap and not ready_sent and current is not None:
+                yield _student_sse_message(
+                    {
+                        "cursor": current,
+                        "type": "student.stream.ready",
+                        "resourceType": "student",
+                        "resourceId": auth.student_id,
+                        "data": {"invalidate": ["messages", "bootstrap"]},
+                    }
+                )
+                ready_sent = True
+                heartbeat_at = time.monotonic()
+            now = time.monotonic()
+            if now - heartbeat_at >= 15:
+                yield f": heartbeat {current or 0}\n\n"
+                heartbeat_at = now
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -1766,3 +1878,20 @@ async def review_document(
         payload=body.public_payload(),
         path_params={"documentId": _uuid(document_id)},
     )
+
+
+@router.get("/v1/staff/documents/{id}/content", status_code=200, response_model=None)
+async def get_staff_document_content(
+    document_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> Response:
+    result = await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_document_content",
+        auth=auth,
+        path_params={"documentId": _uuid(document_id)},
+    )
+    return _binary_response(result)

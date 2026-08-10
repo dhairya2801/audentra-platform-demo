@@ -6,18 +6,26 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.contracts.requests import UpdateStudentHousingPlanRequest
 from audentra.core.auth import AuthContext
-from audentra.core.errors import ConflictError, NotFoundError
+from audentra.core.errors import BadRequestError, ConflictError, NotFoundError
 from audentra.infrastructure.postgres.portal_repository import (
     PostgresPortalRepository,
     _add_calendar_months,
+    _json,
     _onboarding_screen_configurations,
 )
+
+
+def test_audit_metadata_serializes_database_uuids_without_breaking_worker_callbacks() -> None:
+    identifier = UUID("20000000-0000-7000-8000-000000000033")
+
+    assert json.loads(_json({"requirementId": identifier})) == {"requirementId": str(identifier)}
 
 
 def test_about_you_screen_defaults_address_and_residency_to_optional() -> None:
@@ -189,6 +197,53 @@ AUTH = AuthContext(
     actor_id="10000000-0000-7000-8000-000000000001",
     actor_type="student",
 )
+
+
+def test_student_realtime_events_bootstrap_replay_and_bound_the_cursor_window() -> None:
+    occurred_at = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+
+    def handler(sql: str, values: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        assert values["tenant_id"] == AUTH.tenant_id
+        assert values["student_id"] == AUTH.student_id
+        if "SELECT COALESCE(MAX(cursor), 0)" in sql:
+            return [{"cursor": 7}]
+        if "SELECT cursor, event_type, resource_type" in sql:
+            assert values["after_cursor"] == 7
+            assert values["limit"] == 100
+            return [
+                {
+                    "cursor": 8,
+                    "event_type": "student.message.created",
+                    "resource_type": "student_message",
+                    "resource_id": "30000000-0000-7000-8000-000000000008",
+                    "payload": {"invalidate": ["messages", "bootstrap"]},
+                    "created_at": occurred_at,
+                }
+            ]
+        raise AssertionError(sql)
+
+    repository = PostgresPortalRepository(cast(AsyncEngine, FakeEngine(handler)))
+
+    bootstrap = asyncio.run(repository.get_student_realtime_events(AUTH, None))
+    replay = asyncio.run(repository.get_student_realtime_events(AUTH, 7, limit=500))
+
+    assert bootstrap == {"events": [], "cursor": 7}
+    assert replay == {
+        "events": [
+            {
+                "cursor": 8,
+                "type": "student.message.created",
+                "resourceType": "student_message",
+                "resourceId": "30000000-0000-7000-8000-000000000008",
+                "data": {"invalidate": ["messages", "bootstrap"]},
+                "occurredAt": "2028-01-15T12:00:00.000Z",
+            }
+        ],
+        "cursor": 8,
+    }
+    with pytest.raises(BadRequestError) as raised:
+        asyncio.run(repository.get_student_realtime_events(AUTH, -1))
+    assert raised.value.code == "INVALID_EVENT_CURSOR"
 
 
 def test_transcript_credit_upsert_types_nullable_source_code_consistently() -> None:

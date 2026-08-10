@@ -362,6 +362,17 @@ class DecideStudentExperienceUpdateRequest(StrictRequest):
     action: Literal["handle_now", "later"]
 
 
+class StudentExperienceUpdateVersionRequest(StrictRequest):
+    id: UUID
+    expected_version: StrictInt = Field(ge=1)
+
+
+class DeferStudentExperienceUpdatesRequest(StrictRequest):
+    """Atomically defer every update presented in one student portal visit."""
+
+    updates: list[StudentExperienceUpdateVersionRequest] = Field(min_length=1, max_length=20)
+
+
 class SubmitStudentRequirementResponseRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
     response: dict[str, object]
