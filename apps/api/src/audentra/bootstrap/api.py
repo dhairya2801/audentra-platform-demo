@@ -29,7 +29,7 @@ from audentra.infrastructure.postgres.postgres_service import (
 )
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
 from audentra.infrastructure.preview.staff_workspace import PreviewStaffWorkspaceRepository
-from audentra.infrastructure.storage.s3 import S3ObjectStorage
+from audentra.infrastructure.storage import ObjectStorage, create_object_storage
 from audentra.integrations.ai.gateway import StudentAIGateway
 from audentra.integrations.ai.prompt_runtime import (
     PostgresPromptRuntimeRepository,
@@ -47,7 +47,7 @@ class ApiRuntimeResources:
 
     engine: AsyncEngine
     http_client: httpx.AsyncClient
-    object_storage: S3ObjectStorage
+    object_storage: ObjectStorage
     service: PlatformService
     auth_service: BrowserAuthService = field(default_factory=UnavailableBrowserAuthService)
 
@@ -70,9 +70,9 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
         timeout=httpx.Timeout(45.0, connect=10.0, pool=5.0),
         follow_redirects=False,
     )
-    storage: S3ObjectStorage | None = None
+    storage: ObjectStorage | None = None
     try:
-        storage = S3ObjectStorage(settings.object_storage)
+        storage = create_object_storage(settings.object_storage)
         platform = PostgresPlatformRepository(engine)
         portal = PostgresPortalRepository(engine)
         staff = PostgresStaffRepository(engine, portal)

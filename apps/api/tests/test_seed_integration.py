@@ -23,7 +23,7 @@ from audentra.infrastructure.seeding.relational import (
     reset_relational_data,
     seed_relational_data,
 )
-from audentra.infrastructure.storage.s3 import S3ObjectStorage
+from audentra.infrastructure.storage.s3 import S3ObjectStorage, S3StorageSettings
 
 pytestmark = pytest.mark.integration
 
@@ -202,10 +202,12 @@ def test_portal_media_seed_is_rerunnable_against_s3() -> None:
             ),
         }
     )
+    s3_settings = settings.object_storage
+    assert isinstance(s3_settings, S3StorageSettings)
     media_root = Path(__file__).resolve().parents[1] / "assets" / "portal-media"
 
     async def scenario() -> None:
-        storage = S3ObjectStorage(settings.object_storage)
+        storage = S3ObjectStorage(s3_settings)
         try:
             first = await seed_portal_media(
                 storage,

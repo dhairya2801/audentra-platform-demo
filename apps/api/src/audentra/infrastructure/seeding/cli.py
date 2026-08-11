@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from audentra.bootstrap.settings import RuntimeSettings
 from audentra.infrastructure.db.engine import create_database_engine
-from audentra.infrastructure.storage.s3 import S3ObjectStorage
+from audentra.infrastructure.storage import create_object_storage
 
 from .media import MediaSeedReport, seed_portal_media
 from .relational import RelationalSeedReport, seed_relational_data
@@ -77,7 +77,7 @@ async def execute_seed(
             await engine.dispose()
 
     if mode in {"media", "all"}:
-        storage = S3ObjectStorage(settings.object_storage)
+        storage = create_object_storage(settings.object_storage)
         try:
             media_report = await seed_portal_media(
                 storage,

@@ -65,6 +65,7 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
         document_runner = DocumentExtractionRunner(
             DocumentCommandSettings(
                 api_internal_url=settings.worker.api_internal_url,
+                api_internal_audience=settings.worker.api_internal_audience,
                 worker_token=settings.document_worker_token,
                 timeout_seconds=settings.worker.command_timeout_seconds,
             ),

@@ -171,7 +171,7 @@ async def test_api_builder_disposes_created_resources_when_composition_fails(
 
     monkeypatch.setattr(api_bootstrap, "create_database_engine", lambda *_args: engine)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: http)
-    monkeypatch.setattr(api_bootstrap, "S3ObjectStorage", lambda _settings: storage)
+    monkeypatch.setattr(api_bootstrap, "create_object_storage", lambda _settings: storage)
 
     def fail_repository(_engine: object) -> object:
         raise ValueError("repository composition failed")
