@@ -775,6 +775,10 @@ def _map_help_request(row: Mapping[str, Any]) -> JsonDict:
         "updatedAt": _iso(row["updated_at"]),
         "version": int(row["version"]),
     }
+    if row.get("last_message_at") is not None:
+        item["lastMessageAt"] = _iso(row["last_message_at"])
+    if row.get("expires_at") is not None:
+        item["expiresAt"] = _iso(row["expires_at"])
     if row.get("requirement_id") is not None:
         item["requirementId"] = str(row["requirement_id"])
     if row.get("work_item_id") is not None:
@@ -4467,9 +4471,11 @@ class PostgresPortalRepository:
         inquiry_rows = await self._all(
             """
             SELECT id, topic_code, subject, message, status, priority,
-                   assignee_id, requirement_id, version, created_at, updated_at
+                   assignee_id, requirement_id, version, created_at, updated_at,
+                   last_message_at, expires_at
             FROM student_inquiry
             WHERE tenant_id=:tenant_id AND student_id=:student_id
+              AND archived_at IS NULL
             ORDER BY updated_at DESC, id DESC
             LIMIT 50
             """,
@@ -4636,15 +4642,18 @@ class PostgresPortalRepository:
                     INSERT INTO student_inquiry (
                       id, tenant_id, student_id, topic_code, subject, message,
                       status, priority, assignee_id, requirement_id,
-                      status_before_help, version, created_at, updated_at
+                      status_before_help, version, created_at, updated_at,
+                      last_message_at, expires_at
                     )
                     SELECT :id, student.tenant_id, student.id, :topic_code, :subject,
                            :message, 'new', :priority, :assignee_id, :requirement_id,
-                           :status_before_help, 1, NOW(), NOW()
+                           :status_before_help, 1, NOW(), NOW(), NOW(),
+                           NOW() + interval '5 days'
                     FROM student
                     WHERE student.tenant_id=:tenant_id AND student.id=:student_id
                     RETURNING id, topic_code, subject, message, status, priority,
-                              assignee_id, requirement_id, version, created_at, updated_at
+                              assignee_id, requirement_id, version, created_at, updated_at,
+                              last_message_at, expires_at
                     """
                 ),
                 {
@@ -4966,6 +4975,8 @@ class PostgresPortalRepository:
                            inquiry.assignee_id, inquiry.requirement_id,
                            inquiry.status_before_help, inquiry.version,
                            inquiry.created_at, inquiry.updated_at,
+                           inquiry.last_message_at, inquiry.expires_at,
+                           inquiry.archived_at,
                            definition.responsible_office
                     FROM student_inquiry inquiry
                     LEFT JOIN student_requirement requirement
@@ -4996,6 +5007,23 @@ class PostgresPortalRepository:
                 raise ConflictError(
                     "VERSION_CONFLICT",
                     "This conversation changed in another session. Refresh before sending.",
+                )
+            if inquiry.get("archived_at") is not None or str(inquiry["status"]) == "archived":
+                raise ConflictError(
+                    "SUPPORT_CONVERSATION_EXPIRED",
+                    (
+                        "This conversation was archived after five days without messages. "
+                        "Start a new request if you still need help."
+                    ),
+                )
+            expires_at = inquiry.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at <= datetime.now(UTC):
+                raise ConflictError(
+                    "SUPPORT_CONVERSATION_EXPIRED",
+                    (
+                        "This conversation was archived after five days without messages. "
+                        "Start a new request if you still need help."
+                    ),
                 )
             target = await self._resolve_staff_triage_target(
                 connection,
@@ -5036,11 +5064,14 @@ class PostgresPortalRepository:
                 text(
                     """
                     UPDATE student_inquiry
-                    SET status='open', version=version+1, updated_at=NOW()
+                    SET status='open', last_message_at=NOW(),
+                        expires_at=NOW() + interval '5 days',
+                        version=version+1, updated_at=NOW()
                     WHERE tenant_id=:tenant_id AND student_id=:student_id
                       AND id=:inquiry_id
                     RETURNING id, topic_code, subject, message, status, priority,
-                              assignee_id, requirement_id, version, created_at, updated_at
+                              assignee_id, requirement_id, version, created_at, updated_at,
+                              last_message_at, expires_at
                     """
                 ),
                 {
@@ -5540,12 +5571,105 @@ class PostgresPortalRepository:
         )
         return sorted(messages, key=lambda message: str(message["createdAt"]))
 
+    async def _staff_inquiry_messages(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        student_id: str,
+        inquiry_id: str,
+        initial_body: str,
+        initial_created_at: object,
+    ) -> list[JsonDict]:
+        """Return the canonical support thread, including staff-only notes.
+
+        Student-facing reads deliberately omit non-notified notes. Staff needs
+        the full thread so a response remains understandable when someone else
+        takes over the case.
+        """
+
+        staff_result = await connection.execute(
+            text(
+                """
+                SELECT reply.id, reply.response_note AS body,
+                       staff.display_name AS author_name, reply.notify_student,
+                       reply.created_at
+                FROM student_inquiry_reply AS reply
+                JOIN staff_member AS staff
+                  ON staff.tenant_id=reply.tenant_id
+                 AND staff.id=reply.staff_member_id
+                WHERE reply.tenant_id=:tenant_id
+                  AND reply.student_id=:student_id
+                  AND reply.inquiry_id=:inquiry_id
+                ORDER BY reply.created_at, reply.id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        student_result = await connection.execute(
+            text(
+                """
+                SELECT id, body, created_at
+                FROM student_inquiry_student_reply
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND inquiry_id=:inquiry_id
+                ORDER BY created_at, id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        messages: list[JsonDict] = [
+            {
+                "id": inquiry_id,
+                "direction": "student",
+                "body": initial_body,
+                "authorName": "Student",
+                "deliveryStatus": "received",
+                "privateToStaff": False,
+                "createdAt": _iso(initial_created_at),
+            }
+        ]
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "staff",
+                "body": str(row["body"]),
+                "authorName": str(row["author_name"]),
+                "deliveryStatus": ("delivered" if bool(row["notify_student"]) else "recorded"),
+                "privateToStaff": not bool(row["notify_student"]),
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in staff_result.mappings().all()
+        )
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "student",
+                "body": str(row["body"]),
+                "authorName": "Student",
+                "deliveryStatus": "received",
+                "privateToStaff": False,
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in student_result.mappings().all()
+        )
+        return sorted(messages, key=lambda message: str(message["createdAt"]))
+
     async def list_staff_help_requests(self, auth: AuthContext) -> list[JsonDict]:
         rows = await self._all(
             """
             SELECT inquiry.id, inquiry.topic_code, inquiry.subject, inquiry.message,
                    inquiry.status, inquiry.priority, inquiry.assignee_id,
                    inquiry.version, inquiry.created_at, inquiry.updated_at,
+                   inquiry.last_message_at, inquiry.expires_at,
                    student.id AS student_id, student.class_year,
                    person.first_name, person.last_name,
                    COALESCE(profile.preferred_name, person.preferred_name,
@@ -5573,6 +5697,7 @@ class PostgresPortalRepository:
               LIMIT 1
             ) latest_program ON true
             WHERE inquiry.tenant_id=:tenant_id
+              AND inquiry.archived_at IS NULL
             ORDER BY inquiry.updated_at DESC, inquiry.id
             LIMIT 200
             """,
@@ -5591,6 +5716,46 @@ class PostgresPortalRepository:
             }
             for row in rows
         ]
+
+    async def get_staff_inquiry_thread(self, auth: AuthContext, inquiry_id: str) -> JsonDict:
+        if auth.actor_type != "staff":
+            raise ApiError(403, "STAFF_ROLE_REQUIRED", "A staff account is required")
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, student_id, message, status, version, created_at,
+                           last_message_at, expires_at, archived_at
+                    FROM student_inquiry
+                    WHERE tenant_id=:tenant_id AND id=:inquiry_id
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "inquiry_id": inquiry_id},
+            )
+            inquiry = result.mappings().first()
+            if inquiry is None:
+                raise NotFoundError(
+                    "STAFF_INQUIRY_NOT_FOUND",
+                    "This student conversation was not found",
+                )
+            return {
+                "id": str(inquiry["id"]),
+                "status": str(inquiry["status"]),
+                "version": int(inquiry["version"]),
+                "lastMessageAt": _iso(inquiry["last_message_at"]),
+                "expiresAt": _iso(inquiry["expires_at"]),
+                "archivedAt": _iso(inquiry["archived_at"])
+                if inquiry["archived_at"] is not None
+                else None,
+                "messages": await self._staff_inquiry_messages(
+                    connection,
+                    tenant_id=auth.tenant_id,
+                    student_id=str(inquiry["student_id"]),
+                    inquiry_id=str(inquiry["id"]),
+                    initial_body=str(inquiry["message"]),
+                    initial_created_at=inquiry["created_at"],
+                ),
+            }
 
     async def _locked_onboarding(self, connection: AsyncConnection, auth: AuthContext) -> JsonDict:
         result = await connection.execute(

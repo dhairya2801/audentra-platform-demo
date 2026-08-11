@@ -485,8 +485,10 @@ class PostgresManagedConfigurationRepository:
                     _positive_integer(raw_update.get("expectedVersion"), "expectedVersion"),
                 )
             )
-        if not requested or len(requested) > 20 or len({item[0] for item in requested}) != len(
-            requested
+        if (
+            not requested
+            or len(requested) > 20
+            or len({item[0] for item in requested}) != len(requested)
         ):
             raise BadRequestError(
                 "INVALID_EXPERIENCE_UPDATE_BATCH",

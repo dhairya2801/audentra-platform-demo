@@ -155,6 +155,20 @@ def test_help_request_migration_enforces_scope_lifecycle_and_queue_indexes() -> 
     assert "student_inquiry_staff_queue_idx" in migration
 
 
+def test_support_conversation_lifecycle_archives_active_inboxes_without_erasing_history() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "0032_support_conversation_lifecycle.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "last_message_at timestamptz" in migration
+    assert "expires_at timestamptz" in migration
+    assert "archived_at timestamptz" in migration
+    assert "'archived'" in migration
+    assert "student_inquiry_active_conversation_expiry_idx" in migration
+
+
 def test_in_memory_help_request_replays_and_rejects_key_reuse() -> None:
     service = InMemoryPlatformService()
     memory_auth = AuthContext(

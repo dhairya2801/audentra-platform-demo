@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: audentra-platform-api
+  labels:
+    app.kubernetes.io/name: audentra-platform
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: audentra
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: audentra-platform
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 4000
+      protocol: TCP
+      targetPort: http

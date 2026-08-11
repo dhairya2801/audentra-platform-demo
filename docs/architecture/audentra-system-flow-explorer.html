@@ -1,0 +1,1805 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive engineering atlas for Audentra's student, staff, platform, AI, integration, and leadership flows.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2310223f'/%3E%3Cpath d='M8 23 15 7h3l7 16h-4l-1.7-4H13l-1.7 4Zm6.4-7h3.5L16.2 12Z' fill='%23f6c62f'/%3E%3C/svg%3E">
+  <title>Audentra Engineering Atlas</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #14233d;
+      --muted: #617089;
+      --line: #dfe5e1;
+      --paper: #ffffff;
+      --wash: #f3f6f3;
+      --purple: #6552e8;
+      --purple-dark: #4737c8;
+      --purple-soft: #f1eeff;
+      --yellow: #f6c62f;
+      --yellow-soft: #fff8dc;
+      --green: #17856e;
+      --green-soft: #e8f7f1;
+      --blue: #2e66ca;
+      --blue-soft: #edf4ff;
+      --orange: #b76513;
+      --orange-soft: #fff2e2;
+      --red: #b44646;
+      --red-soft: #fff0f0;
+      --navy: #10223f;
+      --shadow: 0 20px 55px rgba(22, 36, 61, 0.09);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 92% 5%, rgba(101, 82, 232, 0.13), transparent 30rem),
+        radial-gradient(circle at 8% 88%, rgba(246, 198, 47, 0.14), transparent 28rem),
+        #eef2ef;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select, a { font: inherit; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 3px solid rgba(101, 82, 232, 0.3);
+      outline-offset: 2px;
+    }
+    code {
+      overflow-wrap: anywhere;
+      color: #283d61;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+    }
+    .page {
+      width: min(1580px, calc(100% - 28px));
+      margin: 14px auto 42px;
+    }
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 28px;
+      align-items: end;
+      padding: 30px 34px;
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      border-radius: 22px;
+      background: linear-gradient(125deg, rgba(16, 34, 63, 0.99), rgba(35, 29, 88, 0.97));
+      box-shadow: var(--shadow);
+      color: #fff;
+    }
+    .kicker {
+      margin: 0;
+      color: #7a8798;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+    .masthead .kicker { color: #d8d2ff; }
+    h1 {
+      max-width: 920px;
+      margin: 7px 0 8px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(36px, 5vw, 64px);
+      font-weight: 500;
+      letter-spacing: -0.04em;
+      line-height: 0.98;
+    }
+    .masthead p:not(.kicker) {
+      max-width: 900px;
+      margin: 0;
+      color: #c8d1df;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+    .doc-badge {
+      display: grid;
+      min-width: 250px;
+      gap: 7px;
+      padding: 16px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.17);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .doc-badge strong { color: #fff; font-size: 14px; }
+    .doc-badge span { color: #bdc8d8; font-size: 12px; line-height: 1.45; }
+    .doc-badge i {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--yellow);
+      box-shadow: 0 0 0 5px rgba(246, 198, 47, 0.13);
+    }
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin: 14px 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--paper);
+      box-shadow: 0 10px 30px rgba(22, 36, 61, 0.04);
+    }
+    .stat {
+      min-width: 0;
+      padding: 15px 18px;
+      border-right: 1px solid var(--line);
+    }
+    .stat:last-child { border-right: 0; }
+    .stat span {
+      display: block;
+      margin-bottom: 3px;
+      color: #7a8798;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .stat strong { display: block; font-size: 14px; line-height: 1.4; }
+    .atlas {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    .atlas-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+      padding: 15px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfb;
+    }
+    .view-switch {
+      display: inline-flex;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+    }
+    .view-switch button {
+      padding: 9px 13px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #53627a;
+      font-size: 12px;
+      font-weight: 850;
+      cursor: pointer;
+    }
+    .view-switch button.is-active { background: var(--navy); color: #fff; }
+    .toolbar-note { color: var(--muted); font-size: 12px; }
+    .toolbar-note strong { color: var(--ink); }
+    .view { display: none; }
+    .view.is-active { display: grid; }
+    .catalog-view, .tour-view { grid-template-columns: 340px minmax(0, 1fr); min-height: 850px; }
+    .sidebar {
+      min-width: 0;
+      padding: 20px 16px;
+      border-right: 1px solid var(--line);
+      background: #f8faf8;
+    }
+    .sidebar-head { padding: 0 7px 14px; }
+    .sidebar h2 {
+      margin: 5px 0 6px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 25px;
+      font-weight: 500;
+    }
+    .sidebar-head > p:not(.kicker) {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .filters { display: grid; gap: 9px; margin-bottom: 13px; }
+    .search-wrap { position: relative; }
+    .search-wrap::before {
+      content: "⌕";
+      position: absolute;
+      top: 8px;
+      left: 11px;
+      color: #718096;
+      font-size: 18px;
+    }
+    .filters input, .filters select {
+      width: 100%;
+      min-height: 39px;
+      border: 1px solid #d9dfda;
+      border-radius: 10px;
+      background: #fff;
+      color: var(--ink);
+      font-size: 12px;
+    }
+    .filters input { padding: 8px 10px 8px 35px; }
+    .filters select { padding: 8px 10px; }
+    .filter-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .result-count {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 2px 7px 10px;
+      color: #718096;
+      font-size: 11px;
+      font-weight: 750;
+    }
+    .case-list, .tour-list {
+      display: grid;
+      gap: 7px;
+      max-height: 646px;
+      overflow: auto;
+      padding: 1px 3px 10px 1px;
+      scrollbar-color: #c5cdc7 transparent;
+    }
+    .case-choice, .tour-choice {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      width: 100%;
+      padding: 11px;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+    .case-choice:hover, .tour-choice:hover { border-color: #d7dcd7; background: #fff; }
+    .case-choice.is-active, .tour-choice.is-active {
+      border-color: #9d91f6;
+      background: var(--purple-soft);
+      box-shadow: inset 3px 0 var(--purple);
+    }
+    .case-id, .tour-index {
+      display: grid;
+      min-height: 34px;
+      place-items: center;
+      border-radius: 9px;
+      background: #e8ece8;
+      color: #526177;
+      font-size: 10px;
+      font-weight: 950;
+    }
+    .case-choice.is-active .case-id, .tour-choice.is-active .tour-index { background: var(--purple); color: #fff; }
+    .case-copy { min-width: 0; }
+    .case-copy strong { display: block; font-size: 12px; line-height: 1.35; }
+    .case-copy small {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      margin-top: 5px;
+      color: #7a8798;
+      font-size: 9px;
+      font-weight: 850;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .mini-dot { width: 6px; height: 6px; border-radius: 50%; background: #95a09a; }
+    .mini-dot.current { background: var(--green); }
+    .mini-dot.partial { background: var(--orange); }
+    .mini-dot.target { background: var(--purple); }
+    .sidebar-callout {
+      margin-top: 14px;
+      padding: 13px;
+      border: 1px solid #dde3de;
+      border-radius: 12px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .sidebar-callout strong { color: var(--ink); }
+    .workspace { min-width: 0; padding: 24px; }
+    .flow-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: start;
+      padding-bottom: 19px;
+      border-bottom: 1px solid var(--line);
+    }
+    .flow-head h2 {
+      max-width: 960px;
+      margin: 6px 0 8px;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: clamp(28px, 3vw, 43px);
+      font-weight: 500;
+      letter-spacing: -0.025em;
+      line-height: 1.06;
+    }
+    .flow-head p:not(.kicker) {
+      max-width: 900px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.65;
+    }
+    .flow-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 28px;
+      padding: 6px 9px;
+      border: 1px solid #dfe4e0;
+      border-radius: 999px;
+      background: #f7f9f7;
+      color: #53627a;
+      font-size: 10px;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge.current { border-color: #bfe4d6; background: var(--green-soft); color: #116b58; }
+    .badge.partial { border-color: #f0d7b9; background: var(--orange-soft); color: #8f4d0d; }
+    .badge.target { border-color: #d8d0ff; background: var(--purple-soft); color: var(--purple-dark); }
+    .section-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      margin: 22px 0 10px;
+    }
+    .section-label h3 { margin: 0; font-size: 15px; }
+    .section-label p { margin: 0; color: var(--muted); font-size: 11px; }
+    .flow-graph-shell {
+      max-width: 100%;
+      overflow-x: auto;
+      border: 1px solid #dfe4e0;
+      border-radius: 16px;
+      background: #fbfcfb;
+      scrollbar-color: #bfc9c2 transparent;
+      scrollbar-width: thin;
+    }
+    .flow-graph {
+      position: relative;
+      isolation: isolate;
+    }
+    .graph-sticky-axis {
+      position: sticky;
+      top: 0;
+      left: 0;
+      z-index: 6;
+      width: 140px;
+      pointer-events: none;
+    }
+    .graph-heading-corner {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 4;
+      display: flex;
+      width: 140px;
+      height: 46px;
+      align-items: center;
+      padding: 0 14px;
+      border-right: 1px solid #dfe4e0;
+      border-bottom: 1px solid #dfe4e0;
+      background: #f1f4f1;
+      color: #6b788b;
+      font-size: 9px;
+      font-weight: 950;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .graph-order-axis {
+      position: absolute;
+      top: 0;
+      right: 0;
+      left: 140px;
+      z-index: 1;
+      height: 46px;
+      border-bottom: 1px solid #dfe4e0;
+      background: #f7f9f7;
+    }
+    .graph-order-axis span {
+      position: absolute;
+      top: 15px;
+      color: #84909f;
+      font-size: 9px;
+      font-weight: 950;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      transform: translateX(-50%);
+    }
+    .graph-lane {
+      position: absolute;
+      right: 0;
+      left: 0;
+      z-index: 0;
+      border-bottom: 1px solid #e4e8e4;
+      background: #fff;
+    }
+    .graph-lane.is-even { background: #fafbfa; }
+    .graph-lane.is-selected {
+      background: color-mix(in srgb, var(--lane-soft) 72%, #fff);
+      box-shadow: inset 4px 0 var(--lane-color);
+    }
+    .graph-lane-label {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 6;
+      display: grid;
+      width: 140px;
+      align-content: center;
+      gap: 4px;
+      padding: 0 13px;
+      border-right: 1px solid #dfe4e0;
+      background: color-mix(in srgb, var(--lane-soft) 54%, #fff);
+    }
+    .graph-lane-label strong {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      color: var(--lane-color);
+      font-size: 10px;
+      line-height: 1.25;
+    }
+    .graph-lane-label i {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      border-radius: 50%;
+      background: var(--lane-color);
+    }
+    .graph-lane-label small {
+      padding-left: 14px;
+      color: #7c8898;
+      font-size: 8px;
+      font-weight: 850;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .graph-edges {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      overflow: visible;
+      pointer-events: none;
+    }
+    .graph-edge {
+      fill: none;
+      stroke: #73849a;
+      stroke-width: 2;
+      vector-effect: non-scaling-stroke;
+    }
+    .graph-edge.is-async {
+      stroke: var(--purple);
+      stroke-dasharray: 7 5;
+    }
+    .graph-node {
+      position: absolute;
+      z-index: 3;
+      display: grid;
+      width: 144px;
+      height: 84px;
+      grid-template-rows: auto 1fr auto;
+      gap: 5px;
+      padding: 9px 10px;
+      border: 1px solid #cad3cc;
+      border-radius: 11px;
+      background: #fff;
+      box-shadow: 0 6px 15px rgba(20, 35, 61, 0.08);
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+    }
+    .graph-node:hover {
+      border-color: var(--node-color);
+      box-shadow: 0 9px 20px rgba(20, 35, 61, 0.13);
+      transform: translateY(-2px);
+    }
+    .graph-node.is-active {
+      border: 2px solid var(--node-color);
+      background: linear-gradient(150deg, #fff, var(--node-soft));
+      box-shadow: 0 10px 24px color-mix(in srgb, var(--node-color) 22%, transparent);
+    }
+    .graph-node-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 7px;
+      align-items: center;
+    }
+    .graph-node-step {
+      display: grid;
+      width: 23px;
+      height: 20px;
+      place-items: center;
+      border-radius: 6px;
+      background: #edf0ed;
+      color: #637186;
+      font-size: 8px;
+      font-weight: 950;
+    }
+    .graph-node.is-active .graph-node-step { background: var(--node-color); color: #fff; }
+    .graph-node-mode {
+      color: #7b8798;
+      font-size: 8px;
+      font-weight: 950;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .graph-node-title {
+      overflow: hidden;
+      font-size: 10px;
+      font-weight: 850;
+      line-height: 1.24;
+    }
+    .graph-node-location {
+      overflow: hidden;
+      color: var(--node-color);
+      font-size: 8px;
+      font-weight: 950;
+      letter-spacing: 0.04em;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .graph-key {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 13px;
+      align-items: center;
+      padding: 9px 12px 11px;
+      color: #68768a;
+      font-size: 9px;
+      font-weight: 800;
+    }
+    .graph-key span { display: inline-flex; gap: 6px; align-items: center; }
+    .graph-key i { display: inline-block; width: 25px; border-top: 2px solid #73849a; }
+    .graph-key .is-async { border-color: var(--purple); border-top-style: dashed; }
+    .graph-key b { color: var(--ink); }
+    .location-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 7px;
+      border-radius: 7px;
+      background: var(--location-soft, #eef1ef);
+      color: var(--location-color, #526177);
+      font-size: 9px;
+      font-weight: 950;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .location-pill i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(270px, 0.75fr);
+      gap: 14px;
+      margin-top: 4px;
+    }
+    .panel {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+    }
+    .step-panel { overflow: hidden; }
+    .step-banner {
+      display: grid;
+      grid-template-columns: 52px minmax(0, 1fr) auto;
+      gap: 13px;
+      align-items: center;
+      padding: 17px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(110deg, var(--location-soft, #f4f5f4), #fff 65%);
+    }
+    .location-icon {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      place-items: center;
+      border-radius: 14px;
+      background: var(--location-color, var(--navy));
+      color: #fff;
+      font-size: 12px;
+      font-weight: 950;
+      letter-spacing: 0.04em;
+    }
+    .step-banner h3 { margin: 3px 0 2px; font-size: 17px; }
+    .step-banner p { margin: 0; color: var(--muted); font-size: 11px; }
+    .owner-block { text-align: right; }
+    .owner-block strong, .owner-block span { display: block; }
+    .owner-block strong { font-size: 11px; }
+    .owner-block span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .step-body { padding: 18px; }
+    .step-body > p {
+      margin: 0 0 16px;
+      color: #394b68;
+      font-size: 13px;
+      line-height: 1.7;
+    }
+    .io-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .io-card { padding: 12px; border: 1px solid #e3e7e3; border-radius: 11px; background: #fafbfa; }
+    .io-card span { display: block; margin-bottom: 5px; color: #7a8798; font-size: 9px; font-weight: 950; letter-spacing: 0.07em; text-transform: uppercase; }
+    .io-card strong { display: block; font-size: 11px; line-height: 1.48; }
+    .safety {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 10px;
+      margin-top: 11px;
+      padding: 12px;
+      border-left: 3px solid var(--yellow);
+      border-radius: 8px;
+      background: var(--yellow-soft);
+      color: #5e5225;
+      font-size: 11px;
+      line-height: 1.55;
+    }
+    .safety b { color: #725d00; }
+    .files { margin-top: 14px; }
+    .files h4 { margin: 0 0 8px; font-size: 11px; }
+    .file-list { display: grid; gap: 6px; }
+    .file-row {
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+      padding: 8px 9px;
+      border: 1px solid #e5e9e5;
+      border-radius: 8px;
+      background: #fbfcfb;
+    }
+    .file-row span { color: #7a8798; font-size: 9px; font-weight: 900; text-transform: uppercase; }
+    .boundary-panel { padding: 16px; }
+    .boundary-panel h3 { margin: 2px 0 4px; font-size: 15px; }
+    .boundary-panel > p { margin: 0 0 13px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+    .location-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+    .location-tile {
+      min-height: 67px;
+      padding: 9px;
+      border: 1px solid #e1e5e1;
+      border-radius: 10px;
+      background: #fafbfa;
+      opacity: 0.48;
+    }
+    .location-tile.is-used { opacity: 1; border-color: color-mix(in srgb, var(--tile-color) 34%, #dfe4e0); }
+    .location-tile.is-selected {
+      border-color: var(--tile-color);
+      background: var(--tile-soft);
+      box-shadow: inset 3px 0 var(--tile-color);
+    }
+    .location-tile strong { display: block; font-size: 10px; line-height: 1.3; }
+    .location-tile span { display: block; margin-top: 4px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+    .source-panel { margin-top: 14px; padding: 15px 16px; }
+    .source-panel-head { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .source-panel h3 { margin: 0; font-size: 14px; }
+    .source-panel small { color: var(--muted); }
+    .source-links { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+    .source-links a {
+      padding: 7px 9px;
+      border: 1px solid #dfe4e0;
+      border-radius: 8px;
+      background: #fafbfa;
+      color: #35528a;
+      font-size: 10px;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .source-links a:hover { border-color: var(--purple); color: var(--purple-dark); }
+    .tour-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .tour-links button {
+      padding: 6px 8px;
+      border: 1px solid #d8dfe7;
+      border-radius: 8px;
+      background: #fff;
+      color: #35528a;
+      font-size: 10px;
+      font-weight: 850;
+      cursor: pointer;
+    }
+    .empty {
+      padding: 28px 16px;
+      border: 1px dashed #ccd4ce;
+      border-radius: 12px;
+      background: #fff;
+      color: var(--muted);
+      text-align: center;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 14px;
+      padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.74);
+    }
+    .legend strong { margin-right: 5px; font-size: 11px; align-self: center; }
+    .legend-item {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: #fff;
+      color: #56657b;
+      font-size: 9px;
+      font-weight: 850;
+    }
+    .legend-item i { width: 7px; height: 7px; border-radius: 50%; background: var(--legend-color); }
+    .footer-note { margin: 14px 2px 0; color: #66758a; font-size: 11px; line-height: 1.55; }
+    .footer-note strong { color: var(--ink); }
+
+    @media (max-width: 1120px) {
+      .catalog-view, .tour-view { grid-template-columns: 300px minmax(0, 1fr); }
+      .detail-grid { grid-template-columns: 1fr; }
+      .location-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    @media (max-width: 820px) {
+      .page { width: min(100% - 16px, 1580px); margin-top: 8px; }
+      .masthead { grid-template-columns: 1fr; padding: 24px; }
+      .doc-badge { min-width: 0; }
+      .stats-strip { grid-template-columns: 1fr 1fr; }
+      .stat:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .catalog-view, .tour-view { grid-template-columns: 1fr; }
+      .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+      .case-list, .tour-list { max-height: 330px; }
+      .workspace { padding: 18px; }
+      .flow-head { grid-template-columns: 1fr; }
+      .flow-badges { justify-content: flex-start; }
+      .io-grid { grid-template-columns: 1fr; }
+      .location-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 520px) {
+      .masthead { padding: 21px; }
+      .stats-strip { grid-template-columns: 1fr; }
+      .stat { border-right: 0; border-bottom: 1px solid var(--line); }
+      .stat:last-child { border-bottom: 0; }
+      .atlas-toolbar { align-items: stretch; }
+      .view-switch { width: 100%; }
+      .view-switch button { flex: 1; }
+      .filter-grid { grid-template-columns: 1fr; }
+      .workspace { padding: 15px; }
+      .step-banner { grid-template-columns: 45px minmax(0, 1fr); }
+      .owner-block { grid-column: 1 / -1; text-align: left; }
+      .location-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="masthead">
+      <div>
+        <p class="kicker">Engineering documentation · not a product screen</p>
+        <h1>Follow every Audentra flow across the system.</h1>
+        <p>Select a use case, then walk through each stage to see exactly where it runs, what crosses the boundary, what becomes durable, and which source files own the behavior.</p>
+      </div>
+      <div class="doc-badge" aria-label="Atlas scope">
+        <i aria-hidden="true"></i>
+        <strong>Complete documented inventory</strong>
+        <span>57 use cases · six guided tours · current and target behavior kept distinct</span>
+      </div>
+    </header>
+
+    <section class="stats-strip" aria-label="Atlas coverage">
+      <div class="stat"><span>Student lifecycle</span><strong>24 use cases</strong></div>
+      <div class="stat"><span>Staff operations</span><strong>12 use cases</strong></div>
+      <div class="stat"><span>Platform and AI</span><strong>14 use cases</strong></div>
+      <div class="stat"><span>Leadership</span><strong>7 governed projections</strong></div>
+    </section>
+
+    <section class="atlas" aria-label="Audentra interactive system atlas">
+      <div class="atlas-toolbar">
+        <div class="view-switch" role="tablist" aria-label="Atlas view">
+          <button id="catalog-tab" class="is-active" type="button" role="tab" aria-selected="true" data-view="catalog">57-use-case catalog</button>
+          <button id="tour-tab" type="button" role="tab" aria-selected="false" data-view="tour">Six guided tours</button>
+        </div>
+        <div class="toolbar-note"><strong>Tip:</strong> select any stage to reveal frontend, backend, data, worker, or provider ownership.</div>
+      </div>
+
+      <section id="catalog-view" class="view catalog-view is-active" role="tabpanel" aria-labelledby="catalog-tab">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <p class="kicker">Complete inventory</p>
+            <h2>Use cases</h2>
+            <p>Search by behavior or narrow the catalog by persona, delivery status, trigger, or execution location.</p>
+          </div>
+          <div class="filters">
+            <label class="search-wrap">
+              <span hidden>Search use cases</span>
+              <input id="case-search" type="search" placeholder="Search flows, data, or files">
+            </label>
+            <div class="filter-grid">
+              <label><span hidden>Persona</span><select id="group-filter" aria-label="Filter by persona"></select></label>
+              <label><span hidden>Status</span><select id="status-filter" aria-label="Filter by implementation status"></select></label>
+              <label><span hidden>Trigger</span><select id="trigger-filter" aria-label="Filter by trigger"></select></label>
+              <label><span hidden>Location</span><select id="location-filter" aria-label="Filter by execution location"></select></label>
+            </div>
+          </div>
+          <div class="result-count"><span id="result-count">57 flows</span><span id="catalog-audit">57 / 57 loaded</span></div>
+          <div id="case-list" class="case-list" aria-live="polite"></div>
+          <div class="sidebar-callout"><strong>Availability matters.</strong> “Target” flows are documented architecture, not claims about shipped behavior. Preview and partial flows need production hardening or a real adapter.</div>
+        </aside>
+        <article id="catalog-workspace" class="workspace"></article>
+      </section>
+
+      <section id="tour-view" class="view tour-view" role="tabpanel" aria-labelledby="tour-tab">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <p class="kicker">Cross-system stories</p>
+            <h2>Guided tours</h2>
+            <p>Use these six narratives for onboarding. Each tour links back to its authoritative catalog entries.</p>
+          </div>
+          <div id="tour-list" class="tour-list"></div>
+          <div class="sidebar-callout"><strong>Canonical rule:</strong> browser views never become a second source of truth. Official state is validated by the API and committed to PostgreSQL before asynchronous side effects run.</div>
+        </aside>
+        <article id="tour-workspace" class="workspace"></article>
+      </section>
+    </section>
+
+    <section id="legend" class="legend" aria-label="Execution location legend"></section>
+    <p class="footer-note"><strong>Source of inventory:</strong> <code>docs/generated/vv-flow-catalog-and-diagram-screenshots.docx</code>. This atlas is a maintainable engineering companion; the product portals intentionally contain no architecture-explanation route.</p>
+  </main>
+
+  <script>
+    const locations = {
+      studentFrontend: {
+        name: "Student frontend",
+        short: "Student FE",
+        layer: "Frontend",
+        icon: "S-FE",
+        color: "#2e66ca",
+        soft: "#edf4ff",
+        owner: "Audentra-portals · Next.js",
+        runtime: "Student browser + React server/client components",
+        files: ["Audentra-portals/apps/web/app/[tenant]/…", "Audentra-portals/apps/web/app/lib/api-client.ts"]
+      },
+      staffFrontend: {
+        name: "Staff frontend",
+        short: "Staff FE",
+        layer: "Frontend",
+        icon: "T-FE",
+        color: "#6552e8",
+        soft: "#f1eeff",
+        owner: "Audentra-portals · Next.js",
+        runtime: "Staff browser + React workspace",
+        files: ["Audentra-portals/apps/web/app/staff/…", "Audentra-portals/apps/web/app/lib/api-client.ts"]
+      },
+      platformApi: {
+        name: "Platform API",
+        short: "Backend API",
+        layer: "Backend",
+        icon: "API",
+        color: "#116f60",
+        soft: "#e8f7f1",
+        owner: "Audentra-platform · FastAPI",
+        runtime: "HTTP adapter + framework-neutral application/domain services",
+        files: ["Audentra-platform/apps/api/src/audentra/interfaces/http/routes.py", "Audentra-platform/apps/api/src/audentra/application/platform_service.py"]
+      },
+      postgres: {
+        name: "PostgreSQL",
+        short: "Database",
+        layer: "Data",
+        icon: "DB",
+        color: "#9a5b14",
+        soft: "#fff2e2",
+        owner: "Audentra-platform · PostgreSQL",
+        runtime: "Canonical records, versions, audit, outbox, jobs, and projections",
+        files: ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/…", "Audentra-platform/apps/api/migrations/…"]
+      },
+      objectStorage: {
+        name: "Object storage",
+        short: "Object store",
+        layer: "Data",
+        icon: "OBJ",
+        color: "#89711a",
+        soft: "#fff8dc",
+        owner: "Audentra-platform · S3/MinIO adapter",
+        runtime: "Original uploads, signed packets, recordings, and other immutable bytes",
+        files: ["Audentra-platform/apps/api/src/audentra/infrastructure/storage/s3.py"]
+      },
+      worker: {
+        name: "Durable worker",
+        short: "Worker",
+        layer: "Async",
+        icon: "WK",
+        color: "#b44646",
+        soft: "#fff0f0",
+        owner: "Audentra-platform · Python worker",
+        runtime: "Outbox consumers, scheduled jobs, projections, parsing, retries, and dead letters",
+        files: ["Audentra-platform/apps/api/src/audentra/infrastructure/worker/…", "Audentra-platform/apps/api/src/audentra/interfaces/worker/main.py"]
+      },
+      externalProvider: {
+        name: "External provider",
+        short: "Provider",
+        layer: "Integration",
+        icon: "EXT",
+        color: "#4e6f8e",
+        soft: "#edf4f8",
+        owner: "Provider-specific adapter",
+        runtime: "OpenRouter, speech-to-text, identity, payment, e-sign, CRM/SIS, or communications provider",
+        files: ["Audentra-platform/apps/api/src/audentra/integrations/…"]
+      },
+      delivery: {
+        name: "Delivery platform",
+        short: "CI / K8s",
+        layer: "Delivery",
+        icon: "OPS",
+        color: "#273b68",
+        soft: "#eef1f7",
+        owner: "GitHub Actions + cloud runtime",
+        runtime: "Immutable image build, registry, Kubernetes/GCE rollout, health checks, and rollback",
+        files: [".github/workflows/ci.yml", "infra/kubernetes/", "infra/preview-vm/"]
+      }
+    };
+
+    const sourceDocs = {
+      "01": ["System architecture", "../01-system-architecture.md"],
+      "02": ["Domain data and workflow", "../02-domain-data-and-workflow.md"],
+      "03": ["Student portal feature flows", "../03-student-portal-feature-flows.md"],
+      "04": ["Tracking, observability, and audit", "../04-tracking-observability-and-audit.md"],
+      "05": ["Agentic flows and cost controls", "../05-agentic-flows-and-cost-controls.md"],
+      "06": ["Staff, leader, and VP flows", "../06-staff-leader-vp-flows.md"],
+      "07": ["Integrations and dummy-to-real", "../07-integrations-and-dummy-to-real.md"],
+      "08": ["Security, privacy, and authorization", "../08-security-privacy-and-authorization.md"],
+      "09": ["Deployment, testing, and roadmap", "../09-deployment-testing-and-roadmap.md"],
+      "10": ["Student portal acceptance", "../10-student-portal-acceptance.md"],
+      "11": ["Agentic runtime", "../11-agentic-runtime.md"],
+      "12": ["Student domain state map", "../12-student-domain-state-map.md"],
+      "13": ["CRM change graph", "../13-crm-change-graph.md"],
+      "14": ["Current implementation map", "../14-current-implementation-map.md"],
+      "16": ["Deployment security and CI/CD", "../16-deployment-security-and-cicd.md"],
+      "17": ["Onboarding question alignment", "../17-onboarding-question-alignment.md"],
+      "19": ["Tenant rewards", "../19-tenant-rewards.md"],
+      "22": ["Staff Action Center and shared state", "../22-staff-action-center-and-realtime-state.md"],
+      "23": ["Student–staff flows and contracts", "../23-student-staff-user-flows-and-contracts.md"],
+      "24": ["Staff portal implementation and operations", "../24-staff-portal-implementation-and-operations.md"],
+      "worker": ["Worker implementation map", "../14-current-implementation-map.md"]
+    };
+
+    const groupLabels = { student: "Student", staff: "Staff", platform: "Platform / AI", leadership: "Leadership" };
+    const triggerLabels = { user: "User action", event: "Domain event", schedule: "Schedule", integration: "Integration", system: "System lifecycle", mixed: "Mixed" };
+
+    const s = (location, title, detail, input, output, data, mode = "Sync", safety = "Canonical validation and authorization apply at this boundary.", files = []) => ({
+      location, title, detail, input, output, data, mode, safety, files
+    });
+    const u = (id, group, title, purpose, availability, trigger, sources, stages) => ({
+      id, group, title, purpose, availability, trigger, sources, stages
+    });
+
+    const useCases = [
+      u("S01", "student", "Registration, sign-in and bootstrap routing", "Student establishes a session; bootstrap chooses sign-in, onboarding, or dashboard.", "Current preview", "user", ["03","10","14"], [
+        s("studentFrontend", "Submit credentials", "The tenant-aware sign-in screen collects a preview identity and starts a credentialed request.", "Tenant slug + credentials", "Credentialed sign-in request", "No canonical state yet", "Sync", "The browser never decides tenant membership or the first safe route.", ["Audentra-portals/apps/web/app/[tenant]/sign-in/page.tsx", "Audentra-portals/apps/web/app/sign-in/sign-in-client.tsx"]),
+        s("platformApi", "Authenticate and resolve tenant", "FastAPI verifies the credential, resolves the tenant, and creates the HTTP-only session boundary.", "Sign-in request", "Authenticated session identity", "Session metadata", "Sync", "Failed authentication returns a bounded error without exposing identity details.", ["Audentra-platform/apps/api/src/audentra/interfaces/http/auth_routes.py"]),
+        s("postgres", "Read identity and progress", "The repository loads membership, role, onboarding progress, and enrollment state.", "Identity + tenant", "Canonical bootstrap facts", "Credential identity and student progress", "Sync", "Tenant-scoped queries prevent cross-tenant reads.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/auth_repository.py"]),
+        s("platformApi", "Choose first safe route", "The API derives whether the user belongs at sign-in, onboarding, or the dashboard.", "Canonical bootstrap facts", "Bootstrap response + route intent", "No browser-owned route state", "Sync", "Only server facts may advance the student beyond required onboarding.", ["Audentra-platform/apps/api/src/audentra/interfaces/http/routes.py"]),
+        s("studentFrontend", "Render the selected entry", "The route guard navigates to the server-selected experience and renders loading, error, or ready state.", "Bootstrap response", "Visible student screen", "Client cache only", "Sync", "A reload asks the API again instead of trusting stale client state.", ["Audentra-portals/apps/web/app/components/student-route-guard.tsx"])
+      ]),
+      u("S02", "student", "Ordered onboarding and resume", "Eight server-versioned steps save and resume at the first incomplete task.", "Current", "user", ["03","14","17"], [
+        s("studentFrontend", "Open or answer a step", "The onboarding form renders the current server-defined step and permitted input controls.", "Onboarding projection", "Step answer + expected version", "Unsaved form state", "Sync", "Conditional fields remain UI hints until the API validates them.", ["Audentra-portals/apps/web/app/[tenant]/onboarding/page.tsx"]),
+        s("platformApi", "Validate order and answer", "The API checks the step definition, input type, required fields, branch conditions, and expected version.", "Step answer", "Accepted command or validation/conflict", "Validated command", "Sync", "Blocked, skipped, or stale steps cannot be completed by crafting a request.", ["Audentra-platform/apps/api/src/audentra/domain/onboarding.py", "Audentra-platform/apps/api/src/audentra/infrastructure/postgres/journey_routing.py"]),
+        s("postgres", "Persist progress", "The answer and new journey version become durable in the canonical student record.", "Validated step result", "Committed progress + next eligible step", "Answers, completion state, journey version", "Sync", "Optimistic version checks prevent a stale tab from replacing newer progress.", ["Audentra-platform/apps/api/migrations/0030_conditional_journey_routing.sql"]),
+        s("studentFrontend", "Resume first incomplete step", "The UI refreshes the projection and routes to the next eligible step; a later login repeats the same read.", "Updated onboarding projection", "Next form or completion screen", "Client cache only", "Sync", "Reloading never restarts completed work.", ["Audentra-portals/apps/web/app/onboarding/page.tsx"])
+      ]),
+      u("S03", "student", "Admission offer decision", "Student accepts an offer idempotently; the API creates an enrollment journey.", "Current", "user", ["03","14"], [
+        s("studentFrontend", "Choose offer decision", "The offer screen sends accept, decline, or still-deciding with an idempotency key.", "Offer projection", "Decision command", "Pending UI state", "Sync", "Repeated clicks reuse the same idempotency boundary.", ["Audentra-portals/apps/web/app/onboarding/offer-acceptance.ts"]),
+        s("platformApi", "Validate decision", "The API authorizes the student and verifies that the offer can transition from its current state.", "Decision command", "Accepted domain transition", "Domain command", "Sync", "Illegal transitions are rejected without partial enrollment creation."),
+        s("postgres", "Commit offer and enrollment", "Offer state, enrollment journey, audit record, and outbox event commit together.", "Accepted transition", "Canonical offer + enrollment IDs", "Offer, enrollment, audit, outbox", "Sync", "One transaction prevents an accepted offer without its enrollment journey.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/portal_repository.py"]),
+        s("worker", "Refresh projections", "The outbox worker updates dashboard and downstream projections after the transaction commits.", "Offer-accepted outbox event", "Updated projection receipt", "Outbox receipt and dashboard projection", "Async", "Leases and receipts make projection delivery retry-safe.", ["Audentra-platform/apps/api/src/audentra/infrastructure/worker/dashboard_projector.py"]),
+        s("studentFrontend", "Show enrollment next action", "The frontend reloads the canonical dashboard/enrollment projection.", "Updated API projection", "Enrollment experience", "Client cache only", "Sync", "The UI does not infer journey creation from the button click alone.")
+      ]),
+      u("S04", "student", "Dashboard and next action", "Student sees authoritative progress, deadlines, unread messages, and the next action.", "Current", "user", ["03","14"], [
+        s("studentFrontend", "Request dashboard", "The tenant dashboard requests the student's current projection.", "Authenticated session", "Dashboard GET", "Client request state", "Sync", "Loading and retry are explicit states.", ["Audentra-portals/apps/web/app/[tenant]/dashboard/page.tsx", "Audentra-portals/apps/web/app/student-dashboard.tsx"]),
+        s("platformApi", "Authorize projection read", "The API resolves the student relationship and requests canonical dashboard data.", "Session + tenant", "Authorized projection query", "No write", "Sync", "Only the signed-in student's projection is returned."),
+        s("postgres", "Read shared facts", "Progress, requirements, deadlines, unread messages, rewards, and events are read from shared records/projections.", "Student ID", "Dashboard facts", "Canonical tables and projections", "Sync", "No dashboard-only source of truth is created.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/portal_repository.py"]),
+        s("platformApi", "Rank next action", "Deterministic ordering chooses the highest eligible action and composes the response.", "Dashboard facts", "Next action + dashboard payload", "Derived response", "Sync", "Blocked dependencies remain blocked even if they look urgent."),
+        s("studentFrontend", "Render current state", "Widgets show progress, calendar, financial, academic, and campus information from one response.", "Dashboard payload", "Visible dashboard", "Client cache only", "Sync", "Refresh replaces stale cached content with canonical data.", ["Audentra-portals/apps/web/app/components/dashboard-*.tsx"])
+      ]),
+      u("S05", "student", "Requirement applicability and dependencies", "Server instantiates only applicable requirements and prevents blocked work from advancing.", "Current", "event", ["02","03","12"], [
+        s("platformApi", "Evaluate journey context", "Enrollment attributes and prior answers are evaluated against the published requirement graph.", "Student + journey configuration", "Applicable requirement set", "Derived applicability", "Sync", "The API, not hidden browser fields, evaluates conditions.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/journey_routing.py"]),
+        s("postgres", "Instantiate requirement state", "Applicable requirements and dependency edges become durable for this enrollment.", "Applicable set", "Requirement instances", "Requirements, dependencies, versions", "Sync", "Unique keys make re-evaluation idempotent.", ["Audentra-platform/apps/api/migrations/0030_conditional_journey_routing.sql"]),
+        s("studentFrontend", "Show ready and blocked work", "Enrollment pages render the canonical status and explain unmet prerequisites.", "Requirement projection", "Actionable or blocked UI", "Client cache only", "Sync", "A blocked task never becomes actionable only because the page is stale.", ["Audentra-portals/apps/web/app/[tenant]/enrollment/page.tsx"]),
+        s("platformApi", "Guard completion command", "Every completion attempt re-checks applicability, dependencies, and version.", "Student action", "Committed completion or conflict", "Requirement state", "Sync", "A deactivated task completed from a stale page is rejected or reconciled explicitly.")
+      ]),
+      u("S06", "student", "Profile verification and save conflict", "Student saves permitted profile fields with expected version; stale writes receive a conflict.", "Current", "user", ["03","23"], [
+        s("studentFrontend", "Edit permitted fields", "The profile form tracks changes and sends only student-owned fields with the expected record version.", "Profile projection", "Profile patch + version", "Unsaved form values", "Sync", "Institution-owned fields are read-only in the UI and still protected by the API.", ["Audentra-portals/apps/web/app/[tenant]/profile/page.tsx"]),
+        s("platformApi", "Authorize and validate patch", "The API applies field ownership rules and checks the expected version.", "Patch + session", "Validated patch or 409", "No partial write", "Sync", "Stale or unauthorized fields are rejected."),
+        s("postgres", "Compare and update", "The repository atomically compares the version, updates allowed fields, and appends audit history.", "Validated patch", "New profile version", "Profile and audit", "Sync", "The compare-and-swap prevents lost updates.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/portal_repository.py"]),
+        s("studentFrontend", "Resolve conflict", "On 409, the form keeps local values, loads current canonical data, and asks the student to reconcile.", "Conflict + current record", "Merged retry or cancel", "Local draft retained", "Sync", "The UI never silently overwrites another writer's change.")
+      ]),
+      u("S07", "student", "Housing plan and roommate preference", "Student chooses a housing path and related preferences as part of onboarding.", "Current", "user", ["03","14"], [
+        s("studentFrontend", "Choose housing path", "The onboarding form captures on-campus/off-campus intent and applicable roommate preferences.", "Published form definition", "Typed answers", "Local form state", "Sync", "Only relevant follow-up fields are displayed."),
+        s("platformApi", "Validate conditional answers", "The API checks required answers and evaluates branch conditions from the published journey.", "Typed answers", "Accepted housing step", "Validated command", "Sync", "A crafted answer cannot bypass a required branch."),
+        s("postgres", "Version housing preferences", "Answers are saved with the onboarding version and audit context.", "Accepted step", "Updated journey projection", "Onboarding answers and version", "Sync", "A stale form receives a conflict instead of replacing newer preferences."),
+        s("studentFrontend", "Continue eligible branch", "The UI loads the next server-selected step for the chosen housing path.", "Updated projection", "Next onboarding form", "Client cache only", "Sync", "Changing an earlier answer re-evaluates downstream applicability.")
+      ]),
+      u("S08", "student", "Family permissions / FERPA delegation", "Student records or revokes family access permissions; authorization governs future use.", "Current onboarding; production auth target", "user", ["03","08"], [
+        s("studentFrontend", "Grant or revoke permission", "The student explicitly selects a person, scope, and action in onboarding or settings.", "Current delegation state", "Consent command", "Local confirmation state", "Sync", "Consent is never inferred from contact information."),
+        s("platformApi", "Validate identity, scope, and consent", "The API checks the student, requested permission scope, and allowed transition.", "Consent command", "Authorized grant/revoke", "Validated command", "Sync", "Production use requires stronger delegated-user authentication than the preview."),
+        s("postgres", "Record versioned delegation", "Permission state and non-repudiation audit history commit together.", "Authorized transition", "New delegation version", "Delegation and audit", "Sync", "Revocation is durable and future access checks read current state."),
+        s("platformApi", "Enforce on future access", "Subsequent protected reads resolve active delegation before revealing permitted fields.", "Delegated access request", "Minimized response or denial", "Access audit", "Sync", "Field-level authorization still applies after identity is proven.")
+      ]),
+      u("S09", "student", "Onboarding signature and signed packets", "Completion creates immutable tenant-branded signed PDFs visible in My Documents.", "Current", "user", ["03","10"], [
+        s("studentFrontend", "Review and sign", "The student reviews the rendered disclosure and submits explicit signature intent.", "Packet preview", "Signature command", "Local signature state", "Sync", "The UI shows the exact document/version being signed."),
+        s("platformApi", "Validate packet and signer", "The API confirms identity, packet version, required acknowledgements, and idempotency.", "Signature command", "Authorized signature result", "Signed-document metadata", "Sync", "A changed packet requires fresh consent."),
+        s("objectStorage", "Store immutable signed bytes", "The finalized tenant-branded PDF is written under a protected object key.", "Rendered signed PDF", "Object key + checksum", "Immutable packet bytes", "Sync", "Checksums and protected access preserve the signed artifact."),
+        s("postgres", "Commit signed-document record", "Metadata, checksum, signer, audit, and requirement completion become durable.", "Object key + signature result", "Signed packet projection", "Signed document, requirement, audit", "Sync", "Metadata never claims completion if object storage failed."),
+        s("studentFrontend", "Show in My Documents", "The documents page reads the protected record and requests authorized download access.", "Signed packet projection", "Visible/downloadable packet", "No public object URL", "Sync", "Downloads remain tenant- and student-authorized.")
+      ]),
+      u("S10", "student", "Document upload and extraction", "Original bytes and metadata persist before the worker parses a document.", "Current", "event", ["03","11","14"], [
+        s("studentFrontend", "Select and submit files", "The upload component validates basic size/type guidance and sends the original bytes once.", "Student files + requirement context", "Multipart upload", "Upload progress only", "Sync", "Client checks improve UX but do not replace server validation.", ["Audentra-portals/apps/web/app/components/document-upload.tsx"]),
+        s("platformApi", "Authorize upload", "The API validates tenant, student, requirement context, MIME/size policy, and idempotency.", "Multipart request", "Authorized storage command", "Document metadata draft", "Sync", "A file is never parsed before the authenticated storage boundary is established.", ["Audentra-platform/apps/api/src/audentra/interfaces/http/routes.py"]),
+        s("objectStorage", "Persist original bytes", "The exact original is stored before any AI or extraction call starts.", "Authorized file stream", "Object key + checksum", "Original document bytes", "Sync", "The retained original enables retry and human review without data loss.", ["Audentra-platform/apps/api/src/audentra/infrastructure/storage/s3.py"]),
+        s("postgres", "Commit metadata and parse event", "Document metadata, requirement linkage, audit, and outbox event commit together.", "Object key + checksum", "Queued document record", "Document, audit, outbox", "Sync", "A durable event is created only after the original exists.", ["Audentra-platform/apps/api/src/audentra/infrastructure/postgres/portal_repository.py"]),
+        s("worker", "Claim extraction job", "The worker leases the event, deduplicates the attempt, and loads parsing policy.", "Document-uploaded event", "Provider request or terminal prior result", "Job lease and attempt", "Async", "A terminal result prevents duplicate model spend.", ["Audentra-platform/apps/api/src/audentra/infrastructure/worker/document_commands.py"]),
+        s("externalProvider", "Extract structured evidence", "The configured multimodal provider returns schema-constrained fields and confidence evidence.", "Document bytes + bounded prompt", "Structured extraction candidate", "Provider response metadata", "Async", "Provider output is untrusted until locally validated."),
+        s("postgres", "Store reviewable result", "Validated extraction, status, provenance, and failure details are persisted for portal reads.", "Validated result", "Document extraction projection", "Extraction result and audit", "Async", "Failures retain the original and can create a human-review task."),
+        s("studentFrontend", "Render processing or result", "The document page reads current status and shows processing, retry, review, or success without inventing completion.", "Document projection", "Visible extraction state", "Client cache only", "Sync", "Polling/refresh can recover after a closed browser.", ["Audentra-portals/apps/web/app/components/document-extraction-review.tsx"])
+      ]),
+      u("S11", "student", "Document mismatch, failure and retry", "The system surfaces type mismatch/failure and retries from the retained original with an idempotency boundary.", "Current", "event", ["03","11","13"], [
+        s("studentFrontend", "See actionable failure", "The UI distinguishes unsupported/mismatched evidence, provider failure, and human-review-required state.", "Document projection", "Retry or help action", "No lost original", "Sync", "The message never implies that the original was deleted.", ["Audentra-portals/apps/web/app/components/document-extraction-retry.tsx"]),
+        s("platformApi", "Request safe retry", "The API authorizes the student/staff action and creates a deduplicated retry command.", "Document ID + expected state", "Retry accepted or existing terminal result", "Retry intent", "Sync", "Repeated clicks cannot fan out duplicate jobs."),
+        s("worker", "Reload retained original", "The worker leases the retry, fetches the original, and applies the current parsing policy.", "Retry event + object key", "New extraction attempt", "Attempt and lease", "Async", "Retry does not require a second upload.", ["Audentra-platform/apps/api/src/audentra/infrastructure/worker/document_commands.py"]),
+        s("externalProvider", "Re-run classification/extraction", "The provider receives the bounded multimodal request and returns structured output.", "Original bytes + schema", "Extraction candidate or provider error", "Provider attempt metadata", "Async", "Timeouts and invalid schema remain retryable/observable failures."),
+        s("postgres", "Finish or route to human", "A terminal result is saved, or a linked staff action is created with reason and retained evidence.", "Validated attempt", "Completed document or review task", "Document status, task, notification, audit", "Async", "The same failure cannot create unlimited duplicate staff tasks."),
+        s("studentFrontend", "Refresh canonical state", "The page shows the latest result and any help/review status.", "Updated projection", "Success or human-review UX", "Client cache only", "Sync", "Stale UI never marks the requirement complete on its own.")
+      ]),
+      u("S12", "student", "Student confirms extraction; staff decides", "Student confirms eligible extracted fields; staff review can update the document, requirement, and notification.", "Current slice", "user", ["14","22","23"], [
+        s("studentFrontend", "Confirm eligible fields", "The student reviews extracted data and submits only fields that policy permits them to confirm.", "Extraction projection", "Confirmation command + version", "Local review state", "Sync", "Low-confidence or protected decisions remain staff-owned."),
+        s("platformApi", "Validate confirmation", "The API checks document state, field ownership, and expected version.", "Confirmation command", "Accepted evidence update", "Validated command", "Sync", "A stale extraction cannot be confirmed after staff changes it."),
+        s("postgres", "Commit evidence and work state", "Evidence, requirement, work item, audit, and outbox changes commit atomically.", "Accepted update", "Canonical document/work projection", "Document, requirement, task, audit, outbox", "Sync", "No partial state can show a completed requirement with an unresolved document."),
+        s("staffFrontend", "Review exception", "Authorized staff inspect the original, extraction evidence, and linked requirement before deciding.", "Staff document projection", "Decision command", "Local decision draft", "Sync", "The original remains available through protected access."),
+        s("platformApi", "Apply staff decision", "The API authorizes the reviewer and validates the allowed decision transition.", "Decision + expected version", "Canonical result or conflict", "Domain command", "Sync", "Concurrent decisions return 409 rather than overwrite."),
+        s("worker", "Project and notify", "Outbox consumers refresh dependent views and create the student notification after commit.", "Decision event", "Projection receipt + notification", "Outbox receipt and notification", "Async", "Retry-safe delivery avoids duplicate notifications."),
+        s("studentFrontend", "See decision on refresh/live invalidation", "The student reads the updated requirement, document, and notification state.", "Canonical projection", "Visible outcome", "Client cache only", "Sync", "The portal can recover even if the student was offline during delivery.")
+      ]),
+      u("S13", "student", "Transcript course and exemption recommendation", "Transcript evidence yields advisory course/exemption suggestions for later registrar action.", "Current advisory", "event", ["11","14"], [
+        s("worker", "Prepare transcript evidence", "The document worker assembles validated transcript fields and tenant academic context.", "Parsed transcript + policy", "Bounded recommendation request", "Job attempt", "Async", "Only verified/traceable evidence enters the recommendation context."),
+        s("externalProvider", "Generate structured recommendation", "The model returns schema-constrained course and exemption candidates with reasons/confidence.", "Transcript evidence + catalog", "Advisory candidates", "Provider response", "Async", "The model cannot create official transfer credit."),
+        s("platformApi", "Validate advisory output", "Domain rules normalize identifiers, reject unknown courses, and label results advisory.", "Provider candidates", "Validated recommendations", "No official academic decision", "Async", "Invalid or unsupported claims are discarded before persistence."),
+        s("postgres", "Store provenance and candidates", "Recommendations, evidence links, confidence, and model provenance become reviewable.", "Validated recommendations", "Recommendation projection", "Advisory records and audit", "Async", "Official registrar outcomes remain separate records."),
+        s("studentFrontend", "Show advisory matches", "The classrooms/documents experience explains potential matches without presenting them as awarded credit.", "Recommendation projection", "Visible advisory cards", "Client cache only", "Sync", "Wording preserves the human decision boundary.", ["Audentra-portals/apps/web/app/components/document-context-matches.tsx"])
+      ]),
+      u("S14", "student", "Financial-aid and immunization document lanes", "Financial aid is classification-only; immunization routes to manual review under policy.", "Current", "event", ["11","14"], [
+        s("studentFrontend", "Upload requirement evidence", "The requirement page sends files with financial-aid or immunization context.", "Files + requirement ID", "Document upload", "Upload progress", "Sync", "Help requests remain linked to the exact requirement."),
+        s("platformApi", "Apply tenant document policy", "The API selects classification-only, extraction, or manual-review behavior for this requirement type.", "Document metadata + tenant policy", "Processing lane", "Policy decision", "Sync", "The model cannot override tenant policy."),
+        s("objectStorage", "Retain original", "Original evidence is stored for authorized review.", "File bytes", "Protected object key", "Original bytes", "Sync", "Manual review never depends on a lossy AI transform."),
+        s("worker", "Classify or route", "Financial aid is classified without authoritative adjudication; immunization creates the configured review path.", "Processing event", "Classification or staff-review task", "Job, task, audit", "Async", "Provider failure routes to explicit attention instead of silent completion."),
+        s("staffFrontend", "Perform policy-owned review", "Staff inspect the retained evidence and record the institutional decision.", "Document + policy context", "Staff decision", "Decision draft", "Sync", "Only authorized teams can view sensitive health/aid documents."),
+        s("postgres", "Update requirement and notification", "The decision updates linked records and emits a durable event for student visibility.", "Authorized decision", "Canonical requirement result", "Document, requirement, task, notification, audit", "Sync", "Atomic updates prevent mismatched statuses.")
+      ]),
+      u("S15", "student", "Deposit payment", "Student records a simulated idempotent deposit; no card data is accepted in the preview.", "Preview/dummy", "user", ["03","10","14"], [
+        s("studentFrontend", "Start simulated deposit", "The preview payment screen submits an amount/intent without collecting card data.", "Payment projection", "Idempotent deposit command", "Pending UI state", "Sync", "The preview must never accept or log payment credentials.", ["Audentra-portals/apps/web/app/[tenant]/payments/page.tsx"]),
+        s("platformApi", "Validate payment intent", "The API verifies enrollment, amount, status, and idempotency key.", "Deposit command", "Authorized mock-adapter request", "Payment intent", "Sync", "Duplicate submits return the prior result."),
+        s("externalProvider", "Return simulated result", "The dummy provider produces a bounded success/failure response; a real provider remains an adapter replacement.", "Mock payment intent", "Provider result", "No card data", "Sync", "Production requires signed webhooks and reconciliation."),
+        s("postgres", "Commit payment projection", "Payment status, enrollment effect, audit, and outbox event commit together.", "Provider result", "Canonical receipt", "Payment, enrollment, audit, outbox", "Sync", "An uncertain provider result cannot be presented as settled."),
+        s("studentFrontend", "Render receipt or recovery", "The screen reloads the canonical payment projection.", "Payment result", "Receipt, pending, or retry UI", "Client cache only", "Sync", "Refreshing does not create another deposit.")
+      ]),
+      u("S16", "student", "Financial payment-plan selection", "Student selects a payment plan through a versioned financial projection.", "Current preview", "user", ["14"], [
+        s("studentFrontend", "Choose a plan", "The financials page shows eligible tenant-defined plans and submits one selection.", "Financial projection", "Plan selection + version", "Local choice", "Sync", "Displayed options are not treated as eligibility authority.", ["Audentra-portals/apps/web/app/[tenant]/financials/page.tsx"]),
+        s("platformApi", "Validate eligibility and version", "The API confirms the plan is active and available to this enrollment.", "Plan command", "Accepted selection or conflict", "Validated command", "Sync", "A removed plan selected from a stale page is rejected safely."),
+        s("postgres", "Version financial projection", "The selected plan and audit history are committed with a new version.", "Accepted selection", "Updated financial projection", "Plan selection and audit", "Sync", "Optimistic concurrency prevents lost updates."),
+        s("studentFrontend", "Show canonical plan", "The page refreshes and renders the committed selection and next financial action.", "Updated projection", "Visible plan state", "Client cache only", "Sync", "The UI does not declare success before the response.")
+      ]),
+      u("S17", "student", "Messages and read receipt", "Student opens enrollment messages; read state updates the shared inbox and unread count.", "Current", "user", ["03","10","23"], [
+        s("studentFrontend", "Open inbox or conversation", "The student message surface requests active support conversations and messages.", "Authenticated session", "Conversation query", "Client display state", "Sync", "Only conversations for this student and tenant are requested.", ["Audentra-portals/apps/web/app/[tenant]/messages/page.tsx"]),
+        s("platformApi", "Authorize conversation read", "The API validates relationship and returns the canonical ordered message history.", "Conversation query", "Messages + cursor + unread state", "No write yet", "Sync", "Staff-only notes are never included."),
+        s("postgres", "Read persistent thread", "Conversation, messages, participants, delivery state, and retention timestamps are loaded.", "Student + conversation IDs", "Canonical thread", "Support conversation tables", "Sync", "Messages remain durable through the configured active/idle retention window.", ["Audentra-platform/apps/api/migrations/0032_support_conversation_lifecycle.sql"]),
+        s("platformApi", "Record read receipt", "Opening the thread advances the student's read cursor idempotently.", "Latest visible message ID", "Updated unread count", "Read-receipt command", "Sync", "Repeated opens do not create duplicate receipts."),
+        s("postgres", "Persist read state", "The participant cursor and audit metadata are updated.", "Read command", "Canonical unread state", "Conversation participant/read state", "Sync", "Unread totals derive from message sequence and cursor."),
+        s("studentFrontend", "Update notification count", "The inbox and global notification center reconcile to the returned unread count.", "Updated unread state", "Visible read status", "Client cache only", "Sync", "A later refresh repairs missed real-time invalidation.", ["Audentra-portals/apps/web/app/components/student-notification-center.tsx"])
+      ]),
+      u("S18", "student", "Appointment scheduling", "Student creates or manages eligible advisor appointments with idempotent creation.", "Current", "user", ["10","23"], [
+        s("studentFrontend", "Choose an eligible slot", "The appointment page presents server-provided availability and submits a selected slot.", "Availability projection", "Appointment command + idempotency key", "Local selection", "Sync", "The client does not reserve a slot before API confirmation.", ["Audentra-portals/apps/web/app/[tenant]/appointments/page.tsx"]),
+        s("platformApi", "Validate slot and relationship", "The API checks advisor scope, eligibility, collision, and idempotency.", "Appointment command", "Accepted booking or conflict", "Validated command", "Sync", "Concurrent booking returns a conflict with fresh availability."),
+        s("postgres", "Commit appointment", "The appointment, audit, notification intent, and outbox event become durable.", "Accepted booking", "Appointment record", "Appointment, audit, outbox", "Sync", "A retry returns the same appointment."),
+        s("externalProvider", "Synchronize calendar when configured", "A provider adapter may create/update the external calendar event from the outbox.", "Appointment event", "External reference or retry", "Provider mapping", "Async", "External failure does not erase the canonical booking."),
+        s("studentFrontend", "Show confirmed schedule", "The page and student calendar read the committed appointment.", "Appointment projection", "Visible calendar item", "Client cache only", "Sync", "Pending external sync can be shown separately from booking status.")
+      ]),
+      u("S19", "student", "Help and support inquiry", "Student reads support content and may send an inquiry that creates durable staff work.", "Current preview / durable support slice", "user", ["03","23","24"], [
+        s("studentFrontend", "Raise linked help request", "The student submits a question from a requirement or general help page with the relevant context attached.", "Question + optional requirement/document", "Inquiry command", "Pending form state", "Sync", "Context links prevent staff from guessing which task is blocked.", ["Audentra-portals/apps/web/app/components/requirement-help-request.tsx", "Audentra-portals/apps/web/app/[tenant]/help/page.tsx"]),
+        s("platformApi", "Validate and route inquiry", "The API authorizes the student, sanitizes content, resolves triage ownership, and applies idempotency.", "Inquiry command", "Accepted conversation/work item", "Validated command", "Sync", "Duplicate submissions do not create duplicate tickets."),
+        s("postgres", "Commit conversation, task, and event", "Inquiry, first message, linked work item, audit, and outbox event commit together.", "Accepted inquiry", "Inquiry ID + message ID", "Conversation, message, task, audit, outbox", "Sync", "Staff work cannot exist without the student message, or vice versa.", ["Audentra-platform/apps/api/migrations/0032_support_conversation_lifecycle.sql"]),
+        s("worker", "Notify staff asynchronously", "The worker projects the work item and emits a staff invalidation/notification after commit.", "Inquiry-created event", "Delivery receipt", "Outbox receipt and notification", "Async", "Retries are deduplicated and never block the student's request."),
+        s("staffFrontend", "Open triage work", "The assigned team sees the new inquiry and opens its conversation/action record.", "Staff notification or refreshed queue", "Visible support task", "Client cache only", "Sync", "A manual refresh still recovers if real-time delivery was missed.")
+      ]),
+      u("S20", "student", "Academics and catalog search", "Student views program, prerequisites, catalog courses, resources, and advisory credit context.", "Current", "user", ["14","23"], [
+        s("studentFrontend", "Browse or search courses", "The classrooms page sends tenant-scoped filters and renders course/resource cards.", "Search/filter input", "Catalog query", "Local filter state", "Sync", "This surface is informational; it does not alter registration or transcript outcomes.", ["Audentra-portals/apps/web/app/[tenant]/classrooms/page.tsx"]),
+        s("platformApi", "Read published academic version", "The API resolves the tenant's current published catalog and student-safe advisory context.", "Tenant + filters", "Catalog projection", "No write", "Sync", "Draft staff content is never returned to students."),
+        s("postgres", "Query tenant academic content", "Courses, prerequisites, instructors, program relationships, and optional resource links are read.", "Published version + filters", "Academic records", "Academic content tables", "Sync", "Optional media links can be null without breaking the course."),
+        s("studentFrontend", "Render informational experience", "The UI shows current course facts and embeds only configured safe resources.", "Catalog projection", "Course carousel/details", "Client cache only", "Sync", "A refresh picks up a newly published catalog version.")
+      ]),
+      u("S21", "student", "Campus life discovery", "Student views tenant-owned events, clubs, club details, and schedules.", "Current", "user", ["14","23"], [
+        s("studentFrontend", "Open campus life", "The campus page requests published events, clubs, and participation state.", "Tenant + student session", "Campus-content query", "Client view state", "Sync", "Removed content may remain on an already-open page until the next request.", ["Audentra-portals/apps/web/app/[tenant]/campus-life/page.tsx"]),
+        s("platformApi", "Authorize and select published version", "The API returns only active student-facing content and the student's valid registrations.", "Campus query", "Campus projection", "No write for browsing", "Sync", "Draft/deactivated items remain staff-only."),
+        s("postgres", "Read events, clubs, and revisions", "Canonical event dates, statuses, club details, and enrollment relationships are loaded.", "Tenant + published version", "Campus records", "Campus content and participation tables", "Sync", "Registrations reference stable event IDs even when display content changes."),
+        s("studentFrontend", "Render current event state", "The page shows current dates/status and explains cancellation or changed details for enrolled events.", "Campus projection", "Visible discovery page", "Client cache only", "Sync", "A stale action is revalidated by the API instead of reviving a deleted event."),
+        s("worker", "Notify affected students on material change", "Published date/cancellation changes fan out deduplicated notifications to enrolled students.", "Content-changed outbox event", "Student notifications", "Outbox receipts and notifications", "Async", "Notification work is asynchronous so staff publishing is not blocked.")
+      ]),
+      u("S22", "student", "Tenant rewards", "Completion and page rules award tenant-defined points into an idempotent ledger.", "Current preview", "event", ["19","14"], [
+        s("platformApi", "Recognize eligible action", "A completed command or allowlisted page event is matched against the tenant reward policy.", "Domain/page event", "Reward candidate", "Policy evaluation", "Sync", "Browser-supplied point values are ignored."),
+        s("postgres", "Insert idempotent ledger entry", "A stable source key ensures the same achievement is awarded at most once.", "Reward candidate", "Ledger entry or prior award", "Reward ledger and balance projection", "Sync", "Unique constraints prevent refresh/click farming."),
+        s("platformApi", "Return updated balance", "The response includes canonical points and any newly earned award.", "Ledger result", "Reward projection", "Derived balance", "Sync", "Balance is recomputed from canonical ledger state."),
+        s("studentFrontend", "Show celebration once", "The UI presents points and a bounded celebration for the new award.", "Reward projection", "Visible points/celebration", "Session display marker", "Sync", "The durable ledger, not the animation, proves the award.", ["Audentra-portals/apps/web/app/components/reward-celebration.tsx"])
+      ]),
+      u("S23", "student", "Edward student assistance", "Student asks a contextual question; Edward returns bounded advice, navigation, and typed action widgets.", "Current / key optional", "user", ["05","11","14"], [
+        s("studentFrontend", "Ask Edward", "The student sends a question from the assistant with the current route/context reference.", "Question + route context", "Assistant request", "Conversation display state", "Sync", "The frontend does not attach arbitrary hidden records.", ["Audentra-portals/apps/web/app/components/edward-assistant.tsx"]),
+        s("platformApi", "Build bounded context", "The controlled gateway authorizes the request, retrieves only needed facts/policy, and enforces budget/model rules.", "Assistant request", "Provider prompt + output schema", "Usage intent", "Sync", "Sensitive data and authoritative-write tools are excluded.", ["Audentra-platform/apps/api/src/audentra/integrations/ai/gateway.py"]),
+        s("postgres", "Read student snapshot and policy", "Compact student context, tenant prompts, policy, and usage limits are loaded.", "Student + intent", "Bounded evidence bundle", "Canonical facts and usage ledger", "Sync", "The full database is never dumped into model context."),
+        s("externalProvider", "Generate structured assistance", "The configured model returns explanatory text and typed navigation/action suggestions.", "Bounded prompt + schema", "Structured assistant response", "Provider metadata", "Async", "Schema validation and safety checks treat output as untrusted."),
+        s("platformApi", "Validate safe response", "The gateway filters destinations/widgets and records usage; official mutations remain separate deterministic commands.", "Provider response", "Safe assistant payload", "Usage and response metadata", "Sync", "Edward cannot directly mark requirements complete or change official data."),
+        s("studentFrontend", "Render answer and widgets", "The assistant displays advice and only allowlisted navigation/action controls.", "Safe assistant payload", "Visible answer", "Conversation display state", "Sync", "The student confirms any consequential action through a normal portal flow.")
+      ]),
+      u("S24", "student", "Session, offline and error recovery", "The portal exposes loading/error/retry states and resumes persisted server state after a return.", "Current partial", "system", ["03","10"], [
+        s("studentFrontend", "Detect missing/stale state", "Route guards and resource hooks distinguish loading, offline, unauthorized, conflict, and server errors.", "Navigation or network transition", "Explicit recovery state", "Local cache/draft", "Sync", "Errors are not rendered as empty success states.", ["Audentra-portals/apps/web/app/components/server-state-provider.tsx", "Audentra-portals/apps/web/app/hooks/use-api-resource.ts"]),
+        s("platformApi", "Validate session on retry", "The API re-resolves the session, tenant, and authorization for every resumed request.", "Cookie + tenant header", "Fresh canonical response or auth error", "Session metadata", "Sync", "A stale browser session cannot preserve revoked access."),
+        s("postgres", "Read durable progress", "Saved onboarding, enrollment, messages, and tasks are loaded from canonical records.", "Authorized identity", "Current server state", "Canonical student data", "Sync", "Unsaved local drafts are distinct from committed progress."),
+        s("studentFrontend", "Reconcile and resume", "The UI preserves safe local input where possible, refreshes canonical data, and resumes the correct route.", "Fresh response + optional local draft", "Recovered experience", "Client cache only", "Sync", "Version conflicts require explicit reconciliation rather than silent overwrite.")
+      ]),
+
+      u("T01", "staff", "Staff authentication and entry", "Staff signs in to a tenant workspace with an HTTP-only preview session.", "Preview; OIDC target", "user", ["24"], [
+        s("staffFrontend", "Submit staff sign-in", "The tenant staff entry sends the preview credential without storing a bearer token in browser storage.", "Tenant + staff credentials", "Credentialed sign-in request", "Pending UI state", "Sync", "Production replaces preview credentials with institutional OIDC.", ["Audentra-portals/apps/web/app/[tenant]/staff/page.tsx"]),
+        s("platformApi", "Authenticate staff identity", "The auth route verifies identity and establishes the HTTP-only session.", "Sign-in request", "Session cookie", "Session metadata", "Sync", "Authentication alone does not grant all tenant data."),
+        s("postgres", "Resolve role and team scope", "Staff membership, role, component/team, and tenant are loaded.", "Staff identity", "Authorized workspace scope", "Staff credential and role records", "Sync", "Disabled staff and cross-tenant identities are denied."),
+        s("staffFrontend", "Enter scoped workspace", "The staff portal loads navigation and data permitted for the resolved role/team.", "Bootstrap response", "Staff workspace", "Client cache only", "Sync", "Every later API call repeats server-side authorization.", ["Audentra-portals/apps/web/app/staff/staff-portal.tsx"])
+      ]),
+      u("T02", "staff", "Today and Action Center", "Staff sees assigned students, priorities, risk evidence, and suggested next actions.", "Preview / API slice", "user", ["22","24"], [
+        s("staffFrontend", "Request work projection", "Today and Action Center send filters such as assignee, team, status, and priority.", "Staff session + filters", "Work-query request", "UI filter state", "Sync", "The UI does not calculate canonical ownership or SLA."),
+        s("platformApi", "Authorize staff scope", "The API applies tenant, role, team, assignment, and field-level rules.", "Work query", "Scoped repository query", "No write", "Sync", "@me and team views are server-scoped."),
+        s("postgres", "Read shared work facts", "Tasks, students, outcomes, due dates, summaries, and risk evidence are loaded from shared records/projections.", "Scope + filters", "Action Center projection", "Task/student/action-center tables", "Sync", "The board and detail page read the same work item version."),
+        s("platformApi", "Order and shape response", "Deterministic priority/SLA rules and pagination produce the staff payload.", "Scoped facts", "Ranked work list", "Derived response", "Sync", "AI suggestions never replace official status/priority."),
+        s("staffFrontend", "Render actionable queue", "Staff can open the task modal or Action Center detail from the ranked list.", "Work projection", "Visible work queue", "Client cache only", "Sync", "Refresh restores canonical ordering.", ["Audentra-portals/apps/web/app/staff/staff-action-center.tsx"])
+      ]),
+      u("T03", "staff", "Task-board coordination", "Staff moves, assigns, escalates, and notes work items; expected version blocks stale updates.", "Preview / API slice", "user", ["22","23","24"], [
+        s("staffFrontend", "Edit task in Jira-style modal", "A staff member changes status, assignee, priority, escalation, or comments using the current version.", "Task projection", "Task patch + expected version", "Local draft", "Sync", "The board stays compact; detail opens in a focused dialog."),
+        s("platformApi", "Authorize transition", "The API validates staff scope, transition rules, assignment target, and expected version.", "Task patch", "Accepted command or 409", "Validated task command", "Sync", "Unauthorized or stale transitions never reach persistence."),
+        s("postgres", "Compare, update, and audit", "The task version is compared and the work item, history, audit, and outbox update atomically.", "Accepted task command", "New task version", "Work item, history, audit, outbox", "Sync", "Compare-and-swap prevents two staff members from silently overwriting each other."),
+        s("platformApi", "Return canonical task", "The response contains the committed record; conflicts include the current version for reload.", "Commit or conflict", "Task projection or 409", "No extra source of truth", "Sync", "Optimistic UI is reconciled to the returned record."),
+        s("staffFrontend", "Reconcile all board views", "The modal, board column, counts, and detail update from the canonical response.", "Task projection", "Consistent staff UI", "Client cache only", "Sync", "A focus refresh repairs missed invalidations.", ["Audentra-portals/apps/web/app/staff/task-board-utils.ts"])
+      ]),
+      u("T04", "staff", "Student inspector and preference update", "Authorized staff inspect shared student context and edit allowed operational preferences.", "API slice", "user", ["23","24"], [
+        s("staffFrontend", "Open student inspector", "The staff surface requests the student profile, journey, requirements, documents, communications, and allowed preferences.", "Student ID + staff session", "Inspector query", "UI selection", "Sync", "The inspector does not fetch every sensitive field by default."),
+        s("platformApi", "Apply relationship and field authorization", "The API verifies staff scope and selects only fields permitted for the role/use case.", "Inspector query", "Minimized student projection", "Access decision", "Sync", "Access is denied when the staff-student relationship is absent."),
+        s("postgres", "Read shared student record", "The same canonical records used by the student portal are projected for staff operations.", "Authorized student ID", "Student context", "Student, enrollment, task, document, message records", "Sync", "No duplicate CRM-like student record is created."),
+        s("staffFrontend", "Edit permitted preference", "Staff sends a scoped operational preference change with the record version.", "Student projection", "Preference patch", "Local draft", "Sync", "Institutional and student-owned field rules remain visible."),
+        s("postgres", "Commit update and history", "Allowed fields, work log, audit, and outbox event update atomically.", "Authorized patch", "New student version", "Student preference, audit, outbox", "Sync", "The student sees the same committed value on refresh.")
+      ]),
+      u("T05", "staff", "Staff document decision and notification", "Staff decision atomically updates evidence, requirement, work item, audit, and optional message.", "API slice", "user", ["22","23","24"], [
+        s("staffFrontend", "Review evidence and decide", "Authorized staff inspect the retained original and structured evidence, then choose approve, reject, request-more, or retry.", "Document/action projection", "Decision + expected versions", "Decision draft", "Sync", "Protected file access is short-lived and audited."),
+        s("platformApi", "Validate staff decision", "The API checks role, relationship, document state, requirement transition, and all expected versions.", "Decision command", "Accepted atomic transition", "Validated command", "Sync", "A stale decision returns conflict instead of mutating part of the workflow."),
+        s("postgres", "Commit all linked effects", "Document, requirement, work item, audit, optional student message, and outbox event commit in one transaction.", "Accepted decision", "Canonical decision result", "Document, requirement, task, message, audit, outbox", "Sync", "The transaction prevents contradictory cross-portal state."),
+        s("worker", "Project and invalidate", "The worker updates dependent projections and sends retry-safe student notification/invalidation.", "Document-decision event", "Projection and delivery receipts", "Outbox receipts, projections, notifications", "Async", "Notification failure cannot roll back the official decision."),
+        s("studentFrontend", "See requirement outcome", "The student notification center and document/requirement pages reload canonical state.", "Notification or refresh", "Visible decision", "Client cache only", "Sync", "The student can recover the result after being offline.")
+      ]),
+      u("T06", "staff", "Inquiry assignment, reply and resolution", "Staff owns, responds to, and resolves student inquiries with durable conversation history and notifications.", "Current durable support slice", "user", ["23","24"], [
+        s("staffFrontend", "Claim and open conversation", "Staff assigns the inquiry, sees the linked requirement/document, and reads the durable message history.", "Inquiry/work projection", "Assignment or reply command", "Local composer state", "Sync", "Unassigned triage remains visible to the configured team/leader fallback."),
+        s("platformApi", "Validate ownership and message", "The API authorizes the participant, sanitizes content, checks expected version, and applies idempotency.", "Assignment/reply command", "Accepted conversation transition", "Validated command", "Sync", "A stale status or duplicate send cannot create divergent history."),
+        s("postgres", "Persist reply and work state", "Message, assignment/status, activity timestamp, audit, and outbox event commit together.", "Accepted transition", "Message + conversation version", "Conversation, message, task, audit, outbox", "Sync", "Messages persist for the active thread; idle retention is based on durable last activity.", ["Audentra-platform/apps/api/migrations/0032_support_conversation_lifecycle.sql"]),
+        s("worker", "Deliver real-time invalidation", "The worker emits participant-scoped notification/SSE invalidation without blocking the API response.", "Conversation-updated event", "Delivery receipt", "Outbox receipt and notification", "Async", "Missed live delivery is repaired by the next canonical read."),
+        s("studentFrontend", "Receive and reply", "The student notification center/inbox exposes the staff response and supports the same conversation.", "Live invalidation or refresh", "Visible message + student reply", "Client read/composer state", "Sync", "Staff-only notes never cross this boundary."),
+        s("platformApi", "Resolve or reopen", "A participant action changes the inquiry state under transition and version rules.", "Resolution/reopen command", "Canonical conversation state", "Domain command", "Sync", "A later student reply can reopen/follow up according to policy."),
+        s("worker", "Expire inactive thread after policy window", "A scheduled job finds conversations idle beyond the configured retention window and archives/expires them safely.", "Retention schedule + last activity", "Expired conversation receipts", "Conversation lifecycle status", "Async", "New activity updates the clock; active conversations are never deleted mid-use.")
+      ]),
+      u("T07", "staff", "Managed journey/configuration publish", "Staff submits a validated versioned journey, academic, or campus configuration candidate.", "Preview / target durable", "user", ["23","24"], [
+        s("staffFrontend", "Design draft graph or form", "The journey builder creates steps, input schemas, branches, switch cases, thresholds, dependencies, and layout metadata.", "Current draft/version", "Configuration candidate", "Local graph draft", "Sync", "The editor surfaces unreachable nodes and overlapping layout before publish.", ["Audentra-portals/apps/web/app/staff/journey-flow-builder.tsx", "Audentra-portals/apps/web/app/staff/onboarding-form-builder.tsx"]),
+        s("platformApi", "Validate schema and graph", "The API checks node IDs, inputs, branch predicates, cycles, reachability, permissions, and expected version.", "Candidate + expected version", "Validated draft or errors", "Validation report", "Sync", "Malformed or unsafe flows never become student-facing."),
+        s("postgres", "Save immutable version", "Draft/published configuration and audit metadata are stored as a new version.", "Validated candidate", "Configuration version", "Journey/configuration versions and audit", "Sync", "Published versions are not edited in place."),
+        s("platformApi", "Publish selected version", "An explicit staff confirmation atomically changes the tenant's active version and emits an event.", "Version ID + confirmation", "Published projection", "Active-version pointer and outbox", "Sync", "Draft generation—AI-assisted or manual—cannot self-publish."),
+        s("studentFrontend", "Read published flow on refresh", "New student sessions read the active version; in-progress journeys follow migration/version policy.", "Bootstrap/requirement query", "Student form/flow", "Client cache only", "Sync", "A stale page action is validated against current journey state.")
+      ]),
+      u("T08", "staff", "Edward configuration drafting", "Staff asks Edward for a draft or change summary, reviews it, then explicitly confirms publication.", "Preview", "user", ["23","24"], [
+        s("staffFrontend", "Describe desired change", "Staff provides bounded intent and existing configuration context to Edward.", "Change request + selected version", "Draft-assistance request", "Local prompt state", "Sync", "The UI labels generated content as a draft."),
+        s("platformApi", "Build governed authoring context", "The AI gateway loads the allowed schema, tenant constraints, current version, and usage policy.", "Draft request", "Provider prompt + strict schema", "Usage intent", "Sync", "Sensitive student records are unnecessary and excluded."),
+        s("externalProvider", "Generate structured draft", "The model returns a schema-constrained configuration diff and human-readable rationale.", "Bounded context", "Draft candidate", "Provider metadata", "Async", "Output is untrusted and cannot publish itself."),
+        s("platformApi", "Validate candidate", "The same deterministic graph/config validation used for manual drafts checks the result.", "Draft candidate", "Validated draft + warnings", "Validation report", "Sync", "Invalid generated nodes/conditions are rejected."),
+        s("staffFrontend", "Review and edit", "Staff inspect the diff, correct fields, preview branches, and explicitly choose whether to save/publish through T07.", "Validated draft", "Human-approved candidate", "Local draft", "Sync", "No side effect occurs until explicit confirmation.")
+      ]),
+      u("T09", "staff", "Campus life and club management", "Staff creates or updates clubs and publishes student-facing events.", "Current content slice", "user", ["23","24"], [
+        s("staffFrontend", "Create or edit campus content", "The content manager edits club/event details, dates, media, status, and audience with the current version.", "Published/draft record", "Content command + expected version", "Local form draft", "Sync", "Destructive changes show affected registrations before confirmation."),
+        s("platformApi", "Authorize and validate content", "The API checks content-manager permission, tenant scope, dates, URLs, status transition, and version.", "Content command", "Accepted update or conflict", "Validated command", "Sync", "A stale editor cannot overwrite a newer event revision."),
+        s("postgres", "Commit version and change event", "Content, revision history, audit, and outbox event commit together; registrations retain stable references.", "Accepted update", "Published campus record", "Campus content, revisions, audit, outbox", "Sync", "Deletion/cancellation uses lifecycle status when dependent registrations exist."),
+        s("worker", "Notify affected registrants", "Material date, venue, or cancellation changes create deduplicated student notifications.", "Campus-content-changed event", "Notification receipts", "Outbox receipts and notifications", "Async", "Fan-out cannot stall the staff save request."),
+        s("studentFrontend", "Read new content on refresh", "The campus page fetches the latest published version and current registration status.", "Campus page request", "Updated campus experience", "Client cache only", "Sync", "An open stale page is corrected by refresh or a rejected stale action.")
+      ]),
+      u("T10", "staff", "Academic catalog publication", "Staff publishes courses, prerequisites, instructors, resources, and catalog versions without changing transcript outcomes.", "Current content slice", "user", ["23","24"], [
+        s("staffFrontend", "Edit academic content", "Staff maintain course facts, prerequisite links, instructor metadata, and optional resource/video URLs.", "Catalog draft", "Academic candidate + version", "Local form draft", "Sync", "Optional resources may be null and URLs are validated."),
+        s("platformApi", "Validate catalog candidate", "The API checks tenant scope, stable IDs, prerequisite references, URL policy, and expected version.", "Academic candidate", "Validated catalog update", "Validation report", "Sync", "Broken prerequisite references are rejected."),
+        s("postgres", "Publish catalog version", "Course and relationship revisions, audit, active version, and outbox event commit atomically.", "Validated update", "Published academic projection", "Academic content, revisions, audit, outbox", "Sync", "Publishing content never awards or removes transcript credit."),
+        s("studentFrontend", "Read published catalog", "The classrooms page gets the active tenant version on refresh and renders safe resources.", "Catalog request", "Updated informational content", "Client cache only", "Sync", "No student action is required for a content-only change.")
+      ]),
+      u("T11", "staff", "Knowledge base and Core Plays", "Staff maintains governed guidance and operational playbooks.", "Preview / target durable", "user", ["23","24"], [
+        s("staffFrontend", "Author governed content", "Staff edit articles/playbooks, ownership, audience, status, tags, and version notes.", "Current content version", "Draft candidate", "Local editor state", "Sync", "Draft and published states are visibly distinct."),
+        s("platformApi", "Validate governance rules", "The API checks role, tenant, required metadata, references, and expected version.", "Draft candidate", "Accepted version or errors", "Validated command", "Sync", "Only authorized publishers can activate content."),
+        s("postgres", "Store immutable version", "Content body, metadata, approval status, audit, and active-version pointer are persisted.", "Accepted candidate", "Knowledge/playbook projection", "Governed content versions and audit", "Sync", "Published guidance remains traceable to author and version."),
+        s("staffFrontend", "Consume current guidance", "Staff views read the published version while editors can inspect draft/history.", "Content query", "Visible article/playbook", "Client cache only", "Sync", "Future LLM context injection must retrieve only approved versions.")
+      ]),
+      u("T12", "staff", "Freshness and live invalidation", "Polling and focus refresh protect canonical state; SSE invalidation provides the live upgrade path.", "Current polling + current SSE slice", "mixed", ["22","23","24"], [
+        s("staffFrontend", "Open live workspace", "The portal loads canonical data, tracks the last event cursor/version, and subscribes when live delivery is available.", "Staff session + cursor", "Initial query + SSE connection", "Client cache and cursor", "Sync", "The client never treats the stream as the source of truth.", ["Audentra-portals/apps/web/app/staff/staff-realtime.ts"]),
+        s("platformApi", "Authorize stream and reads", "The API scopes events by tenant, role, team/assignment, and cursor.", "Session + cursor", "Scoped invalidations", "Connection metadata", "Async", "Events contain identifiers/versions, not unrestricted student payloads."),
+        s("postgres", "Expose durable change position", "Outbox/events and canonical row versions provide a recoverable freshness boundary.", "Committed changes", "Event cursor + current versions", "Outbox/event records", "Async", "Reconnect can continue from the last durable cursor."),
+        s("staffFrontend", "Prompt or reconcile update", "A relevant invalidation shows one deduplicated notice; the user can load canonical data without losing unsaved form values.", "Invalidation event", "Refresh decision", "Pending-update marker", "Async", "Navigation does not repeatedly replay already-seen notices."),
+        s("platformApi", "Return canonical replacement", "Refresh/focus/poll requests read current state regardless of live-delivery success.", "Refresh query", "Current projection", "No stream-owned state", "Sync", "Polling remains a recovery path when SSE is unavailable.")
+      ]),
+
+      u("A01", "platform", "Authenticated API request lifecycle", "Correlation ID, authentication, tenant resolution, relationship authorization, validation, use case, and telemetry.", "Architecture/current pattern", "system", ["01","08"], [
+        s("studentFrontend", "Send credentialed request", "A portal sends the exact tenant header, HTTP-only cookie, correlation context, and typed payload.", "User intent", "HTTPS request", "Client request state", "Sync", "Secrets and session tokens are not copied into application logs."),
+        s("platformApi", "Run middleware boundary", "Middleware assigns/propagates correlation ID, resolves auth, tenant, and request telemetry.", "HTTP request", "Authenticated request context", "Correlation and request metadata", "Sync", "Unknown tenant/session fails before business logic.", ["Audentra-platform/apps/api/src/audentra/interfaces/http/middleware.py"]),
+        s("postgres", "Resolve membership/relationship", "Repositories verify tenant membership and the caller's relationship to the target record.", "Identity + resource IDs", "Authorization facts", "Identity and relationship records", "Sync", "Every query remains tenant-scoped."),
+        s("platformApi", "Validate and execute use case", "Typed contracts and application/domain rules authorize fields and perform the operation.", "Request context + payload", "Domain result or problem response", "Use-case state", "Sync", "Validation errors are stable, bounded API problems."),
+        s("postgres", "Read or commit canonical state", "The transaction reads/writes authoritative records and audit/outbox when consequential.", "Domain operation", "Committed result", "Canonical data, audit, outbox", "Sync", "Transaction rollback prevents partial effects."),
+        s("studentFrontend", "Reconcile response", "The caller renders canonical success, conflict, auth, validation, or retry state.", "Typed API response", "Visible UI state", "Client cache only", "Sync", "Frontend state is replaced/reconciled from the server response.")
+      ]),
+      u("A02", "platform", "Domain command, audit and outbox", "One database transaction commits domain change, audit record, and durable event together.", "Current", "system", ["01","12","14"], [
+        s("platformApi", "Create domain command", "The HTTP/application layer converts an authorized request into one explicit command with actor, tenant, correlation, and idempotency context.", "Validated request", "Domain command", "Command metadata", "Sync", "The command carries no implicit global tenant state."),
+        s("postgres", "Begin one transaction", "The unit of work locks/compares required rows and applies domain invariants.", "Domain command", "Pending row changes", "Transaction-local state", "Sync", "Any failed invariant rolls back every effect.", ["Audentra-platform/apps/api/src/audentra/infrastructure/db/unit_of_work.py"]),
+        s("postgres", "Write state, audit, and event", "Business records, immutable audit entry, and outbox envelope are inserted before commit.", "Validated transition", "Atomic transaction contents", "Domain tables, audit log, outbox", "Sync", "The event cannot exist without the state it describes."),
+        s("postgres", "Commit atomically", "PostgreSQL makes all three effects durable at one commit position.", "Transaction contents", "Committed version/event ID", "Canonical database", "Sync", "Rollback leaves no orphan side effect."),
+        s("platformApi", "Return canonical result", "The API responds after commit; asynchronous work is represented as queued, not completed.", "Committed result", "HTTP response", "No browser-owned success", "Sync", "Slow providers never hold the database transaction open."),
+        s("worker", "Consume after commit", "A separate process leases the outbox event and performs projections/provider work.", "Durable event", "Receipt, retry, or dead letter", "Outbox delivery state", "Async", "At-least-once delivery is made safe by idempotent handlers.")
+      ]),
+      u("A03", "platform", "Outbox projection delivery", "Worker claims events with leases, deduplicates receipts, updates projections, retries, and dead-letters failures.", "Current", "event", ["14","worker"], [
+        s("worker", "Claim an event lease", "The worker selects an available outbox event and obtains a time-bounded lease.", "Pending outbox rows", "Leased event envelope", "Lease owner and deadline", "Async", "Another worker cannot process the same live lease."),
+        s("postgres", "Check delivery receipt", "A handler-specific idempotency receipt determines whether this event/effect already completed.", "Event ID + handler", "New attempt or prior result", "Outbox receipts", "Async", "A retried process can return the prior terminal result."),
+        s("worker", "Apply projector", "The deterministic projector updates dashboard, document review, notification, or other derived state.", "Event payload", "Projection command", "Handler attempt", "Async", "Handlers use event version/correlation rather than reading arbitrary stale cache."),
+        s("postgres", "Commit projection and receipt", "Projection changes and the successful receipt commit atomically.", "Projection command", "Delivered event", "Projection + receipt", "Async", "Crash-before-commit is retryable; crash-after-commit is deduplicated."),
+        s("worker", "Retry or dead-letter", "Transient failures back off; exhausted/permanent failures become inspectable dead letters.", "Handler error", "Scheduled retry or dead letter", "Attempt count, next run, error metadata", "Async", "The original domain transaction stays committed and observable.")
+      ]),
+      u("A04", "platform", "Queued document-extraction worker", "Worker calls a private API command after the event commits; a terminal result prevents duplicate AI spend.", "Current", "event", ["11","14","worker"], [
+        s("worker", "Lease extraction event", "The worker claims the document-upload/retry event and verifies no terminal processing result exists.", "Durable document event", "Extraction attempt", "Lease and idempotency receipt", "Async", "Duplicate events reuse a terminal result."),
+        s("objectStorage", "Read retained original", "The worker streams the protected original by object key.", "Authorized object key", "Document bytes", "No duplicate stored copy", "Async", "Missing/corrupt objects become explicit terminal or retryable errors."),
+        s("externalProvider", "Run multimodal extraction", "The configured provider receives bounded bytes/text and a supported structured-output schema.", "Original + prompt/schema", "Structured extraction", "Provider request/response metadata", "Async", "Unsupported strict-schema routes use explicit validated fallback rather than pretending success."),
+        s("worker", "Normalize and validate", "Local code validates schema, identifiers, confidence, and policy before producing the private command.", "Provider response", "Validated extraction command", "Normalized result", "Async", "Backend UUIDs and metadata are serialized independently of model output."),
+        s("platformApi", "Apply private terminal command", "The private API boundary revalidates document state and persists success/failure/human-review outcome.", "Validated worker command", "Canonical document result", "Application command", "Sync", "The worker cannot bypass domain transitions."),
+        s("postgres", "Commit result once", "Extraction, provenance, audit, staff task/notification, and terminal receipt become durable.", "Terminal command", "Document projection", "Extraction and workflow records", "Sync", "Terminal uniqueness prevents repeated provider spend.")
+      ]),
+      u("A05", "platform", "Activity and friction analytics", "Browser sends allowlisted events; the platform derives engagement/friction separately from official records.", "Current", "event", ["04","14"], [
+        s("studentFrontend", "Emit allowlisted activity", "The portal records approved page/action/error events with correlation and no free-form sensitive payload.", "User interaction", "Analytics event", "Short client buffer", "Async", "Analytics loss never blocks the official student action.", ["Audentra-portals/apps/web/app/hooks/use-activity-tracking.ts"]),
+        s("platformApi", "Validate telemetry contract", "The API allowlists event names/fields, applies privacy limits, and attaches server context.", "Analytics event", "Accepted telemetry record", "Sanitized event", "Async", "Unknown fields and sensitive text are discarded."),
+        s("postgres", "Store separate activity fact", "Telemetry is stored apart from official enrollment/task records.", "Sanitized event", "Activity event ID", "Activity/telemetry table", "Async", "Analytics cannot mutate official requirement state."),
+        s("worker", "Derive aggregate signals", "Background jobs calculate friction/engagement aggregates under documented windows.", "Activity facts", "Aggregate projection", "Derived analytics projection", "Async", "Derived signals preserve source/cutoff metadata."),
+        s("staffFrontend", "Show bounded evidence", "Authorized views can display the aggregate as supporting evidence, not an authoritative student decision.", "Aggregate projection", "Risk/friction indicator", "Client cache only", "Sync", "Sensitive raw events remain hidden when unnecessary.")
+      ]),
+      u("A06", "platform", "Runtime lineage / CRM change graph", "State-effect registry, correlation IDs, audit records, events, and receipts explain a real request's lineage.", "Current", "system", ["13","14"], [
+        s("platformApi", "Attach correlation and effect definition", "A consequential route maps to a declared state-effect entry and propagates one correlation ID.", "Authorized request", "Traceable command", "Correlation metadata", "Sync", "Undeclared effects fail registry validation in tests.", ["Audentra-platform/packages/state-effects/src/registry.ts"]),
+        s("postgres", "Record state and audit lineage", "The transaction writes before/after identifiers, actor, correlation, and outbox event.", "Traceable command", "Committed audit/event IDs", "Domain, audit, outbox", "Sync", "Sensitive values are minimized/redacted in audit metadata."),
+        s("worker", "Record asynchronous receipt", "Each downstream handler links attempts/results to the original event and correlation.", "Outbox event", "Delivery receipt", "Receipt, retry, dead-letter metadata", "Async", "At-least-once attempts remain distinguishable from business duplicates."),
+        s("delivery", "Generate inspectable graph", "Repository tooling validates the registry and generates a change graph for engineers/operators.", "State-effect registry", "Mermaid/JSON lineage artifact", "Generated documentation", "System", "Generated files are evidence, not a runtime source of truth.", ["Audentra-platform/packages/state-effects/scripts/generate.ts", "Audentra-platform/docs/generated/crm-change-graph.json"])
+      ]),
+      u("A07", "platform", "Explicit AI assistance", "A user action invokes the controlled agent gateway with bounded context, policy, and usage recording.", "Current", "user", ["05","11"], [
+        s("studentFrontend", "Request an AI assist", "A visible user action sends a bounded question/task and route reference.", "User intent", "AI request", "Pending assistant state", "Sync", "No background AI call is implied by merely viewing a page."),
+        s("platformApi", "Authorize, budget, and select policy", "The gateway verifies purpose, retrieves allowed context, checks cache/dedupe/budget, and selects model/schema.", "AI request", "Controlled provider call", "Run intent and policy decision", "Sync", "Circuit breakers can deny/defer without blocking normal portal work."),
+        s("postgres", "Read compact context", "Only task/student facts needed for this intent plus prior summaries and approved policy are loaded.", "Run intent", "Bounded evidence bundle", "Canonical context and usage ledger", "Sync", "Context size and sensitive fields are explicitly limited."),
+        s("externalProvider", "Return schema-constrained output", "The selected model produces one validated envelope, potentially containing task, outcome, student summary, and signals.", "Prompt + JSON schema", "Structured candidate", "Provider metadata", "Async", "Strict schema is required where supported; local validation remains mandatory."),
+        s("platformApi", "Validate and persist projections", "Output is normalized and independently persisted to the permitted projections with provenance.", "Structured candidate", "AI result", "Summary/signal/usage records", "Sync", "AI output never directly changes official enrollment decisions."),
+        s("studentFrontend", "Render assistive result", "The caller displays generated content with status, provenance, and retry controls.", "AI result", "Visible assistance", "Client cache only", "Sync", "Provider failure is explicit and does not erase prior results.")
+      ]),
+      u("A08", "platform", "Event-triggered AI candidate", "A deterministic domain event identifies a potential agent task; policy decides whether a run is allowed.", "Target design", "event", ["05"], [
+        s("postgres", "Commit triggering domain event", "A normal business transaction records the state change and outbox event first.", "Domain command", "Durable event", "Domain, audit, outbox", "Sync", "AI is never inside the business transaction."),
+        s("worker", "Classify AI candidate", "The worker maps the event to a declared agent intent and applies quiet-window/debounce rules.", "Outbox event", "Candidate run key", "Candidate job", "Async", "Multiple messages in one conversation window collapse into one candidate."),
+        s("postgres", "Check policy, dedupe, and budget", "The run key, prior terminal results, tenant policy, consent, and budget are evaluated.", "Candidate run key", "Allowed/deferred/denied decision", "Agent run ledger", "Async", "Denied or duplicate runs consume no provider tokens."),
+        s("externalProvider", "Generate structured projections", "When allowed, the provider returns the intent-specific strict schema.", "Bounded evidence", "AI projection candidate", "Provider metadata", "Async", "Output cannot execute official actions."),
+        s("postgres", "Persist result and provenance", "Summary/signals/suggestions and run metadata become durable and emit a freshness event.", "Validated output", "Updated projection versions", "AI projections, usage, outbox", "Async", "One transaction keeps related generated projections consistent."),
+        s("staffFrontend", "Review update when ready", "The staff page receives one deduplicated invalidation and loads the new canonical projection on demand.", "Freshness event", "Visible AI update", "Client pending marker", "Async", "Unsaved staff form values are not replaced automatically.")
+      ]),
+      u("A09", "platform", "Scheduled reminder and outreach", "An aggregate trigger identifies eligible students; a controlled run drafts or queues outreach.", "Target design", "schedule", ["05","06"], [
+        s("worker", "Start scheduled evaluation", "A scheduler opens a tenant-scoped batch at the configured time/cadence.", "Schedule definition", "Batch ID + cutoff", "Scheduled job", "Async", "A distributed lease prevents overlapping runs."),
+        s("postgres", "Select eligible students", "A deterministic query finds students matching due-date, inactivity, status, consent, and suppression rules.", "Tenant + cutoff", "Candidate cohort", "Read-only canonical facts", "Async", "Eligibility is reproducible from the recorded cutoff."),
+        s("worker", "Apply policy and batch limits", "Candidates are deduplicated, rate-limited, grouped, and assigned an outreach intent.", "Candidate cohort", "Allowed outreach jobs", "Run ledger and queue", "Async", "Budget/circuit breakers stop the batch safely."),
+        s("externalProvider", "Draft bounded outreach", "The model or template provider creates structured channel-specific drafts from approved context.", "Outreach intent + compact context", "Draft message/action", "Provider metadata", "Async", "No message is sent merely because text was generated."),
+        s("postgres", "Queue review/send action", "Draft, reason, cohort/cutoff, audit, and optional staff task are stored.", "Validated draft", "Outreach queue item", "Draft, task, audit, usage", "Async", "Human approval or declared auto-send policy remains explicit."),
+        s("staffFrontend", "Review or monitor outreach", "Staff can approve, edit, cancel, or inspect delivery/outcome under role policy.", "Outreach queue", "Approved/cancelled action", "Client draft only", "Sync", "Every consequential action returns to a deterministic API command.")
+      ]),
+      u("A10", "platform", "Inbound CRM/SIS synchronization", "External changes enter through an adapter, are validated/idempotent, then become canonical domain updates.", "Target design", "integration", ["07"], [
+        s("externalProvider", "Expose change feed", "The CRM/SIS supplies a webhook, cursor feed, or polling endpoint with stable external identifiers.", "External record change", "Provider payload + cursor", "External system state", "Async", "Credentials and cursor management stay inside the adapter."),
+        s("worker", "Poll or receive through adapter", "A provider-specific adapter normalizes transport and records the inbound attempt.", "Provider payload", "Canonical integration envelope", "Sync job/attempt", "Async", "Retries reuse provider cursor/idempotency keys."),
+        s("platformApi", "Validate mapping and authority", "The integration port maps IDs/fields, resolves tenant, validates ownership and conflict policy, and creates a domain command.", "Integration envelope", "Accepted command or quarantine", "Mapping decision", "Async", "Unknown/mismatched records are quarantined, not guessed."),
+        s("postgres", "Commit canonical update", "External mapping, domain change, audit, and outbox event commit atomically.", "Accepted command", "Canonical version", "Mapping, domain record, audit, outbox", "Sync", "Source-system precedence and timestamps are recorded."),
+        s("worker", "Refresh dependent projections", "Outbox handlers update portals/work queues and record the inbound receipt.", "Canonical-change event", "Projection receipts", "Projections and receipts", "Async", "Projection failure does not roll back the accepted source update.")
+      ]),
+      u("A11", "platform", "Outbound CRM/SIS/comms synchronization", "Outbox events drive retry-safe external adapters after a local transaction commits.", "Target design", "integration", ["07"], [
+        s("postgres", "Commit local source event", "A normal domain transaction stores the change, audit, and outbound-capable outbox event.", "Local command", "Durable event", "Domain, audit, outbox", "Sync", "External availability cannot block the canonical transaction."),
+        s("worker", "Claim and map outbound effect", "The integration handler leases the event, loads mapping/config, and creates a provider request with idempotency key.", "Outbox event", "Provider command", "Attempt and mapping", "Async", "Unsupported or suppressed fields never leave the platform."),
+        s("externalProvider", "Apply external update", "The CRM/SIS/comms API returns success, accepted, conflict, or failure with an external reference.", "Provider command", "External result", "External system record", "Async", "Timeout is treated as unknown until idempotent reconciliation."),
+        s("postgres", "Record receipt or retry", "External reference, response hash, attempt, next retry, or dead letter is stored.", "External result", "Delivery state", "Integration receipt", "Async", "A retry uses the same business idempotency key."),
+        s("staffFrontend", "Expose sync health", "Authorized operations views can show pending, failed, or reconciled integration state.", "Integration projection", "Visible sync status", "Client cache only", "Sync", "Staff can distinguish local success from external delivery.")
+      ]),
+      u("A12", "platform", "Payment/e-signature webhook", "A signed inbound webhook is validated, deduplicated, and applied as an authoritative external result.", "Target design", "integration", ["07"], [
+        s("externalProvider", "Send signed webhook", "The provider posts an event ID, timestamp, signature, and result reference.", "Provider-side completion", "HTTPS webhook", "External event", "Async", "No browser callback is considered authoritative."),
+        s("platformApi", "Verify signature and freshness", "The webhook adapter validates secret/signature, timestamp, tenant mapping, event type, and payload schema.", "Webhook request", "Verified integration envelope", "Verification metadata", "Sync", "Invalid or replayed signatures are rejected before lookup/mutation."),
+        s("postgres", "Deduplicate provider event", "A unique provider/event key returns the prior receipt when already processed.", "Verified envelope", "New or prior event receipt", "Webhook receipt", "Sync", "At-least-once provider delivery cannot duplicate business results."),
+        s("platformApi", "Map authoritative result", "The adapter resolves the internal transaction/document and creates the allowed domain transition.", "Provider result + mapping", "Domain command", "Mapping decision", "Sync", "Unknown references are quarantined for operations."),
+        s("postgres", "Commit result, audit, and outbox", "Canonical status, external reference, audit, and downstream event commit together.", "Domain command", "Canonical result", "Payment/signature, audit, outbox", "Sync", "The raw webhook is minimized and retained per policy."),
+        s("worker", "Notify and project", "Downstream handlers update the student/staff projections and notifications.", "Result event", "Delivery receipts", "Projection and notification state", "Async", "Missed live delivery is recoverable by refresh.")
+      ]),
+      u("A13", "platform", "Tenant isolation and sensitive access", "Identity proves who; the app resolves tenant, role, and relationship, applies field-level authorization, and records access.", "Current boundary / production hardening", "system", ["08","14"], [
+        s("studentFrontend", "Present tenant-scoped session", "The portal sends the exact tenant context and HTTP-only session on every protected call.", "Navigation/action", "Credentialed request", "No authorization decision", "Sync", "The hostname/path alone never grants access."),
+        s("platformApi", "Verify identity and tenant", "Authentication resolves the subject; tenant middleware rejects missing/mismatched tenant context.", "Credentialed request", "Tenant-scoped principal", "Request security context", "Sync", "Default-deny applies when tenant cannot be proven."),
+        s("postgres", "Resolve membership and relationship", "Tenant membership, staff role/team, student ownership, delegation, and target relationship are queried.", "Principal + resource", "Authorization facts", "Security records", "Sync", "Queries always include tenant predicates."),
+        s("platformApi", "Apply operation and field policy", "The route/use case authorizes the action and minimizes response fields for the role and purpose.", "Authorization facts", "Allowed command/response or denial", "Access decision", "Sync", "Authentication is never treated as blanket authorization."),
+        s("postgres", "Record sensitive access", "Required reads/changes are audited with actor, purpose, resource, and correlation metadata.", "Sensitive operation", "Access audit", "Audit record", "Sync", "Logs avoid copying document/message contents."),
+        s("staffFrontend", "Render minimized data", "The portal receives only the authorized projection and hides no field as a substitute for server enforcement.", "Minimized response", "Role-appropriate UI", "Client cache only", "Sync", "Revoked access fails on the next request even if old UI remains open.")
+      ]),
+      u("A14", "platform", "Build, test and deploy", "CI runs checks, builds containers, and deploys the exact commit through GitHub OIDC and cloud workload identity.", "Current preview deployment", "system", ["09","16"], [
+        s("delivery", "Push reviewed commit", "A branch/PR produces an immutable Git SHA in the independently owned frontend or backend repository.", "Git commit", "CI workflow run", "Git history", "System", "Frontend and backend release independently; histories are never merged."),
+        s("delivery", "Run repository checks", "CI installs locked dependencies and runs lint, typecheck, tests, build, migration/checksum, and security gates for that repository.", "Source SHA", "Verified build inputs", "CI logs/artifacts", "System", "A failed gate prevents image publication/deployment."),
+        s("delivery", "Build and publish immutable image", "OIDC/WIF obtains short-lived cloud credentials and pushes an image tagged by exact Git SHA.", "Verified source", "Registry image digest", "Artifact Registry", "System", "No long-lived service-account JSON key is stored in GitHub."),
+        s("delivery", "Roll out through native deployment", "The preview VM or Kubernetes deployment pulls the immutable image under a serialized release/rollout process.", "Image digest + reviewed config", "New replica/release", "Deployment revision", "Async", "Secrets remain outside the image and protected from logs."),
+        s("delivery", "Health-check or roll back", "Readiness, public route, image SHA, and container/pod health determine cutover success.", "Candidate release", "Healthy release or rollback", "Release status", "Async", "Failed health checks restore the prior immutable release.", ["Audentra-platform/infra/kubernetes/", "Audentra-platform/infra/preview-vm/"])
+      ]),
+
+      u("L01", "leadership", "Counselor daily work queue", "Risk, urgency, due dates, and ownership produce a counselor's prioritized work view.", "Target design", "schedule", ["06"], [
+        s("postgres", "Read governed work facts", "Assigned students, open tasks, deadlines, outcomes, communication state, and allowed risk evidence are selected at a cutoff.", "Counselor/team scope", "Queue fact set", "Shared student/task records", "Async", "The projection never invents parallel student facts."),
+        s("worker", "Calculate deterministic priority", "Documented urgency, due-date, risk, SLA, and ownership rules produce a ranked projection.", "Queue fact set", "Prioritized queue", "Counselor queue projection", "Async", "Scores preserve inputs/cutoff and distinguish AI suggestions."),
+        s("platformApi", "Authorize counselor slice", "The API limits the queue to the counselor's tenant, team, assignments, and permitted fields.", "Staff session + filters", "Scoped queue response", "Access decision", "Sync", "Leaders and counselors receive different projections."),
+        s("staffFrontend", "Work the queue", "The counselor sees why each item is ranked and opens the underlying Action Center/task/conversation.", "Scoped queue", "Visible daily plan", "Client cache only", "Sync", "Every action returns to the canonical work-item flow.")
+      ]),
+      u("L02", "leadership", "Support-case lifecycle", "A support case moves through assignment, investigation, communication, resolution, and audit.", "Target design", "user", ["06"], [
+        s("staffFrontend", "Create or claim case", "Staff convert a signal/inquiry into a scoped case with owner, priority, SLA, and linked student context.", "Queue item or inquiry", "Case command", "Local case draft", "Sync", "Duplicate detection links related work rather than cloning it."),
+        s("platformApi", "Validate lifecycle transition", "The API checks role, assignment, status transition, escalation policy, and expected version.", "Case command", "Accepted transition", "Validated domain command", "Sync", "Blocked/closed/cancelled transitions remain explicit."),
+        s("postgres", "Commit case and audit", "Case state, links, work log, audit, and outbox event commit together.", "Accepted transition", "Canonical case version", "Case, history, audit, outbox", "Sync", "Every status has actor, reason, and timestamp."),
+        s("staffFrontend", "Investigate and communicate", "Staff use linked evidence, messages, appointments, and playbooks to work the case.", "Case projection", "Recorded intervention/outcome", "Local drafts only", "Sync", "Communication evidence is linked, not pasted into ungoverned notes."),
+        s("worker", "Escalate or follow up", "SLA/inactivity events create deduplicated follow-up or leader escalation work.", "Case event/schedule", "Follow-up action", "Task/notification projection", "Async", "Resolved/cancelled cases are suppressed."),
+        s("postgres", "Resolve with durable outcome", "Resolution, disposition, next action, student summary impact, and audit become canonical.", "Resolution command", "Closed case projection", "Outcome, case, audit, outbox", "Sync", "Outcome evidence remains reviewable after closure.")
+      ]),
+      u("L03", "leadership", "Intervention playbook", "A staff member selects a controlled play, performs an intervention, and records the outcome.", "Target design", "user", ["06"], [
+        s("staffFrontend", "Select governed play", "The Action Center recommends or lets staff choose a published Core Play appropriate to the case.", "Case/student context", "Play selection", "Local selection", "Sync", "AI may suggest a play but staff chooses it."),
+        s("platformApi", "Load eligible play version", "The API authorizes access and resolves the exact published play/version and required fields.", "Play ID + case", "Play execution plan", "No copied mutable template", "Sync", "Retired or ineligible plays cannot start new executions."),
+        s("postgres", "Create intervention execution", "The case links to an immutable play version with owner, start time, and expected outcome.", "Play plan", "Intervention ID", "Intervention and audit", "Sync", "Later template edits do not rewrite historical work."),
+        s("staffFrontend", "Perform and record steps", "Staff complete channel actions, notes, approvals, and disposition fields.", "Intervention projection", "Step/outcome commands", "Local forms", "Sync", "Consequential sends/updates use deterministic API commands."),
+        s("postgres", "Commit outcome and effects", "Outcome, follow-up, case/task status, audit, and outbox events update atomically.", "Recorded outcome", "Completed intervention", "Outcome, work state, audit, outbox", "Sync", "Incomplete required evidence blocks completion."),
+        s("worker", "Refresh operational projections", "Counselor/director/leader projections receive the intervention result after commit.", "Intervention-completed event", "Projection receipts", "Aggregate projections", "Async", "Aggregates preserve the underlying outcome lineage.")
+      ]),
+      u("L04", "leadership", "Director/team operations", "Director balances capacity, overdue work, and staff performance across a team projection.", "Target design", "schedule", ["06"], [
+        s("postgres", "Select team-level facts", "Assignments, active case load, SLA, outcomes, availability, and backlog are read at a cutoff.", "Director's team scope", "Team fact set", "Shared work/student records", "Async", "Sensitive student details are omitted when aggregate facts suffice."),
+        s("worker", "Build capacity projection", "Deterministic aggregation calculates workload, overdue work, throughput, and coverage gaps.", "Team fact set", "Director projection", "Team operations projection", "Async", "Definitions and cutoff are versioned."),
+        s("platformApi", "Authorize director view", "The API verifies management scope and applies row/field suppression.", "Director session + filters", "Scoped team metrics", "Access decision", "Sync", "A director cannot expand outside assigned teams."),
+        s("staffFrontend", "Inspect and rebalance", "The director drills from metrics to allowed work items and proposes reassignment/escalation.", "Team projection", "Rebalance command", "Client filter/draft", "Sync", "Aggregate views link to canonical tasks rather than hidden copies."),
+        s("postgres", "Commit operational change", "Assignments/priorities, reason, audit, and outbox event update under expected-version rules.", "Authorized rebalance", "Updated work versions", "Tasks, audit, outbox", "Sync", "Concurrent counselor changes return conflict.")
+      ]),
+      u("L05", "leadership", "Enrollment leader funnel", "Leader sees cohort funnel, risk clusters, interventions, and system health across the tenant.", "Target design", "schedule", ["06"], [
+        s("postgres", "Read tenant cohort facts", "Enrollment milestones, requirements, offers, payments, interventions, outcomes, and data-quality/system-health facts are selected.", "Tenant + cohort + cutoff", "Governed cohort fact set", "Shared canonical records", "Async", "Metric definitions identify source tables and cutoff."),
+        s("worker", "Build funnel and risk clusters", "Versioned metric rules aggregate stages, conversion, friction, intervention coverage, and operational health.", "Cohort fact set", "Leader projection", "Funnel/risk projection", "Async", "Small-cell suppression and data-quality flags travel with results."),
+        s("platformApi", "Authorize leader projection", "The API enforces tenant/role scope and suppresses unnecessary row-level student data.", "Leader query", "Scoped metrics and allowed drill-down", "Access decision", "Sync", "Leadership does not imply unrestricted document/message access."),
+        s("staffFrontend", "Explore and choose intervention", "The leader filters cohorts, inspects evidence, and creates governed team/action requests.", "Leader projection", "Operational command", "Client filters", "Sync", "Narratives remain linked to measured facts."),
+        s("postgres", "Record selected action", "Target, owner, rationale, expected outcome, audit, and follow-up event become durable.", "Leader command", "Intervention/work record", "Work item, audit, outbox", "Sync", "A chart click alone never changes student state.")
+      ]),
+      u("L06", "leadership", "VP executive snapshot", "VP consumes privacy-suppressed, aggregated enrollment indicators and trends.", "Target design", "schedule", ["06"], [
+        s("postgres", "Read approved aggregate inputs", "Only governed metric facts and minimum cohort dimensions are selected.", "Institution + period + cutoff", "Aggregate fact set", "Metric source records", "Async", "Row-level message/document content is excluded."),
+        s("worker", "Aggregate and suppress", "The projection applies metric versions, comparison periods, quality checks, and small-cell/privacy suppression.", "Aggregate fact set", "Executive metrics", "VP projection + quality metadata", "Async", "Suppressed cells cannot be reconstructed through filters."),
+        s("platformApi", "Authorize executive scope", "The API returns only approved institutional/cohort aggregations and trend metadata.", "VP session + query", "Privacy-safe snapshot", "Access decision", "Sync", "Drill-down stops before unauthorized student detail."),
+        s("staffFrontend", "Render answer-first snapshot", "The executive view explains movement, targets, caveats, and operational implications.", "Privacy-safe snapshot", "Visible scorecard/trends", "Client cache only", "Sync", "Every metric exposes definition, cutoff, and suppression caveat.")
+      ]),
+      u("L07", "leadership", "Projection hierarchy", "Student, counselor, director, leader, and VP views are different governed projections of shared facts.", "Architecture/target", "system", ["06"], [
+        s("postgres", "Maintain shared canonical facts", "Student, enrollment, requirement, task, communication, intervention, and audit records remain the common evidence base.", "Domain transactions", "Versioned canonical records", "Shared database", "Sync", "No persona receives a private source of truth."),
+        s("worker", "Materialize purpose-specific projections", "Versioned rules create student, counselor, director, leader, and executive projections at defined cutoffs.", "Canonical facts + policy", "Role projections", "Projection tables/materialized views", "Async", "Each projection records source/version/cutoff."),
+        s("platformApi", "Authorize projection and drill-down", "Role, tenant, team, relationship, purpose, and field policy determine which projection and detail level is available.", "Authenticated query", "Governed response", "Access decision and audit", "Sync", "Higher organizational role does not automatically grant all sensitive fields."),
+        s("studentFrontend", "Render student projection", "The student sees personal progress, next actions, messages, and permitted explanations.", "Student response", "Personal portal", "Client cache only", "Sync", "Student view exposes no staff-only notes."),
+        s("staffFrontend", "Render operational or leadership projection", "The same frontend repository renders counselor through executive views from role-appropriate contracts.", "Staff/leader response", "Scoped workspace", "Client cache only", "Sync", "Metrics and operational tasks retain links back to shared facts and lineage.")
+      ])
+    ];
+
+    const tours = [
+      {
+        id: "support",
+        title: "Student help request to resolved conversation",
+        purpose: "A requirement-linked student inquiry becomes staff work, a durable two-way conversation, and a recoverable resolution.",
+        availability: "Current durable slice",
+        trigger: "user",
+        linkedCases: ["S19","T06","S17","A02","T12"],
+        sources: ["22","23","24"],
+        stages: [
+          s("studentFrontend", "Submit linked help request", "Student sends the question with requirement/document context.", "Question + context", "Inquiry command", "Local pending state", "Sync", "Idempotency prevents duplicate tickets."),
+          s("platformApi", "Authorize and route", "The API sanitizes, resolves triage ownership, and creates one domain command.", "Inquiry command", "Accepted support transition", "Validated command", "Sync", "Team/leader fallback prevents invisible unassigned work."),
+          s("postgres", "Commit conversation and task", "Conversation, first message, task, audit, and outbox event commit together.", "Support transition", "Inquiry/message/task IDs", "Canonical support records", "Sync", "Atomicity keeps the staff task linked to the exact message."),
+          s("worker", "Invalidate staff workspace", "A retry-safe event delivers the new-work notification without blocking the student.", "Inquiry-created event", "Staff delivery receipt", "Outbox receipt", "Async", "Missed live delivery is repaired by refresh."),
+          s("staffFrontend", "Claim and reply", "Staff opens the Action Center conversation, assigns it, and sends a response.", "Support projection", "Reply command", "Local composer", "Sync", "Staff-only notes are kept separate."),
+          s("postgres", "Persist reply and status", "The reply, read/unread state, task transition, activity clock, audit, and event commit.", "Reply command", "Conversation version", "Message/task/audit/outbox", "Sync", "Five-day idle retention is based on last durable activity."),
+          s("studentFrontend", "Receive and continue", "The student gets a notification, opens the thread, and can reply or see resolution.", "Live invalidation or refresh", "Visible durable conversation", "Read cursor", "Sync", "Opening on another device loads the same message history.")
+        ]
+      },
+      {
+        id: "transcript",
+        title: "Transcript upload, parsing, human review, and notification",
+        purpose: "The original survives every failure; extraction runs asynchronously; human intervention is created automatically when needed.",
+        availability: "Current",
+        trigger: "event",
+        linkedCases: ["S10","S11","S12","S13","T05","A04"],
+        sources: ["11","14","23"],
+        stages: [
+          s("studentFrontend", "Upload transcript", "The student submits one or more transcript files from the linked requirement.", "Original files", "Multipart request", "Upload progress", "Sync", "The UI sends files once and shows explicit processing state."),
+          s("objectStorage", "Retain original first", "Protected original bytes and checksum are stored before parsing.", "File stream", "Object key", "Immutable original", "Sync", "Retry and staff review never depend on re-upload."),
+          s("postgres", "Queue durable extraction", "Metadata, requirement link, audit, and outbox event commit.", "Object key", "Document/job IDs", "Document + outbox", "Sync", "The API can return while parsing continues."),
+          s("worker", "Lease and orchestrate", "The worker deduplicates, loads policy, and prepares the provider request.", "Document event", "Extraction attempt", "Lease/attempt", "Async", "Terminal results prevent repeated token spend."),
+          s("externalProvider", "Parse with structured output", "The multimodal model returns schema-constrained transcript evidence.", "Original + schema", "Structured candidate", "Provider metadata", "Async", "Local validation still treats model output as untrusted."),
+          s("postgres", "Persist result or intervention", "Success updates extraction; failure stores reason and creates a linked staff-review task/notification.", "Validated attempt", "Canonical document state", "Extraction/task/audit/outbox", "Async", "The original remains safe in both branches."),
+          s("staffFrontend", "Review exception", "Staff can retry or decide from the Action Center with the original and failure reason.", "Review projection", "Decision/retry command", "Local decision", "Sync", "The task is automatically resolved if a later successful upload satisfies it."),
+          s("studentFrontend", "See final state", "The student receives canonical success, review-needed, or staff-decision status.", "Notification/refresh", "Visible requirement result", "Client cache only", "Sync", "No stale screen can mark parsing complete itself.")
+        ]
+      },
+      {
+        id: "enrichment",
+        title: "Conversation evidence to AI outcome and student summaries",
+        purpose: "Many channel events are debounced into one bounded, structured AI call whose independent projections update together.",
+        availability: "Current action-center slice",
+        trigger: "event",
+        linkedCases: ["A07","A08","T06","T12"],
+        sources: ["05","11","22"],
+        stages: [
+          s("postgres", "Commit channel evidence", "Portal messages, email/call adapter results, and transcripts become canonical communication evidence first.", "Channel event", "Versioned evidence + outbox", "Messages/outcomes/transcripts", "Sync", "Raw evidence is visible before AI finishes."),
+          s("worker", "Debounce quiet window", "The worker coalesces bursts across portal, email, and voice for the same student/action.", "Evidence events", "One enrichment run key", "Deferred job", "Async", "Ten messages do not create ten summaries."),
+          s("postgres", "Assemble canonical context", "Prior summaries, student facts, tasks, outcomes, documents, transcripts, and open reach-outs are read at a cutoff.", "Run key + cutoff", "Bounded evidence bundle", "Canonical context", "Async", "The cutoff makes the result explainable and rerunnable."),
+          s("externalProvider", "Generate one strict envelope", "One model call returns outcome summary, student summary, suggested follow-up, and conversation signals.", "Evidence + JSON schema", "Structured envelope", "Provider attempt", "Async", "Schema support is required where available; local validation remains."),
+          s("postgres", "Commit independent projections", "Each validated section is persisted with the same run/cutoff/provenance and new versions.", "Validated envelope", "Updated summary/signal projections", "AI projections + usage + outbox", "Async", "A transaction prevents a new outcome with an old student summary from the same run."),
+          s("staffFrontend", "Offer one refresh notice", "An open staff detail receives one deduplicated update indicator and loads the canonical versions on demand.", "Projection-updated event", "Visible AI result", "Pending update marker", "Async", "Unsaved staff inputs are preserved.")
+        ]
+      },
+      {
+        id: "scheduled",
+        title: "Scheduled incomplete-task reminder campaign",
+        purpose: "A repeatable cohort query identifies eligible students without stalling workers or sending duplicate outreach.",
+        availability: "Target design",
+        trigger: "schedule",
+        linkedCases: ["A09","L01","L02"],
+        sources: ["05","06"],
+        stages: [
+          s("worker", "Acquire schedule lease", "One scheduler instance opens the tenant batch and records its cutoff.", "Cron/config", "Batch ID", "Scheduled job", "Async", "Overlapping worker replicas cannot run the same batch."),
+          s("postgres", "Find eligible students", "The deterministic query selects incomplete tasks due soon with inactivity/consent/suppression rules.", "Tenant + cutoff", "Candidate cohort", "Read-only canonical facts", "Async", "The cohort can be reproduced from query/version/cutoff."),
+          s("worker", "Dedupe and rate-limit", "Stable campaign/student keys, budget, and channel policy create bounded outreach jobs.", "Candidates", "Allowed jobs", "Run ledger", "Async", "Prior sends and active cases suppress duplicates."),
+          s("externalProvider", "Draft channel content", "Templates or a controlled model create the approved structured draft.", "Intent + compact context", "Draft", "Provider metadata", "Async", "Generation alone never sends."),
+          s("postgres", "Queue approval or send", "Draft, rationale, cutoff, audit, and delivery intent become durable.", "Validated draft", "Outreach item", "Draft/task/audit/outbox", "Async", "Tenant policy decides human approval versus automated send."),
+          s("staffFrontend", "Review campaign state", "Staff can inspect, approve, edit, cancel, and see delivery/outcome.", "Outreach projection", "Operational action", "Client draft only", "Sync", "Every action is versioned and auditable.")
+        ]
+      },
+      {
+        id: "journey",
+        title: "Conditional journey design to student branch execution",
+        purpose: "Staff publish a validated graph; student answers choose yes/no, switch-case, and threshold branches on the server.",
+        availability: "Current builder + routing slice",
+        trigger: "user",
+        linkedCases: ["T07","T08","S02","S05"],
+        sources: ["17","23","24"],
+        stages: [
+          s("staffFrontend", "Build graph and forms", "Staff add typed steps, dependencies, branch predicates, switch cases, thresholds, and layout.", "Template/current version", "Journey candidate", "Local graph draft", "Sync", "Auto-layout removes overlap without changing logical edges."),
+          s("platformApi", "Validate graph semantics", "The API checks inputs, reachability, cycles, targets, branch coverage, and expected version.", "Journey candidate", "Validation report", "Validated graph", "Sync", "Invalid/unreachable flows cannot publish."),
+          s("postgres", "Publish immutable version", "The graph, form schemas, audit, and active-version pointer commit.", "Approved candidate", "Published journey version", "Journey versions + audit", "Sync", "In-progress students retain explicit version/migration policy."),
+          s("studentFrontend", "Render current form", "The portal displays the current server-eligible step and its typed controls.", "Journey projection", "Student answer", "Local form state", "Sync", "Hidden branches are not treated as authorization."),
+          s("platformApi", "Evaluate answer and route", "Server routing evaluates predicates and chooses the next eligible node.", "Answer + version", "Accepted result + next node", "Routing decision", "Sync", "Crafted answers cannot jump to arbitrary nodes."),
+          s("postgres", "Persist answer and branch", "The answer, selected edge, progress, and audit become durable.", "Routing decision", "Updated journey projection", "Answers, edge, progress, version", "Sync", "Reload resumes the same branch from canonical state.")
+        ]
+      },
+      {
+        id: "content",
+        title: "Staff content publish to student refresh and notifications",
+        purpose: "Academic and campus content is versioned in PostgreSQL; students read the published version on refresh; material event changes notify registrants.",
+        availability: "Current content slice",
+        trigger: "user",
+        linkedCases: ["T09","T10","S20","S21"],
+        sources: ["14","23","24"],
+        stages: [
+          s("staffFrontend", "Edit content", "Staff update course, event, club, media, date, status, or optional resource fields.", "Current version", "Content command", "Local draft", "Sync", "The editor previews affected event registrations."),
+          s("platformApi", "Validate and authorize", "The API checks staff role, tenant, schema, links/dates, lifecycle, and expected version.", "Content command", "Accepted update or 409", "Validated command", "Sync", "Stale writes cannot replace newer revisions."),
+          s("postgres", "Commit published revision", "Content, active version, audit, and outbox event update atomically.", "Accepted update", "Published projection", "Content/revision/audit/outbox", "Sync", "Dependent registrations keep stable IDs through cancellation/revision."),
+          s("worker", "Notify affected registrants", "Material campus-event changes fan out deduplicated notifications after commit.", "Content-changed event", "Student notifications", "Outbox receipts", "Async", "Publishing is not stalled by notification fan-out."),
+          s("studentFrontend", "Read on refresh", "Campus life and classrooms fetch the latest published tenant content.", "Page request", "Updated student page", "Client cache only", "Sync", "An already-open page may be stale until refresh; stale actions are rejected by the API.")
+        ]
+      }
+    ];
+
+    if (useCases.length !== 57) {
+      throw new Error(`Atlas inventory mismatch: expected 57 use cases, found ${useCases.length}.`);
+    }
+
+    const state = {
+      view: "catalog",
+      selectedCase: "S10",
+      selectedCaseStage: 0,
+      selectedTour: "support",
+      selectedTourStage: 0,
+      search: "",
+      group: "all",
+      status: "all",
+      trigger: "all",
+      location: "all"
+    };
+
+    const esc = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[char]));
+    const statusKind = (availability) => {
+      const value = availability.toLowerCase();
+      if (value.includes("target design") || value === "architecture/target") return "target";
+      if (value.includes("preview") || value.includes("partial") || value.includes("slice") || value.includes("hardening") || value.includes("target")) return "partial";
+      return "current";
+    };
+    const statusLabel = (kind) => ({ current: "Implemented/current", partial: "Preview/partial", target: "Target design" }[kind]);
+    const styleForLocation = (id, prefix = "--location") => {
+      const location = locations[id];
+      return `${prefix}-color:${location.color};${prefix}-soft:${location.soft}`;
+    };
+    const locationPill = (id) => {
+      const location = locations[id];
+      return `<span class="location-pill" style="${styleForLocation(id)}"><i></i>${esc(location.short)}</span>`;
+    };
+
+    function hydrateHash() {
+      const raw = window.location.hash.replace(/^#/, "");
+      if (!raw) return;
+      const [view, id, stage] = raw.split(":");
+      if (view === "catalog" && useCases.some((item) => item.id === id)) {
+        state.view = "catalog";
+        state.selectedCase = id;
+        state.selectedCaseStage = Math.max(0, Number(stage) || 0);
+      }
+      if (view === "tour" && tours.some((item) => item.id === id)) {
+        state.view = "tour";
+        state.selectedTour = id;
+        state.selectedTourStage = Math.max(0, Number(stage) || 0);
+      }
+    }
+
+    function updateHash() {
+      const id = state.view === "catalog" ? state.selectedCase : state.selectedTour;
+      const stage = state.view === "catalog" ? state.selectedCaseStage : state.selectedTourStage;
+      history.replaceState(null, "", `#${state.view}:${id}:${stage}`);
+    }
+
+    function populateFilters() {
+      const options = (items) => items.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("");
+      document.getElementById("group-filter").innerHTML = options([["all","All personas"], ...Object.entries(groupLabels)]);
+      document.getElementById("status-filter").innerHTML = options([["all","All statuses"],["current","Current"],["partial","Preview / partial"],["target","Target"]]);
+      document.getElementById("trigger-filter").innerHTML = options([["all","All triggers"], ...Object.entries(triggerLabels)]);
+      document.getElementById("location-filter").innerHTML = options([["all","All locations"], ...Object.entries(locations).map(([id, item]) => [id,item.short])]);
+    }
+
+    function filteredCases() {
+      const needle = state.search.trim().toLowerCase();
+      return useCases.filter((item) => {
+        const haystack = [item.id, item.title, item.purpose, item.availability, item.trigger, ...item.stages.flatMap((stage) => [stage.title, stage.detail, stage.input, stage.output, stage.data, stage.safety, ...stage.files])].join(" ").toLowerCase();
+        return (!needle || haystack.includes(needle))
+          && (state.group === "all" || item.group === state.group)
+          && (state.status === "all" || statusKind(item.availability) === state.status)
+          && (state.trigger === "all" || item.trigger === state.trigger)
+          && (state.location === "all" || item.stages.some((stage) => stage.location === state.location));
+      });
+    }
+
+    function renderCaseList() {
+      const list = filteredCases();
+      const container = document.getElementById("case-list");
+      document.getElementById("result-count").textContent = `${list.length} flow${list.length === 1 ? "" : "s"}`;
+      if (!list.length) {
+        container.innerHTML = '<div class="empty">No use cases match these filters.<br>Clear one filter or try a broader search.</div>';
+        return list;
+      }
+      if (!list.some((item) => item.id === state.selectedCase)) {
+        state.selectedCase = list[0].id;
+        state.selectedCaseStage = 0;
+      }
+      container.innerHTML = list.map((item) => {
+        const kind = statusKind(item.availability);
+        return `<button type="button" class="case-choice ${item.id === state.selectedCase ? "is-active" : ""}" data-case="${item.id}" aria-pressed="${item.id === state.selectedCase}">
+          <span class="case-id">${item.id}</span>
+          <span class="case-copy"><strong>${esc(item.title)}</strong><small><i class="mini-dot ${kind}"></i>${esc(groupLabels[item.group])} · ${esc(statusLabel(kind))}</small></span>
+        </button>`;
+      }).join("");
+      container.querySelectorAll("[data-case]").forEach((button) => button.addEventListener("click", () => {
+        state.selectedCase = button.dataset.case;
+        state.selectedCaseStage = 0;
+        renderCatalog();
+      }));
+      return list;
+    }
+
+    function renderTourList() {
+      const container = document.getElementById("tour-list");
+      container.innerHTML = tours.map((tour, index) => `<button type="button" class="tour-choice ${tour.id === state.selectedTour ? "is-active" : ""}" data-tour="${tour.id}" aria-pressed="${tour.id === state.selectedTour}">
+        <span class="tour-index">0${index + 1}</span>
+        <span class="case-copy"><strong>${esc(tour.title)}</strong><small>${tour.stages.length} stages · ${esc(triggerLabels[tour.trigger])}</small></span>
+      </button>`).join("");
+      container.querySelectorAll("[data-tour]").forEach((button) => button.addEventListener("click", () => {
+        state.selectedTour = button.dataset.tour;
+        state.selectedTourStage = 0;
+        renderTours();
+      }));
+    }
+
+    function renderSources(item) {
+      return item.sources.map((sourceId) => {
+        const source = sourceDocs[sourceId];
+        return source ? `<a href="${esc(source[1])}">${esc(sourceId === "worker" ? source[0] : `Doc ${sourceId} · ${source[0]}`)}</a>` : "";
+      }).join("");
+    }
+
+    function renderTrace(item, selectedIndex, selectorName) {
+      const laneIds = Object.keys(locations).filter((locationId) => item.stages.some((stage) => stage.location === locationId));
+      const laneIndex = new Map(laneIds.map((locationId, index) => [locationId, index]));
+      const laneTop = 46;
+      const laneHeight = 100;
+      const nodeLeft = 158;
+      const nodeGap = 180;
+      const nodeWidth = 144;
+      const nodeHeight = 84;
+      const graphWidth = Math.max(1060, nodeLeft + ((item.stages.length - 1) * nodeGap) + nodeWidth + 28);
+      const graphHeight = laneTop + (laneIds.length * laneHeight);
+      const markerBase = `graph-arrow-${selectorName}-${item.id.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
+      const lanes = laneIds.map((locationId, index) => {
+        const location = locations[locationId];
+        const selected = item.stages[selectedIndex].location === locationId;
+        return `<div class="graph-lane ${index % 2 ? "is-even" : ""} ${selected ? "is-selected" : ""}" style="top:${laneTop + (index * laneHeight)}px;height:${laneHeight}px;--lane-color:${location.color};--lane-soft:${location.soft}"></div>`;
+      }).join("");
+      const laneLabels = laneIds.map((locationId, index) => {
+        const location = locations[locationId];
+        return `<div class="graph-lane-label" style="top:${laneTop + (index * laneHeight)}px;height:${laneHeight}px;--lane-color:${location.color};--lane-soft:${location.soft}"><strong><i></i>${esc(location.short)}</strong><small>${esc(location.layer)}</small></div>`;
+      }).join("");
+      const order = item.stages.map((stage, index) => `<span style="left:${nodeLeft + (index * nodeGap) + (nodeWidth / 2)}px">Step ${String(index + 1).padStart(2,"0")}</span>`).join("");
+      const edges = item.stages.slice(0, -1).map((stage, index) => {
+        const next = item.stages[index + 1];
+        const startX = nodeLeft + (index * nodeGap) + nodeWidth;
+        const endX = nodeLeft + ((index + 1) * nodeGap);
+        const startY = laneTop + (laneIndex.get(stage.location) * laneHeight) + (laneHeight / 2);
+        const endY = laneTop + (laneIndex.get(next.location) * laneHeight) + (laneHeight / 2);
+        const control = Math.max(14, (endX - startX) / 2);
+        const isAsync = next.mode.toLowerCase().includes("async");
+        return `<path class="graph-edge ${isAsync ? "is-async" : ""}" d="M ${startX} ${startY} C ${startX + control} ${startY}, ${endX - control} ${endY}, ${endX} ${endY}" marker-end="url(#${markerBase}-${isAsync ? "async" : "sync"})"></path>`;
+      }).join("");
+      const nodes = item.stages.map((stage, index) => {
+        const location = locations[stage.location];
+        const top = laneTop + (laneIndex.get(stage.location) * laneHeight) + ((laneHeight - nodeHeight) / 2);
+        return `<button type="button" class="graph-node ${index === selectedIndex ? "is-active" : ""}" style="left:${nodeLeft + (index * nodeGap)}px;top:${top}px;--node-color:${location.color};--node-soft:${location.soft}" data-${selectorName}-stage="${index}" aria-pressed="${index === selectedIndex}" aria-label="Stage ${index + 1}: ${esc(stage.title)}. Runs in ${esc(location.name)}.">
+          <span class="graph-node-top"><span class="graph-node-step">${String(index + 1).padStart(2,"0")}</span><span class="graph-node-mode">${esc(stage.mode)}</span></span>
+          <span class="graph-node-title">${esc(stage.title)}</span>
+          <span class="graph-node-location">${esc(location.short)} · ${esc(location.layer)}</span>
+        </button>`;
+      }).join("");
+      return `<div class="flow-graph-shell" aria-label="Graphical execution flow for ${esc(item.title)}">
+        <div class="flow-graph" style="width:${graphWidth}px;height:${graphHeight}px">
+          <div class="graph-sticky-axis" style="height:${graphHeight}px"><div class="graph-heading-corner">Execution lane</div>${laneLabels}</div>
+          <div class="graph-order-axis">${order}</div>
+          ${lanes}
+          <svg class="graph-edges" width="${graphWidth}" height="${graphHeight}" viewBox="0 0 ${graphWidth} ${graphHeight}" aria-hidden="true">
+            <defs>
+              <marker id="${markerBase}-sync" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,4 L0,8 Z" fill="#73849a"></path></marker>
+              <marker id="${markerBase}-async" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L8,4 L0,8 Z" fill="#6552e8"></path></marker>
+            </defs>
+            ${edges}
+          </svg>
+          ${nodes}
+        </div>
+      </div>
+      <div class="graph-key"><b>Hand-offs</b><span><i></i>Immediate / synchronous</span><span><i class="is-async"></i>Queued / asynchronous</span><span>Select any node to inspect its inputs, outputs, state, files, and failure boundary.</span></div>`;
+    }
+
+    function centerSelectedGraphNode(workspace, selectorName, selectedIndex) {
+      const shell = workspace.querySelector(".flow-graph-shell");
+      const node = workspace.querySelector(`[data-${selectorName}-stage="${selectedIndex}"]`);
+      if (!shell || !node) return;
+      const desiredLeft = node.offsetLeft - ((shell.clientWidth - node.offsetWidth) / 2);
+      shell.scrollLeft = Math.max(0, desiredLeft);
+    }
+
+    function renderLocationMap(item, selectedStage) {
+      const used = new Set(item.stages.map((stage) => stage.location));
+      return `<div class="location-grid">${Object.entries(locations).map(([id, location]) => `<div class="location-tile ${used.has(id) ? "is-used" : ""} ${selectedStage.location === id ? "is-selected" : ""}" style="--tile-color:${location.color};--tile-soft:${location.soft}">
+        <strong>${esc(location.name)}</strong><span>${esc(location.layer)} · ${item.stages.filter((stage) => stage.location === id).length} stage${item.stages.filter((stage) => stage.location === id).length === 1 ? "" : "s"}</span>
+      </div>`).join("")}</div>`;
+    }
+
+    function renderStepPanel(item, stage, stageIndex) {
+      const location = locations[stage.location];
+      const files = [...new Set(stage.files.length ? stage.files : location.files)];
+      return `<section class="panel step-panel" style="${styleForLocation(stage.location)}">
+        <div class="step-banner">
+          <div class="location-icon">${esc(location.icon)}</div>
+          <div><p class="kicker">Stage ${stageIndex + 1} runs in ${esc(location.layer)}</p><h3>${esc(stage.title)}</h3><p>${esc(location.name)} · ${esc(stage.mode)}</p></div>
+          <div class="owner-block"><strong>${esc(location.owner)}</strong><span>${esc(location.runtime)}</span></div>
+        </div>
+        <div class="step-body">
+          <p>${esc(stage.detail)}</p>
+          <div class="io-grid">
+            <div class="io-card"><span>Input crossing in</span><strong>${esc(stage.input)}</strong></div>
+            <div class="io-card"><span>Output crossing out</span><strong>${esc(stage.output)}</strong></div>
+            <div class="io-card"><span>Data / state here</span><strong>${esc(stage.data)}</strong></div>
+          </div>
+          <div class="safety"><b>✓</b><div><b>Failure and integrity boundary</b><br>${esc(stage.safety)}</div></div>
+          <div class="files"><h4>Primary implementation neighborhood</h4><div class="file-list">${files.map((file) => `<div class="file-row"><span>${esc(location.layer)}</span><code>${esc(file)}</code></div>`).join("")}</div></div>
+        </div>
+      </section>`;
+    }
+
+    function renderWorkspace(item, selectedIndex, type) {
+      const kind = statusKind(item.availability);
+      const stage = item.stages[Math.min(selectedIndex, item.stages.length - 1)];
+      const linked = item.linkedCases ? `<div class="tour-links">${item.linkedCases.map((id) => `<button type="button" data-open-case="${id}">Open ${id}</button>`).join("")}</div>` : "";
+      return `<header class="flow-head">
+          <div><p class="kicker">${type === "case" ? `${item.id} · ${groupLabels[item.group]} use case` : "Guided cross-system tour"}</p><h2>${esc(item.title)}</h2><p>${esc(item.purpose)}</p>${linked}</div>
+          <div class="flow-badges"><span class="badge ${kind}">${esc(item.availability)}</span><span class="badge">${esc(triggerLabels[item.trigger])}</span><span class="badge">${item.stages.length} stages</span></div>
+        </header>
+        <div class="section-label"><h3>Graphical system flow</h3><p>Rows are execution locations; arrows are data or event hand-offs.</p></div>
+        ${renderTrace(item, selectedIndex, type)}
+        <div class="detail-grid">
+          ${renderStepPanel(item, stage, selectedIndex)}
+          <aside>
+            <section class="panel boundary-panel"><p class="kicker">Whole-flow footprint</p><h3>Where this flow runs</h3><p>Strong tiles participate in the flow. The highlighted tile owns the selected stage.</p>${renderLocationMap(item, stage)}</section>
+            <section class="panel source-panel"><div class="source-panel-head"><h3>Authoritative evidence</h3><small>${item.sources.length} source${item.sources.length === 1 ? "" : "s"}</small></div><div class="source-links">${renderSources(item)}</div></section>
+          </aside>
+        </div>`;
+    }
+
+    function renderCatalog() {
+      const visibleCases = renderCaseList();
+      if (!visibleCases.length) {
+        document.getElementById("catalog-workspace").innerHTML = '<div class="empty">No flow is selected because the current filters return no use cases.</div>';
+        return;
+      }
+      const item = useCases.find((entry) => entry.id === state.selectedCase);
+      state.selectedCaseStage = Math.min(state.selectedCaseStage, item.stages.length - 1);
+      const workspace = document.getElementById("catalog-workspace");
+      workspace.innerHTML = renderWorkspace(item, state.selectedCaseStage, "case");
+      workspace.querySelectorAll("[data-case-stage]").forEach((button) => button.addEventListener("click", () => {
+        state.selectedCaseStage = Number(button.dataset.caseStage);
+        renderCatalog();
+      }));
+      centerSelectedGraphNode(workspace, "case", state.selectedCaseStage);
+      updateHash();
+    }
+
+    function renderTours() {
+      renderTourList();
+      const item = tours.find((entry) => entry.id === state.selectedTour);
+      state.selectedTourStage = Math.min(state.selectedTourStage, item.stages.length - 1);
+      const workspace = document.getElementById("tour-workspace");
+      workspace.innerHTML = renderWorkspace(item, state.selectedTourStage, "tour");
+      workspace.querySelectorAll("[data-tour-stage]").forEach((button) => button.addEventListener("click", () => {
+        state.selectedTourStage = Number(button.dataset.tourStage);
+        renderTours();
+      }));
+      workspace.querySelectorAll("[data-open-case]").forEach((button) => button.addEventListener("click", () => {
+        state.view = "catalog";
+        state.selectedCase = button.dataset.openCase;
+        state.selectedCaseStage = 0;
+        renderAll();
+      }));
+      centerSelectedGraphNode(workspace, "tour", state.selectedTourStage);
+      updateHash();
+    }
+
+    function renderLegend() {
+      document.getElementById("legend").innerHTML = `<strong>Execution locations</strong>${Object.values(locations).map((location) => `<span class="legend-item" style="--legend-color:${location.color}"><i></i>${esc(location.short)} · ${esc(location.layer)}</span>`).join("")}`;
+    }
+
+    function renderAll() {
+      document.querySelectorAll("[data-view]").forEach((button) => {
+        const active = button.dataset.view === state.view;
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      document.getElementById("catalog-view").classList.toggle("is-active", state.view === "catalog");
+      document.getElementById("tour-view").classList.toggle("is-active", state.view === "tour");
+      if (state.view === "catalog") renderCatalog(); else renderTours();
+    }
+
+    hydrateHash();
+    populateFilters();
+    renderLegend();
+
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
+      state.view = button.dataset.view;
+      renderAll();
+    }));
+    document.getElementById("case-search").addEventListener("input", (event) => { state.search = event.target.value; renderCatalog(); });
+    document.getElementById("group-filter").addEventListener("change", (event) => { state.group = event.target.value; renderCatalog(); });
+    document.getElementById("status-filter").addEventListener("change", (event) => { state.status = event.target.value; renderCatalog(); });
+    document.getElementById("trigger-filter").addEventListener("change", (event) => { state.trigger = event.target.value; renderCatalog(); });
+    document.getElementById("location-filter").addEventListener("change", (event) => { state.location = event.target.value; renderCatalog(); });
+    window.addEventListener("hashchange", () => {
+      hydrateHash();
+      renderAll();
+    });
+
+    renderAll();
+  </script>
+</body>
+</html>

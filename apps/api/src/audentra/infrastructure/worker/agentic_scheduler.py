@@ -66,7 +66,167 @@ class AgenticWorkflowScheduler:
         scanned = await self._scan_engagement()
         matched = await self._run_action_rules()
         lifecycle_actions = await self._run_due_work_item_actions()
-        return processed + scanned + matched + lifecycle_actions
+        archived_conversations = await self._archive_inactive_support_conversations()
+        return processed + scanned + matched + lifecycle_actions + archived_conversations
+
+    async def _archive_inactive_support_conversations(self) -> int:
+        """Remove quiet support threads from active inboxes without losing evidence.
+
+        The conversation rows, participant messages, delivery records, and work
+        logs remain intact.  Only the active-inbox projection is retired after
+        the agreed five-day inactivity period, so staff can still audit or
+        recover the history without a destructive background delete.
+        """
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    WITH expired AS (
+                      SELECT inquiry.id
+                      FROM public.student_inquiry AS inquiry
+                      WHERE inquiry.archived_at IS NULL
+                        AND inquiry.status IN ('new', 'open', 'waiting_on_student', 'resolved')
+                        AND inquiry.expires_at <= NOW()
+                      ORDER BY inquiry.expires_at, inquiry.id
+                      LIMIT 100
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE public.student_inquiry AS inquiry
+                    SET status = 'archived',
+                        archived_at = NOW(),
+                        version = inquiry.version + 1,
+                        updated_at = NOW()
+                    FROM expired
+                    WHERE inquiry.id = expired.id
+                    RETURNING inquiry.id, inquiry.tenant_id, inquiry.student_id
+                    """
+                )
+            )
+            archived = [dict(row) for row in result.mappings().all()]
+            for inquiry in archived:
+                work_item_result = await connection.execute(
+                    text(
+                        """
+                        SELECT item.id, item.assignee_id, item.component
+                        FROM public.staff_work_item AS item
+                        WHERE item.tenant_id = :tenant_id
+                          AND (
+                            (item.source_type = 'message' AND item.source_id = :inquiry_id)
+                            OR EXISTS (
+                              SELECT 1
+                              FROM public.staff_work_item_link AS link
+                              WHERE link.tenant_id = item.tenant_id
+                                AND link.work_item_id = item.id
+                                AND link.entity_type = 'inquiry'
+                                AND link.entity_id = :inquiry_id
+                            )
+                          )
+                        ORDER BY item.created_at DESC, item.id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": inquiry["tenant_id"],
+                        "inquiry_id": inquiry["id"],
+                    },
+                )
+                work_item = work_item_result.mappings().first()
+                if work_item is None:
+                    await self._emit_support_conversation_archive_to_student(connection, inquiry)
+                    continue
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO public.staff_work_log (
+                          id, tenant_id, work_item_id, actor_type, actor_id,
+                          actor_name, action, message, occurred_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'system', NULL,
+                          'Audentra scheduler', 'status_changed', :message, NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": self._uuid_factory(),
+                        "tenant_id": inquiry["tenant_id"],
+                        "work_item_id": work_item["id"],
+                        "message": (
+                            "The support conversation left active inboxes after five days "
+                            "without a participant message. Its full history is retained."
+                        ),
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO public.staff_realtime_event (
+                          id, tenant_id, event_type, resource_type, resource_id,
+                          work_item_id, staff_member_id, team_component, tenant_wide,
+                          payload, created_at
+                        ) VALUES (
+                          :id, :tenant_id, 'staff.inquiry.archived',
+                          'student_inquiry', :inquiry_id, :work_item_id,
+                          :staff_member_id, :team_component, false,
+                          CAST(:payload AS jsonb), NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": self._uuid_factory(),
+                        "tenant_id": inquiry["tenant_id"],
+                        "inquiry_id": inquiry["id"],
+                        "work_item_id": work_item["id"],
+                        "staff_member_id": work_item["assignee_id"],
+                        "team_component": (
+                            None if work_item["assignee_id"] is not None else work_item["component"]
+                        ),
+                        "payload": _json(
+                            {
+                                "inquiryId": str(inquiry["id"]),
+                                "workItemId": str(work_item["id"]),
+                                "invalidate": ["workspace", "inquiries"],
+                            }
+                        ),
+                    },
+                )
+                await self._emit_support_conversation_archive_to_student(connection, inquiry)
+        return len(archived)
+
+    async def _emit_support_conversation_archive_to_student(
+        self,
+        connection: Any,
+        inquiry: dict[str, Any],
+    ) -> None:
+        """Invalidate the student's support view after its active thread expires."""
+
+        await connection.execute(
+            text(
+                """
+                INSERT INTO public.student_realtime_event (
+                  id, tenant_id, student_id, event_type, resource_type,
+                  resource_id, payload, created_at
+                ) VALUES (
+                  :id, :tenant_id, :student_id, 'student.inquiry.archived',
+                  'student_inquiry', :inquiry_id,
+                  CAST(:payload AS jsonb), NOW()
+                )
+                """
+            ),
+            {
+                "id": self._uuid_factory(),
+                "tenant_id": inquiry["tenant_id"],
+                "student_id": inquiry["student_id"],
+                "inquiry_id": inquiry["id"],
+                "payload": _json(
+                    {
+                        "inquiryId": str(inquiry["id"]),
+                        "href": f"/help?conversation={inquiry['id']}",
+                        "invalidate": ["help", "messages", "bootstrap"],
+                    }
+                ),
+            },
+        )
 
     async def _run_due_work_item_actions(self) -> int:
         """Promote due follow-ups and escalate expired blockers/SLA work without AI."""

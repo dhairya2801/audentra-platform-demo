@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -32,11 +32,15 @@ class FakeConnection:
         *,
         duplicate_execution: bool = False,
         due_lifecycle_rows: list[Mapping[str, Any]] | None = None,
+        expired_conversation_rows: list[Mapping[str, Any]] | None = None,
+        expired_conversation_work_item_rows: list[Mapping[str, Any]] | None = None,
         action_rule_rows: list[Mapping[str, Any]] | None = None,
         inbox_rows: list[Mapping[str, Any]] | None = None,
     ) -> None:
         self.duplicate_execution = duplicate_execution
         self.due_lifecycle_rows = due_lifecycle_rows or []
+        self.expired_conversation_rows = expired_conversation_rows or []
+        self.expired_conversation_work_item_rows = expired_conversation_work_item_rows or []
         self.action_rule_rows = action_rule_rows or []
         self.inbox_rows = inbox_rows or []
         self.calls: list[tuple[str, Mapping[str, Any]]] = []
@@ -51,6 +55,10 @@ class FakeConnection:
         self.calls.append((sql, values))
         if "WITH due AS" in sql and "blocked_review_due" in sql:
             return FakeResult(self.due_lifecycle_rows)
+        if "WITH expired AS" in sql and "SET status = 'archived'" in sql:
+            return FakeResult(self.expired_conversation_rows)
+        if "FROM public.staff_work_item AS item" in sql and "item.source_type = 'message'" in sql:
+            return FakeResult(self.expired_conversation_work_item_rows)
         if "FROM public.staff_action_rule" in sql:
             return FakeResult(self.action_rule_rows)
         if "UPDATE public.inbox_event AS event" in sql:
@@ -371,6 +379,171 @@ def test_due_lifecycle_actions_remind_follow_ups_and_escalate_blockers_without_a
     assert realtime[1]["team_component"] == "Registrar"
     assert '"kind":"follow_up_due"' in str(realtime[0]["payload"])
     assert '"kind":"blocked_review_due"' in str(realtime[1]["payload"])
+
+
+def test_inactive_support_conversations_leave_active_inboxes_without_deleting_history() -> None:
+    connection = FakeConnection(
+        expired_conversation_rows=[
+            {"id": "inquiry-1", "tenant_id": "tenant-1", "student_id": "student-1"}
+        ],
+        expired_conversation_work_item_rows=[
+            {
+                "id": "work-1",
+                "assignee_id": "staff-1",
+                "component": "Enrollment Support",
+            }
+        ],
+    )
+    values = _uuids()
+    scheduler = AgenticWorkflowScheduler(
+        cast(AsyncEngine, FakeEngine(connection)),
+        uuid_factory=lambda: next(values),
+    )
+
+    archived = asyncio.run(scheduler._archive_inactive_support_conversations())
+
+    assert archived == 1
+    archive_sql = connection.calls[0][0]
+    assert "inquiry.expires_at <= NOW()" in archive_sql
+    assert "SET status = 'archived'" in archive_sql
+    assert "FOR UPDATE SKIP LOCKED" in archive_sql
+    log_sql, log = next(
+        (sql, params)
+        for sql, params in connection.calls
+        if "INSERT INTO public.staff_work_log" in sql
+    )
+    assert "'status_changed'" in log_sql
+    assert "history is retained" in str(log["message"])
+    realtime = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.staff_realtime_event" in sql
+    )
+    assert realtime["staff_member_id"] == "staff-1"
+    assert '"inquiryId":"inquiry-1"' in str(realtime["payload"])
+    student_realtime = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.student_realtime_event" in sql
+    )
+    assert student_realtime["student_id"] == "student-1"
+    assert '"href":"/help?conversation=inquiry-1"' in str(student_realtime["payload"])
+
+
+def test_inactive_support_conversation_without_work_item_still_invalidates_student() -> None:
+    connection = FakeConnection(
+        expired_conversation_rows=[
+            {"id": "inquiry-1", "tenant_id": "tenant-1", "student_id": "student-1"}
+        ]
+    )
+    scheduler = AgenticWorkflowScheduler(
+        cast(AsyncEngine, FakeEngine(connection)),
+        uuid_factory=lambda: next(_uuids()),
+    )
+
+    archived = asyncio.run(scheduler._archive_inactive_support_conversations())
+
+    assert archived == 1
+    assert not any("INSERT INTO public.staff_work_log" in sql for sql, _params in connection.calls)
+    assert not any(
+        "INSERT INTO public.staff_realtime_event" in sql for sql, _params in connection.calls
+    )
+    student_realtime = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.student_realtime_event" in sql
+    )
+    assert student_realtime["inquiry_id"] == "inquiry-1"
+
+
+def test_engagement_snapshot_creates_deterministic_urgent_intervention() -> None:
+    connection = FakeConnection()
+    values = _uuids()
+    scheduler = AgenticWorkflowScheduler(
+        cast(AsyncEngine, FakeEngine(connection)),
+        uuid_factory=lambda: next(values),
+    )
+    now = datetime.now(UTC)
+
+    asyncio.run(
+        scheduler._persist_engagement_snapshot(
+            {
+                "tenant_id": "tenant-1",
+                "student_id": "student-1",
+                "last_active_at": now,
+                "last_meaningful_action_at": now - timedelta(hours=1),
+                "current_step_code": "official-transcript",
+                "completion_percentage": 75,
+                "blocking_requirement_count": 0,
+                "next_deadline": now + timedelta(days=1),
+                "recent_upload_failures": 2,
+                "help_requested": False,
+                "open_support_case_count": 1,
+            }
+        )
+    )
+
+    snapshot = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.student_engagement_snapshot" in sql
+    )
+    assert snapshot["days_to_next_deadline"] <= 1
+    assert '"deadline_within_7_days"' in str(snapshot["signals"])
+    assert '"priority":"urgent"' in str(snapshot["signals"])
+
+    candidate = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.intervention_candidate" in sql
+    )
+    assert candidate["priority"] == "urgent"
+    assert '"deadline_within_7_days"' in str(candidate["reason_codes"])
+    assert '"recentUploadFailures":2' in str(candidate["evidence"])
+
+    run = next(params for sql, params in connection.calls if "INSERT INTO public.agent_run" in sql)
+    assert '"intervention":true' in str(run["result"])
+
+
+def test_engagement_snapshot_without_risk_records_no_intervention_candidate() -> None:
+    connection = FakeConnection()
+    values = _uuids()
+    scheduler = AgenticWorkflowScheduler(
+        cast(AsyncEngine, FakeEngine(connection)),
+        uuid_factory=lambda: next(values),
+    )
+    now = datetime.now(UTC)
+
+    asyncio.run(
+        scheduler._persist_engagement_snapshot(
+            {
+                "tenant_id": "tenant-1",
+                "student_id": "student-1",
+                "last_active_at": now,
+                "last_meaningful_action_at": now,
+                "current_step_code": "welcome",
+                "completion_percentage": 100,
+                "blocking_requirement_count": 0,
+                "next_deadline": None,
+                "recent_upload_failures": 0,
+                "help_requested": False,
+                "open_support_case_count": 0,
+            }
+        )
+    )
+
+    snapshot = next(
+        params
+        for sql, params in connection.calls
+        if "INSERT INTO public.student_engagement_snapshot" in sql
+    )
+    assert snapshot["days_to_next_deadline"] is None
+    assert snapshot["signals"] == '{"reasons":[],"priority":"low"}'
+    assert not any(
+        "INSERT INTO public.intervention_candidate" in sql for sql, _params in connection.calls
+    )
+    run = next(params for sql, params in connection.calls if "INSERT INTO public.agent_run" in sql)
+    assert run["result"] == '{"intervention":false,"reasons":[]}'
 
 
 def test_due_action_rules_are_evaluated_and_checkpointed_after_a_bounded_scan() -> None:

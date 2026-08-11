@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: audentra-platform-config
+  labels:
+    app.kubernetes.io/name: audentra-platform
+    app.kubernetes.io/part-of: audentra
+data:
+  AUDENTRA_ENV: production
+  AUTH_MODE: production
+  BROWSER_AUTH_REQUIRED: "true"
+  API_HOST: 0.0.0.0
+  API_PORT: "4000"
+  API_INTERNAL_URL: http://audentra-platform-api:4000
+  WEB_ORIGIN: https://app.example.edu
+  DB_POOL_SIZE: "8"
+  DB_MAX_OVERFLOW: "4"
+  DB_POOL_TIMEOUT_SECONDS: "5"
+  DB_POOL_RECYCLE_SECONDS: "1800"
+  DB_STATEMENT_TIMEOUT_MS: "15000"
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_FORCE_PATH_STYLE: "false"
+  MAX_DOCUMENT_BYTES: "10485760"
+  ONBOARDING_DOCUMENT_TEMPLATE_DIR: /app/assets/onboarding
+  PORTAL_MEDIA_DIR: /app/assets/portal-media
+  WORKER_CONSUMER_NAME: audentra-kubernetes
+  WORKER_BATCH_SIZE: "10"
+  WORKER_POLL_INTERVAL_SECONDS: "1"
+  WORKER_LEASE_SECONDS: "60"
+  WORKER_MAX_ATTEMPTS: "10"
+  WORKER_BASE_RETRY_MS: "1000"
+  WORKER_MAX_RETRY_MS: "300000"
+  WORKER_COMMAND_TIMEOUT_SECONDS: "30"
+  OPENROUTER_MODEL: openai/gpt-5.6-luna-pro
+  OPENROUTER_DOCUMENT_MODEL: openai/gpt-5.6-luna-pro
+  OPENROUTER_APP_URL: https://app.example.edu
+  OPENROUTER_APP_NAME: Audentra
+  OPENROUTER_DOCUMENT_TIMEOUT_MS: "120000"
+  OPENROUTER_DOCUMENT_MAX_TOKENS: "6000"
+  OPENROUTER_DOCUMENT_REASONING_TOKENS: "256"

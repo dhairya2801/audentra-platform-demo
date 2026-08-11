@@ -96,6 +96,42 @@ sibling `Audentra-portals` repository.
   after that gate so submissions, dependency unlocks, rewards, notifications,
   and audit behavior do not fork into a second runtime.
 
+## Live support conversations and Kubernetes
+
+- A `student_inquiry` is the canonical support-conversation record. Participant
+  messages, student inbox delivery, inquiry state, work logs, audit records,
+  realtime invalidations, and the five-day expiry refresh must commit in one
+  transaction. Do not create a second chat datastore or treat an SSE payload as
+  a message record.
+- Archive inactive conversations from active student/staff inboxes after five
+  days; preserve the inquiry, participant messages, and history for audit and
+  recovery. A retention-policy purge would be a separate, explicitly approved
+  deletion workflow.
+- Follow both the legacy `staff_work_item.source_id` and the canonical
+  `staff_work_item_link` when synchronizing an inquiry with an Action Center
+  task. Reopened support actions are linked rather than guaranteed to use the
+  legacy source shape.
+- An outbound portal communication linked to an inquiry must write both the
+  durable `student_message` delivery and the matching inquiry reply before it
+  emits a realtime hint or queues AI enrichment.
+- The interactive architecture explorer is an internal engineering artifact at
+  `docs/architecture/audentra-system-flow-explorer.html`. Keep it self-contained
+  and aligned with the authoritative 57-flow inventory in
+  `docs/generated/vv-flow-catalog-and-diagram-screenshots.docx`. Every stage
+  must identify its execution location (student/staff frontend, API,
+  PostgreSQL, object storage, worker, external provider, or delivery runtime),
+  boundary input/output, durable state, failure behavior, and source
+  neighborhood. The primary visualization is an interactive swimlane graph:
+  each node sits in its execution runtime and each edge represents a sync or
+  async boundary hand-off. Preserve current/preview/target labels; never
+  describe a target design as shipped. Do not expose the atlas as a student or
+  staff portal route.
+- Kubernetes manifests must remain portable Kustomize base resources. Keep
+  PostgreSQL, object storage, OpenRouter credentials, and tenant secrets out
+  of Git; use the documented `audentra-platform-runtime` secret contract or a
+  cloud-managed external-secret implementation. Run the standalone migration
+  Job before rolling API/worker workloads.
+
 ## Validation
 
 Run the relevant subset while developing and the full gates before handoff:

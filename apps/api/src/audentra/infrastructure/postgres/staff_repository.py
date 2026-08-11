@@ -2461,13 +2461,65 @@ class PostgresStaffRepository:
                 communication_id = self._uuid_factory()
                 delivery_status = "received" if direction == "inbound" else "recorded"
                 if channel == "portal" and direction == "outbound":
-                    await self._insert_student_message(
+                    linked_inquiry = await self._lock_linked_inquiry_for_work_item(
+                        connection,
+                        auth=auth,
+                        work_item_id=work_item_id,
+                    )
+                    if linked_inquiry is not None:
+                        self._require_active_inquiry_conversation(linked_inquiry)
+                    delivered_message = await self._insert_student_message(
                         connection,
                         auth=auth,
                         student_id=str(interaction["student_id"]),
                         subject=subject or f"Follow-up: {work_item['title']}",
                         body=body,
+                        href=(
+                            f"/help?conversation={linked_inquiry['id']}"
+                            if linked_inquiry is not None
+                            else None
+                        ),
                     )
+                    if linked_inquiry is not None:
+                        await connection.execute(
+                            text(
+                                f"""
+                                UPDATE {self._table("student_inquiry")}
+                                SET status = 'waiting_on_student',
+                                    last_message_at = NOW(),
+                                    expires_at = NOW() + interval '5 days',
+                                    version = version + 1,
+                                    updated_at = NOW()
+                                WHERE tenant_id = :tenant_id AND id = :inquiry_id
+                                """
+                            ),
+                            {
+                                "tenant_id": _uuid(auth.tenant_id),
+                                "inquiry_id": linked_inquiry["id"],
+                            },
+                        )
+                        await connection.execute(
+                            text(
+                                f"""
+                                INSERT INTO {self._table("student_inquiry_reply")} (
+                                  id, tenant_id, inquiry_id, student_id, staff_member_id,
+                                  response_note, notify_student, student_message_id, created_at
+                                ) VALUES (
+                                  :id, :tenant_id, :inquiry_id, :student_id, :staff_member_id,
+                                  :response_note, true, :student_message_id, NOW()
+                                )
+                                """
+                            ),
+                            {
+                                "id": self._uuid_factory(),
+                                "tenant_id": _uuid(auth.tenant_id),
+                                "inquiry_id": linked_inquiry["id"],
+                                "student_id": linked_inquiry["student_id"],
+                                "staff_member_id": _uuid(auth.actor_id),
+                                "response_note": body,
+                                "student_message_id": _uuid(str(delivered_message["id"])),
+                            },
+                        )
                     delivery_status = "delivered"
                 await connection.execute(
                     text(
@@ -3635,6 +3687,7 @@ class PostgresStaffRepository:
                     "VERSION_CONFLICT",
                     "This inquiry changed in another staff session",
                 )
+            self._require_active_inquiry_conversation(inquiry)
 
             next_assignee = inquiry["assignee_id"] if assignee_value is _MISSING else assignee_value
             assignee: dict[str, object] | None = None
@@ -3657,11 +3710,17 @@ class PostgresStaffRepository:
                     SET status = :status,
                         assignee_id = :assignee_id,
                         resolved_at = CASE
-                          WHEN :status = 'resolved' THEN NOW() ELSE NULL
+                          WHEN :is_resolved THEN NOW() ELSE NULL
                         END,
                         resolution_reason = CASE
-                          WHEN :status = 'resolved' THEN 'resolved_by_staff'
+                          WHEN :is_resolved THEN 'resolved_by_staff'
                           ELSE NULL
+                        END,
+                        last_message_at = CASE
+                          WHEN :has_response THEN NOW() ELSE last_message_at
+                        END,
+                        expires_at = CASE
+                          WHEN :has_response THEN NOW() + interval '5 days' ELSE expires_at
                         END,
                         version = version + 1,
                         updated_at = NOW()
@@ -3673,6 +3732,8 @@ class PostgresStaffRepository:
                 ),
                 {
                     "status": next_status,
+                    "is_resolved": next_status == "resolved",
+                    "has_response": response_note is not None,
                     "assignee_id": (
                         _uuid(str(next_assignee)) if next_assignee is not None else None
                     ),
@@ -3725,6 +3786,7 @@ class PostgresStaffRepository:
                     student_id=str(inquiry["student_id"]),
                     subject=f"Reply: {inquiry['subject']}",
                     body=response_note,
+                    href=f"/help?conversation={inquiry_id}",
                 )
             reply_id: UUID | None = None
             if response_note is not None:
@@ -3759,11 +3821,22 @@ class PostgresStaffRepository:
             work_result = await connection.execute(
                 text(
                     f"""
-                    SELECT id, status, version
-                    FROM {self._table("staff_work_item")}
-                    WHERE tenant_id = :tenant_id
-                      AND source_type = 'message'
-                      AND source_id = :inquiry_id
+                    SELECT item.id, item.status, item.version
+                    FROM {self._table("staff_work_item")} AS item
+                    WHERE item.tenant_id = :tenant_id
+                      AND (
+                        (item.source_type = 'message' AND item.source_id = :inquiry_id)
+                        OR EXISTS (
+                          SELECT 1
+                          FROM {self._table("staff_work_item_link")} AS link
+                          WHERE link.tenant_id = item.tenant_id
+                            AND link.work_item_id = item.id
+                            AND link.entity_type = 'inquiry'
+                            AND link.entity_id = :inquiry_id
+                        )
+                      )
+                    ORDER BY item.created_at DESC, item.id DESC
+                    LIMIT 1
                     FOR UPDATE
                     """
                 ),
@@ -5023,6 +5096,79 @@ class PostgresStaffRepository:
             )
         return dict(recording)
 
+    def _require_active_inquiry_conversation(self, inquiry: Mapping[str, object]) -> None:
+        if inquiry.get("archived_at") is not None or str(inquiry["status"]) == "archived":
+            raise ConflictError(
+                "SUPPORT_CONVERSATION_EXPIRED",
+                (
+                    "This conversation was archived after five days without messages. "
+                    "Create a new student action to continue."
+                ),
+            )
+        expires_at = inquiry.get("expires_at")
+        if isinstance(expires_at, datetime) and expires_at <= self._clock():
+            raise ConflictError(
+                "SUPPORT_CONVERSATION_EXPIRED",
+                (
+                    "This conversation was archived after five days without messages. "
+                    "Create a new student action to continue."
+                ),
+            )
+
+    async def _lock_linked_inquiry_for_work_item(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        work_item_id: str,
+    ) -> dict[str, object] | None:
+        """Find a support thread related to an Action Center work item.
+
+        Help-request work items have a legacy ``message`` source and a durable
+        work-item link.  Supporting both makes a portal message recorded in the
+        Action Center land in the same student/staff conversation rather than
+        creating a disconnected inbox record.
+        """
+
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT inquiry.id, inquiry.student_id, inquiry.subject,
+                       inquiry.status, inquiry.last_message_at, inquiry.expires_at,
+                       inquiry.archived_at
+                FROM {self._table("student_inquiry")} AS inquiry
+                WHERE inquiry.tenant_id = :tenant_id
+                  AND (
+                    EXISTS (
+                      SELECT 1
+                      FROM {self._table("staff_work_item")} AS item
+                      WHERE item.tenant_id = inquiry.tenant_id
+                        AND item.id = :work_item_id
+                        AND item.source_type = 'message'
+                        AND item.source_id = inquiry.id
+                    )
+                    OR EXISTS (
+                      SELECT 1
+                      FROM {self._table("staff_work_item_link")} AS link
+                      WHERE link.tenant_id = inquiry.tenant_id
+                        AND link.work_item_id = :work_item_id
+                        AND link.entity_type = 'inquiry'
+                        AND link.entity_id = inquiry.id
+                    )
+                  )
+                ORDER BY inquiry.created_at, inquiry.id
+                LIMIT 1
+                FOR UPDATE OF inquiry
+                """
+            ),
+            {
+                "tenant_id": _uuid(auth.tenant_id),
+                "work_item_id": _uuid(work_item_id),
+            },
+        )
+        row = result.mappings().first()
+        return dict(row) if row is not None else None
+
     async def _lock_inquiry(
         self,
         connection: AsyncConnection,
@@ -5036,7 +5182,8 @@ class PostgresStaffRepository:
                        inquiry.subject, inquiry.message, inquiry.status,
                        inquiry.priority, inquiry.assignee_id,
                        inquiry.requirement_id, inquiry.status_before_help,
-                       inquiry.version,
+                       inquiry.version, inquiry.last_message_at, inquiry.expires_at,
+                       inquiry.archived_at,
                        inquiry.created_at, inquiry.updated_at, student.class_year,
                        person.first_name, person.last_name,
                        COALESCE(profile.preferred_name, person.preferred_name,

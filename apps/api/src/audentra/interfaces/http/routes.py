@@ -1361,6 +1361,22 @@ async def update_staff_inquiry(
     )
 
 
+@router.get("/v1/staff/inquiries/{id}/thread", status_code=200, response_model=None)
+async def get_staff_inquiry_thread(
+    inquiry_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_inquiry_thread",
+        auth=auth,
+        path_params={"inquiryId": _uuid(inquiry_id)},
+    )
+
+
 @router.post("/v1/staff/campus-life/clubs", status_code=201, response_model=None)
 async def create_staff_club(
     body: CreateStaffClubRequest,

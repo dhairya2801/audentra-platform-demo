@@ -4,6 +4,39 @@ This changelog summarizes user-visible releases. Detailed notes are separated
 by persona so students, staff, and implementation teams can review only the
 changes that affect them.
 
+## 2026-08-10 - Live support conversations and portable Kubernetes
+
+### Students and staff
+
+- A help request is now one live, durable conversation shared by the student
+  Help portal and the staff Messages workspace. Staff replies create a real
+  student inbox message and thread entry in the same transaction.
+- Each participant message extends the active conversation for five days.
+  Quiet conversations then leave active inboxes without deleting the protected
+  message history. An expiry emits a durable realtime invalidation to both
+  portals so an already-open page re-reads the confirmed state.
+- Reopened support actions continue to use the same inquiry link, so task
+  lifecycle changes, Action Center portal outreach, and conversation history
+  cannot drift apart.
+
+### Operations
+
+- Added a self-contained interactive engineering atlas under `docs/architecture`
+  for employee onboarding. It now covers the complete 57-use-case inventory
+  (24 student, 12 staff, 14 platform/AI, and 7 leadership flows), while keeping
+  six cross-system guided tours for quick orientation. Each selectable stage
+  identifies its frontend, API, database, object-storage, worker, provider, or
+  delivery location; boundary input/output; durable state; failure guarantee;
+  implementation neighborhood; and current/preview/target status. The atlas is
+  intentionally absent from the student and staff products. The selected flow
+  is now drawn as an interactive swimlane graph with clickable nodes and
+  directional solid (synchronous) or dashed (asynchronous) hand-off edges.
+- Added standard-Kubernetes, Kustomize-based API/worker, service, ingress,
+  HPA, PDB, network-policy, and migration-Job templates plus thin GKE/EKS
+  image overlays. No cloud credential or live secret is committed.
+
+See [live conversation and Kubernetes details](docs/changelog/2026-08-10-live-conversations-and-kubernetes.md).
+
 ## 2026-08-10 — Action Center lifecycle hardening
 
 ### Reliable intelligence

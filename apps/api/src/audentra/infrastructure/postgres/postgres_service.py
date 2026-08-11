@@ -826,6 +826,11 @@ class PostgresPlatformService:
                 payload,
                 staff=cast(list[Mapping[str, Any]], center.get("staff", [])),
             )
+        if operation == "staff.get_inquiry_thread":
+            return await portal.get_staff_inquiry_thread(
+                auth,
+                self._path(call, "inquiryId", "id"),
+            )
         if operation == "staff.create_club":
             return await staff.create_club(auth, payload, call.request_id)
         if operation == "staff.update_club":

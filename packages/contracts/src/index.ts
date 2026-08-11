@@ -1423,6 +1423,16 @@ export interface StaffInquiry {
   version: number;
 }
 
+export interface StaffInquiryThread {
+  id: string;
+  status: StaffInquiry["status"] | "archived";
+  version: number;
+  lastMessageAt: string;
+  expiresAt: string;
+  archivedAt: string | null;
+  messages: StudentInquiryMessage[];
+}
+
 export interface StaffJourneyBlueprintItem {
   id: string;
   kind: "onboarding" | "enrollment";
@@ -2205,6 +2215,8 @@ export interface StudentHelpRequest {
   workItemId?: string | null;
   createdAt: string;
   updatedAt: string;
+  lastMessageAt?: string;
+  expiresAt?: string;
   version: number;
   messages: StudentInquiryMessage[];
 }
@@ -2214,7 +2226,8 @@ export interface StudentInquiryMessage {
   direction: "student" | "staff";
   body: string;
   authorName: string;
-  deliveryStatus: "received" | "delivered";
+  deliveryStatus: "received" | "delivered" | "recorded";
+  privateToStaff?: boolean;
   createdAt: string;
 }
 
