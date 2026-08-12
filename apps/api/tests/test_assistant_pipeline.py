@@ -18,9 +18,9 @@ from audentra.core.ports import ServiceCall
 from audentra.infrastructure.memory.store import DEMO_IDS
 from audentra.integrations.assistant.classify import Classification
 from audentra.integrations.assistant.guard import build_causal_guards, guard_grounded_answer
-from audentra.integrations.assistant.pipeline import AssistantPipeline
+from audentra.integrations.assistant.pipeline import AssistantPipeline, AssistantPipelineResult
 from audentra.integrations.assistant.planner import validate_model_tool_plan
-from audentra.integrations.assistant.tools import AssistantToolHost
+from audentra.integrations.assistant.tools import AssistantToolHost, PrimitiveRead
 
 
 class RecordingHost(AssistantToolHost):
@@ -29,7 +29,7 @@ class RecordingHost(AssistantToolHost):
     def __init__(self, primitives: dict[str, dict[str, Any]]) -> None:
         self.read_primitives: list[str] = []
 
-        def reader(name: str, value: dict[str, Any]):
+        def reader(name: str, value: dict[str, Any]) -> PrimitiveRead:
             async def read() -> dict[str, Any]:
                 self.read_primitives.append(name)
                 return value
@@ -174,7 +174,11 @@ def _full_primitives() -> dict[str, dict[str, Any]]:
     }
 
 
-def _run(pipeline: AssistantPipeline, message: str, history: list | None = None):
+def _run(
+    pipeline: AssistantPipeline,
+    message: str,
+    history: list[dict[str, str]] | None = None,
+) -> AssistantPipelineResult:
     return asyncio.run(pipeline.execute(message=message, history=history or []))
 
 
@@ -310,7 +314,7 @@ def test_aid_verification_and_fafsa_questions_answer_from_requirements() -> None
 
 
 def test_claim_guard_rejects_invented_amount_and_falls_back() -> None:
-    async def lying_composer(**_kwargs: Any):
+    async def lying_composer(**_kwargs: Any) -> dict[str, Any]:
         return {"answer": "Your aid package totals $99,999 and everything is complete."}
 
     host = RecordingHost(_full_primitives())
@@ -324,7 +328,7 @@ def test_claim_guard_rejects_invented_amount_and_falls_back() -> None:
 
 
 def test_claim_guard_accepts_grounded_prose() -> None:
-    async def honest_composer(**kwargs: Any):
+    async def honest_composer(**kwargs: Any) -> dict[str, Any]:
         return {
             "answer": "You've accepted the Aster Grant worth $10,000.",
             "provider": "openrouter",
@@ -422,7 +426,11 @@ AUTH = AuthContext(
 )
 
 
-def _ask(service: InMemoryPlatformService, payload: dict[str, Any], request_id: str = "req-1"):
+def _ask(
+    service: InMemoryPlatformService,
+    payload: dict[str, Any],
+    request_id: str = "req-1",
+) -> dict[str, Any]:
     return cast(
         dict[str, Any],
         asyncio.run(

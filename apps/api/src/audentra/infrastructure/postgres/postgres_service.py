@@ -43,7 +43,7 @@ from audentra.integrations.ai.edward_safety import (
 )
 from audentra.integrations.ai.extraction import match_document_to_student_context
 from audentra.integrations.assistant.classify import REQUEST_TYPES
-from audentra.integrations.assistant.pipeline import AssistantPipeline
+from audentra.integrations.assistant.pipeline import AssistantPipeline, ModelComposer, ModelPlanner
 from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
 from audentra.integrations.assistant.tools import AssistantToolHost
 
@@ -1591,7 +1591,7 @@ class PostgresPlatformService:
             appointment_type=appointment_type,
         )
 
-    def _assistant_planner(self, auth: AuthContext, request_id: str):
+    def _assistant_planner(self, auth: AuthContext, request_id: str) -> ModelPlanner | None:
         planner = getattr(self.ai, "plan_assistant_tool_reads", None)
         if planner is None:
             return None
@@ -1602,20 +1602,23 @@ class PostgresPlatformService:
             page_label: str | None = None,
             page_path: str | None = None,
         ) -> Mapping[str, Any] | None:
-            return await planner(
-                message=message,
-                page_label=page_label,
-                page_path=page_path,
-                allowed_request_types=REQUEST_TYPES,
-                available_tools=TOOL_DESCRIPTIONS,
-                tenant_id=auth.tenant_id,
-                student_id=auth.student_id,
-                request_id=request_id,
+            return cast(
+                Mapping[str, Any] | None,
+                await planner(
+                    message=message,
+                    page_label=page_label,
+                    page_path=page_path,
+                    allowed_request_types=REQUEST_TYPES,
+                    available_tools=TOOL_DESCRIPTIONS,
+                    tenant_id=auth.tenant_id,
+                    student_id=auth.student_id,
+                    request_id=request_id,
+                ),
             )
 
         return plan
 
-    def _assistant_composer(self, auth: AuthContext, request_id: str):
+    def _assistant_composer(self, auth: AuthContext, request_id: str) -> ModelComposer | None:
         writer = getattr(self.ai, "write_grounded_answer", None)
         if writer is None:
             return None
@@ -1627,14 +1630,17 @@ class PostgresPlatformService:
             draft_answer: str,
             feedback: str | None = None,
         ) -> Mapping[str, Any] | None:
-            return await writer(
-                question=question,
-                evidence_texts=evidence_texts,
-                draft_answer=draft_answer,
-                feedback=feedback,
-                tenant_id=auth.tenant_id,
-                student_id=auth.student_id,
-                request_id=request_id,
+            return cast(
+                Mapping[str, Any] | None,
+                await writer(
+                    question=question,
+                    evidence_texts=evidence_texts,
+                    draft_answer=draft_answer,
+                    feedback=feedback,
+                    tenant_id=auth.tenant_id,
+                    student_id=auth.student_id,
+                    request_id=request_id,
+                ),
             )
 
         return compose

@@ -608,8 +608,6 @@ class StudentAIGateway:
             ),
         )
         parsed = parse_extraction_json(message_content(payload))
-        if not isinstance(parsed, dict):
-            return None
         return parsed
 
     def _assistant_structured_output(
