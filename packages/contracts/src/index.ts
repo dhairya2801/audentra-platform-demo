@@ -816,7 +816,21 @@ export interface StudentDocument {
     | "needs_review"
     | "under_review"
     | "accepted"
-    | "rejected";
+    | "rejected"
+    | "needs_resubmission"
+    | "waived";
+  /** Present once a reviewer has ruled on the document. */
+  review?: {
+    decision:
+      | "accepted"
+      | "rejected"
+      | "needs_resubmission"
+      | "waived"
+      | "under_review";
+    decidedAt: string;
+    note: string | null;
+    synthetic?: boolean;
+  };
   sha256?: string;
   contentUrl?: string;
   extraction?: StudentDocumentExtraction;
@@ -2083,6 +2097,8 @@ export interface FinancialDocumentRequirement {
   dueAt: string | null;
   documentId?: string | null;
   href: string;
+  version: number;
+  updatedAt: string;
 }
 
 export interface FinancialPaymentScheduleItem {
@@ -2105,6 +2121,7 @@ export interface FinancialAward {
   acceptedAmountCents: number;
   status: "offered" | "accepted" | "declined" | "pending";
   requiresAction: boolean;
+  updatedAt: string;
 }
 
 export interface StudentFinancials {
