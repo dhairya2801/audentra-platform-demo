@@ -10,6 +10,7 @@ import pytest
 from audentra.bootstrap import worker as worker_bootstrap
 from audentra.bootstrap.settings import RuntimeSettings
 from audentra.bootstrap.worker import WorkerRuntimeResources
+from audentra.infrastructure.storage import GcsStorageSettings
 
 
 class StubEngine:
@@ -113,7 +114,14 @@ async def test_worker_builder_wires_independent_worker_runtime(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     settings = RuntimeSettings.from_environment(
-        {"AUDENTRA_ENV": "test", "WORKER_ID": "worker-test"}, package_root=tmp_path
+        {
+            "AUDENTRA_ENV": "test",
+            "WORKER_ID": "worker-test",
+            "OBJECT_STORAGE_PROVIDER": "gcs",
+            "OBJECT_STORAGE_BUCKET": "worker-test-documents",
+            "GOOGLE_CLOUD_PROJECT": "worker-test-project",
+        },
+        package_root=tmp_path,
     )
     engine = StubEngine()
     http = StubHttpClient()
@@ -157,7 +165,15 @@ async def test_worker_builder_wires_independent_worker_runtime(
     review_projector = object()
     scheduled_runner = object()
     dispatcher = object()
+    object_storage = object()
     monkeypatch.setattr(worker_bootstrap, "create_database_engine", create_engine)
+    monkeypatch.setattr(
+        worker_bootstrap,
+        "create_object_storage",
+        lambda storage_settings: (
+            captured.update({"storage_settings": storage_settings}) or object_storage
+        ),
+    )
     monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: http)
     monkeypatch.setattr(worker_bootstrap, "OutboxRepository", create_repository)
     monkeypatch.setattr(
@@ -198,7 +214,8 @@ async def test_worker_builder_wires_independent_worker_runtime(
     assert cast(Any, resources.http_client) is http
     assert cast(Any, resources.repository) is repository
     assert cast(Any, resources.worker) is worker
-    assert resources.object_storage is not None
+    assert cast(Any, resources.object_storage) is object_storage
+    assert isinstance(captured["storage_settings"], GcsStorageSettings)
     assert cast(Any, captured["database_options"]).application_name == "audentra-worker"
     assert cast(Any, captured["outbox_config"]).worker_id == "worker-test"
     assert captured["worker_repository"] is repository
