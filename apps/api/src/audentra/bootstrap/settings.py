@@ -14,7 +14,7 @@ from audentra.infrastructure.db.engine import DatabaseEngineOptions
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings, StorageSettings
 from audentra.infrastructure.voice.config import VoiceSettings
 from audentra.integrations.ai.gateway import GatewaySettings
-from audentra.interfaces.http.config import HttpSettings, parse_tenant_slug_ids
+from audentra.interfaces.http.config import HttpSettings
 
 Environment = Literal["development", "preview", "test", "production"]
 AuthMode = Literal["demo"]
@@ -60,7 +60,6 @@ class RuntimeSettings:
     demo_student_id: str
     demo_actor_id: str
     demo_staff_actor_id: str
-    tenant_slug_map_json: str | None
     object_storage: StorageSettings
     ai: GatewaySettings
     worker: WorkerSettings
@@ -181,7 +180,6 @@ class RuntimeSettings:
             demo_staff_actor_id=values.get(
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
-            tenant_slug_map_json=values.get("TENANT_SLUG_MAP"),
             object_storage=_object_storage_settings(
                 values,
                 provider=object_storage_provider,
@@ -202,7 +200,7 @@ class RuntimeSettings:
                 ).strip()
                 or "openai/whisper-large-v3",
                 app_url=values.get("OPENROUTER_APP_URL", "http://localhost:3000").strip(),
-                app_name=values.get("OPENROUTER_APP_NAME", "Aster Student Portal").strip(),
+                app_name=values.get("OPENROUTER_APP_NAME", "Audentra Student Portal").strip(),
                 document_timeout_seconds=openrouter_timeout_ms / 1_000,
                 document_max_tokens=_bounded_int(
                     values, ("OPENROUTER_DOCUMENT_MAX_TOKENS",), 6_000, 1_200, 16_000
@@ -280,7 +278,6 @@ class RuntimeSettings:
             demo_student_id=self.demo_student_id,
             demo_actor_id=self.demo_actor_id,
             demo_staff_actor_id=self.demo_staff_actor_id,
-            tenant_slug_ids=parse_tenant_slug_ids(self.tenant_slug_map_json),
         )
 
     def assert_api_deployable(self) -> None:

@@ -73,9 +73,9 @@ def guided_response(message: str, context: Mapping[str, Any]) -> dict[str, Any]:
         response = _campus_life_guidance(context)
     elif re.search(r"document|upload|transcript|fafsa|ferpa", text):
         response = (
-            "Open Documents to upload a PDF, JPEG, or PNG. Aster stores the original file "
-            "and prepares structured fields for your review. Nothing extracted is treated "
-            "as verified until you approve it."
+            "Open Documents to upload a PDF, JPEG, or PNG. Your institution stores the "
+            "original file and prepares structured fields for your review. Nothing extracted "
+            "is treated as verified until you approve it."
         )
     elif re.search(r"deadline|due|when", text):
         response = (

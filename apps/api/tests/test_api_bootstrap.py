@@ -106,7 +106,6 @@ def test_preview_composes_the_browser_auth_adapter() -> None:
         StubEngine(),  # type: ignore[arg-type]
         environment="preview",
         staff_invitation_code="x" * 32,
-        demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
     )
 
     assert auth is not None
@@ -118,7 +117,6 @@ def test_browser_auth_adapter_still_rejects_production() -> None:
             StubEngine(),  # type: ignore[arg-type]
             environment="production",
             staff_invitation_code="x" * 32,
-            demo_student_ids={"aster": "00000000-0000-7000-8000-000000000101"},
         )
 
 

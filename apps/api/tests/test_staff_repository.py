@@ -254,7 +254,7 @@ def _club_row(*, version: int = 1) -> dict[str, object]:
     }
 
 
-def test_managed_content_read_seeds_defaults_and_maps_durable_rows() -> None:
+def test_managed_content_read_is_read_only_and_maps_durable_rows() -> None:
     def handler(sql: str, _values: dict[str, object]) -> FakeResult:
         if "FROM public.staff_knowledge_card" in sql:
             return FakeResult([_knowledge_row()])
@@ -276,11 +276,8 @@ def test_managed_content_read_seeds_defaults_and_maps_durable_rows() -> None:
         "Confirm the reason",
         "Send resubmission guidance",
     ]
-    assert engine.begin_count == 1
-    seed_sql = [sql for sql, _values in connection.executions if "ON CONFLICT (id)" in sql]
-    assert len(seed_sql) == 2
-    assert all("CAST(:tenant_text AS text), chr(58)" in sql for sql in seed_sql)
-    assert all(":core-play" not in sql and ":knowledge:" not in sql for sql in seed_sql)
+    assert engine.begin_count == 0
+    assert all("INSERT" not in sql and "UPDATE" not in sql for sql, _ in connection.executions)
 
 
 def test_staff_managed_content_crud_is_versioned_audited_and_emits_outbox() -> None:

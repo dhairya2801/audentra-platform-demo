@@ -17,6 +17,7 @@ from audentra.infrastructure.postgres.platform_repository import PostgresPlatfor
 from audentra.infrastructure.postgres.portal_repository import PostgresPortalRepository
 from audentra.infrastructure.seeding.relational import (
     ASTER_TENANT_ID,
+    provision_demo_managed_configurations,
     reset_relational_data,
 )
 
@@ -32,7 +33,12 @@ def test_zero_step_acceptance_routes_to_dashboard_and_later_publication_reopens(
     async def scenario() -> None:
         engine = create_database_engine(database_url)
         try:
-            await reset_relational_data(engine, environment="test")
+            await reset_relational_data(
+                engine,
+                environment="test",
+                preserve_managed_configurations=False,
+            )
+            await provision_demo_managed_configurations(engine, tenant_slugs=("aster",))
             async with engine.begin() as connection:
                 candidate = (
                     (
@@ -116,8 +122,7 @@ def test_zero_step_acceptance_routes_to_dashboard_and_later_publication_reopens(
                 / "aster"
                 / "journeys.yaml"
             )
-            fallback_yaml = asset.read_text(encoding="utf-8")
-            document = yaml.safe_load(fallback_yaml)
+            document = yaml.safe_load(asset.read_text(encoding="utf-8"))
             assert isinstance(document, dict)
             onboarding = next(
                 flow for flow in document["flows"] if flow.get("kind") == "onboarding"
@@ -141,19 +146,14 @@ def test_zero_step_acceptance_routes_to_dashboard_and_later_publication_reopens(
                 actor_type="staff",
                 tenant_slug="aster",
             )
-            await PostgresManagedConfigurationRepository(engine).publish(
+            managed_repository = PostgresManagedConfigurationRepository(engine)
+            current = await managed_repository.get(staff_auth, "journeys")
+            await managed_repository.publish(
                 staff_auth,
                 "journeys",
                 {
-                    "yaml": yaml.safe_dump(document, sort_keys=False),
-                    "expectedVersion": 1,
-                },
-                {
-                    "yaml": fallback_yaml,
-                    "version": 1,
-                    "recordCount": 0,
-                    "updatedAt": "2026-08-03T00:00:00Z",
-                    "updatedBy": "Packaged tenant configuration",
+                    "document": document,
+                    "expectedVersion": current["version"],
                 },
                 "zero-step-postgres-publication",
             )
@@ -204,7 +204,12 @@ def test_zero_step_acceptance_routes_to_dashboard_and_later_publication_reopens(
             assert state["pending_updates"] >= 1
         finally:
             try:
-                await reset_relational_data(engine, environment="test")
+                await reset_relational_data(
+                    engine,
+                    environment="test",
+                    preserve_managed_configurations=False,
+                )
+                await provision_demo_managed_configurations(engine)
             finally:
                 await engine.dispose()
 

@@ -26,6 +26,11 @@ class RecordingService:
 
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            return {
+                "tenantId": "00000000-0000-7000-8000-000000000001",
+                "slug": "aster",
+            }
         return {"operation": call.operation}
 
 

@@ -12,6 +12,7 @@ import calendar
 import hashlib
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -111,22 +112,23 @@ _HOUSING_PLAN_FIELD_BINDINGS = {
     "accessibleHousingInformation": "accessibleHousingInformation",
     "livingLearningCommunities": "livingLearningCommunities",
 }
+_HOUSING_RESIDENCE_CODE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,79}$")
 _ONBOARDING_SCREEN_DEFAULTS: dict[str, tuple[str, str, str]] = {
     "offer": (
         "Offer",
-        "Your place at Aster",
+        "Review your offer",
         "Begin by confirming the admission decision that brought you here.",
     ),
     "about_you": (
         "About you",
         "Identity & home address",
-        "Add the personal details and permanent address Aster needs to prepare your "
+        "Add the personal details and permanent address your institution needs to prepare your "
         "student record.",
     ),
     "housing": (
         "Housing",
         "One personalized story",
-        "Tell us where you imagine starting your Aster experience.",
+        "Tell us where you imagine starting your college experience.",
     ),
     "campus_life": (
         "Campus life",
@@ -136,7 +138,7 @@ _ONBOARDING_SCREEN_DEFAULTS: dict[str, tuple[str, str, str]] = {
     "emergency_contacts": (
         "Emergency contacts",
         "People in your corner",
-        "Enter one or more people Aster may contact in an emergency.",
+        "Enter one or more people your institution may contact in an emergency.",
     ),
     "family_permissions": (
         "Family permissions",
@@ -265,8 +267,14 @@ def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
             default_label, default_title, default_description = _ONBOARDING_SCREEN_DEFAULTS[step]
             configuration: JsonDict = {
                 "label": str(input_config.get("screen_label") or default_label),
-                "title": str(input_config.get("screen_title") or default_title),
-                "description": str(input_config.get("screen_description") or default_description),
+                "title": str(
+                    input_config.get("screen_title") or task.get("title") or default_title
+                ),
+                "description": str(
+                    input_config.get("screen_description")
+                    or task.get("description")
+                    or default_description
+                ),
             }
             raw_fields = input_config.get("fields")
             if isinstance(raw_fields, list):
@@ -309,12 +317,17 @@ def _map_housing(row: Mapping[str, Any], residences: list[JsonDict] | None = Non
     if preference not in {"on_campus", "off_campus", "commuting", "undecided", "family"}:
         preference = None
     residence = payload.get("housingResidenceOption")
-    if residence not in {"aster_residence_hall", "aster_apartments", "student_village"}:
+    if not isinstance(residence, str) or not _HOUSING_RESIDENCE_CODE.fullmatch(residence):
         residence = None
+    residence_preferences = [
+        item
+        for item in _list(payload.get("housingResidencePreferences"))
+        if isinstance(item, str) and _HOUSING_RESIDENCE_CODE.fullmatch(item)
+    ]
     mapped: JsonDict = {
         "preference": preference,
         "residenceOption": residence,
-        "residencePreferences": _list(payload.get("housingResidencePreferences")),
+        "residencePreferences": residence_preferences,
         "roomType": payload.get("housingRoomType"),
         "bathroomPreference": payload.get("bathroomPreference"),
         "roommateMatching": payload.get("roommateMatching"),
@@ -997,6 +1010,12 @@ class PostgresPortalRepository:
                 raise ConflictError(
                     "VERSION_CONFLICT", "Your housing plan changed in another session"
                 )
+            await self._validate_housing_residence_codes(
+                connection,
+                auth,
+                update.get("residenceOption"),
+                update.get("residencePreferences"),
+            )
             residence = (
                 update.get("residenceOption") if update["preference"] == "on_campus" else None
             )
@@ -4267,7 +4286,7 @@ class PostgresPortalRepository:
                    club.version, club.updated_at,
                    COALESCE(media.public_path, '/media/clubs/code-collective.jpg') AS image_url,
                    COALESCE(media.alt_text, 'Students collaborating in a campus club') AS image_alt,
-                   COALESCE(media.attribution, 'Default Aster club image') AS image_attribution,
+                   COALESCE(media.attribution, 'Default tenant club image') AS image_attribution,
                    COALESCE(media.source_url, '') AS image_source_url
             FROM student_club club
             LEFT JOIN media_asset media ON media.id=club.media_asset_id
@@ -4507,6 +4526,20 @@ class PostgresPortalRepository:
         )
 
     async def get_student_help(self, auth: AuthContext) -> JsonDict:
+        tenant_configuration = await self._one(
+            """
+            SELECT contacts
+            FROM tenant_portal_configuration
+            WHERE tenant_id=:tenant_id
+            """,
+            {"tenant_id": auth.tenant_id},
+        )
+        if tenant_configuration is None:
+            raise NotFoundError(
+                "TENANT_CONFIGURATION_NOT_FOUND",
+                "The tenant portal configuration has not been provisioned",
+            )
+        support = _mapping(_mapping(tenant_configuration.get("contacts")).get("support"))
         rows = await self._all(
             """
             SELECT id, category, question, answer FROM help_article
@@ -4554,9 +4587,9 @@ class PostgresPortalRepository:
             ],
             "requests": requests,
             "support": {
-                "email": "enrollment-support@vv.example",
-                "phone": "+1 555 010 2027",
-                "hours": "Monday-Friday, 09:00-17:00",
+                "email": str(support.get("email") or ""),
+                "phone": str(support.get("phone") or ""),
+                "hours": str(support.get("hours") or ""),
             },
         }
 
@@ -5870,6 +5903,13 @@ class PostgresPortalRepository:
             about_you_required_fields=required_fields,
             about_you_required_custom_fields=required_custom_fields,
         )
+        if step == "housing":
+            await self._validate_housing_residence_codes(
+                connection,
+                auth,
+                data.get("housingResidenceOption"),
+                data.get("housingResidencePreferences"),
+            )
         if step == "offer":
             result = await connection.execute(
                 text(
@@ -5902,6 +5942,41 @@ class PostgresPortalRepository:
                     "DEPOSIT_REQUIRED",
                     "Complete the enrollment deposit before saving this step",
                 )
+
+    async def _validate_housing_residence_codes(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        residence_option: object,
+        residence_preferences: object,
+    ) -> None:
+        codes = {
+            value
+            for value in (
+                residence_option,
+                *(_list(residence_preferences) if residence_preferences is not None else []),
+            )
+            if isinstance(value, str)
+        }
+        if not codes:
+            return
+        result = await connection.execute(
+            text(
+                """
+                SELECT code
+                FROM housing_residence_option
+                WHERE tenant_id=:tenant_id AND active=true
+                  AND code=ANY(CAST(:codes AS text[]))
+                """
+            ),
+            {"tenant_id": auth.tenant_id, "codes": sorted(codes)},
+        )
+        active_codes = {str(row["code"]) for row in result.mappings().all()}
+        if active_codes != codes:
+            raise BadRequestError(
+                "HOUSING_RESIDENCE_OPTION_INVALID",
+                "Choose only currently available residences for this university",
+            )
 
     def _request_hash(self, auth: AuthContext, payload: object) -> str:
         encoded = _json(

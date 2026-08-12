@@ -3,6 +3,7 @@
 import unicodedata
 from datetime import datetime
 from typing import Annotated, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import (
@@ -13,6 +14,7 @@ from pydantic import (
     StrictStr,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 from .base import StrictRequest
@@ -46,14 +48,17 @@ OnboardingStep = Literal[
     "deposit",
 ]
 HousingPreference = Literal["on_campus", "off_campus", "commuting", "undecided", "family"]
-HousingResidence = Literal["aster_residence_hall", "aster_apartments", "student_village"]
+HousingResidenceCode = Annotated[
+    StrictStr,
+    StringConstraints(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9_-]{0,79}$"),
+]
 DocumentCategory = Literal[
     "identity", "residency", "transcript", "financial_aid", "health", "consent", "other"
 ]
 
 
 def _ensure_email(value: str) -> str:
-    if len(value) > 254 or value.count("@") != 1:
+    if len(value) > 254 or value.count("@") != 1 or any(character.isspace() for character in value):
         raise ValueError("must be a valid email address")
     local, domain = value.rsplit("@", 1)
     if not local or not domain or "." not in domain:
@@ -71,8 +76,157 @@ def _ensure_iso8601(value: str) -> str:
     return value
 
 
+def _ensure_public_url(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if "\\" in value or any(character.isspace() or ord(character) < 32 for character in value):
+        raise ValueError("must be a relative path or an HTTPS URL")
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        raise ValueError("must be a relative path or an HTTPS URL")
+    return value
+
+
 class EmptyBody(StrictRequest):
     pass
+
+
+class TenantNamesRequest(StrictRequest):
+    display_name: Annotated[StrictStr, StringConstraints(min_length=1, max_length=180)]
+    legal_name: Annotated[StrictStr, StringConstraints(min_length=1, max_length=180)]
+    short_name: Annotated[StrictStr, StringConstraints(min_length=1, max_length=80)]
+
+
+class TenantBrandingRequest(StrictRequest):
+    logo_url: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)]
+    logo_alt: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)]
+    logo_dark_url: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None
+    logo_dark_alt: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)] | None
+    favicon_url: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None
+    hero_image_url: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None
+    hero_image_alt: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)] | None
+    primary_color: Annotated[
+        StrictStr, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
+    ]
+    secondary_color: Annotated[
+        StrictStr, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
+    ]
+    accent_color: Annotated[
+        StrictStr, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$")
+    ]
+
+    _safe_urls = field_validator("logo_url", "logo_dark_url", "favicon_url", "hero_image_url")(
+        _ensure_public_url
+    )
+
+    @model_validator(mode="after")
+    def _accessible_optional_assets(self) -> "TenantBrandingRequest":
+        if (self.logo_dark_url is None) != (self.logo_dark_alt is None):
+            raise ValueError("logoDarkUrl and logoDarkAlt must be provided together")
+        if (self.hero_image_url is None) != (self.hero_image_alt is None):
+            raise ValueError("heroImageUrl and heroImageAlt must be provided together")
+        return self
+
+
+class TenantLocalizationRequest(StrictRequest):
+    locale: Annotated[
+        StrictStr,
+        StringConstraints(
+            min_length=2, max_length=35, pattern=r"^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$"
+        ),
+    ]
+    time_zone: Annotated[
+        StrictStr,
+        StringConstraints(
+            min_length=1,
+            max_length=100,
+            pattern=r"^(UTC|[A-Za-z_]+(?:/[A-Za-z0-9._+-]+)+)$",
+        ),
+    ]
+    currency_code: Annotated[StrictStr, StringConstraints(pattern=r"^[A-Z]{3}$")]
+    country_code: Annotated[StrictStr, StringConstraints(pattern=r"^[A-Z]{2}$")]
+
+
+class TenantAcademicContextRequest(StrictRequest):
+    academic_year_label: Annotated[StrictStr, StringConstraints(min_length=1, max_length=80)]
+    current_term_label: Annotated[StrictStr, StringConstraints(min_length=1, max_length=120)]
+    default_campus_name: (
+        Annotated[StrictStr, StringConstraints(min_length=1, max_length=180)] | None
+    )
+
+
+class TenantContactRequest(StrictRequest):
+    label: Annotated[StrictStr, StringConstraints(min_length=1, max_length=120)]
+    email: Annotated[StrictStr, StringConstraints(min_length=3, max_length=254)] | None
+    phone: (
+        Annotated[
+            StrictStr,
+            StringConstraints(min_length=7, max_length=40, pattern=r"^\+?[0-9 ()-]{7,40}$"),
+        ]
+        | None
+    )
+    hours: Annotated[StrictStr, StringConstraints(min_length=1, max_length=240)] | None
+    url: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)] | None
+
+    @field_validator("email")
+    @classmethod
+    def _valid_contact_email(cls, value: str | None) -> str | None:
+        return None if value is None else _ensure_email(value)
+
+    _safe_url = field_validator("url")(_ensure_public_url)
+
+    @model_validator(mode="after")
+    def _has_contact_method(self) -> "TenantContactRequest":
+        if self.email is None and self.phone is None and self.url is None:
+            raise ValueError("email, phone, or url is required")
+        return self
+
+
+class TenantContactsRequest(StrictRequest):
+    support: TenantContactRequest
+    admissions: TenantContactRequest | None
+    financial_aid: TenantContactRequest | None
+
+
+class UpdateTenantPortalConfigurationRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+    names: TenantNamesRequest = cast(TenantNamesRequest, None)
+    branding: TenantBrandingRequest = cast(TenantBrandingRequest, None)
+    localization: TenantLocalizationRequest = cast(TenantLocalizationRequest, None)
+    academic_context: TenantAcademicContextRequest = cast(TenantAcademicContextRequest, None)
+    contacts: TenantContactsRequest = cast(TenantContactsRequest, None)
+    capabilities: dict[
+        Annotated[StrictStr, StringConstraints(pattern=r"^[a-z][A-Za-z0-9]{0,63}$")],
+        StrictBool,
+    ] = cast(dict[str, StrictBool], None)
+    public_links: dict[
+        Annotated[StrictStr, StringConstraints(pattern=r"^[a-z][A-Za-z0-9]{0,63}$")],
+        Annotated[StrictStr, StringConstraints(min_length=1, max_length=1000)],
+    ] = cast(dict[str, str], None)
+
+    @field_validator("capabilities")
+    @classmethod
+    def _bounded_capabilities(cls, value: dict[str, bool]) -> dict[str, bool]:
+        if len(value) > 64:
+            raise ValueError("must contain at most 64 entries")
+        return value
+
+    @field_validator("public_links")
+    @classmethod
+    def _safe_public_links(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 64:
+            raise ValueError("must contain at most 64 entries")
+        for url in value.values():
+            _ensure_public_url(url)
+        return value
+
+    @model_validator(mode="after")
+    def _has_change(self) -> "UpdateTenantPortalConfigurationRequest":
+        if self.model_fields_set == {"expected_version"}:
+            raise ValueError("at least one configuration group is required")
+        return self
 
 
 def _normalize_email(value: object) -> str:
@@ -221,8 +375,10 @@ class StudentOnboardingDataRequest(StrictRequest):
     )
     accommodation_interest: Literal["not_now", "housing", "academic", "both"] | None = None
     housing_preference: HousingPreference | None = None
-    housing_residence_option: HousingResidence | None = None
-    housing_residence_preferences: list[HousingResidence] | None = Field(default=None, max_length=3)
+    housing_residence_option: HousingResidenceCode | None = None
+    housing_residence_preferences: list[HousingResidenceCode] | None = Field(
+        default=None, max_length=3
+    )
     insurance_interest: Literal["not_now", "learn_more", "tuition", "housing", "both"] | None = None
     housing_room_type: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
     bathroom_preference: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
@@ -328,8 +484,8 @@ class CompleteStudentOnboardingRequest(StrictRequest):
 class UpdateStudentHousingPlanRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
     preference: HousingPreference
-    residence_option: HousingResidence | None = None
-    residence_preferences: list[HousingResidence] | None = Field(default=None, max_length=3)
+    residence_option: HousingResidenceCode | None = None
+    residence_preferences: list[HousingResidenceCode] | None = Field(default=None, max_length=3)
     room_type: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
     bathroom_preference: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
     roommate_matching: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
@@ -694,8 +850,15 @@ StaffManagedContentStatus = Literal["draft", "published", "archived"]
 
 class UpdateStaffManagedConfigurationRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
-    yaml: Annotated[StrictStr, StringConstraints(min_length=1, max_length=250_000)]
+    document: dict[str, object] | None = None
+    yaml: Annotated[StrictStr, StringConstraints(min_length=1, max_length=250_000)] | None = None
     change_summary: Annotated[StrictStr, StringConstraints(max_length=500)] | None = None
+
+    @model_validator(mode="after")
+    def _requires_document_or_yaml(self) -> "UpdateStaffManagedConfigurationRequest":
+        if self.document is None and self.yaml is None:
+            raise ValueError("document or yaml is required")
+        return self
 
 
 class DraftStaffManagedConfigurationRequest(StrictRequest):

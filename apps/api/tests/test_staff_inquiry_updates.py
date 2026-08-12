@@ -14,7 +14,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.core.auth import AuthContext
-from audentra.core.errors import ConflictError
+from audentra.core.errors import ConflictError, NotFoundError
 from audentra.core.ports import ServiceCall
 from audentra.infrastructure.postgres.postgres_service import (
     PostgresPlatformService,
@@ -301,16 +301,17 @@ def test_postgres_inquiry_lookup_hides_foreign_tenant_and_performs_no_write() ->
     engine = FakeEngine(handler)
     repository = PostgresStaffRepository(cast(AsyncEngine, engine), cast(Any, FakeStudentReader()))
 
-    result = asyncio.run(
-        repository.update_inquiry(
-            staff_auth(tenant_id=FOREIGN_TENANT_ID),
-            INQUIRY_ID,
-            update_payload(),
-            "request-foreign",
+    with pytest.raises(NotFoundError) as raised:
+        asyncio.run(
+            repository.update_inquiry(
+                staff_auth(tenant_id=FOREIGN_TENANT_ID),
+                INQUIRY_ID,
+                update_payload(),
+                "request-foreign",
+            )
         )
-    )
 
-    assert result is None
+    assert raised.value.code == "STAFF_INQUIRY_NOT_FOUND"
     assert len(engine.connection.calls) == 1
 
 
@@ -335,20 +336,10 @@ class ServiceStaffRepository:
         }
 
 
-class ServicePreviewRepository:
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, ...]] = []
-
-    async def update_inquiry(self, *args: object, **kwargs: object) -> dict[str, object]:
-        self.calls.append((*args, kwargs))
-        return {"id": INQUIRY_ID, "source": "preview"}
-
-
 def service_with_inquiry_repositories(
     canonical: object,
-) -> tuple[PostgresPlatformService, ServiceStaffRepository, ServicePreviewRepository]:
+) -> tuple[PostgresPlatformService, ServiceStaffRepository]:
     staff = ServiceStaffRepository(canonical)
-    preview = ServicePreviewRepository()
     bundle = PostgresRepositoryBundle(
         platform=cast(Any, object()),
         portal=cast(Any, object()),
@@ -360,9 +351,8 @@ def service_with_inquiry_repositories(
         cast(Any, object()),
         NoopSignedDocuments(),
         "worker-token",
-        cast(Any, preview),
     )
-    return service, staff, preview
+    return service, staff
 
 
 def inquiry_call() -> ServiceCall:
@@ -377,7 +367,7 @@ def inquiry_call() -> ServiceCall:
 
 def test_service_prefers_canonical_inquiry_without_touching_preview() -> None:
     canonical = {"id": INQUIRY_ID, "source": "postgres"}
-    service, staff, preview = service_with_inquiry_repositories(canonical)
+    service, staff = service_with_inquiry_repositories(canonical)
 
     result = asyncio.run(service.dispatch(inquiry_call()))
 
@@ -387,16 +377,15 @@ def test_service_prefers_canonical_inquiry_without_touching_preview() -> None:
         update_payload(responseNote=None, notifyStudent=False),
         "request-service",
     )
-    assert preview.calls == []
 
 
-def test_service_falls_back_to_preview_only_when_canonical_id_is_absent() -> None:
-    service, _staff, preview = service_with_inquiry_repositories(None)
+def test_service_does_not_invent_a_preview_inquiry_when_canonical_id_is_absent() -> None:
+    service, staff = service_with_inquiry_repositories(None)
 
     result = asyncio.run(service.dispatch(inquiry_call()))
 
-    assert result == {"id": INQUIRY_ID, "source": "preview"}
-    assert len(preview.calls) == 1
+    assert result is None
+    assert len(staff.calls) == 1
 
 
 class RecordingHttpService:
@@ -406,6 +395,8 @@ class RecordingHttpService:
 
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            return {"tenantId": TENANT_ID, "slug": "aster"}
         if self.error is not None:
             raise self.error
         return {"id": INQUIRY_ID, "status": "open", "version": 2}
@@ -475,7 +466,7 @@ async def test_http_patch_rejects_invalid_reply_before_dispatch(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
-    assert service.calls == []
+    assert not any(call.operation == "staff.update_inquiry" for call in service.calls)
 
 
 def test_reply_migration_preserves_private_history_and_notification_link() -> None:

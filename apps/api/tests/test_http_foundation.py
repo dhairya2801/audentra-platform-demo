@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 from httpx import ASGITransport, AsyncClient, Response
 
-from audentra.core.errors import ApiError
+from audentra.core.errors import ApiError, NotFoundError
 from audentra.core.ports import BinaryPayload, ServiceCall
 from audentra.interfaces.http.app import create_app
 from audentra.interfaces.http.config import HttpSettings
@@ -24,6 +24,28 @@ class FakePlatformService:
 
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            tenant_ids = {
+                "aster": "00000000-0000-7000-8000-000000000001",
+                "harvard": HARVARD_TENANT_ID,
+            }
+            requested_slug = call.path_params.get("slug")
+            requested_id = call.path_params.get("tenantId")
+            tenant_id = (
+                tenant_ids.get(str(requested_slug))
+                if requested_slug is not None
+                else str(requested_id)
+                if requested_id in tenant_ids.values()
+                else None
+            )
+            if tenant_id is None:
+                raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
+            slug = (
+                str(requested_slug)
+                if requested_slug is not None
+                else next(key for key, value in tenant_ids.items() if value == tenant_id)
+            )
+            return {"tenantId": tenant_id, "slug": slug}
         if call.operation == "student.get_document_content":
             return BinaryPayload(
                 data=b"%PDF-test",
@@ -157,6 +179,50 @@ async def test_tenant_slug_resolves_to_uuid_tenant(
     assert service.calls[-1].auth.tenant_id == HARVARD_TENANT_ID
 
 
+async def test_public_tenant_bootstrap_returns_known_and_404s_unknown(
+    client: AsyncClient,
+) -> None:
+    known = await client.get("/v1/tenants/aster/bootstrap")
+    unknown = await client.get("/v1/tenants/unknown/bootstrap")
+
+    assert known.status_code == 200
+    assert known.json()["tenantId"].endswith("0001")
+    assert unknown.status_code == 404
+    assert error_body(unknown)["code"] == "TENANT_NOT_FOUND"
+
+
+async def test_staff_tenant_patch_is_authorized_validated_and_dispatched(
+    client: AsyncClient, service: FakePlatformService
+) -> None:
+    body = {
+        "expectedVersion": 1,
+        "names": {
+            "displayName": "Aster University",
+            "legalName": "Aster University",
+            "shortName": "Aster U",
+        },
+    }
+    denied = await client.patch("/v1/staff/tenant-configuration", json=body)
+    accepted = await client.patch(
+        "/v1/staff/tenant-configuration",
+        headers={"X-Demo-Actor-Type": "staff"},
+        json=body,
+    )
+    partial = await client.patch(
+        "/v1/staff/tenant-configuration",
+        headers={"X-Demo-Actor-Type": "staff"},
+        json={"expectedVersion": 1, "names": {"shortName": "Aster U"}},
+    )
+
+    assert denied.status_code == 401
+    assert accepted.status_code == 200
+    update_call = next(
+        call for call in service.calls if call.operation == "staff.update_tenant_configuration"
+    )
+    assert update_call.payload == body
+    assert partial.status_code == 400
+
+
 @pytest.mark.parametrize(
     ("headers", "message_fragment"),
     [
@@ -179,21 +245,16 @@ async def test_unknown_or_conflicting_tenant_slug_is_rejected(
     assert message_fragment in error_body(response)["message"]
 
 
-def test_tenant_slug_map_is_environment_configurable_and_immutable(
+def test_tenant_slug_map_environment_variable_is_no_longer_runtime_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenant_id = "00000000-0000-7000-8000-000000000099"
     monkeypatch.setenv("TENANT_SLUG_MAP", f'{{"custom":"{tenant_id}"}}')
     monkeypatch.setenv("DOCUMENT_WORKER_TOKEN", "   ")
     settings = HttpSettings.from_environment()
-    manual_settings = HttpSettings(tenant_slug_ids={"custom": tenant_id})
 
-    assert settings.tenant_slug_ids == {"custom": tenant_id}
+    assert not hasattr(settings, "tenant_slug_ids")
     assert settings.document_worker_token == HttpSettings().document_worker_token
-    with pytest.raises(TypeError):
-        settings.tenant_slug_ids["other"] = tenant_id
-    with pytest.raises(TypeError):
-        manual_settings.tenant_slug_ids["other"] = tenant_id  # type: ignore[index]
 
 
 async def test_worker_token_uses_existing_header_alias(
@@ -231,7 +292,7 @@ async def test_worker_token_bypasses_browser_cookie_requirement_only_for_interna
 
     assert internal.status_code == 200
     assert browser_route.status_code == 401
-    assert service.calls[-1].operation == "internal.process_document_extraction"
+    assert any(call.operation == "internal.process_document_extraction" for call in service.calls)
 
 
 async def test_cors_preflight_allows_tenant_slug_and_worker_token(

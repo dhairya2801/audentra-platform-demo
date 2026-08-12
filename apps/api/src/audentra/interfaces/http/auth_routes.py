@@ -41,6 +41,15 @@ def _development_only(request: Request) -> None:
         )
 
 
+def _guided_reset_only(request: Request) -> None:
+    if get_settings(request).environment not in {"development", "test"}:
+        raise ApiError(
+            404,
+            "GUIDED_RESET_DISABLED",
+            "The guided onboarding reset is not available",
+        )
+
+
 def _set_session_cookie(
     response: Response,
     request: Request,
@@ -147,7 +156,7 @@ async def sign_in_demo_student(
     auth: AuthServiceDependency,
 ) -> object:
     _development_only(request)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
@@ -166,9 +175,9 @@ async def start_guided_onboarding(
     response: Response,
     auth: AuthServiceDependency,
 ) -> object:
-    _development_only(request)
+    _guided_reset_only(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     await auth.reset_demo_fixture(completed_onboarding=body.completed_onboarding)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
@@ -197,7 +206,7 @@ async def sign_up_student(
     auth: AuthServiceDependency,
 ) -> object:
     _development_only(request)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.sign_up_student(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
@@ -226,7 +235,7 @@ async def sign_in_student(
     auth: AuthServiceDependency,
 ) -> object:
     _development_only(request)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.sign_in_student(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
@@ -267,7 +276,7 @@ async def sign_in_staff(
     auth: AuthServiceDependency,
 ) -> object:
     _development_only(request)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.sign_in_staff(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
@@ -294,7 +303,7 @@ async def sign_up_staff(
     auth: AuthServiceDependency,
 ) -> object:
     _development_only(request)
-    tenant_id, tenant_slug = resolve_request_tenant(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.sign_up_staff(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,

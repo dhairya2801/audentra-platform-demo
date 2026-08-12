@@ -4,7 +4,6 @@ import inspect
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 import yaml  # type: ignore[import-untyped]
@@ -21,7 +20,6 @@ from audentra.infrastructure.postgres.managed_configuration_repository import (
     _journey_string_list,
     _journey_task_material_signature,
     _validate_core_onboarding_invariants,
-    _validated_fallback,
     academic_courses,
     campus_events,
     materialized_journey_tasks,
@@ -32,6 +30,7 @@ from audentra.infrastructure.seeding.relational import (
     ASTER_STUDENT_ID,
     ASTER_TENANT_ID,
     HARVARD_TENANT_ID,
+    provision_demo_managed_configurations,
     reset_relational_data,
 )
 
@@ -882,13 +881,6 @@ flows:
     )
     _validate_core_onboarding_invariants(parsed, previous)
 
-    fallback = _validated_fallback(
-        "journeys",
-        _fallback(yaml.safe_dump(previous, sort_keys=False)),
-        validate_materialized_inputs=False,
-    )
-    assert fallback["version"] == 1
-
     with pytest.raises(ApiError, match="at least two selection options"):
         parse_managed_configuration(
             "journeys",
@@ -1146,7 +1138,6 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
         pytest.skip("Set AUDENTRA_TEST_DATABASE_URL to run the managed publication integration")
 
     engine = create_database_engine(database_url)
-    assets = Path(__file__).parents[1] / "assets" / "config" / "tenants" / "aster"
     staff_auth = AuthContext(
         tenant_id=ASTER_TENANT_ID,
         student_id=ASTER_STUDENT_ID,
@@ -1167,11 +1158,19 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
         clock=lambda: publication_time,
     )
     try:
-        await reset_relational_data(engine, environment="test", completed_onboarding=True)
+        await reset_relational_data(
+            engine,
+            environment="test",
+            completed_onboarding=True,
+            preserve_managed_configurations=False,
+        )
+        await provision_demo_managed_configurations(engine, tenant_slugs=("aster",))
 
-        journey_yaml = (assets / "journeys.yaml").read_text(encoding="utf-8")
-        journey_document = yaml.safe_load(journey_yaml)
-        assert isinstance(journey_document, dict)
+        journey_current = await repository.get(staff_auth, "journeys")
+        journey_version = int(journey_current["version"])
+        journey_document = yaml.safe_load(
+            yaml.safe_dump(journey_current["document"], sort_keys=False)
+        )
         onboarding = next(
             flow for flow in journey_document["flows"] if flow.get("kind") == "onboarding"
         )
@@ -1203,13 +1202,17 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             staff_auth,
             "journeys",
             {
-                "yaml": yaml.safe_dump(journey_document, sort_keys=False),
-                "expectedVersion": 1,
+                "document": journey_document,
+                "expectedVersion": journey_version,
             },
-            _fallback(journey_yaml),
             "managed-journey-integration",
         )
-        assert published["version"] == 2
+        assert published["version"] == journey_version + 1
+        assert published["document"] == journey_document
+        restarted_repository = PostgresManagedConfigurationRepository(engine)
+        after_restart = await restarted_repository.get(staff_auth, "journeys")
+        assert after_restart["version"] == published["version"]
+        assert after_restart["document"] == published["document"]
 
         updates = await repository.list_student_updates(student_auth)
         meal_update = next(update for update in updates if update["title"] == "Choose a meal plan")
@@ -1222,24 +1225,25 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
         )
         assert decision["status"] == "deferred"
 
-        campus_yaml = (assets / "campus-life.yaml").read_text(encoding="utf-8")
-        campus_document = yaml.safe_load(campus_yaml)
-        assert isinstance(campus_document, dict)
+        campus_current = await repository.get(staff_auth, "campus_life")
+        campus_document = yaml.safe_load(
+            yaml.safe_dump(campus_current["document"], sort_keys=False)
+        )
         campus_document["events"][0]["title"] = "Live Sync Welcome Event"
         await repository.publish(
             staff_auth,
             "campus_life",
             {
-                "yaml": yaml.safe_dump(campus_document, sort_keys=False),
-                "expectedVersion": 1,
+                "document": campus_document,
+                "expectedVersion": campus_current["version"],
             },
-            _fallback(campus_yaml),
             "managed-campus-integration",
         )
 
-        academics_yaml = (assets / "academics.yaml").read_text(encoding="utf-8")
-        academics_document = yaml.safe_load(academics_yaml)
-        assert isinstance(academics_document, dict)
+        academics_current = await repository.get(staff_auth, "academics")
+        academics_document = yaml.safe_load(
+            yaml.safe_dump(academics_current["document"], sort_keys=False)
+        )
         academics_document["courses"][0]["title"] = "Live Sync Programming"
         async with engine.connect() as connection:
             program_requirements_before = await connection.scalar(
@@ -1255,10 +1259,9 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             staff_auth,
             "academics",
             {
-                "yaml": yaml.safe_dump(academics_document, sort_keys=False),
-                "expectedVersion": 1,
+                "document": academics_document,
+                "expectedVersion": academics_current["version"],
             },
-            _fallback(academics_yaml),
             "managed-academics-integration",
         )
 
@@ -1332,9 +1335,8 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             "journeys",
             {
                 "yaml": yaml.safe_dump(dependency_document, sort_keys=False),
-                "expectedVersion": 2,
+                "expectedVersion": journey_version + 1,
             },
-            _fallback(journey_yaml),
             "managed-journey-dependency-added-integration",
         )
         async with engine.connect() as connection:
@@ -1362,9 +1364,8 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             "journeys",
             {
                 "yaml": yaml.safe_dump(dependency_document, sort_keys=False),
-                "expectedVersion": 3,
+                "expectedVersion": journey_version + 2,
             },
-            _fallback(journey_yaml),
             "managed-journey-dependency-removed-integration",
         )
         async with engine.connect() as connection:
@@ -1419,9 +1420,8 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             "journeys",
             {
                 "yaml": yaml.safe_dump(next_document, sort_keys=False),
-                "expectedVersion": 4,
+                "expectedVersion": journey_version + 3,
             },
-            _fallback(journey_yaml),
             "managed-journey-retirement-integration",
         )
 
@@ -1496,9 +1496,8 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
             "journeys",
             {
                 "yaml": yaml.safe_dump(core_only_document, sort_keys=False),
-                "expectedVersion": 5,
+                "expectedVersion": journey_version + 4,
             },
-            _fallback(journey_yaml),
             "managed-journey-zero-active-integration",
         )
         async with engine.connect() as connection:
@@ -1527,16 +1526,11 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
         assert zero_active["link_count"] == 0
     finally:
         try:
-            await reset_relational_data(engine, environment="test")
+            await reset_relational_data(
+                engine,
+                environment="test",
+                preserve_managed_configurations=False,
+            )
+            await provision_demo_managed_configurations(engine)
         finally:
             await engine.dispose()
-
-
-def _fallback(yaml_text: str) -> dict[str, Any]:
-    return {
-        "yaml": yaml_text,
-        "version": 1,
-        "recordCount": 0,
-        "updatedAt": "2026-08-02T00:00:00Z",
-        "updatedBy": "Packaged tenant configuration",
-    }

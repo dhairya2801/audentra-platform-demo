@@ -37,7 +37,9 @@ from audentra.infrastructure.seeding.relational import (
     _convert_value,
     _ensure_student_journey_for_accepted_offer,
     _foreign_key_order,
+    _managed_configuration_root,
     _upsert_statement,
+    provision_demo_managed_configurations,
     seed_relational_data,
 )
 from audentra.infrastructure.seeding.safety import SeedEnvironmentError, seed_environment
@@ -204,6 +206,24 @@ def test_relational_seed_rejects_production_before_using_engine() -> None:
                 environment="production",
             )
         )
+
+
+def test_managed_configuration_root_resolves_runtime_working_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = Path(__file__).resolve().parents[1] / "assets" / "config" / "tenants"
+    monkeypatch.chdir(tenant_root.parents[2])
+    monkeypatch.delenv("MANAGED_CONFIGURATION_ROOT", raising=False)
+
+    assert _managed_configuration_root() == tenant_root
+
+
+def test_normal_seed_replays_existing_managed_documents_without_new_publication() -> None:
+    source = inspect.getsource(seed_relational_data)
+    provision_source = inspect.getsource(provision_demo_managed_configurations)
+
+    assert "provision_demo_managed_configurations(engine)" in source
+    assert "rematerialize_existing=True" in provision_source
 
 
 def test_upsert_statement_is_insert_only_and_uses_typed_json_cast() -> None:

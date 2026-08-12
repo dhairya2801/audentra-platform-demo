@@ -28,8 +28,8 @@ from audentra.infrastructure.postgres.postgres_service import (
     PostgresSignedDocumentGenerator,
 )
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
+from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
 from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
-from audentra.infrastructure.preview.staff_workspace import PreviewStaffWorkspaceRepository
 from audentra.infrastructure.storage import ObjectStorage, create_object_storage
 from audentra.infrastructure.voice import (
     UnavailableVoiceSessionService,
@@ -86,6 +86,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
         portal = PostgresPortalRepository(engine)
         staff = PostgresStaffRepository(engine, portal)
         managed = PostgresManagedConfigurationRepository(engine)
+        tenant = PostgresTenantRepository(engine)
         prompt_runtime = VersionedPromptRuntime(PostgresPromptRuntimeRepository(engine))
         ai = StudentAIGateway(
             settings.ai,
@@ -98,18 +99,17 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 portal=portal,
                 staff=staff,
                 managed=managed,
+                tenant=tenant,
             ),
             storage,
             ai,
             PostgresSignedDocumentGenerator(settings.onboarding_template_dir),
             settings.document_worker_token,
-            PreviewStaffWorkspaceRepository(enabled=settings.environment != "production"),
         )
         auth_service = PostgresDevelopmentAuth(
             engine,
             environment=settings.environment,
             staff_invitation_code=settings.staff_invitation_code,
-            demo_student_ids=settings.http_settings().demo_student_slug_ids,
         )
         voice_service: VoiceSessionServiceProtocol = (
             VoiceSessionService(

@@ -151,6 +151,32 @@ def test_signed_generator_uses_injected_harvard_template_and_drawn_signature(
     assert len(signed) > len(source.read_bytes())
 
 
+def test_signed_generator_fails_closed_for_tenant_without_reviewed_templates() -> None:
+    repository = FakeSignedRepository()
+    storage = FakeStorage()
+    unknown_tenant_auth = AuthContext(
+        tenant_id="00000000-0000-7000-8000-000000000099",
+        student_id=AUTH.student_id,
+        actor_id=AUTH.actor_id,
+        actor_type="student",
+    )
+
+    with pytest.raises(ApiError) as raised:
+        asyncio.run(
+            PostgresSignedDocumentGenerator().ensure(
+                auth=unknown_tenant_auth,
+                onboarding=_onboarding("typed"),
+                repository=cast(PostgresPortalRepository, repository),
+                storage=storage,
+                request_id="request-unknown-tenant",
+            )
+        )
+
+    assert raised.value.code == "ONBOARDING_TEMPLATE_NOT_PROVISIONED"
+    assert repository.saved == []
+    assert storage.objects == {}
+
+
 class FakeConnection:
     async def execute(self, _statement: object) -> None:
         return None

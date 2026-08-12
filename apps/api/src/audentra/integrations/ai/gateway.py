@@ -62,7 +62,7 @@ class GatewaySettings:
     openrouter_document_model: str = "qwen/qwen3.7-flash"
     openrouter_transcription_model: str = "openai/whisper-large-v3"
     app_url: str = "http://localhost:3000"
-    app_name: str = "Aster Student Portal"
+    app_name: str = "Audentra Student Portal"
     document_timeout_seconds: float = 120.0
     document_max_tokens: int = 6_000
     document_reasoning_tokens: int = 256
@@ -330,7 +330,7 @@ class StudentAIGateway:
             tenant_id,
             "edward_chat",
             system_prompt=(
-                "You are Edward, Aster University's student portal guide. Answer in plain "
+                "You are Edward, the signed-in institution's student portal guide. Answer in plain "
                 "language using only the provided portal context. You have no shell, Python "
                 "runtime, filesystem, arbitrary network access, secret store, or ability to "
                 "execute code. Never provide or pretend to execute instructions for attacking "
@@ -1084,11 +1084,9 @@ class StudentAIGateway:
             try:
                 return await self._runtime_config.resolve(tenant_id, operation)  # type: ignore[arg-type]
             except RuntimeError:
-                # An operation nobody has published tenant configuration for
-                # runs on its code-owned defaults, exactly like a process with
-                # no versioned runtime at all. The assistant planner and
-                # composer ship as code-owned prompts first; publishing a
-                # tenant version later upgrades them without a deploy.
+                # Operations without a published tenant override use neutral,
+                # code-owned protocol defaults. No mutable runtime state is
+                # stored here; publishing a version upgrades them without a deploy.
                 pass
         return RuntimeConfig(
             tenant_id=tenant_id or "runtime-fallback",

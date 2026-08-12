@@ -28,7 +28,7 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.ai.openrouter_model == "openai/gpt-4o-mini"
     assert settings.ai.openrouter_document_model == "qwen/qwen3.7-flash"
     assert settings.onboarding_template_dir == tmp_path / "assets" / "onboarding"
-    assert settings.http_settings().tenant_slug_ids["aster"].endswith("0001")
+    assert not hasattr(settings.http_settings(), "tenant_slug_ids")
 
 
 def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: Path) -> None:
