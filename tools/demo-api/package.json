@@ -5,13 +5,15 @@
   "type": "module",
   "dependencies": {
     "@vv/document-preprocessing": "file:../../packages/document-preprocessing",
-    "js-yaml": "4.3.1"
+    "@vv/student-assistant-core": "file:../../packages/student-assistant-core",
+    "js-yaml": "4.3.1",
+    "tsx": "^4.21.0"
   },
   "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
-    "test": "node --test test/*.test.js",
-    "reset": "node src/reset.js"
+    "dev": "node --import tsx --watch src/server.js",
+    "start": "node --import tsx src/server.js",
+    "test": "node --import tsx --test test/*.test.js",
+    "reset": "node --import tsx src/reset.js"
   },
   "engines": {
     "node": ">=22.13.0"

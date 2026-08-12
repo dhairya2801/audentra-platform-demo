@@ -740,6 +740,7 @@ export function createSeedState(options = {}) {
           acceptedAmountCents: 739500,
           status: "accepted",
           requiresAction: false,
+          updatedAt: seedTimestamp,
         },
         {
           id: "40000000-0000-7000-8000-000000000102",
@@ -750,6 +751,7 @@ export function createSeedState(options = {}) {
           acceptedAmountCents: 800000,
           status: "accepted",
           requiresAction: false,
+          updatedAt: seedTimestamp,
         },
         {
           id: "40000000-0000-7000-8000-000000000103",
@@ -760,6 +762,7 @@ export function createSeedState(options = {}) {
           acceptedAmountCents: 0,
           status: "offered",
           requiresAction: true,
+          updatedAt: seedTimestamp,
         },
         {
           id: "40000000-0000-7000-8000-000000000104",
@@ -770,6 +773,7 @@ export function createSeedState(options = {}) {
           acceptedAmountCents: 0,
           status: "pending",
           requiresAction: false,
+          updatedAt: seedTimestamp,
         },
       ],
       requiredDocuments: [
@@ -781,6 +785,8 @@ export function createSeedState(options = {}) {
           status: "verified",
           dueAt: null,
           href: "/documents",
+          version: 1,
+          updatedAt: seedTimestamp,
         },
         {
           id: "41000000-0000-7000-8000-000000000102",
@@ -790,6 +796,8 @@ export function createSeedState(options = {}) {
           status: "action_required",
           dueAt: "2027-08-03T23:59:59.000Z",
           href: "/documents",
+          version: 1,
+          updatedAt: seedTimestamp,
         },
         {
           id: "41000000-0000-7000-8000-000000000103",
@@ -799,6 +807,8 @@ export function createSeedState(options = {}) {
           status: "not_started",
           dueAt: "2027-08-10T23:59:59.000Z",
           href: "/financials",
+          version: 1,
+          updatedAt: seedTimestamp,
         },
       ],
       paymentPlans: [
@@ -826,6 +836,34 @@ export function createSeedState(options = {}) {
         attemptedCredits: 28,
         maximumAttemptedCredits: 180,
       },
+    },
+    financialAidPolicies: [
+      {
+        id: "71000000-0000-7000-8000-000000000001",
+        topic: "verification_worksheet",
+        requirementCode: "verification_worksheet",
+        title: "Verification worksheet requirement (synthetic demo)",
+        sourceOwner: `${tenant.shortName} Financial Aid (synthetic demo)`,
+        version: 1,
+        status: "published",
+        effectiveFrom: "2026-01-01T00:00:00.000Z",
+        effectiveUntil: null,
+        academicYear: "2027–2028",
+        sectionId: "worksheet-purpose",
+        studentVisibleText:
+          "This synthetic demo institution uses the verification worksheet to collect student attestations needed for its verification review.",
+        citationLabel: "Synthetic demo Financial Aid policy",
+        citationUrl:
+          "https://example.edu/demo/financial-aid/verification-worksheet",
+        synthetic: true,
+      },
+    ],
+    financialAidSupport: {
+      email: `financial-aid@${tenant.slug}.example.edu`,
+      phone: "+1-555-0107",
+      hours: "Monday-Friday, 9:00-17:00 ET",
+      appointmentRoute: "/appointments",
+      synthetic: true,
     },
     campusLife: {
       events: [
@@ -1005,13 +1043,54 @@ export function createSeedState(options = {}) {
     state.academics.transcriptCredits = [];
     state.academics.exemptions = [];
   }
-  if (options.completedOnboarding) {
+  // This accepted-student variant is fictional V1 fixture state only. New
+  // credential signups deliberately do not opt into it: acceptance must come
+  // from the demo offer workflow, never from account creation alone.
+  if (options.acceptedStudent || options.completedOnboarding) {
     const acceptedAt = "2026-07-24T12:00:00.000Z";
     state.offer.status = "accepted";
     state.offer.acceptedAt = acceptedAt;
     state.offer.version = 2;
     state.journey = createJourney(acceptedAt);
     state.requirements = createRequirements(acceptedAt);
+    const completedProfile = state.requirements.find(
+      (requirement) => requirement.code === "profile_verification",
+    );
+    if (completedProfile) {
+      completedProfile.status = "completed";
+      completedProfile.progressPercent = 100;
+    }
+    for (const requirement of state.requirements) {
+      if (
+        requirement.status === "blocked" &&
+        requirement.dependsOnCodes.length === 1 &&
+        requirement.dependsOnCodes[0] === "profile_verification"
+      ) {
+        requirement.status = "ready";
+      }
+    }
+    state.profile.version = 2;
+    state.profile.updatedAt = acceptedAt;
+    state.onboarding = {
+      ...state.onboarding,
+      currentStep: "housing",
+      completedSteps: ["offer", "about_you"],
+      data: {
+        firstName: state.profile.firstName,
+        lastName: state.profile.lastName,
+        preferredName: state.profile.preferredName,
+        mobilePhone: state.profile.mobilePhone,
+        communicationPreference: state.profile.communicationPreference,
+        skippedSteps: [],
+      },
+      version: 3,
+      updatedAt: acceptedAt,
+    };
+    state.journey.version = 2;
+    state.portalProjectionVersion = 2;
+  }
+  if (options.completedOnboarding) {
+    const acceptedAt = state.offer.acceptedAt;
     state.onboarding = {
       status: "completed",
       currentStep: "deposit",
@@ -1021,7 +1100,6 @@ export function createSeedState(options = {}) {
       version: 10,
       updatedAt: acceptedAt,
     };
-    state.portalProjectionVersion = 2;
   }
   customizeSeedForTenant(state, tenant);
   normalizeTenantContent(state);

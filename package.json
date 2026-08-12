@@ -4,7 +4,8 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "tools/demo-api"
+    "tools/demo-api",
+    "tools/edward-eval"
   ],
   "scripts": {
     "build": "npm run build:api && npm run build:node",
@@ -28,6 +29,8 @@
     "dev:demo-api": "npm --workspace @vv/demo-api run dev",
     "demo:reset": "npm --workspace @vv/demo-api run reset",
     "test:demo-api": "npm --workspace @vv/demo-api test",
+    "test:assistant-core": "npm --workspace @vv/student-assistant-core test",
+    "eval:edward": "node --import tsx tools/edward-eval/run.mjs",
     "crm:graph": "npm --workspace @vv/state-effects run generate",
     "crm:graph:check": "npm --workspace @vv/state-effects run generate:check",
     "cgc:index": "cgc --db kuzudb --path ./tmp/codegraphcontext index .",

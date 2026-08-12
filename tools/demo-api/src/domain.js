@@ -2144,6 +2144,8 @@ export function reviewStaffDocument(
     if (financialDocument) {
       financialDocument.status =
         decision === "accepted" ? "received" : "required";
+      financialDocument.version = (financialDocument.version ?? 1) + 1;
+      financialDocument.updatedAt = now.toISOString();
     }
   }
   item.status = "done";
@@ -2314,7 +2316,7 @@ export function createUploadedDocument(draft, input, now) {
     createdAt: now.toISOString(),
   };
   draft.documents.push(document);
-  updateDocumentRequirement(draft, document);
+  updateDocumentRequirement(draft, document, now);
   draft.portalProjectionVersion += 1;
   return documentResponse(document);
 }
@@ -2472,7 +2474,7 @@ export function queueDocumentExtraction(draft, documentId, now) {
   if (document.processingMode === "manual_review") {
     document.status = "under_review";
     document.extraction = null;
-    updateDocumentRequirement(draft, document);
+    updateDocumentRequirement(draft, document, now);
     draft.portalProjectionVersion += 1;
     return documentResponse(document);
   }
@@ -2664,7 +2666,7 @@ export function completeDocumentExtractionRetry(
   ) {
     ingestTranscriptCourses(draft, document, now);
   }
-  updateDocumentRequirement(draft, document);
+  updateDocumentRequirement(draft, document, now);
   draft.portalProjectionVersion += 1;
   return documentResponse(document);
 }
@@ -2689,7 +2691,7 @@ export function autoProjectCompletedTranscripts(draft, now) {
     if (Array.isArray(document.extraction.courses)) {
       ingestTranscriptCourses(draft, document, now);
     }
-    updateDocumentRequirement(draft, document);
+    updateDocumentRequirement(draft, document, now);
     projected += 1;
   }
   if (projected > 0) draft.portalProjectionVersion += 1;
@@ -2898,7 +2900,11 @@ export function createDepositPayment(draft, input, now) {
   const financialDocument = draft.financials.requiredDocuments.find(
     (document) => document.code === "deposit",
   );
-  if (financialDocument) financialDocument.status = "verified";
+  if (financialDocument) {
+    financialDocument.status = "verified";
+    financialDocument.version = (financialDocument.version ?? 1) + 1;
+    financialDocument.updatedAt = now.toISOString();
+  }
   const requirement = draft.requirements.find(
     (candidate) => candidate.code === "enrollment_deposit",
   );
@@ -3269,7 +3275,7 @@ function documentResponse(document) {
   };
 }
 
-function updateDocumentRequirement(draft, document) {
+function updateDocumentRequirement(draft, document, now) {
   const manuallyStoredForReview =
     (document.processingMode ??
       documentProcessingModeForCategory(document.category)) ===
@@ -3301,7 +3307,11 @@ function updateDocumentRequirement(draft, document) {
     const financialDocument = draft.financials.requiredDocuments.find(
       (item) => item.code === "verification_worksheet",
     );
-    if (financialDocument) financialDocument.status = "under_review";
+    if (financialDocument) {
+      financialDocument.status = "under_review";
+      financialDocument.version = (financialDocument.version ?? 1) + 1;
+      financialDocument.updatedAt = now?.toISOString() ?? document.createdAt;
+    }
   }
 }
 

@@ -160,12 +160,103 @@ export function normalizeEdwardResponse(response, authority) {
       })
     : [];
 
+  const blocks = normalizeResponseBlocks(response?.blocks);
   return {
     ...response,
     message: sanitizeEdwardProse(response?.message),
+    ...(blocks.length > 0 ? { blocks } : {}),
     suggestedActions: suggestedActions.slice(0, 4),
     widgets: normalizeWidgets(response?.widgets, authority),
   };
+}
+
+const blockTypes = new Set([
+  "text",
+  "bullet_list",
+  "numbered_list",
+  "table",
+  "next_steps",
+]);
+
+/**
+ * Blocks are built from grounded state rather than written by a model, so this
+ * is a bound rather than a trust boundary: it caps size and re-runs the same
+ * prose sanitiser the message goes through, so no route can grow a way to put
+ * unchecked text in front of a student.
+ */
+function normalizeResponseBlocks(blocks) {
+  if (!Array.isArray(blocks)) return [];
+  return blocks
+    .flatMap((block) => {
+      if (!block || typeof block !== "object" || !blockTypes.has(block.type)) {
+        return [];
+      }
+      const fallbackText = sanitizeEdwardProse(block.fallbackText);
+      if (!fallbackText) return [];
+      const base = { type: block.type, fallbackText };
+      if (block.type === "text") {
+        return [{ ...base, text: sanitizeEdwardProse(block.text) }];
+      }
+      if (block.type === "table") {
+        const columns = (Array.isArray(block.columns) ? block.columns : [])
+          .slice(0, 6)
+          .flatMap((column) =>
+            column?.key && column?.label
+              ? [
+                  {
+                    key: String(column.key).slice(0, 40),
+                    label: sanitizeEdwardProse(column.label).slice(0, 60),
+                    ...(column.align === "right" ? { align: "right" } : {}),
+                  },
+                ]
+              : [],
+          );
+        if (columns.length === 0) return [];
+        const rows = (Array.isArray(block.rows) ? block.rows : [])
+          .slice(0, 25)
+          .map((row) =>
+            Object.fromEntries(
+              columns.map((column) => [
+                column.key,
+                sanitizeEdwardProse(row?.[column.key] ?? "").slice(0, 160),
+              ]),
+            ),
+          );
+        return [
+          {
+            ...base,
+            ...(block.caption ? { caption: sanitizeEdwardProse(block.caption) } : {}),
+            columns,
+            rows,
+          },
+        ];
+      }
+      const items = (Array.isArray(block.items) ? block.items : [])
+        .slice(0, 12)
+        .flatMap((item) => {
+          const text = sanitizeEdwardProse(item?.text).slice(0, 300);
+          if (!text) return [];
+          const href = normalizeEdwardActionHref(item?.href);
+          return [
+            {
+              text,
+              ...(href ? { href } : {}),
+              ...(item?.owner === "student" || item?.owner === "university"
+                ? { owner: item.owner }
+                : {}),
+            },
+          ];
+        });
+      if (items.length === 0) return [];
+      return [
+        {
+          ...base,
+          ...(block.title ? { title: sanitizeEdwardProse(block.title) } : {}),
+          items,
+        },
+      ];
+    })
+    .slice(0, 8);
 }
 
 function normalizeWidgets(widgets, authority) {

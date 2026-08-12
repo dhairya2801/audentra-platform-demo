@@ -9,6 +9,32 @@ import { JsonStateStore } from "../src/store.js";
 const fixedClock = () => new Date("2026-07-24T12:00:00.000Z");
 
 describe("JsonStateStore", () => {
+  it("keeps signup-style seeds ineligible and marks only the accepted V1 fixture accepted", () => {
+    const ineligible = createSeedState({ freshStudent: true });
+    const accepted = createSeedState({ acceptedStudent: true });
+
+    assert.equal(ineligible.offer.status, "offered");
+    assert.equal(ineligible.offer.acceptedAt, null);
+    assert.equal(accepted.offer.status, "accepted");
+    assert.equal(accepted.offer.acceptedAt, "2026-07-24T12:00:00.000Z");
+    assert.ok(accepted.journey);
+    assert.ok(
+      accepted.requirements.some(
+        (requirement) => requirement.status === "completed",
+      ),
+    );
+    assert.ok(
+      accepted.requirements.some(
+        (requirement) => requirement.status === "ready",
+      ),
+    );
+    assert.ok(
+      accepted.requirements.some(
+        (requirement) => requirement.status === "blocked",
+      ),
+    );
+  });
+
   it("creates deterministic seed state and persists mutations atomically", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vv-demo-store-"));
     const dataFile = join(directory, "state.json");

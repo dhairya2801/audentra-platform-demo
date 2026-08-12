@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reconcileDocumentRequirements } from "./document-state.js";
 import {
   createSeedState,
   FIXTURE_VERSION,
@@ -43,6 +44,9 @@ export class JsonStateStore {
         this.stateFactory(),
       );
       validatePersistedState(parsed);
+      // A state file written before the projection existed can carry the
+      // divergence on disk, so it is repaired on load rather than inherited.
+      reconcileDocumentRequirements(parsed);
       this.#state = parsed;
       await this.#write(parsed);
     } catch (error) {
@@ -63,6 +67,7 @@ export class JsonStateStore {
 
   async reset() {
     const state = this.stateFactory();
+    reconcileDocumentRequirements(state);
     await this.#write(state);
     this.#state = state;
     return this.snapshot();
@@ -117,7 +122,12 @@ export class JsonStateStore {
           shouldCommit = false;
         },
       });
-      if (!shouldCommit) {
+      // Derived state is reconciled here, inside the transaction boundary,
+      // rather than at each call site. A projection that a new mutation path
+      // can forget to run is a staleness bug waiting to be written; this one
+      // cannot be forgotten, because there is no way to commit around it.
+      const reconciled = reconcileDocumentRequirements(draft);
+      if (!shouldCommit && reconciled === 0) {
         return structuredClone(result);
       }
       draft.fixture.revision += 1;

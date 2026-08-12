@@ -86,10 +86,25 @@ import {
   normalizeEdwardResponse,
 } from "./edward-safety.js";
 import {
+  createAssistantConversation,
+  getAssistantConversationMessages,
+  runAssistantTurn,
+  validateAssistantTurnInput,
+  validateCreateAssistantConversationInput,
+} from "./assistant-conversations.js";
+import { runPreviewStudentAssistant } from "./student-assistant.js";
+import {
+  enumValue,
   exactKeys,
   objectBody,
+  requiredString,
   requireIdempotencyKey,
+  uuidValue,
 } from "./validation.js";
+import {
+  applyDocumentReviewDecision,
+  DOCUMENT_REVIEW_DECISIONS,
+} from "./document-state.js";
 import {
   draftManagedConfigurationWithEdward,
   getManagedConfiguration,
@@ -169,6 +184,8 @@ export async function createDemoApi(options = {}) {
   const ai =
     options.ai ??
     createOpenRouterGatewayFromEnv({
+      openAiApiKey: options.openAiApiKey,
+      openAiModel: options.openAiModel,
       apiKey: options.openRouterApiKey,
       model: options.openRouterModel,
       fetch: options.fetch,
@@ -1225,50 +1242,94 @@ async function route({
     });
   }
 
-  if (method === "POST" && path === "/v1/student/assistant/messages") {
-    const body = await readJson(request);
-    const pageContext = validateEdwardInput(body);
-    const state = store.snapshot();
-    const studentContext = buildAssistantContext(
-      state,
-      body.message,
-      pageContext,
-    );
-    const guarded = guardedEdwardResponse(body.message, studentContext);
-    if (guarded) return { body: guarded };
-    const response = await ai.askEdward({
-      message: body.message,
-      pageContext,
-      history: body.history,
-      studentContext,
+  // A reviewer-side decision, exposed as a demo route because this preview has
+  // no staff console. It is the same durable transition a real registrar review
+  // would make, so the document lifecycle can be exercised end to end -- and so
+  // the assistant's view of it can be tested -- without reaching past the API.
+  const documentReviewMatch = path.match(
+    /^\/v1\/demo\/documents\/([^/]+)\/review$/,
+  );
+  if (method === "POST" && documentReviewMatch) {
+    const body = objectBody(await readJson(request));
+    exactKeys(body, ["decision", "note"]);
+    const decision = enumValue(body.decision, "decision", [
+      ...DOCUMENT_REVIEW_DECISIONS,
+    ]);
+    const note =
+      body.note === undefined || body.note === null
+        ? null
+        : requiredString(body.note, "note", { min: 1, max: 400 });
+    const documentId = decodeURIComponent(documentReviewMatch[1]);
+    const body_ = await store.transact((draft) => {
+      const document = draft.documents.find(
+        (candidate) => candidate.id === documentId,
+      );
+      if (!document) {
+        throw notFound(
+          "STUDENT_DOCUMENT_NOT_FOUND",
+          "The document was not found",
+        );
+      }
+      applyDocumentReviewDecision(document, decision, clock(), note);
+      draft.portalProjectionVersion += 1;
+      return { id: document.id, status: document.status, review: document.review };
     });
+    return { body: body_ };
+  }
+
+  if (method === "POST" && path === "/v1/student/assistant/conversations") {
+    validateCreateAssistantConversationInput(await readJson(request));
     return {
-      // The preview mirrors the production API: the orchestration layer—not
-      // an intent regex—attaches receipts for projections it just collected.
-      body: {
-        ...normalizeEdwardResponse(response, {
-          offerId: studentContext.offerId,
-          depositAmountCents: studentContext.depositAmountCents,
-          depositPaid: studentContext.depositPaid,
-          allowDepositPayment:
-            /(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/i.test(
-              body.message,
-            ),
-          documentUploadCategory:
-            /upload|transcript|fafsa|verification/i.test(body.message)
-              ? /transcript/i.test(body.message)
-                ? "transcript"
-                : "financial_aid"
-              : null,
-          appointmentType:
-            /appointment|advisor|counselor|human/i.test(body.message)
-              ? /financial|aid|fafsa|loan/i.test(body.message)
-                ? "financial_aid"
-                : "enrollment_support"
-              : null,
-        }),
-        contextReceipts: studentContext.contextReceipts,
-      },
+      status: 201,
+      body: await createAssistantConversation({ store, clock }),
+    };
+  }
+
+  const assistantMessagesMatch = path.match(
+    /^\/v1\/student\/assistant\/conversations\/([^/]+)\/messages$/,
+  );
+  if (method === "GET" && assistantMessagesMatch) {
+    const conversationId = uuidValue(
+      decodeURIComponent(assistantMessagesMatch[1]),
+      "conversationId",
+    );
+    return {
+      body: getAssistantConversationMessages(store.snapshot(), conversationId),
+    };
+  }
+
+  if (method === "POST" && path === "/v1/student/assistant/messages") {
+    const turn = validateAssistantTurnInput(await readJson(request));
+    return {
+      body: await runAssistantTurn({
+        store,
+        clock,
+        requestId,
+        turn,
+        generateResponse: ({
+          conversationId,
+          message,
+          pageContext,
+          assistantPageContext,
+          history,
+          inputMode,
+          observability,
+        }) =>
+          generateEdwardResponse({
+            store,
+            ai,
+            clock,
+            requestId,
+            conversationId,
+            message,
+            pageContext,
+            assistantPageContext,
+            history,
+            inputMode,
+            observability,
+            logger,
+          }),
+      }),
     };
   }
 
@@ -1896,43 +1957,74 @@ function createRequestId(candidate) {
     : randomUUID();
 }
 
-function validateEdwardInput(input) {
-  const body = objectBody(input);
-  exactKeys(body, ["message", "pageContext", "history"]);
-  if (
-    typeof body.message !== "string" ||
-    body.message.trim().length < 1 ||
-    body.message.length > 2_000
-  ) {
-    throw badRequest("INVALID_MESSAGE", "message must contain 1-2000 characters");
-  }
-  if (
-    typeof body.pageContext !== "string" ||
-    body.pageContext.length > 120
-  ) {
-    throw badRequest(
-      "INVALID_PAGE_CONTEXT",
-      "pageContext must be a string up to 120 characters",
-    );
-  }
-  if (
-    body.history !== undefined &&
-    (!Array.isArray(body.history) ||
-      body.history.length > 8 ||
-      body.history.some(
-        (entry) =>
-          !entry ||
-          !["user", "assistant"].includes(entry.role) ||
-          typeof entry.content !== "string" ||
-          entry.content.length > 1_200,
-      ))
-  ) {
-    throw badRequest(
-      "INVALID_HISTORY",
-      "history must contain up to 8 short user or assistant messages",
-    );
-  }
-  return normalizeEdwardPageContext(body.pageContext);
+async function generateEdwardResponse({
+  store,
+  ai,
+  clock,
+  requestId,
+  conversationId,
+  message,
+  pageContext,
+  assistantPageContext,
+  history,
+  priorPriority,
+  inputMode,
+  observability,
+  logger,
+}) {
+  const guarded = guardedEdwardResponse(message);
+  if (guarded) return guarded;
+  const shared = await runPreviewStudentAssistant({
+    store,
+    ai,
+    clock,
+    requestId,
+    conversationId,
+    message,
+    history,
+    priorPriority,
+    inputMode,
+    pageContext: assistantPageContext,
+    observability,
+    logger,
+  });
+  if (shared.handled) return shared.response;
+
+  const state = store.snapshot();
+  const studentContext = buildAssistantContext(state, message, pageContext);
+  const response = await ai.askEdward({
+    message,
+    pageContext,
+    history,
+    studentContext,
+  });
+  // The preview mirrors the production API: the orchestration layer—not an
+  // intent regex—attaches receipts for projections it actually collected.
+  const normalized = normalizeEdwardResponse(response, {
+    offerId: studentContext.offerId,
+    depositAmountCents: studentContext.depositAmountCents,
+    depositPaid: studentContext.depositPaid,
+    allowDepositPayment:
+      /(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)/i.test(
+        message,
+      ),
+    documentUploadCategory:
+      /upload|transcript|fafsa|verification/i.test(message)
+        ? /transcript/i.test(message)
+          ? "transcript"
+          : "financial_aid"
+        : null,
+    appointmentType: /appointment|advisor|counselor|human/i.test(message)
+      ? /financial|aid|fafsa|loan/i.test(message)
+        ? "financial_aid"
+        : "enrollment_support"
+      : null,
+  });
+  return {
+    ...normalized,
+    contextReceipts: studentContext.contextReceipts,
+    widgets: inputMode === "voice" ? [] : normalized.widgets,
+  };
 }
 
 function buildAssistantContext(state, message = "", pageContext = "/dashboard") {

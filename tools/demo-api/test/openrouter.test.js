@@ -10,6 +10,36 @@ function jsonResponse(payload, status = 200) {
 }
 
 describe("OpenRouterGateway", () => {
+  it("prefers direct OpenAI with gpt-4o-mini when OPENAI credentials are supplied", async () => {
+    const requests = [];
+    const gateway = new OpenRouterGateway({
+      openAiApiKey: "openai-test-key",
+      apiKey: "openrouter-test-key",
+      fetch: async (url, init) => {
+        requests.push({ url, init, body: JSON.parse(init.body) });
+        return jsonResponse({
+          model: "gpt-4o-mini",
+          choices: [{ message: { content: "Your exemptions use reviewed transcript evidence." } }],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        });
+      },
+    });
+
+    const result = await gateway.askEdward({
+      message: "Explain how my course exemptions are evaluated.",
+      pageContext: "/dashboard",
+      history: [],
+      studentContext: {},
+    });
+
+    assert.equal(result.provider, "openai");
+    assert.equal(result.model, "gpt-4o-mini");
+    assert.equal(requests[0].url, "https://api.openai.com/v1/chat/completions");
+    assert.equal(requests[0].body.model, "gpt-4o-mini");
+    assert.equal(requests[0].init.headers.Authorization, "Bearer openai-test-key");
+    assert.equal(requests[0].init.headers["HTTP-Referer"], undefined);
+  });
+
   it("rejects code-execution and secret-exfiltration requests before OpenRouter", async () => {
     let calls = 0;
     const gateway = new OpenRouterGateway({
@@ -124,6 +154,145 @@ describe("OpenRouterGateway", () => {
       requests[0].init.headers.Authorization,
       "Bearer test-key",
     );
+  });
+
+  it("provides structured planning, classification, and grounded composition for the shared graph", async () => {
+    const requests = [];
+    const responses = [
+      {
+        model: "test/shared-model",
+        choices: [
+          {
+            message: {
+              content:
+                '{"requestType":"remaining_steps","additionalRequestTypes":[],"confidence":0.96,"requirementReference":null,"toolNames":["getOnboardingChecklist"],"deadlineWindow":null,"requestedEntity":null,"financialAidEntity":null,"housingEntity":null,"blockerScope":null,"priorityExplanationRequested":false,"registrationQuestion":false}',
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 18,
+          completion_tokens: 8,
+          total_tokens: 26,
+        },
+      },
+      {
+        model: "test/shared-model",
+        choices: [
+          {
+            message: {
+              content:
+                '{"requestType":"remaining_steps","confidence":0.92,"requirementReference":null}',
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 3,
+          total_tokens: 13,
+        },
+      },
+      {
+        model: "test/shared-model",
+        choices: [
+          {
+            message: {
+              content:
+                '{"factIds":["requirement:official_transcript"],"tone":"concise"}',
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 14,
+          completion_tokens: 4,
+          total_tokens: 18,
+        },
+      },
+    ];
+    const gateway = new OpenRouterGateway({
+      apiKey: "test-key",
+      model: "test/shared-model",
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return jsonResponse(responses.shift());
+      },
+    });
+    const sharedContext = {
+      tenantId: "tenant-must-not-enter-prompt",
+      studentId: "student-must-not-enter-prompt",
+      requestId: "request-shared-model",
+      attempt: 1,
+    };
+
+    const plan = await gateway.planStudentAssistantToolReads({
+      ...sharedContext,
+      modelInput: {
+        normalizedMessage: "Give me a rundown.",
+        conversationContext: [],
+        pageContext: { path: "/enrollment", label: "Enrollment" },
+        allowedRequestTypes: [
+          "remaining_steps",
+          "unsupported_or_out_of_scope",
+        ],
+        availableTools: [
+          {
+            name: "getOnboardingChecklist",
+            description: "Read onboarding requirements.",
+          },
+        ],
+      },
+    });
+    const classification = await gateway.classifyStudentAssistantRequest({
+      ...sharedContext,
+      attempt: 2,
+      modelInput: {
+        normalizedMessage: "Give me a rundown.",
+        conversationContext: [],
+        pageContext: { path: "/enrollment", label: "Enrollment" },
+        allowedRequestTypes: [
+          "remaining_steps",
+          "unsupported_or_out_of_scope",
+        ],
+      },
+    });
+    const composition = await gateway.composeStudentAssistantResponse({
+      ...sharedContext,
+      attempt: 3,
+      modelInput: {
+        requestType: "explain_requirement",
+        normalizedMessage: "Why is my transcript required?",
+        facts: [
+          {
+            id: "requirement:official_transcript",
+            text: "The final transcript confirms prior completion.",
+            contextReceiptIds: ["receipt-1"],
+          },
+        ],
+      },
+    });
+
+    assert.deepEqual(plan.output.toolNames, ["getOnboardingChecklist"]);
+    assert.equal(plan.usage.totalTokens, 26);
+    assert.equal(classification.output.requestType, "remaining_steps");
+    assert.equal(classification.usage.totalTokens, 13);
+    assert.deepEqual(composition.output, {
+      factIds: ["requirement:official_transcript"],
+      tone: "concise",
+    });
+    assert.equal(composition.usage.totalTokens, 18);
+    assert.match(
+      requests[0].messages[0].content,
+      /semantic router and read planner/,
+    );
+    assert.match(
+      requests[1].messages[0].content,
+      /bounded request classifier/,
+    );
+    assert.match(requests[2].messages[0].content, /grounded fact IDs/);
+    for (const request of requests) {
+      const prompt = JSON.stringify(request.messages);
+      assert.doesNotMatch(prompt, /tenant-must-not-enter-prompt/);
+      assert.doesNotMatch(prompt, /student-must-not-enter-prompt/);
+    }
   });
 
   it("normalizes untrusted page context and strips unsafe URI schemes", async () => {
@@ -553,8 +722,10 @@ describe("OpenRouterGateway", () => {
   });
 
   it("keeps an explicit other classification as a requirement mismatch", async () => {
+    const recorded = [];
     const gateway = new OpenRouterGateway({
       apiKey: "test-key",
+      responseRecorder: async (response) => recorded.push(response),
       fetch: async () =>
         jsonResponse({
           model: "test/parser",
@@ -594,6 +765,10 @@ describe("OpenRouterGateway", () => {
 
     assert.equal(extraction.status, "completed");
     assert.equal(extraction.documentType, "other");
+    assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].rawResponseText, null);
+    assert.equal(recorded[0].responseBody, null);
+    assert.doesNotMatch(JSON.stringify(recorded[0]), /restaurant menu/i);
   });
 
   it("records the exact provider response before malformed extraction JSON fails", async () => {

@@ -1709,8 +1709,12 @@ describe("contract-compatible development preview API", () => {
       {
         method: "POST",
         body: {
-          message: "Where is my transcript?",
-          pageContext: "/documents",
+          // A topic the grounded graph genuinely has no read for, so this keeps
+          // covering the legacy gateway wiring. "Where is my transcript?" used
+          // to land here too; it is now answered from authoritative document
+          // state instead, which the assertion below pins down.
+          message: "What clubs can I join on campus?",
+          pageContext: "/campus-life",
           history: [],
         },
       },
@@ -1721,8 +1725,28 @@ describe("contract-compatible development preview API", () => {
     assert.deepEqual(assistant.payload.contextReceipts, [
       { source: "dashboard" },
       { source: "profile" },
-      { source: "documents" },
+      { source: "campus_life" },
     ]);
+
+    const transcriptQuestion = await api(
+      baseUrl,
+      "/v1/student/assistant/messages",
+      {
+        method: "POST",
+        body: {
+          message: "Where is my transcript?",
+          pageContext: "/documents",
+          history: [],
+        },
+      },
+    );
+    assert.equal(transcriptQuestion.response.status, 200);
+    assert.equal(
+      transcriptQuestion.payload.studentAssistant?.requestType,
+      "document_status",
+      "a question about a document's state is answered from the record, not by the ungrounded gateway",
+    );
+    assert.match(transcriptQuestion.payload.message, /under review/i);
   });
 
   it("does not advance a transcript requirement when content classification disagrees", async () => {
