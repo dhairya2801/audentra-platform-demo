@@ -31,6 +31,48 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.http_settings().tenant_slug_ids["aster"].endswith("0001")
 
 
+def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: Path) -> None:
+    assert RuntimeSettings.from_environment({}, package_root=tmp_path).voice is None
+
+    with pytest.raises(ValueError, match="must all be set"):
+        RuntimeSettings.from_environment(
+            {"LIVEKIT_URL": "wss://example.livekit.cloud"}, package_root=tmp_path
+        )
+
+    complete = {
+        "LIVEKIT_URL": "wss://example.livekit.cloud",
+        "LIVEKIT_API_KEY": "lk_key",
+        "LIVEKIT_API_SECRET": "lk_secret",
+        "VOICE_AGENT_INTERNAL_TOKEN": "internal-test-token-123456",
+    }
+    settings = RuntimeSettings.from_environment(complete, package_root=tmp_path)
+    assert settings.voice is not None
+    assert settings.voice.livekit_url == "wss://example.livekit.cloud"
+    assert settings.voice.agent_name == "student-assistant-voice"
+    assert settings.voice.session_ttl_seconds == 900
+    assert settings.voice.token_ttl_seconds == 600
+    assert settings.http_settings().voice_agent_internal_token == (
+        "internal-test-token-123456"  # noqa: S105
+    )
+
+    with pytest.raises(ValueError, match="between 24 and 512"):
+        RuntimeSettings.from_environment(
+            {**complete, "VOICE_AGENT_INTERNAL_TOKEN": "short"}, package_root=tmp_path
+        )
+
+    with pytest.raises(ValueError, match="wss://"):
+        RuntimeSettings.from_environment(
+            {
+                **complete,
+                "AUDENTRA_ENV": "preview",
+                "BROWSER_AUTH_REQUIRED": "true",
+                "VV_STAFF_INVITATION_CODE": "a-long-enough-invitation-code",
+                "LIVEKIT_URL": "ws://livekit.internal:7880",
+            },
+            package_root=tmp_path,
+        )
+
+
 def test_document_model_is_wired_through_compose_and_preview_bootstrap() -> None:
     compose_setting = "OPENROUTER_DOCUMENT_MODEL: ${OPENROUTER_DOCUMENT_MODEL:-qwen/qwen3.7-flash}"
     for relative_path in ("infra/compose.yaml", "infra/preview-vm/compose.yaml"):

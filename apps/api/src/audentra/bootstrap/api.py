@@ -28,8 +28,14 @@ from audentra.infrastructure.postgres.postgres_service import (
     PostgresSignedDocumentGenerator,
 )
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
+from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
 from audentra.infrastructure.preview.staff_workspace import PreviewStaffWorkspaceRepository
 from audentra.infrastructure.storage import ObjectStorage, create_object_storage
+from audentra.infrastructure.voice import (
+    UnavailableVoiceSessionService,
+    VoiceSessionService,
+    VoiceSessionServiceProtocol,
+)
 from audentra.integrations.ai.gateway import StudentAIGateway
 from audentra.integrations.ai.prompt_runtime import (
     PostgresPromptRuntimeRepository,
@@ -50,6 +56,9 @@ class ApiRuntimeResources:
     object_storage: ObjectStorage
     service: PlatformService
     auth_service: BrowserAuthService = field(default_factory=UnavailableBrowserAuthService)
+    voice_service: VoiceSessionServiceProtocol = field(
+        default_factory=UnavailableVoiceSessionService
+    )
 
     async def close(self) -> None:
         try:
@@ -102,7 +111,18 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             staff_invitation_code=settings.staff_invitation_code,
             demo_student_ids=settings.http_settings().demo_student_slug_ids,
         )
-        return ApiRuntimeResources(engine, http_client, storage, service, auth_service)
+        voice_service: VoiceSessionServiceProtocol = (
+            VoiceSessionService(
+                settings.voice,
+                PostgresVoiceSessionRepository(engine),
+                service,
+            )
+            if settings.voice is not None
+            else UnavailableVoiceSessionService()
+        )
+        return ApiRuntimeResources(
+            engine, http_client, storage, service, auth_service, voice_service
+        )
     except BaseException:
         try:
             await http_client.aclose()
@@ -128,11 +148,13 @@ def create_production_app(settings: RuntimeSettings | None = None) -> FastAPI:
         app.state.runtime_resources = resources
         app.state.platform_service = resources.service
         app.state.browser_auth_service = resources.auth_service
+        app.state.voice_session_service = resources.voice_service
         try:
             yield
         finally:
             app.state.platform_service = UnavailablePlatformService()
             app.state.browser_auth_service = UnavailableBrowserAuthService()
+            app.state.voice_session_service = UnavailableVoiceSessionService()
             await resources.close()
 
     app = create_app(

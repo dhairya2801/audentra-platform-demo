@@ -54,6 +54,8 @@ class HttpSettings:
     web_origins: tuple[str, ...] = ("http://localhost:3000",)
     # Security note: production composition rejects this explicit local-only fallback.
     document_worker_token: str = "local-development-document-worker-token"  # noqa: S105
+    # Empty means voice is not configured: internal voice routes then fail closed.
+    voice_agent_internal_token: str = ""
     demo_tenant_id: str = "00000000-0000-7000-8000-000000000001"
     demo_student_id: str = "00000000-0000-7000-8000-000000000101"
     demo_actor_id: str = "00000000-0000-7000-8000-000000000100"
@@ -119,6 +121,7 @@ class HttpSettings:
                 os.getenv("DOCUMENT_WORKER_TOKEN", "").strip()
                 or "local-development-document-worker-token"
             ),
+            voice_agent_internal_token=os.getenv("VOICE_AGENT_INTERNAL_TOKEN", "").strip(),
             demo_tenant_id=os.getenv("DEMO_TENANT_ID", "00000000-0000-7000-8000-000000000001"),
             demo_student_id=os.getenv("DEMO_STUDENT_ID", "00000000-0000-7000-8000-000000000101"),
             demo_actor_id=os.getenv("DEMO_ACTOR_ID", "00000000-0000-7000-8000-000000000100"),

@@ -435,6 +435,28 @@ class CreateAssistantConversationRequest(StrictRequest):
     page_context: AssistantPageContextRequest
 
 
+class CreateAssistantVoiceSessionRequest(StrictRequest):
+    conversation_id: UUID
+    page_context: AssistantPageContextRequest
+
+
+class SubmitAssistantVoiceTurnRequest(StrictRequest):
+    client_message_id: Annotated[
+        StrictStr,
+        StringConstraints(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+    ]
+    text: Annotated[
+        StrictStr,
+        StringConstraints(min_length=1, max_length=2_000, pattern=r"\S"),
+    ]
+    input_mode: Literal["voice"]
+    page_context: AssistantPageContextRequest
+    livekit_stream_id: Annotated[
+        StrictStr,
+        StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$"),
+    ]
+
+
 class CreateStudentAppointmentRequest(StrictRequest):
     type: Literal["admissions_counseling", "financial_aid", "enrollment_support"]
     starts_at: StrictStr

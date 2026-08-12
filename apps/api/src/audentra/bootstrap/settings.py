@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 from audentra.infrastructure.db.engine import DatabaseEngineOptions
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings, StorageSettings
+from audentra.infrastructure.voice.config import VoiceSettings
 from audentra.integrations.ai.gateway import GatewaySettings
 from audentra.interfaces.http.config import HttpSettings, parse_tenant_slug_ids
 
@@ -63,6 +64,7 @@ class RuntimeSettings:
     object_storage: StorageSettings
     ai: GatewaySettings
     worker: WorkerSettings
+    voice: VoiceSettings | None
     onboarding_template_dir: Path
 
     @classmethod
@@ -145,6 +147,8 @@ class RuntimeSettings:
                 "WORKER_LEASE_SECONDS must be greater than WORKER_COMMAND_TIMEOUT_SECONDS"
             )
 
+        voice = _voice_settings(values, deployed_environment=deployed_environment)
+
         return cls(
             environment=app_environment,
             auth_mode="demo",
@@ -184,6 +188,8 @@ class RuntimeSettings:
                 secret=storage_secret,
             ),
             ai=GatewaySettings(
+                openai_api_key=values.get("OPENAI_API_KEY", "").strip(),
+                openai_model=values.get("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
                 openrouter_api_key=values.get("OPENROUTER_API_KEY", "").strip(),
                 openrouter_model=values.get("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
                 or "openai/gpt-4o-mini",
@@ -259,6 +265,7 @@ class RuntimeSettings:
                     values, ("WORKER_MAX_RETRY_MS",), 300_000, 1_000, 86_400_000
                 ),
             ),
+            voice=voice,
             onboarding_template_dir=template_dir,
         )
 
@@ -268,6 +275,7 @@ class RuntimeSettings:
             browser_auth_required=self.browser_auth_required,
             web_origins=self.web_origins,
             document_worker_token=self.document_worker_token,
+            voice_agent_internal_token=(self.voice.agent_internal_token if self.voice else ""),
             demo_tenant_id=self.demo_tenant_id,
             demo_student_id=self.demo_student_id,
             demo_actor_id=self.demo_actor_id,
@@ -330,6 +338,46 @@ def _object_storage_settings(
         secret_access_key=secret,
         force_path_style=_boolean(values.get("OBJECT_STORAGE_FORCE_PATH_STYLE"), True),
         max_object_bytes=max_object_bytes,
+    )
+
+
+def _voice_settings(
+    values: Mapping[str, str], *, deployed_environment: bool
+) -> VoiceSettings | None:
+    """Voice is opt-in: absent LiveKit configuration disables it cleanly.
+
+    A partially configured deployment is a misconfiguration, not a downgrade,
+    so any LiveKit value without the full set fails startup instead of leaving
+    the voice routes half-armed.
+    """
+
+    url = values.get("LIVEKIT_URL", "").strip()
+    api_key = values.get("LIVEKIT_API_KEY", "").strip()
+    api_secret = values.get("LIVEKIT_API_SECRET", "").strip()
+    internal_token = values.get("VOICE_AGENT_INTERNAL_TOKEN", "").strip()
+    if not any((url, api_key, api_secret, internal_token)):
+        return None
+    if not all((url, api_key, api_secret)):
+        raise ValueError(
+            "LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET must all be set to enable voice"
+        )
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        raise ValueError("LIVEKIT_URL must be a ws:// or wss:// URL")
+    if deployed_environment and parsed.scheme != "wss":
+        raise ValueError("LIVEKIT_URL must use wss:// outside local development")
+    if not internal_token:
+        raise ValueError("VOICE_AGENT_INTERNAL_TOKEN is required when LiveKit is configured")
+    if not 24 <= len(internal_token) <= 512:
+        raise ValueError("VOICE_AGENT_INTERNAL_TOKEN must contain between 24 and 512 characters")
+    return VoiceSettings(
+        livekit_url=url.rstrip("/"),
+        livekit_api_key=api_key,
+        livekit_api_secret=api_secret,
+        agent_internal_token=internal_token,
+        agent_name=(values.get("VOICE_AGENT_NAME", "").strip() or "student-assistant-voice"),
+        session_ttl_seconds=_bounded_int(values, ("VOICE_SESSION_TTL_SECONDS",), 900, 60, 21_600),
+        token_ttl_seconds=_bounded_int(values, ("VOICE_TOKEN_TTL_SECONDS",), 600, 60, 3_600),
     )
 
 

@@ -221,3 +221,20 @@ def test_assistant_conversation_migration_scopes_and_replay_protects_messages() 
     assert "WHERE client_message_id IS NOT NULL AND role = 'user'" in migration
     assert "assistant_message_history_idx" in migration
     assert "jsonb_typeof(context_receipts) = 'array'" in migration
+
+
+def test_voice_session_migration_binds_rooms_to_owned_conversations() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0034_assistant_voice_sessions.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "assistant_conversation_owner_id_uidx" in migration
+    assert "room_name varchar(255) NOT NULL UNIQUE" in migration
+    assert "provider = 'livekit'" in migration
+    assert "status IN ('active', 'ended')" in migration
+    assert "REFERENCES assistant_conversation(id, tenant_id, student_id)" in migration
+    assert "expires_at > created_at" in migration
+    assert (
+        "(status = 'active' AND ended_at IS NULL)\n"
+        "    OR (status = 'ended' AND ended_at IS NOT NULL)" in migration
+    )

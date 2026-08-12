@@ -10,6 +10,7 @@ from fastapi import Depends, Header, Request
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
 from audentra.core.ports import BrowserAuthService, PlatformService
+from audentra.infrastructure.voice import VoiceSessionServiceProtocol
 
 from .config import HttpSettings
 
@@ -147,8 +148,47 @@ def require_worker_token(
         raise ApiError(403, "WORKER_AUTHENTICATION_FAILED", "The worker credential is not valid")
 
 
+VOICE_AGENT_BEARER_PATTERN = re.compile(r"^Bearer (\S+)$", re.IGNORECASE)
+
+
+def require_voice_agent_token(
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> None:
+    """Constant-time bearer check for the voice agent; fails closed when unset."""
+
+    expected = get_settings(request).voice_agent_internal_token
+    match = (
+        VOICE_AGENT_BEARER_PATTERN.fullmatch(authorization)
+        if isinstance(authorization, str)
+        else None
+    )
+    provided = (match.group(1) if match else "").encode("utf-8")
+    if not expected or not secrets.compare_digest(provided, expected.encode("utf-8")):
+        raise ApiError(
+            401,
+            "VOICE_AGENT_AUTHENTICATION_FAILED",
+            "The voice agent credential is not valid",
+        )
+
+
+def get_voice_session_service(request: Request) -> VoiceSessionServiceProtocol:
+    service = getattr(request.app.state, "voice_session_service", None)
+    if service is None:
+        raise ApiError(
+            503,
+            "ASSISTANT_VOICE_NOT_CONFIGURED",
+            "Voice is not configured for this environment",
+        )
+    return cast(VoiceSessionServiceProtocol, service)
+
+
 AuthDependency = Annotated[AuthContext, Depends(get_auth_context)]
 AuthServiceDependency = Annotated[BrowserAuthService, Depends(get_browser_auth_service)]
 ServiceDependency = Annotated[PlatformService, Depends(get_platform_service)]
 IdempotencyDependency = Annotated[str, Depends(require_idempotency_key)]
 WorkerTokenDependency = Annotated[None, Depends(require_worker_token)]
+VoiceAgentTokenDependency = Annotated[None, Depends(require_voice_agent_token)]
+VoiceSessionServiceDependency = Annotated[
+    VoiceSessionServiceProtocol, Depends(get_voice_session_service)
+]

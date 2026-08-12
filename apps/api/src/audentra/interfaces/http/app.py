@@ -13,6 +13,10 @@ from audentra.core.ports import (
     UnavailableBrowserAuthService,
     UnavailablePlatformService,
 )
+from audentra.infrastructure.voice import (
+    UnavailableVoiceSessionService,
+    VoiceSessionServiceProtocol,
+)
 
 from .auth_routes import auth_router
 from .config import HttpSettings
@@ -39,6 +43,7 @@ def create_app(
     auth_service: BrowserAuthService | None = None,
     settings: HttpSettings | None = None,
     lifespan: Lifespan[FastAPI] | None = None,
+    voice_service: VoiceSessionServiceProtocol | None = None,
 ) -> FastAPI:
     """Build an isolated API instance with injected application behavior."""
 
@@ -52,6 +57,7 @@ def create_app(
     app.state.http_settings = settings or HttpSettings.from_environment()
     app.state.platform_service = service or UnavailablePlatformService()
     app.state.browser_auth_service = auth_service or UnavailableBrowserAuthService()
+    app.state.voice_session_service = voice_service or UnavailableVoiceSessionService()
 
     app.include_router(auth_router)
     app.include_router(router)

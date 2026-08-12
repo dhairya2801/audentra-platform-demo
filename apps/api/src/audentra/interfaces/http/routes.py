@@ -20,6 +20,7 @@ from audentra.contracts.requests import (
     CompleteStudentOnboardingRequest,
     ConfirmStudentDocumentExtractionRequest,
     CreateAssistantConversationRequest,
+    CreateAssistantVoiceSessionRequest,
     CreateDepositPaymentRequest,
     CreateStaffActionRuleRequest,
     CreateStaffClubRequest,
@@ -43,6 +44,7 @@ from audentra.contracts.requests import (
     SelectPaymentPlanRequest,
     SimulateStaffOutreachRequest,
     StartStaffInteractionRequest,
+    SubmitAssistantVoiceTurnRequest,
     SubmitStudentRequirementResponseRequest,
     UpdateStaffActionRuleRequest,
     UpdateStaffClubRequest,
@@ -65,6 +67,8 @@ from .dependencies import (
     AuthDependency,
     IdempotencyDependency,
     ServiceDependency,
+    VoiceAgentTokenDependency,
+    VoiceSessionServiceDependency,
     WorkerTokenDependency,
 )
 
@@ -1108,6 +1112,78 @@ async def get_assistant_conversation_messages(
         auth=auth,
         path_params={"conversationId": _uuid(conversation_id)},
     )
+
+
+@router.post("/v1/student/assistant/voice-sessions", status_code=201, response_model=None)
+async def create_assistant_voice_session(
+    body: CreateAssistantVoiceSessionRequest,
+    request: Request,
+    auth: AuthDependency,
+    voice_sessions: VoiceSessionServiceDependency,
+) -> object:
+    return await voice_sessions.create(auth, body.public_payload(), request.state.request_id)
+
+
+@router.post(
+    "/v1/student/assistant/voice-sessions/{id}/token",
+    status_code=200,
+    response_model=None,
+)
+async def reconnect_assistant_voice_session(
+    voice_session_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    auth: AuthDependency,
+    voice_sessions: VoiceSessionServiceDependency,
+) -> object:
+    return await voice_sessions.reconnect(auth, _uuid(voice_session_id), request.state.request_id)
+
+
+# The three internal routes below are the voice agent's whole surface. They
+# authenticate with the shared voice-agent bearer credential, never a student
+# session: the student identity is bound server-side by the session record.
+
+
+@router.get(
+    "/internal/assistant/voice-sessions/{id}",
+    status_code=200,
+    response_model=None,
+)
+async def get_internal_voice_session(
+    voice_session_id: Annotated[UUID, Path(alias="id")],
+    _agent_token: VoiceAgentTokenDependency,
+    voice_sessions: VoiceSessionServiceDependency,
+) -> object:
+    return await voice_sessions.get_internal(_uuid(voice_session_id))
+
+
+@router.post(
+    "/internal/assistant/voice-sessions/{id}/turns",
+    status_code=200,
+    response_model=None,
+)
+async def submit_internal_voice_turn(
+    voice_session_id: Annotated[UUID, Path(alias="id")],
+    body: SubmitAssistantVoiceTurnRequest,
+    request: Request,
+    _agent_token: VoiceAgentTokenDependency,
+    voice_sessions: VoiceSessionServiceDependency,
+) -> object:
+    return await voice_sessions.submit_turn(
+        _uuid(voice_session_id), body.public_payload(), request.state.request_id
+    )
+
+
+@router.post(
+    "/internal/assistant/voice-sessions/{id}/end",
+    status_code=200,
+    response_model=None,
+)
+async def end_internal_voice_session(
+    voice_session_id: Annotated[UUID, Path(alias="id")],
+    _agent_token: VoiceAgentTokenDependency,
+    voice_sessions: VoiceSessionServiceDependency,
+) -> object:
+    return await voice_sessions.end_internal(_uuid(voice_session_id))
 
 
 @router.get("/v1/student/appointments", status_code=200, response_model=None)
