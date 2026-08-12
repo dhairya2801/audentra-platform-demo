@@ -112,7 +112,7 @@ class PostgresVoiceSessionRepository:
             )
         if row is None:  # pragma: no cover - RETURNING always yields on success
             raise NotFoundError("STUDENT_NOT_FOUND", "The student record was not found")
-        return _map_session(row)
+        return _map_session(dict(row))
 
     async def get_for_student(self, auth: AuthContext, voice_session_id: str) -> JsonDict:
         if auth.actor_type != "student":

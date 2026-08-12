@@ -47,11 +47,11 @@ class DerivedState:
 
 def derive_student_state(execution: ToolExecution) -> DerivedState:
     state = DerivedState(unavailable_data=list(execution.unavailable_data))
-    reads = {
-        name: read.get("data")
-        for name, read in execution.reads.items()
-        if read.get("status") == "available" and isinstance(read.get("data"), Mapping)
-    }
+    reads: dict[str, Mapping[str, Any]] = {}
+    for name, read in execution.reads.items():
+        data = read.get("data")
+        if read.get("status") == "available" and isinstance(data, Mapping):
+            reads[name] = data
 
     checklist = reads.get("getOnboardingChecklist")
     if checklist:

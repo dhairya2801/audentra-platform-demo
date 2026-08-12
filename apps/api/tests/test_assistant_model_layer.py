@@ -27,7 +27,7 @@ from audentra.integrations.ai.provider import CompletionClient
 from audentra.integrations.assistant.classify import REQUEST_TYPES
 from audentra.integrations.assistant.pipeline import AssistantPipeline
 from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
-from audentra.integrations.assistant.tools import AssistantToolHost
+from audentra.integrations.assistant.tools import AssistantToolHost, PrimitiveRead
 
 
 def _chat_payload(content: object, model: str = "gpt-4o-mini") -> dict[str, Any]:
@@ -185,7 +185,7 @@ class RecordingHost(AssistantToolHost):
     def __init__(self, primitives: dict[str, dict[str, Any]]) -> None:
         self.read_primitives: list[str] = []
 
-        def reader(name: str, value: dict[str, Any]):
+        def reader(name: str, value: dict[str, Any]) -> PrimitiveRead:
             async def read() -> dict[str, Any]:
                 self.read_primitives.append(name)
                 return value

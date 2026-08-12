@@ -238,3 +238,13 @@ def test_voice_session_migration_binds_rooms_to_owned_conversations() -> None:
         "(status = 'active' AND ended_at IS NULL)\n"
         "    OR (status = 'ended' AND ended_at IS NOT NULL)" in migration
     )
+
+
+def test_assistant_message_hardening_binds_messages_to_conversation_owner() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0035_assistant_message_ownership.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "FOREIGN KEY (conversation_id, tenant_id, student_id)" in migration
+    assert "REFERENCES assistant_conversation(id, tenant_id, student_id)" in migration
+    assert "ON DELETE CASCADE" in migration

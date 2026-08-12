@@ -61,7 +61,7 @@ class AssistantToolHost:
 
     def __init__(self, primitives: Mapping[str, PrimitiveRead]) -> None:
         self._primitives = dict(primitives)
-        self._cache: dict[str, Any] = {}
+        self._cache: dict[str, Mapping[str, Any]] = {}
 
     def supports(self, primitive: str) -> bool:
         return primitive in self._primitives

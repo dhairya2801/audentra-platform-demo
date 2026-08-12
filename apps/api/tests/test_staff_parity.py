@@ -210,3 +210,80 @@ def test_document_review_completes_work_item_and_notifies_student() -> None:
         next(x for x in student_documents["items"] if x["id"] == uploaded["id"])["status"]
         == "accepted"
     )
+
+
+@pytest.mark.parametrize(
+    ("decision", "subject_suffix"),
+    [("accepted", "… was accepted"), ("rejected", "… needs changes")],
+)
+def test_long_document_name_keeps_original_and_bounds_derived_staff_labels(
+    decision: str, subject_suffix: str
+) -> None:
+    service = InMemoryPlatformService()
+    student = AuthContext(
+        tenant_id=DEMO_IDS["tenant_id"],
+        student_id=DEMO_IDS["student_id"],
+        actor_id=DEMO_IDS["person_id"],
+        actor_type="student",
+    )
+    file_name = f"{'ü' * 251}.pdf"
+    uploaded = run(
+        service.dispatch(
+            ServiceCall(
+                operation="student.upload_document",
+                auth=student,
+                request_id="request.long-document-upload",
+                payload={"idempotencyKey": "staff.document.long-name.0001"},
+                upload=FileUpload(
+                    file_name=file_name,
+                    mime_type="application/pdf",
+                    content=b"%PDF-1.7\nlong-name boundary\n%%EOF\n",
+                    category="consent",
+                ),
+            )
+        )
+    )
+    processed = run(
+        service.dispatch(
+            ServiceCall(
+                operation="internal.process_document_extraction",
+                auth=student,
+                request_id="request.long-document-worker",
+                path_params={"document_id": uploaded["id"]},
+            )
+        )
+    )
+    assert processed["fileName"] == file_name
+    assert len(processed["fileName"]) == 255
+    assert processed["status"] == "needs_review"
+
+    center = run(service.dispatch(call("staff.get_action_center")))
+    item = next(
+        candidate
+        for candidate in center["items"]
+        if candidate.get("source") == {"type": "document", "id": uploaded["id"]}
+    )
+    assert len(item["title"]) == 240
+    assert item["title"].startswith("Review ")
+    assert item["title"].endswith("…")
+
+    result = run(
+        service.dispatch(
+            call(
+                "staff.review_document",
+                path={"document_id": uploaded["id"]},
+                payload={
+                    "workItemId": item["id"],
+                    "expectedWorkItemVersion": item["version"],
+                    "decision": decision,
+                    "note": "The bounded-label fixture matches the stored original.",
+                    "notifyStudent": True,
+                },
+            )
+        )
+    )
+    subject = result["notification"]["subject"]
+    assert len(subject) == 240
+    assert subject.endswith(subject_suffix)
+    assert result["document"]["status"] == decision
+    assert result["document"]["fileName"] == file_name

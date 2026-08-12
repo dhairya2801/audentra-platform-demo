@@ -161,6 +161,19 @@ class PostgresPlatformRepository:
             "context_sha256": _optional_string(attempt.get("contextSha256")),
             "prompt_cache_status": _optional_string(attempt.get("promptCacheStatus")),
         }
+        conflict_clause = (
+            """
+                    ON CONFLICT (
+                      tenant_id, document_id, request_id, operation, attempt_number
+                    ) WHERE document_id IS NOT NULL DO NOTHING
+            """
+            if parameters["document_id"] is not None
+            else """
+                    ON CONFLICT (
+                      tenant_id, student_id, request_id, operation, attempt_number
+                    ) WHERE document_id IS NULL DO NOTHING
+            """
+        )
         async with self._engine.begin() as connection:
             await connection.execute(
                 text(
@@ -184,9 +197,7 @@ class PostgresPlatformRepository:
                       :context_policy_version_id, :output_schema_version_id,
                       :config_revision, :context_sha256, :prompt_cache_status
                     )
-                    ON CONFLICT (
-                      tenant_id, document_id, request_id, attempt_number
-                    ) DO NOTHING
+                    {conflict_clause}
                     """
                 ),
                 parameters,

@@ -52,7 +52,7 @@ GitHub Actions invokes `deploy-preview.sh` only after all CI jobs pass on
 3. deploys the API with `min-instances=0`, a three-instance cap, Cloud SQL Auth
    Proxy, Cloud Storage workload identity, and Secret Manager references;
 4. deploys and executes a bounded outbox worker job; and
-5. configures Cloud Scheduler to launch one worker job every two minutes as a
+5. configures Cloud Scheduler to launch one worker job every five minutes as a
    durable polling bridge until the outbox is connected to Cloud Tasks/Pub/Sub.
 
 The jobs start from zero for every execution. Long document/AI work runs in a

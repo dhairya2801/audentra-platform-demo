@@ -31,6 +31,32 @@ def safe_file_name(value: str) -> str:
     return name
 
 
+def bounded_document_label(
+    file_name: object,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+    limit: int = 240,
+) -> str:
+    """Build a bounded derived label while preserving the canonical filename.
+
+    PostgreSQL stores the original filename at up to 255 characters, while
+    staff-work titles and inbox subjects are limited to 240. Only the derived
+    display label is shortened; fixed context such as ``Review`` or a decision
+    suffix is always retained.
+    """
+
+    filename_budget = limit - len(prefix) - len(suffix)
+    if filename_budget < 1:
+        raise ValueError("document label context leaves no room for a filename")
+    normalized_name = str(file_name)
+    if len(normalized_name) > filename_budget:
+        normalized_name = (
+            "…" if filename_budget == 1 else f"{normalized_name[: filename_budget - 1]}…"
+        )
+    return f"{prefix}{normalized_name}{suffix}"
+
+
 def validate_document_upload(file_name: str, mime_type: str, category: str, content: bytes) -> str:
     """Validate metadata and magic bytes, returning a normalized filename."""
 

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
 from audentra.infrastructure.postgres.platform_repository import PostgresPlatformRepository
-from audentra.infrastructure.storage.s3 import S3ObjectStorage
+from audentra.infrastructure.storage import ObjectStorage, create_object_storage
 from audentra.infrastructure.worker.action_center_enrichment import ActionCenterEnrichmentRunner
 from audentra.infrastructure.worker.agentic_scheduler import AgenticWorkflowScheduler
 from audentra.infrastructure.worker.call_transcription import CallTranscriptionRunner
@@ -34,7 +34,7 @@ class WorkerRuntimeResources:
     http_client: httpx.AsyncClient
     repository: OutboxRepository
     worker: WorkerService
-    object_storage: S3ObjectStorage | None = None
+    object_storage: ObjectStorage | None = None
 
     async def close(self) -> None:
         self.worker.stop()
@@ -59,9 +59,9 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
         timeout=httpx.Timeout(settings.worker.command_timeout_seconds, connect=10.0, pool=5.0),
         follow_redirects=False,
     )
-    object_storage: S3ObjectStorage | None = None
+    object_storage: ObjectStorage | None = None
     try:
-        object_storage = S3ObjectStorage(settings.object_storage)
+        object_storage = create_object_storage(settings.object_storage)
         outbox = OutboxRepository(
             engine,
             OutboxRepositoryConfig(

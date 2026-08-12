@@ -40,7 +40,7 @@ runtime_environment+=",WORKER_BATCH_SIZE=5,WORKER_COMMAND_TIMEOUT_SECONDS=180"
 runtime_environment+=",WORKER_LEASE_SECONDS=300"
 
 job_network_options=(
-  --add-cloudsql-instances="${CLOUD_SQL_INSTANCE}"
+  --set-cloudsql-instances="${CLOUD_SQL_INSTANCE}"
   --service-account="${RUNTIME_SERVICE_ACCOUNT}"
   --region="${GCP_REGION}"
   --project="${GCP_PROJECT_ID}"
@@ -144,7 +144,7 @@ scheduler_uri="https://run.googleapis.com/v2/projects/${GCP_PROJECT_ID}/location
 scheduler_args=(
   --location="${GCP_REGION}"
   --project="${GCP_PROJECT_ID}"
-  --schedule="*/2 * * * *"
+  --schedule="*/5 * * * *"
   --time-zone=Etc/UTC
   --uri="${scheduler_uri}"
   --http-method=POST
