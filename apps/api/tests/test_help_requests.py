@@ -666,11 +666,14 @@ def test_real_postgres_help_request_is_atomic_isolated_and_replay_safe() -> None
             assert int(counts["audits"]) == 1
             assert int(counts["events"]) == 1
             assert int(counts["replays"]) == 1
-            assert lineage["metadata"] == {
-                "topicCode": "support",
-                "status": "new",
-                "priority": "high",
-            }
+            metadata = lineage["metadata"]
+            assert metadata["topicCode"] == "support"
+            assert metadata["status"] == "new"
+            assert metadata["priority"] == "high"
+            # Triage now records where the inquiry landed alongside the basics.
+            assert metadata["triageComponent"] == "Enrollment Support"
+            assert metadata["workItemId"] is not None
+            assert metadata["requirementId"] is None
             assert lineage["event_name"] == "student.help_request_created.v1"
             assert "message" not in lineage["payload"]["data"]
         finally:
@@ -695,8 +698,66 @@ def _integration_schema_statements(schema: str) -> tuple[str, ...]:
           id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
           topic_code text NOT NULL, subject text NOT NULL, message text NOT NULL,
           status text NOT NULL, priority text NOT NULL, assignee_id uuid,
+          requirement_id uuid, status_before_help text, work_item_id uuid,
           version integer NOT NULL, created_at timestamptz NOT NULL,
-          updated_at timestamptz NOT NULL
+          updated_at timestamptz NOT NULL, last_message_at timestamptz,
+          expires_at timestamptz, archived_at timestamptz
+        )""",
+        f"""CREATE TABLE {schema}.staff_member (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL,
+          display_name varchar(160) NOT NULL,
+          email_normalized varchar(320) NOT NULL,
+          component varchar(120) NOT NULL,
+          active boolean NOT NULL DEFAULT true,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          updated_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE {schema}.student_inquiry_reply (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, inquiry_id uuid NOT NULL,
+          student_id uuid NOT NULL, staff_member_id uuid NOT NULL,
+          response_note text NOT NULL, notify_student boolean NOT NULL,
+          student_message_id uuid, created_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE {schema}.student_inquiry_student_reply (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, inquiry_id uuid NOT NULL,
+          student_id uuid NOT NULL, request_key varchar(128) NOT NULL,
+          body text NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE {schema}.staff_notification (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, staff_member_id uuid,
+          team_component varchar(120), kind varchar(48) NOT NULL,
+          title varchar(240) NOT NULL, body text NOT NULL,
+          resource_type varchar(48), resource_id uuid,
+          dedupe_key varchar(240) NOT NULL,
+          tenant_wide boolean NOT NULL DEFAULT false,
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT staff_notification_dedupe_uidx_{schema}
+            UNIQUE (tenant_id, dedupe_key)
+        )""",
+        f"""CREATE TABLE {schema}.staff_realtime_event (
+          cursor bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          id uuid NOT NULL, tenant_id uuid NOT NULL,
+          event_type varchar(120) NOT NULL, resource_type varchar(80) NOT NULL,
+          resource_id uuid NOT NULL, work_item_id uuid, staff_member_id uuid,
+          team_component varchar(120), tenant_wide boolean NOT NULL DEFAULT false,
+          payload jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE {schema}.student_realtime_event (
+          cursor bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+          id uuid NOT NULL, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
+          event_type varchar(120) NOT NULL, resource_type varchar(80) NOT NULL,
+          resource_id uuid NOT NULL,
+          payload jsonb NOT NULL DEFAULT '{{}}'::jsonb,
+          created_at timestamptz NOT NULL DEFAULT now()
+        )""",
+        f"""CREATE TABLE {schema}.staff_work_item_link (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, work_item_id uuid NOT NULL,
+          entity_type varchar(40) NOT NULL, entity_id uuid NOT NULL,
+          relationship varchar(40) NOT NULL DEFAULT 'related',
+          created_at timestamptz NOT NULL DEFAULT now(),
+          CONSTRAINT staff_work_item_link_uidx_{schema}
+            UNIQUE (tenant_id, work_item_id, entity_type, entity_id)
         )""",
         f"""CREATE TABLE {schema}.staff_work_item (
           id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
