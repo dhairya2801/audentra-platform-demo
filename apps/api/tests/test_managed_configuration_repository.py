@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from audentra.infrastructure.postgres.managed_configuration_repository import (
     PostgresManagedConfigurationRepository,
     _journey_input_config,
     _journey_input_flow,
+    _journey_input_form,
     _journey_string_list,
     _journey_task_material_signature,
     _validate_core_onboarding_invariants,
@@ -124,6 +126,210 @@ flows:
         )
 
     assert error.value.code == "MANAGED_JOURNEY_DEPENDENCY_CYCLE"
+
+
+def test_journey_parser_normalizes_answer_driven_branch_routes() -> None:
+    document = parse_managed_configuration(
+        "journeys",
+        """
+tenant: aster
+configuration: journeys
+flows:
+  - id: conditional_onboarding
+    kind: onboarding
+    tasks:
+      - id: living_plan
+        title: Choose where you will live
+        description: Tell us whether you plan to live on campus.
+        task_type: single_select
+        options: ["Yes", "No"]
+      - id: housing_application
+        title: Complete your housing application
+        description: Share the information Housing needs.
+        task_type: form
+        depends_on: [living_plan]
+        activation:
+          match: all
+          rules:
+            - source_task: living_plan
+              field: $answer
+              operator: equals
+              value: "Yes"
+      - id: commuter_setup
+        title: Set up your commuter plan
+        description: Share the information Commuter Services needs.
+        task_type: form
+        depends_on: [living_plan]
+        activation:
+          rules:
+            - source_task: living_plan
+              field: $answer
+              operator: equals
+              value: "No"
+""",
+        tenant_slug="aster",
+    )
+
+    tasks = {task["code"]: task for task in materialized_journey_tasks(document)}
+
+    assert tasks["housing_application"]["activation"] == {
+        "match": "all",
+        "rules": [
+            {
+                "sourceTaskId": "living_plan",
+                "fieldId": "$answer",
+                "operator": "equals",
+                "value": "Yes",
+            }
+        ],
+    }
+    assert tasks["commuter_setup"]["activation"]["rules"][0]["value"] == "No"
+
+
+def test_journey_parser_rejects_invalid_answer_driven_route_contracts() -> None:
+    with pytest.raises(ApiError, match="must also be a prerequisite") as missing_dependency:
+        parse_managed_configuration(
+            "journeys",
+            """
+tenant: aster
+configuration: journeys
+flows:
+  - id: conditional_onboarding
+    kind: onboarding
+    tasks:
+      - id: living_plan
+        title: Choose where you will live
+        description: Tell us whether you plan to live on campus.
+        task_type: single_select
+        options: ["Yes", "No"]
+      - id: housing_application
+        title: Complete your housing application
+        description: Share the information Housing needs.
+        task_type: form
+        activation:
+          rules:
+            - source_task: living_plan
+              field: $answer
+              operator: equals
+              value: "Yes"
+""",
+            tenant_slug="aster",
+        )
+
+    assert missing_dependency.value.code == "MANAGED_JOURNEY_ROUTE_SOURCE_NOT_PREREQUISITE"
+
+    with pytest.raises(ApiError, match="is not a published option") as invalid_option:
+        parse_managed_configuration(
+            "journeys",
+            """
+tenant: aster
+configuration: journeys
+flows:
+  - id: conditional_onboarding
+    kind: onboarding
+    tasks:
+      - id: living_plan
+        title: Choose where you will live
+        description: Tell us whether you plan to live on campus.
+        task_type: single_select
+        options: ["Yes", "No"]
+      - id: housing_application
+        title: Complete your housing application
+        description: Share the information Housing needs.
+        task_type: form
+        depends_on: [living_plan]
+        activation:
+          rules:
+            - source_task: living_plan
+              field: $answer
+              operator: equals
+              value: Maybe
+""",
+            tenant_slug="aster",
+        )
+
+    assert invalid_option.value.code == "INVALID_MANAGED_JOURNEY_ROUTE"
+
+
+def test_journey_parser_supports_switch_defaults_and_numeric_thresholds() -> None:
+    document = parse_managed_configuration(
+        "journeys",
+        """
+tenant: aster
+configuration: journeys
+flows:
+  - id: routed_onboarding
+    kind: onboarding
+    tasks:
+      - id: living_plan
+        title: Choose a living plan
+        description: Choose the option that fits.
+        task_type: single_select
+        options: [On campus, Off campus, With family, Not sure]
+      - id: other_living_path
+        title: Review another living path
+        description: Handle the default case.
+        task_type: information
+        depends_on: [living_plan]
+        activation:
+          rules:
+            - source_task: living_plan
+              field: $answer
+              operator: none_of
+              value: [On campus, Off campus, With family]
+      - id: readiness_assessment
+        title: Complete readiness assessment
+        description: Record the readiness score.
+        task_type: form
+        input:
+          fields:
+            - id: readiness_score
+              title: Readiness score
+              field_type: number
+              required: true
+              minimum: 0
+              maximum: 100
+              step: 1
+      - id: guided_path
+        title: Complete the guided path
+        description: Continue through the middle tier.
+        task_type: information
+        depends_on: [readiness_assessment]
+        activation:
+          match: all
+          rules:
+            - source_task: readiness_assessment
+              field: readiness_score
+              operator: greater_than_or_equal
+              value: 50
+            - source_task: readiness_assessment
+              field: readiness_score
+              operator: less_than
+              value: 80
+""",
+        tenant_slug="aster",
+    )
+
+    tasks = {task["code"]: task for task in materialized_journey_tasks(document)}
+    assert tasks["other_living_path"]["activation"]["rules"][0]["value"] == [
+        "On campus",
+        "Off campus",
+        "With family",
+    ]
+    score = tasks["readiness_assessment"]["inputConfig"]["fields"][0]
+    assert score == {
+        "id": "readiness_score",
+        "title": "Readiness score",
+        "field_type": "number",
+        "required": True,
+        "minimum": 0.0,
+        "maximum": 100.0,
+        "step": 1.0,
+    }
+    assert [rule["operator"] for rule in tasks["guided_path"]["activation"]["rules"]] == [
+        "greater_than_or_equal",
+        "less_than",
+    ]
 
 
 def test_journey_parser_preserves_order_activity_and_interaction_configuration() -> None:
@@ -388,11 +594,23 @@ def test_choice_flow_normalizes_conditions_and_rejects_invalid_field_shapes() ->
                 "maximum_selections": 1,
                 "when": {"field": "campus", "equals": "north"},
             },
+            {
+                "id": "score",
+                "title": "Readiness score",
+                "field_type": "number",
+                "required": True,
+                "minimum": 0,
+                "maximum": 100,
+                "step": 5,
+            },
         ],
         task_code="preferences",
     )
     assert flow[1]["maximum_selections"] == 1
     assert flow[1]["when"] == {"field": "campus", "equals": "north"}
+    assert flow[2]["minimum"] == 0.0
+    assert flow[2]["maximum"] == 100.0
+    assert flow[2]["step"] == 5.0
 
     invalid_flows = [
         ("not-a-list", "must be a list"),
@@ -404,7 +622,18 @@ def test_choice_flow_normalizes_conditions_and_rejects_invalid_field_shapes() ->
             ],
             "duplicate choice-flow field id",
         ),
-        ([{"id": "score", "title": "Score", "field_type": "number"}], "invalid choice-flow"),
+        (
+            [
+                {
+                    "id": "score",
+                    "title": "Score",
+                    "field_type": "number",
+                    "minimum": 10,
+                    "maximum": 1,
+                }
+            ],
+            "minimum exceeds maximum",
+        ),
         (
             [{"id": "name", "title": "Name", "field_type": "text", "options": ["x"]}],
             "options require a select field",
@@ -424,6 +653,67 @@ def test_choice_flow_normalizes_conditions_and_rejects_invalid_field_shapes() ->
     for invalid, message in invalid_flows:
         with pytest.raises(ApiError, match=message):
             _journey_input_flow(invalid, task_code="preferences")
+
+
+def test_multi_page_form_normalizes_pages_and_rejects_duplicate_cross_page_fields() -> None:
+    form = _journey_input_form(
+        {
+            "version": 1,
+            "pages": [
+                {
+                    "id": "contact",
+                    "title": "Contact details",
+                    "fields": [
+                        {
+                            "id": "email",
+                            "title": "Email",
+                            "field_type": "email",
+                            "required": True,
+                        }
+                    ],
+                },
+                {
+                    "id": "preferences",
+                    "title": "Preferences",
+                    "description": "Choose one.",
+                    "fields": [
+                        {
+                            "id": "channel",
+                            "title": "Channel",
+                            "field_type": "single_select",
+                            "required": True,
+                            "options": ["Portal", "Email"],
+                        }
+                    ],
+                },
+            ],
+        },
+        task_code="student_intake",
+    )
+
+    assert form["version"] == 1
+    assert form["pages"][1]["description"] == "Choose one."
+    assert form["pages"][1]["fields"][0]["options"] == ["Portal", "Email"]
+
+    with pytest.raises(ApiError, match="duplicate form field email across pages"):
+        _journey_input_form(
+            {
+                "version": 1,
+                "pages": [
+                    {
+                        "id": "one",
+                        "title": "One",
+                        "fields": [{"id": "email", "title": "Email", "field_type": "email"}],
+                    },
+                    {
+                        "id": "two",
+                        "title": "Two",
+                        "fields": [{"id": "email", "title": "Email again", "field_type": "email"}],
+                    },
+                ],
+            },
+            task_code="student_intake",
+        )
 
 
 def test_journey_parser_validates_core_cards_before_excluding_them() -> None:
@@ -703,6 +993,16 @@ events:
     assert event["advertisement_ends_at"] == datetime(2027, 8, 28, 17, tzinfo=UTC)
 
 
+def test_campus_event_changes_notify_registrants_without_live_content_replacement() -> None:
+    source = inspect.getsource(PostgresManagedConfigurationRepository._notify_event_registrants)
+
+    assert "UPDATE campus_event_registration" in source
+    assert "status=CASE WHEN :cancel THEN 'cancelled_by_event'" in source
+    assert "INSERT INTO student_realtime_event" in source
+    assert '"invalidate": ["messages", "bootstrap"]' in source
+    assert '"campus_life"' not in source
+
+
 def test_academic_course_parser_keeps_prerequisites_and_resources() -> None:
     document = parse_managed_configuration(
         "academics",
@@ -710,7 +1010,8 @@ def test_academic_course_parser_keeps_prerequisites_and_resources() -> None:
 tenant: aster
 configuration: academics
 courses:
-  - code: CS 201
+  - id: cs-201
+    code: CS 201
     title: Data Structures
     description: Trees, graphs, hashing, and algorithm analysis.
     credits: 4
@@ -722,6 +1023,12 @@ courses:
     resources:
       - label: Course handbook
         url: https://example.edu/cs-201
+    related_videos:
+      - id: data-structures-overview
+        title: Data structures overview
+        description: Optional review material.
+        url: https://www.youtube.com/watch?v=2Lg0W1_JMs4
+        source_label: CS50
 """,
         tenant_slug="aster",
     )
@@ -733,6 +1040,17 @@ courses:
     assert course["resources"] == [
         {"label": "Course handbook", "url": "https://example.edu/cs-201"}
     ]
+    assert course["sourceId"] == "cs-201"
+    assert course["relatedVideos"] == [
+        {
+            "id": "data-structures-overview",
+            "title": "Data structures overview",
+            "description": "Optional review material.",
+            "url": "https://www.youtube.com/watch?v=2Lg0W1_JMs4",
+            "provider": "YouTube",
+            "sourceLabel": "CS50",
+        }
+    ]
 
 
 def test_academic_course_parser_returns_public_error_for_invalid_credits() -> None:
@@ -743,7 +1061,8 @@ def test_academic_course_parser_returns_public_error_for_invalid_credits() -> No
 tenant: aster
 configuration: academics
 courses:
-  - code: CS 201
+  - id: cs-201
+    code: CS 201
     title: Data Structures
     description: Trees, graphs, hashing, and algorithm analysis.
     credits: many
@@ -753,6 +1072,31 @@ courses:
         )
 
     assert error.value.code == "INVALID_MANAGED_CONFIGURATION"
+
+
+def test_academic_course_parser_rejects_non_youtube_embeds() -> None:
+    with pytest.raises(ApiError, match="valid HTTPS YouTube URL") as error:
+        parse_managed_configuration(
+            "academics",
+            """
+tenant: aster
+configuration: academics
+courses:
+  - id: cs-101
+    code: CS 101
+    title: Programming Fundamentals
+    description: Introductory programming.
+    credits: 4
+    level: 100
+    related_videos:
+      - id: unsafe
+        title: Untrusted embed
+        url: https://video.example.edu/watch/123
+""",
+            tenant_slug="aster",
+        )
+
+    assert error.value.code == "INVALID_CATALOG_COURSE"
 
 
 def test_staff_managed_experience_migration_is_tenant_scoped_and_versioned() -> None:
@@ -781,6 +1125,17 @@ def test_staff_journey_builder_migration_preserves_evidence_and_backfills_types(
     assert "WHEN 'document' THEN 'upload_file'" in migration
     assert "jsonb_array_elements" in migration
     assert "WHERE code='system_zero_step_enrollment'" in migration
+
+
+def test_conditional_journey_routing_migration_is_bounded_and_backward_compatible() -> None:
+    migration = (
+        Path(__file__).parents[1] / "migrations" / "0030_conditional_journey_routing.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "ADD COLUMN activation_rules jsonb NOT NULL" in migration
+    assert 'DEFAULT \'{"match":"all","rules":[]}\'::jsonb' in migration
+    assert "jsonb_typeof(activation_rules) = 'object'" in migration
+    assert "IN ('all', 'any')" in migration
 
 
 @pytest.mark.anyio

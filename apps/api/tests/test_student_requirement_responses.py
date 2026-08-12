@@ -81,6 +81,73 @@ def test_selection_flow_enforces_required_conditional_types_options_and_maximum(
         )
 
 
+def test_multi_page_form_validates_the_flat_canonical_response_across_every_page() -> None:
+    form = {
+        "version": 1,
+        "pages": [
+            {
+                "id": "contact",
+                "title": "Contact",
+                "fields": [{"id": "email", "field_type": "email", "required": True}],
+            },
+            {
+                "id": "preferences",
+                "title": "Preferences",
+                "fields": [
+                    {
+                        "id": "channel",
+                        "field_type": "single_select",
+                        "required": True,
+                        "options": ["Portal", "Email"],
+                    }
+                ],
+            },
+        ],
+    }
+
+    assert _normalize_requirement_response(
+        "form",
+        {"form": form},
+        {"values": {"email": "student@example.edu", "channel": "Portal"}},
+    ) == {"values": {"email": "student@example.edu", "channel": "Portal"}}
+    with pytest.raises(ApiError, match="channel is required"):
+        _normalize_requirement_response(
+            "form",
+            {"form": form},
+            {"values": {"email": "student@example.edu"}},
+        )
+
+
+def test_number_fields_enforce_published_range_and_step() -> None:
+    fields = [
+        {
+            "id": "readiness_score",
+            "field_type": "number",
+            "required": True,
+            "minimum": 0,
+            "maximum": 100,
+            "step": 5,
+        }
+    ]
+    assert _normalize_requirement_response(
+        "form",
+        {"fields": fields},
+        {"values": {"readiness_score": 75}},
+    ) == {"values": {"readiness_score": 75}}
+    with pytest.raises(ApiError, match="exceeds its maximum"):
+        _normalize_requirement_response(
+            "form",
+            {"fields": fields},
+            {"values": {"readiness_score": 105}},
+        )
+    with pytest.raises(ApiError, match="allowed step"):
+        _normalize_requirement_response(
+            "form",
+            {"fields": fields},
+            {"values": {"readiness_score": 72}},
+        )
+
+
 @pytest.mark.parametrize(
     ("interaction_type", "config", "response"),
     [
@@ -210,8 +277,8 @@ def test_bounded_response_accepts_json_scalars_and_rejects_hostile_shapes() -> N
         ),
         (
             [{"id": "score", "field_type": "number"}],
-            {"score": 1},
-            "unsupported published type",
+            {"score": "high"},
+            "must be a number",
         ),
     ],
 )

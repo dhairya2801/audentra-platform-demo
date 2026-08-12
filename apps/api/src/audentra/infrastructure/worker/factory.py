@@ -7,15 +7,18 @@ from audentra.infrastructure.messaging.dispatcher import EventDispatcher, EventH
 
 from .dashboard_projector import StudentDashboardProjector
 from .document_commands import DocumentExtractionRunner
+from .document_review_projector import DocumentReviewProjector
 
 
 def build_event_dispatcher(
     projector: StudentDashboardProjector,
     document_runner: DocumentExtractionRunner,
+    document_review_projector: DocumentReviewProjector,
 ) -> EventDispatcher:
     handlers: dict[HandlerKey, EventHandler] = {
         "dashboard_projection": projector.handle,
         "document_reservation_recovery": document_runner.handle,
         "document_extraction": document_runner.handle,
+        "document_review_routing": document_review_projector.handle,
     }
     return EventDispatcher(handlers)

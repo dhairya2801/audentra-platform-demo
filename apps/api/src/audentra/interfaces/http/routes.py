@@ -1,11 +1,14 @@
 """Compatibility-first FastAPI routes for the Audentra platform API."""
 
+import asyncio
 import json
+import time
 from collections.abc import Mapping
 from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
@@ -13,22 +16,34 @@ from starlette.formparsers import MultiPartException
 from audentra.contracts.requests import (
     ActivityEventBatchRequest,
     AskEdwardRequest,
+    CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
     ConfirmStudentDocumentExtractionRequest,
     CreateDepositPaymentRequest,
+    CreateStaffActionRuleRequest,
     CreateStaffClubRequest,
     CreateStaffCorePlayRequest,
     CreateStaffKnowledgeCardRequest,
+    CreateStaffWorkCommentRequest,
+    CreateStaffWorkItemRequest,
     CreateStudentAppointmentRequest,
     CreateStudentDocumentRequest,
     CreateStudentHelpRequest,
+    CreateStudentInquiryMessageRequest,
     DecideStudentExperienceUpdateRequest,
+    DeferStudentExperienceUpdatesRequest,
     DraftStaffManagedConfigurationRequest,
     PreviewStaffEdwardRequest,
+    RecordStaffCommunicationRequest,
+    RegisterCampusEventRequest,
+    RequestStaffAiRefreshRequest,
+    RetryStaffCallTranscriptionRequest,
     ReviewStaffDocumentRequest,
     SelectPaymentPlanRequest,
     SimulateStaffOutreachRequest,
+    StartStaffInteractionRequest,
     SubmitStudentRequirementResponseRequest,
+    UpdateStaffActionRuleRequest,
     UpdateStaffClubRequest,
     UpdateStaffCorePlayRequest,
     UpdateStaffInquiryRequest,
@@ -54,8 +69,21 @@ from .dependencies import (
 
 MAXIMUM_DOCUMENT_BYTES = 10_485_760
 MAXIMUM_PORTAL_MEDIA_BYTES = 5_242_880
+MAXIMUM_CALL_RECORDING_BYTES = 10_485_760
 ALLOWED_DOCUMENT_MIME_TYPES = {"application/pdf", "image/jpeg", "image/png"}
 ALLOWED_PORTAL_MEDIA_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_CALL_RECORDING_MIME_TYPES = {
+    "audio/flac",
+    "audio/m4a",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "audio/webm",
+    "audio/x-m4a",
+    "video/mp4",
+    "video/webm",
+}
 ALLOWED_DOCUMENT_CATEGORIES = {
     "identity",
     "residency",
@@ -279,6 +307,92 @@ async def _read_portal_media_upload(request: Request) -> FileUpload:
         await form.close()
 
 
+def _valid_audio_signature(content: bytes, mime_type: str) -> bool:
+    if mime_type in {"audio/webm", "video/webm"}:
+        return content.startswith(b"\x1a\x45\xdf\xa3")
+    if mime_type == "audio/ogg":
+        return content.startswith(b"OggS")
+    if mime_type == "audio/flac":
+        return content.startswith(b"fLaC")
+    if mime_type == "audio/wav":
+        return len(content) >= 12 and content.startswith(b"RIFF") and content[8:12] == b"WAVE"
+    if mime_type == "audio/mpeg":
+        return content.startswith(b"ID3") or (
+            len(content) >= 2 and content[0] == 0xFF and content[1] & 0xE0 == 0xE0
+        )
+    return len(content) >= 12 and content[4:8] == b"ftyp"
+
+
+async def _read_call_recording_upload(request: Request) -> FileUpload:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise ApiError(415, "MULTIPART_REQUIRED", "Content-Type must be multipart/form-data")
+    try:
+        form = await request.form(
+            max_files=1,
+            max_fields=1,
+            max_part_size=MAXIMUM_CALL_RECORDING_BYTES,
+        )
+    except (MultiPartException, StarletteHTTPException) as error:
+        raise ApiError(
+            413,
+            "CALL_RECORDING_TOO_LARGE",
+            "Upload one call recording no larger than 10 MB",
+        ) from error
+    try:
+        file_part: UploadFile | None = None
+        consent_confirmed = False
+        for field_name, part in form.multi_items():
+            if isinstance(part, UploadFile):
+                if field_name != "file" or file_part is not None:
+                    raise BadRequestError(
+                        "ONE_CALL_RECORDING_REQUIRED",
+                        "Upload exactly one call recording",
+                    )
+                file_part = part
+            elif field_name == "consentConfirmed":
+                consent_confirmed = str(part).strip().lower() == "true"
+            else:
+                raise BadRequestError(
+                    "UNEXPECTED_UPLOAD_FIELD",
+                    "Only file and consentConfirmed fields are accepted",
+                )
+        if file_part is None:
+            raise BadRequestError("FILE_REQUIRED", "Choose a call recording to upload")
+        if not consent_confirmed:
+            raise BadRequestError(
+                "RECORDING_CONSENT_REQUIRED",
+                "Confirm that recording and transcription consent was obtained",
+            )
+        mime_type = (file_part.content_type or "application/octet-stream").split(";", 1)[0]
+        if mime_type not in ALLOWED_CALL_RECORDING_MIME_TYPES:
+            raise ApiError(
+                415,
+                "UNSUPPORTED_CALL_RECORDING_TYPE",
+                "Use a FLAC, MP3, MP4, M4A, OGG, WAV, or WebM recording",
+            )
+        content = await file_part.read(MAXIMUM_CALL_RECORDING_BYTES + 1)
+        if len(content) < 1 or len(content) > MAXIMUM_CALL_RECORDING_BYTES:
+            raise ApiError(
+                413,
+                "CALL_RECORDING_TOO_LARGE",
+                "Call recordings must be no larger than 10 MB",
+            )
+        if not _valid_audio_signature(content, mime_type):
+            raise ApiError(
+                415,
+                "CALL_RECORDING_SIGNATURE_MISMATCH",
+                "The recording contents do not match the selected audio type",
+            )
+        return FileUpload(
+            file_name=file_part.filename or "call-recording",
+            mime_type=mime_type,
+            content=content,
+        )
+    finally:
+        await form.close()
+
+
 @router.get("/health", status_code=200, response_model=None)
 async def liveness(request: Request, service: ServiceDependency) -> object:
     return await _dispatch(service=service, request=request, operation="health.liveness")
@@ -371,6 +485,30 @@ async def get_campus_life(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="student.get_campus_life", auth=auth
+    )
+
+
+@router.post(
+    "/v1/student/campus-life/events/{eventId}/register",
+    status_code=200,
+    response_model=None,
+)
+async def register_campus_event(
+    event_id: Annotated[UUID, Path(alias="eventId")],
+    body: RegisterCampusEventRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.register_campus_event",
+        auth=auth,
+        path_params={"eventId": _uuid(event_id)},
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
     )
 
 
@@ -486,6 +624,28 @@ async def update_housing_plan(
 
 
 @router.post(
+    "/v1/student/experience-updates/defer",
+    status_code=200,
+    response_model=None,
+)
+async def defer_student_experience_updates(
+    body: DeferStudentExperienceUpdatesRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    """Save a grouped reminder without exposing partial client-side writes."""
+
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.defer_experience_updates",
+        auth=auth,
+        payload=body.public_payload(),
+    )
+
+
+@router.post(
     "/v1/student/experience-updates/{id}/decision",
     status_code=200,
     response_model=None,
@@ -562,6 +722,95 @@ async def list_messages(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="student.list_messages", auth=auth
+    )
+
+
+def _student_sse_message(event: Mapping[str, object]) -> str:
+    cursor_value = event["cursor"]
+    if not isinstance(cursor_value, int):
+        raise TypeError("Student realtime event cursor must be an integer")
+    event_type = str(event["type"]).replace("\r", "").replace("\n", "")
+    return (
+        f"id: {cursor_value}\n"
+        f"event: {event_type}\n"
+        f"data: {json.dumps(dict(event), separators=(',', ':'), default=str)}\n\n"
+    )
+
+
+@router.get("/v1/student/events", status_code=200, response_model=None)
+async def stream_student_events(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    after: Annotated[int | None, Query(ge=0)] = None,
+) -> StreamingResponse:
+    cursor = after
+    header_cursor = request.headers.get("last-event-id")
+    if cursor is None and header_cursor:
+        if not header_cursor.isascii() or not header_cursor.isdecimal():
+            raise BadRequestError(
+                "INVALID_EVENT_CURSOR",
+                "Last-Event-ID must be a non-negative numeric cursor",
+            )
+        cursor = int(header_cursor)
+
+    async def events() -> Any:
+        bootstrap = cursor is None or cursor == 0
+        current = None if bootstrap else cursor
+        heartbeat_at = time.monotonic()
+        yield "retry: 2000\n\n"
+        ready_sent = False
+        while not await request.is_disconnected():
+            batch = await service.dispatch(
+                ServiceCall(
+                    operation="student.get_realtime_events",
+                    auth=auth,
+                    request_id=request.state.request_id,
+                    payload={"afterCursor": current, "limit": 100},
+                )
+            )
+            if not isinstance(batch, Mapping):
+                raise ApiError(
+                    500,
+                    "INVALID_EVENT_STREAM_RESPONSE",
+                    "The platform service returned an invalid event stream response",
+                )
+            raw_events = batch.get("events")
+            if isinstance(raw_events, list):
+                for raw_event in raw_events:
+                    if not isinstance(raw_event, Mapping):
+                        continue
+                    current = int(raw_event["cursor"])
+                    yield _student_sse_message(raw_event)
+                    heartbeat_at = time.monotonic()
+            if current is None and batch.get("cursor") is not None:
+                current = int(batch["cursor"])
+            if bootstrap and not ready_sent and current is not None:
+                yield _student_sse_message(
+                    {
+                        "cursor": current,
+                        "type": "student.stream.ready",
+                        "resourceType": "student",
+                        "resourceId": auth.student_id,
+                        "data": {"invalidate": ["messages", "bootstrap"]},
+                    }
+                )
+                ready_sent = True
+                heartbeat_at = time.monotonic()
+            now = time.monotonic()
+            if now - heartbeat_at >= 15:
+                yield f": heartbeat {current or 0}\n\n"
+                heartbeat_at = now
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 
@@ -926,6 +1175,30 @@ async def create_help_request(
     )
 
 
+@router.post(
+    "/v1/student/help/requests/{id}/messages",
+    status_code=200,
+    response_model=None,
+)
+async def create_student_inquiry_message(
+    inquiry_id: Annotated[UUID, Path(alias="id")],
+    body: CreateStudentInquiryMessageRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.create_inquiry_message",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"inquiryId": _uuid(inquiry_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
 @router.get("/v1/staff/workspace", status_code=200, response_model=None)
 async def get_staff_workspace(
     request: Request, service: ServiceDependency, auth: AuthDependency
@@ -1088,6 +1361,22 @@ async def update_staff_inquiry(
     )
 
 
+@router.get("/v1/staff/inquiries/{id}/thread", status_code=200, response_model=None)
+async def get_staff_inquiry_thread(
+    inquiry_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_inquiry_thread",
+        auth=auth,
+        path_params={"inquiryId": _uuid(inquiry_id)},
+    )
+
+
 @router.post("/v1/staff/campus-life/clubs", status_code=201, response_model=None)
 async def create_staff_club(
     body: CreateStaffClubRequest,
@@ -1163,6 +1452,24 @@ async def get_action_center(
     )
 
 
+@router.post("/v1/staff/work-items", status_code=201, response_model=None)
+async def create_work_item(
+    body: CreateStaffWorkItemRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.create_work_item",
+        auth=auth,
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
+    )
+
+
 @router.patch("/v1/staff/work-items/{id}", status_code=200, response_model=None)
 async def update_work_item(
     work_item_id: Annotated[UUID, Path(alias="id")],
@@ -1178,6 +1485,362 @@ async def update_work_item(
         auth=auth,
         payload=body.public_payload(),
         path_params={"workItemId": _uuid(work_item_id)},
+    )
+
+
+def _staff_sse_message(event: Mapping[str, object]) -> str:
+    cursor_value = event["cursor"]
+    if not isinstance(cursor_value, int):
+        raise TypeError("Staff realtime event cursor must be an integer")
+    cursor = cursor_value
+    event_type = str(event["type"]).replace("\r", "").replace("\n", "")
+    return (
+        f"id: {cursor}\n"
+        f"event: {event_type}\n"
+        f"data: {json.dumps(dict(event), separators=(',', ':'), default=str)}\n\n"
+    )
+
+
+@router.get("/v1/staff/events", status_code=200, response_model=None)
+async def stream_staff_events(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    after: Annotated[int | None, Query(ge=0)] = None,
+) -> StreamingResponse:
+    cursor = after
+    header_cursor = request.headers.get("last-event-id")
+    if cursor is None and header_cursor:
+        if not header_cursor.isascii() or not header_cursor.isdecimal():
+            raise BadRequestError(
+                "INVALID_EVENT_CURSOR",
+                "Last-Event-ID must be a non-negative numeric cursor",
+            )
+        cursor = int(header_cursor)
+
+    async def events() -> Any:
+        bootstrap = cursor is None or cursor == 0
+        current = None if bootstrap else cursor
+        heartbeat_at = time.monotonic()
+        yield "retry: 2000\n\n"
+        ready_sent = False
+        while not await request.is_disconnected():
+            batch = await service.dispatch(
+                ServiceCall(
+                    operation="staff.get_realtime_events",
+                    auth=auth,
+                    request_id=request.state.request_id,
+                    payload={"afterCursor": current, "limit": 100},
+                )
+            )
+            if not isinstance(batch, Mapping):
+                raise ApiError(
+                    500,
+                    "INVALID_EVENT_STREAM_RESPONSE",
+                    "The platform service returned an invalid event stream response",
+                )
+            raw_events = batch.get("events")
+            if isinstance(raw_events, list):
+                for raw_event in raw_events:
+                    if not isinstance(raw_event, Mapping):
+                        continue
+                    current = int(raw_event["cursor"])
+                    yield _staff_sse_message(raw_event)
+                    heartbeat_at = time.monotonic()
+            if current is None and batch.get("cursor") is not None:
+                current = int(batch["cursor"])
+            if bootstrap and not ready_sent and current is not None:
+                yield _staff_sse_message(
+                    {
+                        "cursor": current,
+                        "type": "staff.stream.ready",
+                        "resourceType": "tenant",
+                        "resourceId": auth.tenant_id,
+                        "workItemId": None,
+                        "data": {"invalidate": ["workspace", "notifications", "messages"]},
+                    }
+                )
+                ready_sent = True
+                heartbeat_at = time.monotonic()
+            now = time.monotonic()
+            if now - heartbeat_at >= 15:
+                yield f": heartbeat {current or 0}\n\n"
+                heartbeat_at = now
+            await asyncio.sleep(1)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+@router.get("/v1/staff/work-items/{id}", status_code=200, response_model=None)
+async def get_work_item_detail(
+    work_item_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_work_item_detail",
+        auth=auth,
+        path_params={"workItemId": _uuid(work_item_id)},
+    )
+
+
+@router.post("/v1/staff/work-items/{id}/comments", status_code=201, response_model=None)
+async def create_work_item_comment(
+    work_item_id: Annotated[UUID, Path(alias="id")],
+    body: CreateStaffWorkCommentRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.create_work_comment",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"workItemId": _uuid(work_item_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/v1/staff/work-items/{id}/interactions", status_code=201, response_model=None)
+async def start_work_item_interaction(
+    work_item_id: Annotated[UUID, Path(alias="id")],
+    body: StartStaffInteractionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.start_interaction",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"workItemId": _uuid(work_item_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post(
+    "/v1/staff/interactions/{id}/communications",
+    status_code=201,
+    response_model=None,
+)
+async def record_interaction_communication(
+    interaction_id: Annotated[UUID, Path(alias="id")],
+    body: RecordStaffCommunicationRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.record_interaction_communication",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"interactionId": _uuid(interaction_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post(
+    "/v1/staff/interactions/{id}/recordings",
+    status_code=201,
+    response_model=None,
+)
+async def upload_interaction_recording(
+    interaction_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    upload = await _read_call_recording_upload(request)
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.upload_call_recording",
+        auth=auth,
+        upload=upload,
+        path_params={"interactionId": _uuid(interaction_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/v1/staff/call-recordings/{id}/content", status_code=200)
+async def get_call_recording_content(
+    recording_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> Response:
+    result = await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_call_recording_content",
+        auth=auth,
+        path_params={"recordingId": _uuid(recording_id)},
+    )
+    return _binary_response(result)
+
+
+@router.post(
+    "/v1/staff/call-recordings/{id}/retry",
+    status_code=202,
+    response_model=None,
+)
+async def retry_call_recording_transcription(
+    recording_id: Annotated[UUID, Path(alias="id")],
+    body: RetryStaffCallTranscriptionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.retry_call_transcription",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"recordingId": _uuid(recording_id)},
+    )
+
+
+@router.post(
+    "/v1/staff/interactions/{id}/complete",
+    status_code=200,
+    response_model=None,
+)
+async def complete_interaction(
+    interaction_id: Annotated[UUID, Path(alias="id")],
+    body: CompleteStaffInteractionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.complete_interaction",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"interactionId": _uuid(interaction_id)},
+    )
+
+
+@router.post("/v1/staff/work-items/{id}/ai-refresh", status_code=202, response_model=None)
+async def request_work_item_ai_refresh(
+    work_item_id: Annotated[UUID, Path(alias="id")],
+    body: RequestStaffAiRefreshRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.request_ai_refresh",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"workItemId": _uuid(work_item_id)},
+    )
+
+
+@router.get("/v1/staff/action-rules", status_code=200, response_model=None)
+async def get_staff_action_rules(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_action_rules",
+        auth=auth,
+    )
+
+
+@router.get("/v1/staff/notifications", status_code=200, response_model=None)
+async def get_staff_notifications(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_notifications",
+        auth=auth,
+    )
+
+
+@router.post(
+    "/v1/staff/notifications/{id}/read",
+    status_code=200,
+    response_model=None,
+)
+async def mark_staff_notification_read(
+    notification_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.mark_notification_read",
+        auth=auth,
+        path_params={"notificationId": _uuid(notification_id)},
+    )
+
+
+@router.post("/v1/staff/action-rules", status_code=201, response_model=None)
+async def create_staff_action_rule(
+    body: CreateStaffActionRuleRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.create_action_rule",
+        auth=auth,
+        payload=body.public_payload(),
+    )
+
+
+@router.patch("/v1/staff/action-rules/{id}", status_code=200, response_model=None)
+async def update_staff_action_rule(
+    rule_id: Annotated[UUID, Path(alias="id")],
+    body: UpdateStaffActionRuleRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.update_action_rule",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"ruleId": _uuid(rule_id)},
     )
 
 
@@ -1231,3 +1894,20 @@ async def review_document(
         payload=body.public_payload(),
         path_params={"documentId": _uuid(document_id)},
     )
+
+
+@router.get("/v1/staff/documents/{id}/content", status_code=200, response_model=None)
+async def get_staff_document_content(
+    document_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> Response:
+    result = await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_document_content",
+        auth=auth,
+        path_params={"documentId": _uuid(document_id)},
+    )
+    return _binary_response(result)

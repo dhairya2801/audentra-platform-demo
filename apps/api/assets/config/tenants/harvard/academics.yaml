@@ -33,6 +33,12 @@ courses:
     instructor_names: [Prof. David Chen]
     meeting_pattern: Mon/Wed 1:30 PM
     availability_label: Fall and Spring
+    related_videos:
+      - id: cs50-2026-full-course
+        title: Harvard CS50 (2026) - Full Computer Science University Course
+        description: The official CS50 full-course video for introductory computer science.
+        url: https://www.youtube.com/watch?v=gmuTjeQUbTM
+        source_label: CS50
   - id: compsci-51
     code: COMPSCI 51
     title: Abstraction and Design in Computation
@@ -67,3 +73,9 @@ courses:
     instructor_names: [Prof. Leila Ahmed]
     meeting_pattern: Tue/Thu 2:15 PM
     availability_label: Fall
+    related_videos:
+      - id: stat-110-lectures
+        title: Statistics 110 - Probability lecture series
+        description: Harvard's complete introductory probability lecture playlist.
+        url: https://www.youtube.com/playlist?list=PL2SOU6wwxB0uwwH80KTQ6ht66KWxbzTIo
+        source_label: Harvard Statistics 110

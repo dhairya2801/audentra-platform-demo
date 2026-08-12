@@ -6,18 +6,26 @@ from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.contracts.requests import UpdateStudentHousingPlanRequest
 from audentra.core.auth import AuthContext
-from audentra.core.errors import ConflictError
+from audentra.core.errors import BadRequestError, ConflictError, NotFoundError
 from audentra.infrastructure.postgres.portal_repository import (
     PostgresPortalRepository,
     _add_calendar_months,
+    _json,
     _onboarding_screen_configurations,
 )
+
+
+def test_audit_metadata_serializes_database_uuids_without_breaking_worker_callbacks() -> None:
+    identifier = UUID("20000000-0000-7000-8000-000000000033")
+
+    assert json.loads(_json({"requirementId": identifier})) == {"requirementId": str(identifier)}
 
 
 def test_about_you_screen_defaults_address_and_residency_to_optional() -> None:
@@ -191,6 +199,84 @@ AUTH = AuthContext(
 )
 
 
+def test_student_realtime_events_bootstrap_replay_and_bound_the_cursor_window() -> None:
+    occurred_at = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
+
+    def handler(sql: str, values: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        assert values["tenant_id"] == AUTH.tenant_id
+        assert values["student_id"] == AUTH.student_id
+        if "SELECT COALESCE(MAX(cursor), 0)" in sql:
+            return [{"cursor": 7}]
+        if "SELECT cursor, event_type, resource_type" in sql:
+            assert values["after_cursor"] == 7
+            assert values["limit"] == 100
+            return [
+                {
+                    "cursor": 8,
+                    "event_type": "student.message.created",
+                    "resource_type": "student_message",
+                    "resource_id": "30000000-0000-7000-8000-000000000008",
+                    "payload": {"invalidate": ["messages", "bootstrap"]},
+                    "created_at": occurred_at,
+                }
+            ]
+        raise AssertionError(sql)
+
+    repository = PostgresPortalRepository(cast(AsyncEngine, FakeEngine(handler)))
+
+    bootstrap = asyncio.run(repository.get_student_realtime_events(AUTH, None))
+    replay = asyncio.run(repository.get_student_realtime_events(AUTH, 7, limit=500))
+
+    assert bootstrap == {"events": [], "cursor": 7}
+    assert replay == {
+        "events": [
+            {
+                "cursor": 8,
+                "type": "student.message.created",
+                "resourceType": "student_message",
+                "resourceId": "30000000-0000-7000-8000-000000000008",
+                "data": {"invalidate": ["messages", "bootstrap"]},
+                "occurredAt": "2028-01-15T12:00:00.000Z",
+            }
+        ],
+        "cursor": 8,
+    }
+    with pytest.raises(BadRequestError) as raised:
+        asyncio.run(repository.get_student_realtime_events(AUTH, -1))
+    assert raised.value.code == "INVALID_EVENT_CURSOR"
+
+
+def test_transcript_credit_upsert_types_nullable_source_code_consistently() -> None:
+    engine = FakeEngine(lambda _sql, _params: [])
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    asyncio.run(
+        repository._persist_transcript_credits(
+            cast(AsyncConnection, engine.connection),
+            AUTH,
+            "20000000-0000-7000-8000-000000000099",
+            {
+                "institutionName": "Example University",
+                "courses": [
+                    {
+                        "sourceCode": None,
+                        "title": "Introduction to Computing",
+                        "grade": "A",
+                    }
+                ],
+            },
+        )
+    )
+
+    sql, parameters = engine.connection.calls[0]
+    assert "CAST(:source_code AS varchar)" in sql
+    assert "COALESCE(CAST(:source_code AS varchar),'')" in sql
+    assert "CAST(:title AS varchar)" in sql
+    assert "credit.title=CAST(:title AS varchar)" in sql
+    assert "credit.student_id=CAST(:student_id AS uuid)" in sql
+    assert parameters["source_code"] is None
+
+
 def test_appointments_read_is_tenant_and_student_scoped() -> None:
     now = datetime.now(UTC) + timedelta(days=1)
     engine = FakeEngine(
@@ -282,6 +368,179 @@ def test_idempotency_key_reuse_with_different_payload_conflicts() -> None:
             )
         )
     assert raised.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def _campus_event_row(*, active: bool = True, version: int = 3) -> dict[str, Any]:
+    starts_at = datetime.now(UTC) + timedelta(days=7)
+    return {
+        "id": "event-1",
+        "title": "Welcome Week Block Party",
+        "starts_at": starts_at,
+        "ends_at": starts_at + timedelta(hours=2),
+        "location": "University Green",
+        "active": active,
+        "version": version,
+    }
+
+
+def test_campus_event_registration_is_durable_notified_audited_and_idempotent() -> None:
+    registered_at = datetime.now(UTC)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row()]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return []
+        if "INSERT INTO campus_event_registration" in sql:
+            return [{"registered_at": registered_at}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 3},
+            "event-registration-key",
+            "request-1",
+        )
+    )
+
+    assert result["eventId"] == "event-1"
+    assert result["eventVersion"] == 3
+    assert result["status"] == "registered"
+    assert result["registeredAt"] == registered_at.isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+    sql_calls = [sql for sql, _params in engine.connection.calls]
+    assert any("INSERT INTO campus_event_registration" in sql for sql in sql_calls)
+    assert any("INSERT INTO student_message" in sql for sql in sql_calls)
+    assert any("INSERT INTO audit_event" in sql for sql in sql_calls)
+    assert any("outbox_event" in sql and "INSERT INTO" in sql for sql in sql_calls)
+    assert any("INSERT INTO idempotency_record" in sql for sql in sql_calls)
+    message_params = next(
+        params for sql, params in engine.connection.calls if "INSERT INTO student_message" in sql
+    )
+    assert message_params["kind"] == "campus_event_registered"
+    assert message_params["href"] == "/campus-life"
+
+
+def test_campus_event_registration_returns_existing_without_duplicate_side_effects() -> None:
+    registered_at = datetime.now(UTC) - timedelta(minutes=10)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row()]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return [
+                {
+                    "id": "registration-1",
+                    "status": "registered",
+                    "registered_at": registered_at,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 3},
+            "repeat-registration-key",
+            "request-2",
+        )
+    )
+
+    assert result["id"] == "registration-1"
+    assert result["status"] == "registered"
+    sql_calls = [sql for sql, _params in engine.connection.calls]
+    assert not any("INSERT INTO student_message" in sql for sql in sql_calls)
+    assert not any("INSERT INTO audit_event" in sql for sql in sql_calls)
+    assert any("INSERT INTO idempotency_record" in sql for sql in sql_calls)
+
+
+def test_cancelled_event_registration_can_be_reactivated_after_event_returns() -> None:
+    registered_at = datetime.now(UTC)
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return [_campus_event_row(version=4)]
+        if "FROM campus_event_registration" in sql and "FOR UPDATE" in sql:
+            return [
+                {
+                    "id": "registration-1",
+                    "status": "cancelled_by_event",
+                    "registered_at": registered_at - timedelta(days=1),
+                }
+            ]
+        if "UPDATE campus_event_registration" in sql:
+            return [{"registered_at": registered_at}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    result = asyncio.run(
+        repository.register_campus_event(
+            AUTH,
+            "event-1",
+            {"expectedVersion": 4},
+            "reactivate-registration-key",
+            "request-3",
+        )
+    )
+
+    assert result["id"] == "registration-1"
+    assert result["eventVersion"] == 4
+    assert any(
+        "UPDATE campus_event_registration" in sql for sql, _params in engine.connection.calls
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_rows", "expected_code"),
+    [
+        ([], "CAMPUS_EVENT_NOT_FOUND"),
+        ([_campus_event_row(active=False)], "CAMPUS_EVENT_UNAVAILABLE"),
+        ([_campus_event_row(version=5)], "CAMPUS_EVENT_CHANGED"),
+    ],
+)
+def test_campus_event_registration_rejects_missing_retired_and_stale_events(
+    event_rows: list[Mapping[str, Any]], expected_code: str
+) -> None:
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body" in sql:
+            return []
+        if "FROM campus_event\n" in sql and "FOR UPDATE" in sql:
+            return event_rows
+        return []
+
+    repository = PostgresPortalRepository(cast(AsyncEngine, FakeEngine(handler)))
+    error_type = NotFoundError if expected_code == "CAMPUS_EVENT_NOT_FOUND" else ConflictError
+
+    with pytest.raises(error_type) as raised:
+        asyncio.run(
+            repository.register_campus_event(
+                AUTH,
+                "event-1",
+                {"expectedVersion": 3},
+                f"rejected-{expected_code}",
+                "request-4",
+            )
+        )
+
+    assert raised.value.code == expected_code
 
 
 def test_profile_optimistic_lock_reports_version_conflict() -> None:
@@ -457,14 +716,16 @@ def test_sufficient_document_match_enters_review_without_completing_or_rewarding
                     "title": "Provide identity documentation",
                 }
             ]
-        if "UPDATE student_requirement SET status='under_review'" in sql:
+        if "UPDATE student_requirement SET status=:status" in sql:
             return [{"id": requirement_id}]
         if "requirement_id=COALESCE(requirement_id, :requirement_id)" in sql:
             return [document_row(parameters, linked=True)]
         if "SELECT id FROM staff_member" in sql:
             return [{"id": "10000000-0000-7000-8000-000000000901"}]
-        if "INSERT INTO staff_work_item" in sql:
+        if "INSERT INTO staff_work_item (" in sql:
             work_item_insertions += 1
+            return [{"id": parameters["id"], "version": 1, "inserted": True}]
+        if "INSERT INTO staff_notification" in sql:
             return [{"id": parameters["id"]}]
         return []
 
@@ -522,7 +783,7 @@ def test_sufficient_document_match_enters_review_without_completing_or_rewarding
     assert result["extraction"]["contextMatches"][0]["applied"] is True
     statements = [sql for sql, _parameters in engine.connection.calls]
     requirement_update = next(
-        sql for sql in statements if "UPDATE student_requirement SET status='under_review'" in sql
+        sql for sql in statements if "UPDATE student_requirement SET status=:status" in sql
     )
     assert "progress_percent=LEAST(80" in requirement_update
     assert "completed" not in requirement_update
@@ -538,7 +799,7 @@ def test_sufficient_document_match_enters_review_without_completing_or_rewarding
     assert json.loads(str(extraction_event["payload"]))["data"]["staffReviewQueued"] is True
 
 
-def test_failed_document_extraction_does_not_claim_staff_review_was_queued() -> None:
+def test_failed_document_extraction_queues_human_review_and_realtime_notification() -> None:
     now = datetime(2028, 1, 15, 12, 0, tzinfo=UTC)
     document_id = "20000000-0000-7000-8000-000000000032"
 
@@ -553,13 +814,17 @@ def test_failed_document_extraction_does_not_claim_staff_review_was_queued() -> 
                     "size_bytes": 512,
                     "category": "other",
                     "processing_mode": "agentic",
-                    "status": "uploaded",
+                    "status": parameters.get("status", "needs_review"),
                     "storage_key": "tenant/student/unreadable.pdf",
                     "sha256": "b" * 64,
                     "extraction": json.loads(str(parameters["extraction"])),
                     "created_at": now,
                 }
             ]
+        if "INSERT INTO staff_work_item (" in sql:
+            return [{"id": parameters["id"], "version": 1, "inserted": True}]
+        if "INSERT INTO staff_notification" in sql:
+            return [{"id": parameters["id"]}]
         return []
 
     engine = FakeEngine(handler)
@@ -585,27 +850,37 @@ def test_failed_document_extraction_does_not_claim_staff_review_was_queued() -> 
         )
     )
 
-    assert result["status"] == "uploaded"
-    assert not any("INSERT INTO staff_work_item" in sql for sql, _ in engine.connection.calls)
+    assert result["status"] == "needs_review"
+    work_item_call = next(
+        call for call in engine.connection.calls if "INSERT INTO staff_work_item" in call[0]
+    )
+    assert work_item_call[1]["priority"] == "high"
+    assert work_item_call[1]["blocker_code"] == "document_parse_failure"
+    assert any("INSERT INTO staff_notification" in sql for sql, _ in engine.connection.calls)
+    assert any("INSERT INTO staff_realtime_event" in sql for sql, _ in engine.connection.calls)
     extraction_event = next(
         parameters
         for sql, parameters in engine.connection.calls
         if "INSERT INTO public.outbox_event" in sql
         and parameters.get("event_name") == "document.extraction_completed.v1"
     )
-    assert json.loads(str(extraction_event["payload"]))["data"]["staffReviewQueued"] is False
+    assert json.loads(str(extraction_event["payload"]))["data"]["staffReviewQueued"] is True
 
 
 def test_document_review_work_item_creation_is_idempotent() -> None:
     insert_count = 0
+    work_item_id: str | None = None
 
     def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        nonlocal insert_count
+        nonlocal insert_count, work_item_id
         if "SELECT id FROM staff_member" in sql:
             return []
-        if "INSERT INTO staff_work_item" in sql:
+        if "INSERT INTO staff_work_item (" in sql:
             insert_count += 1
-            return [{"id": parameters["id"]}] if insert_count == 1 else []
+            work_item_id = work_item_id or str(parameters["id"])
+            return [{"id": work_item_id, "version": insert_count, "inserted": insert_count == 1}]
+        if "INSERT INTO staff_notification" in sql:
+            return [{"id": parameters["id"]}]
         return []
 
     engine = FakeEngine(handler)
@@ -616,18 +891,113 @@ def test_document_review_work_item_creation_is_idempotent() -> None:
         "category": "other",
     }
 
-    async def scenario() -> tuple[bool, bool]:
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
         connection = cast(AsyncConnection, engine.connection)
         return (
-            await repository._ensure_document_review_work_item(connection, AUTH, document),
-            await repository._ensure_document_review_work_item(connection, AUTH, document),
+            await repository._ensure_document_review_work_item(
+                connection,
+                AUTH,
+                document,
+                parse_failure=False,
+                failure_code=None,
+                request_id="request-1",
+            ),
+            await repository._ensure_document_review_work_item(
+                connection,
+                AUTH,
+                document,
+                parse_failure=False,
+                failure_code=None,
+                request_id="request-2",
+            ),
         )
 
-    assert asyncio.run(scenario()) == (True, False)
+    first, second = asyncio.run(scenario())
+    assert first["created"] is True
+    assert second["created"] is False
+    assert first["workItemId"] == second["workItemId"]
     work_sql = next(
         sql for sql, _ in engine.connection.calls if "INSERT INTO staff_work_item" in sql
     )
-    assert "ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING" in work_sql
+    normalized_sql = " ".join(work_sql.split())
+    assert (
+        "ON CONFLICT (tenant_id, source_type, source_id) "
+        "WHERE source_type IS NOT NULL AND source_id IS NOT NULL DO UPDATE SET"
+    ) in normalized_sql
+
+
+@pytest.mark.parametrize(
+    ("existing_status", "expected_reopened"),
+    [("in_progress", False), ("done", True), ("cancelled", True)],
+)
+def test_parse_retry_failure_refreshes_active_or_reopens_terminal_review(
+    existing_status: str, expected_reopened: bool
+) -> None:
+    work_item_id = "20000000-0000-7000-8000-000000000044"
+    current_status = existing_status
+
+    def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        nonlocal current_status
+        if "SELECT status" in sql and "source_type='document'" in sql:
+            return [{"status": current_status}]
+        if "INSERT INTO staff_work_item (" in sql:
+            if current_status in {"done", "cancelled"}:
+                current_status = "todo"
+            return [{"id": work_item_id, "version": 4, "inserted": False}]
+        if "INSERT INTO staff_notification" in sql:
+            return [{"id": parameters["id"]}]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+    document = {
+        "id": "20000000-0000-7000-8000-000000000043",
+        "file_name": "transcript.pdf",
+        "category": "transcript",
+    }
+
+    async def scenario() -> tuple[dict[str, Any], dict[str, Any]]:
+        connection = cast(AsyncConnection, engine.connection)
+        first = await repository._ensure_document_review_work_item(
+            connection,
+            AUTH,
+            document,
+            parse_failure=True,
+            failure_code="provider_configuration",
+            request_id="retry-request-1",
+        )
+        second = await repository._ensure_document_review_work_item(
+            connection,
+            AUTH,
+            document,
+            parse_failure=True,
+            failure_code="provider_configuration",
+            request_id="retry-request-2",
+        )
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert first["created"] is False
+    assert first["reopened"] is expected_reopened
+    assert second["reopened"] is False
+    work_sql = next(
+        sql for sql, _ in engine.connection.calls if "INSERT INTO staff_work_item (" in sql
+    )
+    assert "staff_work_item.status IN ('done','cancelled') THEN 'todo'" in " ".join(
+        work_sql.split()
+    )
+    notification_dedupes = [
+        str(parameters["dedupe_key"])
+        for sql, parameters in engine.connection.calls
+        if "INSERT INTO staff_notification" in sql
+    ]
+    assert notification_dedupes == [
+        f"work-item:{work_item_id}:parse-failure:retry-request-1",
+        f"work-item:{work_item_id}:parse-failure:retry-request-2",
+    ]
+    assert sum("INSERT INTO staff_work_log" in sql for sql, _ in engine.connection.calls) == 2
+    assert sum("INSERT INTO staff_realtime_event" in sql for sql, _ in engine.connection.calls) == 2
 
 
 def test_reward_summary_is_authoritative_from_the_student_ledger() -> None:

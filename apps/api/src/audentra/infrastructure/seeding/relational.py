@@ -560,6 +560,7 @@ async def ensure_harvard_demo_student(
             if scenario.tenant_id == HARVARD_TENANT_ID:
                 await _ensure_demo_student_scenario(connection, scenario)
         await _ensure_demo_staff_and_work(connection, tenant_id=HARVARD_TENANT_ID)
+        await _ensure_default_action_rules(connection, (HARVARD_TENANT_ID,))
 
 
 def _demo_uuid(namespace: str, suffix: str) -> str:
@@ -617,6 +618,46 @@ async def _ensure_demo_seed_supplements(
     for scenario in _EXTRA_STUDENTS:
         await _ensure_demo_student_scenario(connection, scenario)
     await _ensure_demo_staff_and_work(connection)
+    await _ensure_default_action_rules(
+        connection,
+        (ASTER_TENANT_ID, HARVARD_TENANT_ID),
+    )
+
+
+async def _ensure_default_action_rules(
+    connection: AsyncConnection,
+    tenant_ids: tuple[str, ...],
+) -> None:
+    """Seed fresh tenants without overwriting staff-customized rule settings."""
+
+    for tenant_id in tenant_ids:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_action_rule (
+                  id, tenant_id, code, name, description, enabled, signal_type,
+                  flow_kind, requirement_code, lookahead_days, cadence_minutes,
+                  component, priority, action_type, title_template,
+                  description_template, version
+                ) VALUES (
+                  :id, :tenant_id, 'transcript-due-soon', 'Transcript due soon',
+                  'Create staff work when an incomplete official transcript is due soon.',
+                  true, 'requirement_due', 'enrollment', 'official_transcript',
+                  3, 60, 'Admissions', 'high', 'deadline_risk',
+                  'Follow up: transcript due soon',
+                  'The official transcript is incomplete and due within 3 days.', 1
+                )
+                ON CONFLICT (tenant_id, code) DO NOTHING
+                """
+            ),
+            {
+                "id": uuid5(
+                    NAMESPACE_URL,
+                    f"audentra:{tenant_id}:staff-action-rule:transcript-due-soon",
+                ),
+                "tenant_id": UUID(tenant_id),
+            },
+        )
 
 
 async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:

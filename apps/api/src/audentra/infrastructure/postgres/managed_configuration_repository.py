@@ -8,6 +8,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, cast
+from urllib.parse import parse_qs, urlparse
 from uuid import UUID, uuid4
 
 import yaml  # type: ignore[import-untyped]
@@ -16,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.infrastructure.postgres.journey_routing import (
+    reconcile_student_journey_routes,
+)
 
 JsonDict = dict[str, Any]
 ManagedConfigurationKind = Literal["journeys", "campus_life", "academics"]
@@ -50,6 +54,21 @@ _CORE_ONBOARDING_STEPS = frozenset(
 )
 _TERMINAL_REQUIREMENT_STATUSES = frozenset({"not_applicable", "completed", "waived", "expired"})
 _SUPPORTED_UPLOAD_MIME_TYPES = frozenset({"application/pdf", "image/jpeg", "image/png"})
+_ROUTE_OPERATORS = frozenset(
+    {
+        "equals",
+        "not_equals",
+        "one_of",
+        "none_of",
+        "contains",
+        "not_contains",
+        "greater_than",
+        "greater_than_or_equal",
+        "less_than",
+        "less_than_or_equal",
+    }
+)
+_ROUTABLE_FIELD_TYPES = frozenset({"checkbox", "single_select", "multiple_select", "number"})
 _INTERACTION_TYPE_ALIASES = {
     "information": "information",
     "approval": "approval",
@@ -431,6 +450,138 @@ class PostgresManagedConfigurationRepository:
                 "requirementSlug": requirement_slug,
             }
 
+    async def defer_student_updates(
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+    ) -> JsonDict:
+        """Defer a displayed update bundle in one version-checked transaction."""
+
+        self._require_student(auth)
+        raw_updates = payload.get("updates")
+        if not isinstance(raw_updates, Sequence) or isinstance(raw_updates, (str, bytes)):
+            raise BadRequestError(
+                "INVALID_EXPERIENCE_UPDATE_BATCH",
+                "Choose one or more updates to defer",
+            )
+        requested: list[tuple[str, int]] = []
+        for raw_update in raw_updates:
+            if not isinstance(raw_update, Mapping):
+                raise BadRequestError(
+                    "INVALID_EXPERIENCE_UPDATE_BATCH",
+                    "Every update needs an identifier and version",
+                )
+            try:
+                update_id = str(_uuid(raw_update.get("id")))
+            except BadRequestError as error:
+                raise BadRequestError(
+                    "INVALID_EXPERIENCE_UPDATE_BATCH",
+                    "Every update needs a valid identifier",
+                ) from error
+            requested.append(
+                (
+                    update_id,
+                    _positive_integer(raw_update.get("expectedVersion"), "expectedVersion"),
+                )
+            )
+        if (
+            not requested
+            or len(requested) > 20
+            or len({item[0] for item in requested}) != len(requested)
+        ):
+            raise BadRequestError(
+                "INVALID_EXPERIENCE_UPDATE_BATCH",
+                "Choose up to twenty different updates to defer",
+            )
+
+        update_ids = [_uuid(update_id) for update_id, _version in requested]
+        async with self.engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, requirement_id, status, version
+                    FROM student_experience_update
+                    WHERE tenant_id=:tenant_id
+                      AND student_id=:student_id
+                      AND id = ANY(:update_ids)
+                    ORDER BY id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(auth.student_id),
+                    "update_ids": update_ids,
+                },
+            )
+            rows_by_id = {str(row["id"]): row for row in result.mappings().all()}
+            if len(rows_by_id) != len(requested):
+                raise NotFoundError(
+                    "STUDENT_EXPERIENCE_UPDATE_NOT_FOUND",
+                    "One or more student experience updates were not found",
+                )
+            for update_id, expected_version in requested:
+                row = rows_by_id[update_id]
+                if int(row["version"]) != expected_version:
+                    raise ConflictError(
+                        "VERSION_CONFLICT",
+                        "An update changed in another session",
+                    )
+                if row["status"] == "acknowledged":
+                    raise ConflictError(
+                        "EXPERIENCE_UPDATE_ALREADY_ACKNOWLEDGED",
+                        "An update has already been acknowledged",
+                    )
+            updated = await connection.execute(
+                text(
+                    """
+                    UPDATE student_experience_update
+                    SET status='deferred',
+                        acknowledged_at=NULL,
+                        deferred_at=NOW(),
+                        version=version+1,
+                        updated_at=NOW()
+                    WHERE tenant_id=:tenant_id
+                      AND student_id=:student_id
+                      AND id = ANY(:update_ids)
+                    RETURNING id, requirement_id, status, version
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(auth.student_id),
+                    "update_ids": update_ids,
+                },
+            )
+            updated_by_id = {str(row["id"]): row for row in updated.mappings().all()}
+            decisions: list[JsonDict] = []
+            for update_id, _expected_version in requested:
+                row = updated_by_id[update_id]
+                requirement_slug = await self._requirement_slug(
+                    connection,
+                    auth,
+                    row.get("requirement_id"),
+                )
+                version = int(row["version"])
+                await self._insert_student_decision_audit(
+                    connection,
+                    auth,
+                    update_id,
+                    "later",
+                    version,
+                    request_id,
+                )
+                decisions.append(
+                    {
+                        "id": update_id,
+                        "status": str(row["status"]),
+                        "version": version,
+                        "requirementSlug": requirement_slug,
+                    }
+                )
+            return {"updates": decisions}
+
     async def _active_row(
         self,
         connection: AsyncConnection,
@@ -633,12 +784,14 @@ class PostgresManagedConfigurationRepository:
                     """
                     INSERT INTO requirement_definition_version (
                       id, tenant_id, code, title, description, blocking,
-                      priority, display_order, depends_on_codes, due_offset_days, version,
+                      priority, display_order, depends_on_codes, activation_rules,
+                      due_offset_days, version,
                       submission_type, responsible_office, flow_kind,
                       interaction_type, input_config, created_at, updated_at
                     ) VALUES (
                       :id, :tenant_id, :code, :title, :description, :blocking,
                       :priority, :display_order, CAST(:depends_on_codes AS text[]),
+                      CAST(:activation_rules AS jsonb),
                       :due_offset_days,
                       :version, :submission_type, :responsible_office, :flow_kind,
                       :interaction_type, CAST(:input_config AS jsonb), NOW(), NOW()
@@ -655,6 +808,7 @@ class PostgresManagedConfigurationRepository:
                     "priority": task["priority"],
                     "display_order": task["displayOrder"],
                     "depends_on_codes": task["dependsOn"],
+                    "activation_rules": _json(task["activation"]),
                     "due_offset_days": task["dueOffsetDays"],
                     "version": int(result.scalar_one()) + 1,
                     "submission_type": task["submissionType"],
@@ -750,7 +904,7 @@ class PostgresManagedConfigurationRepository:
                       AND previous_definition.code=:code
                       AND requirement.retired_at IS NULL
                       AND requirement.status NOT IN (
-                        'not_applicable', 'completed', 'waived', 'expired'
+                        'completed', 'waived', 'expired'
                       )
                     """
                 ),
@@ -954,66 +1108,13 @@ class PostgresManagedConfigurationRepository:
                     },
                 )
                 inserted += 1
-        await connection.execute(
-            text(
-                """
-                WITH desired AS (
-                  SELECT candidate.id,
-                    CASE
-                      WHEN EXISTS (
-                        SELECT 1
-                        FROM unnest(current_definition.depends_on_codes) dependency(code)
-                        WHERE NOT EXISTS (
-                          SELECT 1
-                          FROM student_requirement prerequisite
-                          JOIN requirement_definition_version prerequisite_definition
-                            ON prerequisite_definition.id=
-                               prerequisite.requirement_definition_version_id
-                           AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                          WHERE prerequisite.tenant_id=candidate.tenant_id
-                            AND prerequisite.journey_id=candidate.journey_id
-                            AND prerequisite.retired_at IS NULL
-                            AND prerequisite_definition.code=dependency.code
-                            AND prerequisite.status IN (
-                              'not_applicable','completed','waived'
-                            )
-                        )
-                      ) THEN 'blocked'
-                      WHEN candidate.progress_percent>0 THEN 'in_progress'
-                      ELSE 'ready'
-                    END AS status
-                  FROM student_requirement candidate
-                  JOIN enrollment_journey journey
-                    ON journey.id=candidate.journey_id
-                   AND journey.tenant_id=candidate.tenant_id
-                  JOIN requirement_definition_version evidence_definition
-                    ON evidence_definition.id=
-                       candidate.requirement_definition_version_id
-                   AND evidence_definition.tenant_id=candidate.tenant_id
-                  JOIN journey_requirement_definition current_link
-                    ON current_link.journey_definition_version_id=
-                       journey.journey_definition_version_id
-                  JOIN requirement_definition_version current_definition
-                    ON current_definition.id=current_link.requirement_definition_version_id
-                   AND current_definition.tenant_id=candidate.tenant_id
-                   AND current_definition.code=evidence_definition.code
-                  WHERE candidate.tenant_id=:tenant_id
-                    AND candidate.retired_at IS NULL
-                    AND candidate.status IN ('blocked','ready','in_progress','rejected')
-                )
-                UPDATE student_requirement requirement
-                SET status=desired.status, version=requirement.version+1,
-                    updated_at=:published_at
-                FROM desired
-                WHERE requirement.id=desired.id
-                  AND requirement.status<>desired.status
-                """
-            ),
-            {
-                "tenant_id": _uuid(auth.tenant_id),
-                "published_at": published_at,
-            },
-        )
+        for journey in journeys:
+            await reconcile_student_journey_routes(
+                connection,
+                tenant_id=_uuid(auth.tenant_id),
+                student_id=journey["student_id"],
+                journey_id=journey["id"],
+            )
         await connection.execute(
             text(
                 """
@@ -1063,22 +1164,60 @@ class PostgresManagedConfigurationRepository:
         }
         configured_events = campus_events(document)
         configured_source_ids = {str(item["sourceId"]) for item in configured_events}
-        removed_titles = [
-            title
-            for source_id, title in previous_titles.items()
-            if source_id not in configured_source_ids
+        removed_source_ids = [
+            source_id for source_id in previous_titles if source_id not in configured_source_ids
         ]
-        if removed_titles:
+        for source_id in removed_source_ids:
+            title = previous_titles[source_id]
+            removed_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, title, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id AND active=true
+                      AND source_status='tenant_authored'
+                      AND (source_id=:source_id OR (source_id IS NULL AND title=:title))
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0 ELSE 1 END, id
+                    LIMIT 1 FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": source_id,
+                    "title": title,
+                },
+            )
+            removed = removed_result.mappings().first()
+            if removed is None:
+                continue
+            removed_version = int(removed["version"]) + 1
             await connection.execute(
                 text(
                     """
-                    UPDATE campus_event SET active=false, updated_at=NOW()
-                    WHERE tenant_id=:tenant_id
-                      AND source_status='tenant_authored'
-                      AND title=ANY(CAST(:removed_titles AS text[]))
+                    UPDATE campus_event
+                    SET active=false, source_id=:source_id, version=:version, updated_at=NOW()
+                    WHERE id=:id AND tenant_id=:tenant_id
                     """
                 ),
-                {"tenant_id": _uuid(auth.tenant_id), "removed_titles": removed_titles},
+                {
+                    "id": removed["id"],
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": source_id,
+                    "version": removed_version,
+                },
+            )
+            await self._notify_event_registrants(
+                connection,
+                auth,
+                event_id=removed["id"],
+                event_version=removed_version,
+                subject=f"Event cancelled: {removed['title']}",
+                body=(
+                    f"{removed['title']} is no longer scheduled. Your registration was "
+                    "cancelled automatically; no action is required."
+                ),
+                kind="campus_event_cancelled",
+                cancel=True,
             )
         count = 0
         for event in configured_events:
@@ -1086,49 +1225,69 @@ class PostgresManagedConfigurationRepository:
             existing = await connection.execute(
                 text(
                     """
-                    SELECT id FROM campus_event
-                    WHERE tenant_id=:tenant_id AND title IN (:old_title, :title)
-                    ORDER BY CASE WHEN title=:old_title THEN 0 ELSE 1 END, id
+                    SELECT id, source_id, title, description, starts_at, ends_at,
+                           location, category, featured, accent, active,
+                           registration_url, visual_theme, image_url, image_alt,
+                           image_attribution, image_source_url,
+                           advertisement_starts_at, advertisement_ends_at, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id
+                      AND (
+                        source_id=:source_id
+                        OR (source_id IS NULL AND title IN (:old_title, :title))
+                      )
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0
+                                  WHEN title=:old_title THEN 1 ELSE 2 END, id
                     LIMIT 1 FOR UPDATE
                     """
                 ),
                 {
                     "tenant_id": _uuid(auth.tenant_id),
+                    "source_id": event["sourceId"],
                     "old_title": old_title,
                     "title": event["title"],
                 },
             )
-            event_id = existing.scalar_one_or_none()
-            if event_id is None:
+            existing_row = existing.mappings().first()
+            if existing_row is None:
                 event_id = self._uuid_factory()
                 await connection.execute(
                     text(
                         """
                         INSERT INTO campus_event (
-                          id, tenant_id, title, description, starts_at, ends_at,
+                          id, tenant_id, source_id, title, description, starts_at, ends_at,
                           location, category, featured, accent, active, source_label,
                           source_status, registration_url, visual_theme,
                           image_url, image_alt, image_attribution, image_source_url,
                           advertisement_starts_at, advertisement_ends_at,
-                          created_at, updated_at
+                          version, created_at, updated_at
                         ) VALUES (
-                          :id, :tenant_id, :title, :description, :starts_at, :ends_at,
+                          :id, :tenant_id, :source_id, :title, :description, :starts_at, :ends_at,
                           :location, :category, :featured, :accent, true,
                           'Staff managed campus life', 'tenant_authored',
                           :registration_url, :visual_theme,
                           :image_url, :image_alt, :image_attribution, :image_source_url,
-                          :advertisement_starts_at, :advertisement_ends_at, NOW(), NOW()
+                          :advertisement_starts_at, :advertisement_ends_at, 1, NOW(), NOW()
                         )
                         """
                     ),
-                    {"id": event_id, "tenant_id": _uuid(auth.tenant_id), **event},
+                    {
+                        "id": event_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "source_id": event["sourceId"],
+                        **event,
+                    },
                 )
             else:
+                event_id = existing_row["id"]
+                changed_fields = _campus_event_changed_fields(dict(existing_row), event)
+                version = int(existing_row["version"]) + (1 if changed_fields else 0)
                 await connection.execute(
                     text(
                         """
                         UPDATE campus_event SET
-                          title=:title, description=:description, starts_at=:starts_at,
+                          source_id=:source_id, title=:title, description=:description,
+                          starts_at=:starts_at,
                           ends_at=:ends_at, location=:location, category=:category,
                           featured=:featured, accent=:accent, active=true,
                           source_label='Staff managed campus life',
@@ -1137,14 +1296,132 @@ class PostgresManagedConfigurationRepository:
                           image_alt=:image_alt, image_attribution=:image_attribution,
                           image_source_url=:image_source_url,
                           advertisement_starts_at=:advertisement_starts_at,
-                          advertisement_ends_at=:advertisement_ends_at, updated_at=NOW()
+                          advertisement_ends_at=:advertisement_ends_at,
+                          version=:version, updated_at=NOW()
                         WHERE id=:id AND tenant_id=:tenant_id
                         """
                     ),
-                    {"id": event_id, "tenant_id": _uuid(auth.tenant_id), **event},
+                    {
+                        "id": event_id,
+                        "tenant_id": _uuid(auth.tenant_id),
+                        "source_id": event["sourceId"],
+                        "version": version,
+                        **event,
+                    },
                 )
+                if changed_fields and bool(existing_row["active"]):
+                    await self._notify_event_registrants(
+                        connection,
+                        auth,
+                        event_id=event_id,
+                        event_version=version,
+                        subject=f"Event updated: {event['title']}",
+                        body=_campus_event_change_message(event, changed_fields),
+                        kind="campus_event_changed",
+                    )
             count += 1
         return count
+
+    async def _notify_event_registrants(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        *,
+        event_id: object,
+        event_version: int,
+        subject: str,
+        body: str,
+        kind: str,
+        cancel: bool = False,
+    ) -> None:
+        registrations = await connection.execute(
+            text(
+                """
+                SELECT id, student_id
+                FROM campus_event_registration
+                WHERE tenant_id=:tenant_id AND event_id=:event_id
+                  AND status='registered'
+                ORDER BY registered_at, id
+                FOR UPDATE
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "event_id": event_id},
+        )
+        rows = registrations.mappings().all()
+        for registration in rows:
+            message_id = self._uuid_factory()
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_message (
+                      id, tenant_id, student_id, subject, body, sender_name,
+                      kind, href, sent_at, read_at, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :subject, :body,
+                      'Campus Life', :kind, '/campus-life', NOW(), NULL, NOW()
+                    )
+                """
+                ),
+                {
+                    "id": message_id,
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": registration["student_id"],
+                    "subject": subject[:240],
+                    "body": body,
+                    "kind": kind,
+                },
+            )
+            # A content publication must not refresh the Campus Life page under a
+            # student. The event only invalidates the inbox/bootstrap so an
+            # enrolled student sees the cancellation or revision notification;
+            # their next explicit Campus Life refresh reads the canonical list.
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_realtime_event (
+                      id, tenant_id, student_id, event_type, resource_type,
+                      resource_id, payload, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, 'student.message.created',
+                      'student_message', :resource_id, CAST(:payload AS jsonb), NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": registration["student_id"],
+                    "resource_id": message_id,
+                    "payload": _json(
+                        {
+                            "messageId": str(message_id),
+                            "kind": kind,
+                            "href": "/campus-life",
+                            "invalidate": ["messages", "bootstrap"],
+                        }
+                    ),
+                },
+            )
+        if rows:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE campus_event_registration
+                    SET event_version=:event_version,
+                        status=CASE WHEN :cancel THEN 'cancelled_by_event' ELSE status END,
+                        cancelled_at=CASE WHEN :cancel THEN NOW() ELSE cancelled_at END,
+                        updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND event_id=:event_id
+                      AND status='registered'
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "event_id": event_id,
+                    "event_version": event_version,
+                    "cancel": cancel,
+                },
+            )
 
     async def _materialize_academics(
         self,
@@ -1189,46 +1466,113 @@ class PostgresManagedConfigurationRepository:
         course_ids: dict[str, object] = {}
         courses = academic_courses(document)
         for course in courses:
-            result = await connection.execute(
+            existing_result = await connection.execute(
                 text(
                     """
-                    INSERT INTO catalog_course (
-                      id, tenant_id, catalog_version_id, code, title, description,
-                      credits, level, active, availability_label, instructor_names,
-                      meeting_pattern, resources, source_url, created_at, updated_at
-                    ) VALUES (
-                      :id, :tenant_id, :catalog_id, :code, :title, :description,
-                      :credits, :level, true, :availability_label,
-                      CAST(:instructor_names AS text[]), :meeting_pattern,
-                      CAST(:resources AS jsonb), :source_url, NOW(), NOW()
-                    ) ON CONFLICT (catalog_version_id, code) DO UPDATE SET
-                      title=EXCLUDED.title, description=EXCLUDED.description,
-                      credits=EXCLUDED.credits, level=EXCLUDED.level, active=true,
-                      availability_label=EXCLUDED.availability_label,
-                      instructor_names=EXCLUDED.instructor_names,
-                      meeting_pattern=EXCLUDED.meeting_pattern,
-                      resources=EXCLUDED.resources, source_url=EXCLUDED.source_url,
-                      updated_at=NOW()
-                    RETURNING id
+                    SELECT id FROM catalog_course
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND (source_id=:source_id OR code=:code)
+                    ORDER BY CASE WHEN source_id=:source_id THEN 0 ELSE 1 END, id
+                    LIMIT 1 FOR UPDATE
                     """
                 ),
                 {
-                    "id": self._uuid_factory(),
                     "tenant_id": _uuid(auth.tenant_id),
                     "catalog_id": catalog_id,
+                    "source_id": course["sourceId"],
                     "code": course["code"],
-                    "title": course["title"],
-                    "description": course["description"],
-                    "credits": course["credits"],
-                    "level": course["level"],
-                    "availability_label": course["availabilityLabel"],
-                    "instructor_names": course["instructorNames"],
-                    "meeting_pattern": course["meetingPattern"],
-                    "resources": _json(course["resources"]),
-                    "source_url": course["sourceUrl"],
                 },
             )
-            course_ids[str(course["code"])] = result.scalar_one()
+            course_id = existing_result.scalar_one_or_none()
+            parameters = {
+                "id": course_id or self._uuid_factory(),
+                "tenant_id": _uuid(auth.tenant_id),
+                "catalog_id": catalog_id,
+                "source_id": course["sourceId"],
+                "code": course["code"],
+                "title": course["title"],
+                "description": course["description"],
+                "credits": course["credits"],
+                "level": course["level"],
+                "availability_label": course["availabilityLabel"],
+                "instructor_names": course["instructorNames"],
+                "meeting_pattern": course["meetingPattern"],
+                "resources": _json(course["resources"]),
+                "related_videos": _json(course["relatedVideos"]),
+                "source_url": course["sourceUrl"],
+            }
+            if course_id is None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO catalog_course (
+                          id, tenant_id, catalog_version_id, source_id, code, title,
+                          description, credits, level, active, availability_label,
+                          instructor_names, meeting_pattern, resources, related_videos,
+                          source_url, version, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :catalog_id, :source_id, :code, :title,
+                          :description, :credits, :level, true, :availability_label,
+                          CAST(:instructor_names AS text[]), :meeting_pattern,
+                          CAST(:resources AS jsonb), CAST(:related_videos AS jsonb),
+                          :source_url, 1, NOW(), NOW()
+                        )
+                        """
+                    ),
+                    parameters,
+                )
+                course_id = parameters["id"]
+            else:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE catalog_course SET
+                          source_id=:source_id, code=:code, title=:title,
+                          description=:description, credits=:credits, level=:level,
+                          active=true, availability_label=:availability_label,
+                          instructor_names=CAST(:instructor_names AS text[]),
+                          meeting_pattern=:meeting_pattern,
+                          resources=CAST(:resources AS jsonb),
+                          related_videos=CAST(:related_videos AS jsonb),
+                          source_url=:source_url, version=version+1, updated_at=NOW()
+                        WHERE id=:id AND tenant_id=:tenant_id
+                          AND catalog_version_id=:catalog_id
+                        """
+                    ),
+                    parameters,
+                )
+            course_ids[str(course["code"])] = course_id
+
+        configured_source_ids = [str(course["sourceId"]) for course in courses]
+        if configured_source_ids:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE catalog_course
+                    SET active=false, version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND active=true AND source_id IS NOT NULL
+                      AND NOT (source_id=ANY(CAST(:source_ids AS text[])))
+                    """
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "catalog_id": catalog_id,
+                    "source_ids": configured_source_ids,
+                },
+            )
+        else:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE catalog_course
+                    SET active=false, version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND catalog_version_id=:catalog_id
+                      AND active=true AND source_id IS NOT NULL
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "catalog_id": catalog_id},
+            )
 
         for course in courses:
             course_id = course_ids[str(course["code"])]
@@ -1597,6 +1941,7 @@ def materialized_journey_tasks(
                 task_code=code,
                 materialized=not core_onboarding_task and validate_materialized_inputs,
             )
+            activation = _journey_activation(raw_task, task_code=code)
             title = _required_string(raw_task.get("title"), "journey task title", maximum=180)
             description = _required_string(
                 raw_task.get("description"),
@@ -1649,6 +1994,7 @@ def materialized_journey_tasks(
                     "priority": priority,
                     "displayOrder": display_orders[flow_kind],
                     "dependsOn": list(raw_dependencies),
+                    "activation": activation,
                     "dueOffsetDays": due_offset,
                     "initialProgressPercent": initial_progress,
                     "submissionType": submission_type,
@@ -1693,6 +2039,9 @@ def materialized_journey_tasks(
             else:
                 continue
         task["dependsOn"] = dependencies
+    task_by_code = {str(task["code"]): task for task in tasks}
+    for task in tasks:
+        _validate_journey_activation(task, task_by_code)
     active_dependencies = {
         str(task["code"]): cast(list[str], task["dependsOn"])
         for task in tasks
@@ -1727,6 +2076,251 @@ def materialized_journey_tasks(
     )
 
 
+def _journey_activation(raw_task: Mapping[str, Any], *, task_code: str) -> JsonDict:
+    raw_activation = raw_task.get("activation")
+    if raw_activation is None:
+        return {"match": "all", "rules": []}
+    if not isinstance(raw_activation, Mapping):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation must be an object",
+        )
+    activation = _mapping(raw_activation)
+    match = str(activation.get("match") or "all")
+    if match not in {"all", "any"}:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation match must be all or any",
+        )
+    raw_rules = activation.get("rules", [])
+    if not isinstance(raw_rules, Sequence) or isinstance(raw_rules, (str, bytes)):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} activation rules must be a list",
+        )
+    if len(raw_rules) > 20:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_ROUTE",
+            f"Journey task {task_code} has too many activation rules",
+        )
+    rules: list[JsonDict] = []
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, Mapping):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} has an invalid activation rule",
+            )
+        rule = _mapping(raw_rule)
+        source_task_id = _required_string(
+            rule.get("source_task", rule.get("sourceTaskId")),
+            "activation source task",
+            maximum=100,
+        )
+        field_id = _required_string(
+            rule.get("field", rule.get("fieldId")),
+            "activation answer field",
+            maximum=100,
+        )
+        operator = str(rule.get("operator") or "equals")
+        value = rule.get("value")
+        if operator not in _ROUTE_OPERATORS:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} has an unsupported activation operator",
+            )
+        if not _TASK_CODE.fullmatch(source_task_id):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation source is invalid",
+            )
+        if field_id != "$answer" and not _TASK_CODE.fullmatch(field_id):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation field is invalid",
+            )
+        if isinstance(value, str):
+            value = value.strip()
+            if not value or len(value) > 200:
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} activation value is invalid",
+                )
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            normalized_values: list[str] = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip() or len(item.strip()) > 200:
+                    raise BadRequestError(
+                        "INVALID_MANAGED_JOURNEY_ROUTE",
+                        f"Journey task {task_code} activation case value is invalid",
+                    )
+                normalized = item.strip()
+                if normalized in normalized_values:
+                    raise BadRequestError(
+                        "INVALID_MANAGED_JOURNEY_ROUTE",
+                        f"Journey task {task_code} activation case values must be unique",
+                    )
+                normalized_values.append(normalized)
+            if not normalized_values or len(normalized_values) > 100:
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} activation case values are invalid",
+                )
+            value = normalized_values
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = _bounded_float(
+                value,
+                "activation threshold",
+                minimum=-1_000_000_000_000,
+                maximum=1_000_000_000_000,
+            )
+        elif not isinstance(value, bool):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} activation value has an unsupported type",
+            )
+        rules.append(
+            {
+                "sourceTaskId": source_task_id,
+                "fieldId": field_id,
+                "operator": operator,
+                "value": value,
+            }
+        )
+    return {"match": match, "rules": rules}
+
+
+def _journey_route_fields(task: Mapping[str, Any]) -> dict[str, JsonDict]:
+    interaction_type = str(task.get("interactionType") or "")
+    input_config = _mapping(task.get("inputConfig"))
+    if interaction_type in {"single_select", "multiple_select"}:
+        return {
+            "$answer": {
+                "fieldType": interaction_type,
+                "options": cast(list[str], input_config.get("options", [])),
+            }
+        }
+    if interaction_type not in {"form", "selection_flow"}:
+        return {}
+    form = _mapping(input_config.get("form"))
+    pages = _mapping_list(form.get("pages"))
+    fields = (
+        [field for page in pages for field in _mapping_list(page.get("fields"))]
+        if pages
+        else _mapping_list(input_config.get("fields" if interaction_type == "form" else "flow"))
+    )
+    return {
+        str(field["id"]): {
+            "fieldType": str(field.get("field_type") or ""),
+            "options": cast(list[str], field.get("options", [])),
+            "minimum": field.get("minimum"),
+            "maximum": field.get("maximum"),
+        }
+        for field in fields
+        if str(field.get("field_type") or "") in _ROUTABLE_FIELD_TYPES
+        and (str(field.get("field_type") or "") == "checkbox" or field.get("required") is True)
+    }
+
+
+def _validate_journey_activation(
+    task: Mapping[str, Any],
+    task_by_code: Mapping[str, Mapping[str, Any]],
+) -> None:
+    activation = _mapping(task.get("activation"))
+    rules = _mapping_list(activation.get("rules"))
+    if not rules:
+        return
+    task_code = str(task["code"])
+    dependencies = set(cast(list[str], task.get("dependsOn", [])))
+    signatures: set[str] = set()
+    for rule in rules:
+        source_task_id = str(rule.get("sourceTaskId") or "")
+        field_id = str(rule.get("fieldId") or "")
+        operator = str(rule.get("operator") or "")
+        value = rule.get("value")
+        if source_task_id not in dependencies:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_SOURCE_NOT_PREREQUISITE",
+                f"Journey task {task_code} route source {source_task_id} "
+                "must also be a prerequisite",
+            )
+        source_task = task_by_code.get(source_task_id)
+        if source_task is None or source_task.get("materialized") is not True:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_SOURCE_NOT_FOUND",
+                f"Journey task {task_code} route source {source_task_id} is unavailable",
+            )
+        route_field = _journey_route_fields(source_task).get(field_id)
+        if route_field is None:
+            raise BadRequestError(
+                "MANAGED_JOURNEY_ROUTE_FIELD_NOT_FOUND",
+                f"Journey task {task_code} route field {field_id} is not a "
+                f"selectable answer on {source_task_id}",
+            )
+        field_type = str(route_field["fieldType"])
+        if field_type == "multiple_select":
+            expected_operators = {"contains", "not_contains"}
+        elif field_type == "single_select":
+            expected_operators = {"equals", "not_equals", "one_of", "none_of"}
+        elif field_type == "number":
+            expected_operators = {
+                "equals",
+                "not_equals",
+                "greater_than",
+                "greater_than_or_equal",
+                "less_than",
+                "less_than_or_equal",
+            }
+        else:
+            expected_operators = {"equals", "not_equals"}
+        if operator not in expected_operators:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} route operator does not match field {field_id}",
+            )
+        if field_type == "checkbox":
+            if not isinstance(value, bool):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route field {field_id} requires a yes/no value",
+                )
+        elif field_type == "number":
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route field {field_id} requires a number",
+                )
+            minimum = route_field.get("minimum")
+            maximum = route_field.get("maximum")
+            if (isinstance(minimum, (int, float)) and float(value) < float(minimum)) or (
+                isinstance(maximum, (int, float)) and float(value) > float(maximum)
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route threshold is outside field {field_id}",
+                )
+        else:
+            options = cast(list[str], route_field.get("options", []))
+            values = value if isinstance(value, list) else [value]
+            if (
+                not values
+                or any(not isinstance(item, str) or item not in options for item in values)
+                or (operator in {"one_of", "none_of"} and not isinstance(value, list))
+                or (operator not in {"one_of", "none_of"} and not isinstance(value, str))
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_ROUTE",
+                    f"Journey task {task_code} route value is not a published "
+                    f"option for {field_id}",
+                )
+        signature = _json(rule)
+        if signature in signatures:
+            raise BadRequestError(
+                "DUPLICATE_MANAGED_JOURNEY_ROUTE",
+                f"Journey task {task_code} contains a duplicate activation rule",
+            )
+        signatures.add(signature)
+
+
 def _journey_task_material_signature(task: Mapping[str, Any]) -> str:
     return _json(
         {
@@ -1737,6 +2331,7 @@ def _journey_task_material_signature(task: Mapping[str, Any]) -> str:
             "required": task.get("required"),
             "priority": task.get("priority"),
             "dependsOn": task.get("dependsOn"),
+            "activation": task.get("activation"),
             "dueOffsetDays": task.get("dueOffsetDays"),
             "initialProgressPercent": task.get("initialProgressPercent"),
             "submissionType": task.get("submissionType"),
@@ -1830,6 +2425,16 @@ def _journey_input_config(
                 f"Journey task {task_code} form fields require a form interaction",
             )
         config["fields"] = _journey_input_flow(fields_value, task_code=task_code)
+
+    form_value = config.get("form")
+    if form_value is not None:
+        if interaction_type not in {"form", "selection_flow"}:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} multi-page form requires a form "
+                "or guided-choice interaction",
+            )
+        config["form"] = _journey_input_form(form_value, task_code=task_code)
 
     options_value = config.pop("options", raw_task.get("options"))
     if options_value is not None:
@@ -2053,6 +2658,7 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
             "email",
             "phone",
             "date",
+            "number",
             "checkbox",
             "single_select",
             "multiple_select",
@@ -2101,6 +2707,34 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
                     f"Journey task {task_code} field {field_id} maximum selections "
                     "exceeds its options",
                 )
+        number_constraints = {
+            key: field.get(key)
+            for key in ("minimum", "maximum", "step")
+            if field.get(key) is not None
+        }
+        if number_constraints and field_type != "number":
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} numeric limits require a number field",
+            )
+        if field_type == "number":
+            for key, raw_value in number_constraints.items():
+                mapped[key] = _bounded_float(
+                    raw_value,
+                    f"{field_id} {key}",
+                    minimum=0 if key == "step" else -1_000_000_000_000,
+                    maximum=1_000_000_000_000,
+                    exclusive_minimum=key == "step",
+                )
+            if (
+                "minimum" in mapped
+                and "maximum" in mapped
+                and float(mapped["minimum"]) > float(mapped["maximum"])
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_INPUT",
+                    f"Journey task {task_code} field {field_id} minimum exceeds maximum",
+                )
         if (
             field_type in {"single_select", "multiple_select"}
             and len(cast(list[str], mapped.get("options", []))) < 2
@@ -2130,6 +2764,69 @@ def _journey_input_flow(value: object, *, task_code: str) -> list[JsonDict]:
             f"Journey task {task_code} has too many choice-flow fields",
         )
     return fields
+
+
+def _journey_input_form(value: object, *, task_code: str) -> JsonDict:
+    if not isinstance(value, Mapping):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} multi-page form must be an object",
+        )
+    form = _mapping(value)
+    version = form.get("version", 1)
+    if version != 1:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} has an unsupported form version",
+        )
+    raw_pages = form.get("pages")
+    if not isinstance(raw_pages, Sequence) or isinstance(raw_pages, (str, bytes)):
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} form pages must be a list",
+        )
+    if not raw_pages or len(raw_pages) > 20:
+        raise BadRequestError(
+            "INVALID_MANAGED_JOURNEY_INPUT",
+            f"Journey task {task_code} must define between 1 and 20 form pages",
+        )
+
+    pages: list[JsonDict] = []
+    page_ids: set[str] = set()
+    field_ids: set[str] = set()
+    for raw_page in raw_pages:
+        if not isinstance(raw_page, Mapping):
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has an invalid form page",
+            )
+        page = _mapping(raw_page)
+        page_id = _required_string(page.get("id"), "form page id", maximum=100)
+        if not _TASK_CODE.fullmatch(page_id) or page_id in page_ids:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has an invalid or duplicate form page id",
+            )
+        page_ids.add(page_id)
+        fields = _journey_input_flow(page.get("fields"), task_code=task_code)
+        duplicate_field = next((field["id"] for field in fields if field["id"] in field_ids), None)
+        if duplicate_field is not None:
+            raise BadRequestError(
+                "INVALID_MANAGED_JOURNEY_INPUT",
+                f"Journey task {task_code} has duplicate form field {duplicate_field} across pages",
+            )
+        field_ids.update(str(field["id"]) for field in fields)
+        mapped: JsonDict = {
+            "id": page_id,
+            "title": _required_string(page.get("title"), "form page title", maximum=180),
+            "fields": fields,
+        }
+        description = _optional_string(page.get("description"), maximum=600)
+        if description is not None:
+            mapped["description"] = description
+        pages.append(mapped)
+
+    return {"version": 1, "pages": pages}
 
 
 def campus_events(document: Mapping[str, Any]) -> list[JsonDict]:
@@ -2204,10 +2901,79 @@ def campus_events(document: Mapping[str, Any]) -> list[JsonDict]:
     return events
 
 
+def _campus_event_changed_fields(
+    current: Mapping[str, Any], incoming: Mapping[str, Any]
+) -> set[str]:
+    fields = {
+        "title",
+        "description",
+        "starts_at",
+        "ends_at",
+        "location",
+        "category",
+        "featured",
+        "accent",
+        "registration_url",
+        "visual_theme",
+        "image_url",
+        "image_alt",
+        "image_attribution",
+        "image_source_url",
+        "advertisement_starts_at",
+        "advertisement_ends_at",
+    }
+    return {
+        field
+        for field in fields
+        if _comparable_content_value(current.get(field))
+        != _comparable_content_value(incoming.get(field))
+    }
+
+
+def _campus_event_change_message(incoming: Mapping[str, Any], changed_fields: set[str]) -> str:
+    title = str(incoming["title"])
+    details: list[str] = []
+    if changed_fields & {"starts_at", "ends_at"}:
+        details.append(
+            "The schedule is now "
+            f"{_content_datetime_label(cast(datetime, incoming['starts_at']))} to "
+            f"{_content_datetime_label(cast(datetime, incoming['ends_at']))}."
+        )
+    if "location" in changed_fields:
+        details.append(f"The location is now {incoming['location']}.")
+    if "registration_url" in changed_fields:
+        details.append("The registration details were updated.")
+    if not details:
+        details.append("The event details were updated by Campus Life staff.")
+    if "title" in changed_fields:
+        details.insert(0, f"The event is now titled {title}.")
+    return f"You are registered for {title}. {' '.join(details)}"
+
+
+def _comparable_content_value(value: object) -> object:
+    if isinstance(value, datetime):
+        normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return normalized.astimezone(UTC)
+    return value
+
+
+def _content_datetime_label(value: datetime) -> str:
+    normalized = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return normalized.astimezone(UTC).strftime("%b %d, %Y at %H:%M UTC")
+
+
 def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
     courses: list[JsonDict] = []
     seen: set[str] = set()
+    seen_source_ids: set[str] = set()
     for raw in _mapping_list(document.get("courses")):
+        source_id = _required_string(raw.get("id"), "course id", maximum=160)
+        if source_id in seen_source_ids:
+            raise BadRequestError(
+                "DUPLICATE_CATALOG_COURSE",
+                f"Course id {source_id} is duplicated",
+            )
+        seen_source_ids.add(source_id)
         code = _required_string(raw.get("code"), "course code", maximum=32).upper()
         if code in seen:
             raise BadRequestError("DUPLICATE_CATALOG_COURSE", f"Course {code} is duplicated")
@@ -2215,6 +2981,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
         instructors = raw.get("instructor_names", [])
         prerequisites = raw.get("prerequisites", [])
         resources = raw.get("resources", [])
+        related_videos = raw.get("related_videos", [])
         if not isinstance(instructors, list) or not all(
             isinstance(item, str) for item in instructors
         ):
@@ -2231,6 +2998,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
             )
         if not isinstance(resources, list):
             raise BadRequestError("INVALID_CATALOG_COURSE", f"Course {code} has invalid resources")
+        mapped_videos = _course_videos(related_videos, course_code=code)
         mapped_prerequisites: list[JsonDict] = []
         for item in cast(list[dict[str, object]], prerequisites):
             mapped_prerequisites.append(
@@ -2243,6 +3011,7 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
             )
         courses.append(
             {
+                "sourceId": source_id,
                 "code": code,
                 "title": _required_string(raw.get("title"), "course title", maximum=180),
                 "description": _required_string(
@@ -2261,10 +3030,71 @@ def academic_courses(document: Mapping[str, Any]) -> list[JsonDict]:
                 "meetingPattern": _optional_string(raw.get("meeting_pattern"), maximum=240),
                 "prerequisites": mapped_prerequisites,
                 "resources": copy.deepcopy(resources),
+                "relatedVideos": mapped_videos,
                 "sourceUrl": _optional_string(raw.get("source_url"), maximum=1_000),
             }
         )
     return courses
+
+
+def _course_videos(value: object, *, course_code: str) -> list[JsonDict]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or len(value) > 5:
+        raise BadRequestError(
+            "INVALID_CATALOG_COURSE",
+            f"Course {course_code} must have zero to five related videos",
+        )
+    videos: list[JsonDict] = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, Mapping):
+            raise BadRequestError(
+                "INVALID_CATALOG_COURSE",
+                f"Course {course_code} has an invalid related video",
+            )
+        video_id = _required_string(raw.get("id"), "related video id", maximum=120)
+        url = _youtube_url(raw.get("url"), course_code=course_code)
+        if video_id in seen or url in seen:
+            raise BadRequestError(
+                "INVALID_CATALOG_COURSE",
+                f"Course {course_code} has a duplicate related video",
+            )
+        seen.update({video_id, url})
+        videos.append(
+            {
+                "id": video_id,
+                "title": _required_string(raw.get("title"), "related video title", maximum=180),
+                "description": _optional_string(raw.get("description"), maximum=500),
+                "url": url,
+                "provider": "YouTube",
+                "sourceLabel": _optional_string(raw.get("source_label"), maximum=180),
+            }
+        )
+    return videos
+
+
+def _youtube_url(value: object, *, course_code: str) -> str:
+    url = _required_string(value, "related video URL", maximum=1_000)
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    query = parse_qs(parsed.query)
+    youtube_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com"}
+    valid = False
+    if parsed.scheme == "https" and host == "youtu.be":
+        valid = bool(parsed.path.strip("/"))
+    elif parsed.scheme == "https" and host in youtube_hosts:
+        valid = (
+            (parsed.path == "/watch" and bool(query.get("v")))
+            or (parsed.path == "/playlist" and bool(query.get("list")))
+            or parsed.path.startswith("/embed/")
+        )
+    if not valid:
+        raise BadRequestError(
+            "INVALID_CATALOG_COURSE",
+            f"Course {course_code} related videos must use a valid HTTPS YouTube URL",
+        )
+    return url
 
 
 def _configuration_kind(value: str) -> ManagedConfigurationKind:

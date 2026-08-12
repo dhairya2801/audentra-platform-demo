@@ -8,10 +8,15 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Protocol
 
 from audentra.infrastructure.messaging.dispatcher import EventDispatcher
 from audentra.infrastructure.messaging.envelope import ClaimedOutboxEvent
 from audentra.infrastructure.messaging.outbox import OutboxRepository
+
+
+class ScheduledWorkflowRunner(Protocol):
+    async def run_once(self) -> int: ...
 
 
 @dataclass(slots=True)
@@ -22,7 +27,16 @@ class WorkerStatus:
     in_flight: int = 0
     processed: int = 0
     failed: int = 0
+    scheduled_runs: int = 0
+    scheduled_failures: int = 0
+    enrichment_runs: int = 0
+    enrichment_failures: int = 0
+    transcription_runs: int = 0
+    transcription_failures: int = 0
     last_successful_poll_at: datetime | None = None
+    last_scheduled_run_at: datetime | None = None
+    last_enrichment_run_at: datetime | None = None
+    last_transcription_run_at: datetime | None = None
     last_poll_error: str | None = None
 
 
@@ -33,13 +47,31 @@ class WorkerService:
         dispatcher: EventDispatcher,
         *,
         poll_interval_seconds: float = 1.0,
+        scheduled_runner: ScheduledWorkflowRunner | None = None,
+        scheduled_interval_seconds: float = 300.0,
+        enrichment_runner: ScheduledWorkflowRunner | None = None,
+        enrichment_interval_seconds: float = 1.0,
+        transcription_runner: ScheduledWorkflowRunner | None = None,
+        transcription_interval_seconds: float = 1.0,
         logger: logging.Logger | None = None,
     ) -> None:
         if not 0.05 <= poll_interval_seconds <= 60:
             raise ValueError("poll_interval_seconds must be between 0.05 and 60")
+        if not 60 <= scheduled_interval_seconds <= 3_600:
+            raise ValueError("scheduled_interval_seconds must be between 60 and 3600")
+        if not 0.1 <= enrichment_interval_seconds <= 60:
+            raise ValueError("enrichment_interval_seconds must be between 0.1 and 60")
+        if not 0.1 <= transcription_interval_seconds <= 60:
+            raise ValueError("transcription_interval_seconds must be between 0.1 and 60")
         self._repository = repository
         self._dispatcher = dispatcher
         self._poll_interval_seconds = poll_interval_seconds
+        self._scheduled_runner = scheduled_runner
+        self._scheduled_interval_seconds = scheduled_interval_seconds
+        self._enrichment_runner = enrichment_runner
+        self._enrichment_interval_seconds = enrichment_interval_seconds
+        self._transcription_runner = transcription_runner
+        self._transcription_interval_seconds = transcription_interval_seconds
         self._logger = logger or logging.getLogger(__name__)
         self._stop_event = asyncio.Event()
         self._status = WorkerStatus(started_at=datetime.now(UTC))
@@ -50,6 +82,12 @@ class WorkerService:
     async def run_once(self) -> int:
         """Claim and process one batch; useful for tests and one-shot jobs."""
 
+        await self._run_scheduled_if_due()
+        await self._run_enrichment_if_due()
+        await self._run_transcription_if_due()
+        return await self._poll_outbox_once()
+
+    async def _poll_outbox_once(self) -> int:
         self._status.polling = True
         try:
             batch = await self._repository.claim_batch()
@@ -85,22 +123,108 @@ class WorkerService:
                 processed_in_batch += 1
         return processed_in_batch
 
+    async def _run_scheduled_if_due(self) -> None:
+        if self._scheduled_runner is None:
+            return
+        last_run = self._status.last_scheduled_run_at
+        now = datetime.now(UTC)
+        if (
+            last_run is not None
+            and (now - last_run).total_seconds() < self._scheduled_interval_seconds
+        ):
+            return
+        self._status.last_scheduled_run_at = now
+        try:
+            await self._scheduled_runner.run_once()
+            self._status.scheduled_runs += 1
+        except Exception:
+            self._status.scheduled_failures += 1
+            self._logger.exception("scheduled_agentic_workflow_failed")
+
+    async def _run_enrichment_if_due(self) -> None:
+        if self._enrichment_runner is None:
+            return
+        last_run = self._status.last_enrichment_run_at
+        now = datetime.now(UTC)
+        if (
+            last_run is not None
+            and (now - last_run).total_seconds() < self._enrichment_interval_seconds
+        ):
+            return
+        self._status.last_enrichment_run_at = now
+        try:
+            await self._enrichment_runner.run_once()
+            self._status.enrichment_runs += 1
+        except Exception:
+            self._status.enrichment_failures += 1
+            self._logger.exception("action_center_enrichment_poll_failed")
+
+    async def _run_transcription_if_due(self) -> None:
+        if self._transcription_runner is None:
+            return
+        last_run = self._status.last_transcription_run_at
+        now = datetime.now(UTC)
+        if (
+            last_run is not None
+            and (now - last_run).total_seconds() < self._transcription_interval_seconds
+        ):
+            return
+        self._status.last_transcription_run_at = now
+        try:
+            await self._transcription_runner.run_once()
+            self._status.transcription_runs += 1
+        except Exception:
+            self._status.transcription_failures += 1
+            self._logger.exception("call_transcription_poll_failed")
+
     async def run(self) -> None:
         self._logger.info(
             "worker_poll_loop_started",
             extra={"poll_interval_seconds": self._poll_interval_seconds},
         )
-        while not self._status.stopping:
-            try:
-                processed = await self.run_once()
-                if processed == 0:
+        background_tasks = [
+            asyncio.create_task(self._background_runner_loop("scheduled"))
+            for _runner in [self._scheduled_runner]
+            if _runner is not None
+        ]
+        if self._enrichment_runner is not None:
+            background_tasks.append(asyncio.create_task(self._background_runner_loop("enrichment")))
+        if self._transcription_runner is not None:
+            background_tasks.append(
+                asyncio.create_task(self._background_runner_loop("transcription"))
+            )
+        try:
+            while not self._status.stopping:
+                try:
+                    processed = await self._poll_outbox_once()
+                    if processed == 0:
+                        await self._interruptible_delay()
+                except Exception as error:
+                    self._status.polling = False
+                    self._status.last_poll_error = str(error)
+                    self._logger.exception("worker_poll_failed")
                     await self._interruptible_delay()
-            except Exception as error:
-                self._status.polling = False
-                self._status.last_poll_error = str(error)
-                self._logger.exception("worker_poll_failed")
-                await self._interruptible_delay()
+        finally:
+            for task in background_tasks:
+                task.cancel()
+            await asyncio.gather(*background_tasks, return_exceptions=True)
         self._logger.info("worker_poll_loop_stopped")
+
+    async def _background_runner_loop(self, kind: str) -> None:
+        interval = {
+            "scheduled": self._scheduled_interval_seconds,
+            "enrichment": self._enrichment_interval_seconds,
+            "transcription": self._transcription_interval_seconds,
+        }[kind]
+        while not self._status.stopping:
+            if kind == "scheduled":
+                await self._run_scheduled_if_due()
+            elif kind == "enrichment":
+                await self._run_enrichment_if_due()
+            else:
+                await self._run_transcription_if_due()
+            with suppress(TimeoutError):
+                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
 
     def stop(self) -> None:
         if self._status.stopping:

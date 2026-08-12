@@ -108,6 +108,9 @@ def inquiry_row(*, version: int = 1) -> dict[str, object]:
         "priority": "medium",
         "assignee_id": None,
         "version": version,
+        "last_message_at": NOW,
+        "expires_at": datetime(2026, 8, 7, 19, 30, tzinfo=UTC),
+        "archived_at": None,
         "created_at": NOW,
         "updated_at": NOW,
         "class_year": 2027,
@@ -209,6 +212,7 @@ def test_postgres_inquiry_update_is_atomic_scoped_and_persists_reply() -> None:
     assert "tenant_id = :tenant_id" in update_sql
     assert "version = :expected_version" in update_sql
     assert update_params["expected_version"] == 1
+    assert update_params["is_resolved"] is False
 
     message_params = next(
         values
@@ -226,6 +230,12 @@ def test_postgres_inquiry_update_is_atomic_scoped_and_persists_reply() -> None:
     assert reply_params["response_note"] == "Please upload both transcripts."
     assert reply_params["notify_student"] is True
     assert reply_params["student_message_id"] is not None
+
+    work_item_sql, _work_item_params = next(
+        call for call in engine.connection.calls if "FROM public.staff_work_item AS item" in call[0]
+    )
+    assert "staff_work_item_link" in work_item_sql
+    assert "ORDER BY item.created_at DESC" in work_item_sql
 
     audit_params = next(
         values for sql, values in engine.connection.calls if "INSERT INTO public.audit_event" in sql
@@ -256,6 +266,29 @@ def test_postgres_inquiry_update_detects_version_conflict_before_writes() -> Non
         )
 
     assert raised.value.code == "VERSION_CONFLICT"
+    assert len(engine.connection.calls) == 1
+
+
+def test_postgres_inquiry_update_rejects_an_expired_support_conversation() -> None:
+    expired = inquiry_row()
+    expired["expires_at"] = NOW
+
+    def handler(sql: str, _values: Mapping[str, object]) -> Sequence[Mapping[str, object]]:
+        return [expired] if "FROM public.student_inquiry AS inquiry" in sql else []
+
+    engine = FakeEngine(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, engine),
+        cast(Any, FakeStudentReader()),
+        clock=lambda: UPDATED_AT,
+    )
+
+    with pytest.raises(ConflictError) as raised:
+        asyncio.run(
+            repository.update_inquiry(staff_auth(), INQUIRY_ID, update_payload(), "request-expired")
+        )
+
+    assert raised.value.code == "SUPPORT_CONVERSATION_EXPIRED"
     assert len(engine.connection.calls) == 1
 
 

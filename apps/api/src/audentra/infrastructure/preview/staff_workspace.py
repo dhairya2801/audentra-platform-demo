@@ -172,6 +172,9 @@ class PreviewStaffWorkspaceRepository:
         student: Mapping[str, Any],
         campus_life: Mapping[str, Any],
         canonical_inquiries: Sequence[Mapping[str, Any]] = (),
+        canonical_cohort: Sequence[Mapping[str, Any]] = (),
+        canonical_knowledge: Sequence[Mapping[str, Any]] | None = None,
+        canonical_core_plays: Sequence[Mapping[str, Any]] | None = None,
     ) -> JsonDict:
         self._require_preview_staff(auth)
         async with self._lock:
@@ -191,6 +194,7 @@ class PreviewStaffWorkspaceRepository:
         current_student = cast(JsonDict, copy.deepcopy(student))
         cohort = snapshot.cohort
         _project_current_student(cohort, current_student, staff)
+        _merge_canonical_cohort(cohort, canonical_cohort)
         items = _mapping_list(action_center.get("items"))
         if cohort and items:
             cohort[0]["recommendedAction"]["taskId"] = str(items[0]["id"])
@@ -215,6 +219,16 @@ class PreviewStaffWorkspaceRepository:
         journey_blueprint = _journey_blueprint(snapshot.configurations["journeys"])
         academic_catalog = _academic_catalog(snapshot.configurations["academics"])
         merged_campus = _merge_campus_life(snapshot, campus_life)
+        knowledge_base = (
+            copy.deepcopy(snapshot.knowledge_base)
+            if canonical_knowledge is None
+            else [copy.deepcopy(dict(item)) for item in canonical_knowledge]
+        )
+        core_plays = (
+            copy.deepcopy(snapshot.core_plays)
+            if canonical_core_plays is None
+            else [copy.deepcopy(dict(item)) for item in canonical_core_plays]
+        )
         inquiry_by_id = {str(item["id"]): item for item in snapshot.inquiries}
         inquiry_by_id.update(
             {
@@ -252,8 +266,8 @@ class PreviewStaffWorkspaceRepository:
             "cohort": cohort,
             "cohortSeed": snapshot.cohort_seed,
             "student": current_student,
-            "knowledgeBase": snapshot.knowledge_base,
-            "corePlays": snapshot.core_plays,
+            "knowledgeBase": knowledge_base,
+            "corePlays": core_plays,
             "inquiries": inquiries,
             "journeyBlueprint": journey_blueprint,
             "academicCatalog": academic_catalog,
@@ -268,7 +282,7 @@ class PreviewStaffWorkspaceRepository:
                 academic_catalog,
                 merged_campus,
                 inquiries,
-                snapshot.knowledge_base,
+                knowledge_base,
             ),
             "outreachRuns": snapshot.outreach_runs,
             "capabilities": {
@@ -850,6 +864,38 @@ def _project_current_student(
             entry["assignedStaffId"] = str(staff[1]["id"])
 
 
+def _merge_canonical_cohort(
+    cohort: list[JsonDict], canonical_cohort: Sequence[Mapping[str, Any]]
+) -> None:
+    """Add real students to the preview roster without inventing risk scores."""
+
+    by_id = {str(entry["id"]): entry for entry in cohort}
+    for canonical_value in canonical_cohort:
+        canonical = copy.deepcopy(dict(canonical_value))
+        student_id = str(canonical.get("id") or "")
+        if not student_id:
+            continue
+        current = by_id.get(student_id)
+        if current is None:
+            cohort.append(canonical)
+            by_id[student_id] = canonical
+            continue
+        for key in (
+            "name",
+            "preferredName",
+            "programName",
+            "classYear",
+            "assignedStaffId",
+            "journey",
+            "syntheticSeed",
+        ):
+            if key in canonical:
+                current[key] = canonical[key]
+        recommendation = cast(Mapping[str, Any], canonical.get("recommendedAction", {}))
+        if recommendation.get("taskId"):
+            current["recommendedAction"] = copy.deepcopy(dict(recommendation))
+
+
 def _configuration_kind(value: str) -> ConfigurationKind:
     if value not in _CONFIGURATION_FILES:
         raise BadRequestError("INVALID_STAFF_CONFIGURATION", "Choose a managed configuration")
@@ -1169,6 +1215,18 @@ def _academic_catalog(configuration: Mapping[str, Any]) -> JsonDict:
                 "availabilityLabel": course.get("availability_label"),
                 "instructorNames": list(course.get("instructor_names", [])),
                 "meetingPattern": course.get("meeting_pattern"),
+                "resources": copy.deepcopy(course.get("resources", [])),
+                "relatedVideos": [
+                    {
+                        "id": video.get("id"),
+                        "title": video.get("title"),
+                        "description": video.get("description"),
+                        "url": video.get("url"),
+                        "provider": "YouTube",
+                        "sourceLabel": video.get("source_label"),
+                    }
+                    for video in _mapping_list(course.get("related_videos"))
+                ],
                 "prerequisites": prerequisites,
             }
         )
@@ -1219,6 +1277,8 @@ def _campus_event(item: Mapping[str, Any]) -> JsonDict:
             else None
         ),
         "registrationUrl": item.get("registration_url"),
+        "version": int(item.get("version", 1)),
+        "registrationStatus": None,
     }
 
 

@@ -174,6 +174,17 @@ def test_legacy_validation_rejects_arbitrary_sql_edit() -> None:
         validate_legacy_migrations(migrations)
 
 
+def test_backend_lifecycle_migration_restores_manual_retry_for_legacy_failures() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0028_backend_lifecycle_realtime.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "jsonb_set(extraction, '{retryable}', 'true'::jsonb, true)" in migration
+    assert "mime_type IN ('application/pdf', 'image/jpeg', 'image/png')" in migration
+    assert "extraction->>'status' = 'failed'" in migration
+    assert "extraction->>'failureCode' = 'unsupported_capability'" in migration
+
+
 @pytest.mark.postgres
 def test_postgres_migration_session_can_take_and_release_lock() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")

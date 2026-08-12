@@ -8,7 +8,13 @@ import httpx
 import pytest
 from PIL import Image
 
-from audentra.integrations.ai.gateway import GatewaySettings, StudentAIGateway
+from audentra.integrations.ai.gateway import (
+    ACTION_CENTER_ENRICHMENT_JSON_SCHEMA,
+    GatewaySettings,
+    StudentAIGateway,
+    _deterministic_action_center_enrichment,
+    _normalize_action_center_enrichment,
+)
 from audentra.integrations.ai.prompt_runtime import (
     AiOperation,
     RuntimeConfig,
@@ -57,6 +63,181 @@ def _blank_pdf(page_count: int) -> bytes:
         document.close()
 
 
+def test_deterministic_student_summary_rebuilds_current_task_state() -> None:
+    result = _deterministic_action_center_enrichment(
+        {
+            "student": {"displayName": "Alex", "program": "Computer Science"},
+            "task": {
+                "title": "Confirm onboarding choices",
+                "description": "Confirm the current choices.",
+                "status": "in_progress",
+            },
+            "allTasks": [
+                {
+                    "title": "Confirm onboarding choices",
+                    "status": "in_progress",
+                    "nextStep": "Wait for Alex's reply.",
+                },
+                {"title": "Upload transcript", "status": "done"},
+            ],
+            "communications": [],
+            "priorOutcomes": [],
+            "previousStudentSummary": {
+                "summary": "Alex has an Action Center item currently todo.",
+                "keyFacts": ["Program: Computer Science"],
+                "risks": ["Old risk"],
+                "nextSteps": ["Old next step"],
+            },
+        }
+    )
+
+    summary = str(result["studentSummary"])
+    assert "1 active enrollment or onboarding action" in summary
+    assert "Confirm onboarding choices (in progress)" in summary
+    assert "1 completed or cancelled action is recorded" in summary
+    assert "currently todo" not in summary
+    assert result["risks"] == []
+    assert result["nextSteps"] == ["Wait for Alex's reply."]
+
+
+def test_action_center_result_redacts_technical_identifiers_from_staff_projections() -> None:
+    identifier = "a2cfb654-7372-459d-9bef-4ec49bd3393f"
+    result = _normalize_action_center_enrichment(
+        {
+            "studentSummary": f"Alex's student ID is {identifier}.",
+            "keyFacts": [f"Student ID {identifier}", "Offer status: accepted"],
+        },
+        {
+            "student": {"displayName": "Alex", "program": "Computer Science"},
+            "task": {"title": "Confirm transcript", "status": "in_progress"},
+            "communications": [],
+            "allTasks": [],
+            "priorOutcomes": [],
+            "previousStudentSummary": {},
+        },
+    )
+
+    assert identifier not in result["studentSummary"]
+    assert "[redacted identifier]" in result["studentSummary"]
+    assert result["keyFacts"] == ["Offer status: accepted"]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_response_format", "requires_parameters"),
+    [
+        ("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "json_object", False),
+        ("openai/gpt-5.6-luna-pro", "json_schema", True),
+    ],
+)
+@pytest.mark.anyio
+async def test_action_center_enrichment_uses_model_supported_json_contract(
+    model: str, expected_response_format: str, requires_parameters: bool
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "taskSummary": "Confirm Alex's transcript plan.",
+                                    "whyThisMatters": "The official record is still required.",
+                                    "taskObjective": "Confirm the sending path.",
+                                    "successDefinition": "Alex knows the next step.",
+                                    "suggestedApproach": "Use the portal message already on file.",
+                                    "suggestedChannel": "portal",
+                                    "outcomeSummary": "No interaction result is recorded yet.",
+                                    "channelResults": [],
+                                    "outcomeCode": None,
+                                    "resolutionCode": None,
+                                    "nextStep": "Wait for the official transcript.",
+                                    "followUpRequired": False,
+                                    "confidence": 0.9,
+                                    "conversationSignals": {
+                                        "sentiment": {"label": "Neutral", "score": 0.55},
+                                        "engagement": {"label": "Medium", "score": 0.62},
+                                        "intent": "Completing transcript requirements",
+                                        "likelihoodToProgress": {
+                                            "label": "High",
+                                            "score": 0.82,
+                                        },
+                                    },
+                                    "studentSummary": "Alex still needs an official transcript.",
+                                    "keyFacts": ["Program: Computer Science"],
+                                    "risks": [],
+                                    "nextSteps": ["Wait for the official transcript."],
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 23},
+            },
+            request=request,
+        )
+
+    context = {
+        "student": {"displayName": "Alex", "program": "Computer Science"},
+        "task": {
+            "title": "Confirm transcript plan",
+            "description": "Confirm the accepted submission path.",
+            "status": "in_progress",
+        },
+        "communications": [],
+        "allTasks": [],
+        "priorOutcomes": [],
+        "previousStudentSummary": {},
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        gateway = StudentAIGateway(
+            GatewaySettings(
+                openrouter_api_key="configured",
+                openrouter_model=model,
+            ),
+            CompletionClient(http),
+        )
+        result = await gateway.enrich_action_center(
+            context=context,
+            tenant_id="tenant-1",
+            student_id="student-1",
+            request_id="request-1",
+        )
+
+    response_format = captured["response_format"]
+    assert isinstance(response_format, dict)
+    assert response_format["type"] == expected_response_format
+    if expected_response_format == "json_schema":
+        json_schema = response_format["json_schema"]
+        assert json_schema["name"] == "action_center_enrichment"
+        assert json_schema["strict"] is True
+        assert json_schema["schema"] == ACTION_CENTER_ENRICHMENT_JSON_SCHEMA
+    else:
+        assert response_format == {"type": "json_object"}
+    if requires_parameters:
+        assert captured["provider"] == {"require_parameters": True}
+    else:
+        assert "provider" not in captured
+    messages = captured["messages"]
+    assert isinstance(messages, list)
+    system_prompt = messages[0]["content"]
+    assert "code-owned Action Center schema" in system_prompt
+    assert '"taskSummary"' in system_prompt
+    assert '"studentSummary"' in system_prompt
+    assert result["provider"] == "openrouter"
+    assert result["taskSummary"] == "Confirm Alex's transcript plan."
+    assert result["studentSummary"] == "Alex still needs an official transcript."
+    assert result["conversationSignals"]["likelihoodToProgress"] == {
+        "label": "High",
+        "score": 0.82,
+    }
+
+
 class _StaticDocumentPromptRuntime:
     def __init__(self, operation: AiOperation = "document_extraction") -> None:
         self.operation = operation
@@ -82,6 +263,44 @@ class _StaticDocumentPromptRuntime:
             temperature=0,
             cache_status="hit",
         )
+
+
+def test_document_transport_override_keeps_provider_and_model_consistent() -> None:
+    gateway = StudentAIGateway(
+        GatewaySettings(
+            transcript_provider="groq",
+            groq_model="qwen/qwen3.6-27b",
+            openrouter_document_model="openai/gpt-5.6-luna-pro",
+        ),
+        cast(CompletionClient, object()),
+    )
+    published = RuntimeConfig(
+        tenant_id="tenant-1",
+        operation="transcript_segment_extraction",
+        prompt_template_version_id="prompt-1",
+        context_policy_version_id="context-1",
+        output_schema_version_id="schema-1",
+        config_revision=7,
+        updated_at="2026-08-05T00:00:00Z",
+        system_prompt="Published transcript prompt.",
+        user_prompt_template=None,
+        context_policy={},
+        output_schema=None,
+        provider="openrouter",
+        model="openai/gpt-4o-mini",
+        max_output_tokens=2_000,
+        temperature=0,
+        cache_status="hit",
+    )
+
+    groq = gateway._with_document_model(published, "groq")
+    openrouter = gateway._with_document_model(published, "openrouter")
+
+    assert (groq.provider, groq.model) == ("groq", "qwen/qwen3.6-27b")
+    assert (openrouter.provider, openrouter.model) == (
+        "openrouter",
+        "openai/gpt-5.6-luna-pro",
+    )
 
 
 @pytest.mark.anyio
@@ -227,16 +446,18 @@ async def test_provider_history_is_quoted_as_untrusted_context() -> None:
 
 
 @pytest.mark.parametrize(
-    ("document_model", "expected_response_format"),
+    ("document_model", "expected_response_format", "requires_parameters"),
     [
-        ("qwen/qwen3.7-flash", "json_object"),
-        ("qwen/qwen3.7-flash:free", "json_object"),
-        ("openai/gpt-4o-mini", "json_schema"),
+        ("qwen/qwen3.7-flash", "json_object", False),
+        ("qwen/qwen3.7-flash:free", "json_object", False),
+        ("openai/gpt-5.6-luna", "json_schema", True),
+        ("openai/gpt-5.6-luna-pro", "json_schema", True),
+        ("openai/gpt-4o-mini", "json_schema", True),
     ],
 )
 @pytest.mark.anyio
 async def test_openrouter_document_request_uses_model_supported_json_contract(
-    document_model: str, expected_response_format: str
+    document_model: str, expected_response_format: str, requires_parameters: bool
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -294,7 +515,10 @@ async def test_openrouter_document_request_uses_model_supported_json_contract(
     assert response_format["type"] == expected_response_format
     if expected_response_format == "json_object":
         assert response_format == {"type": "json_object"}
-        assert captured["reasoning"] == {"effort": "none", "exclude": True}
+        if document_model.startswith("qwen/qwen3.7-flash"):
+            assert captured["reasoning"] == {"effort": "none", "exclude": True}
+        else:
+            assert "reasoning" not in captured
     else:
         json_schema = response_format["json_schema"]
         assert json_schema["name"] == "student_document_extraction"
@@ -305,7 +529,10 @@ async def test_openrouter_document_request_uses_model_supported_json_contract(
         assert set(schema["required"]) == set(schema["properties"])
         assert schema["properties"]["fields"]["items"]["additionalProperties"] is False
         assert "reasoning" not in captured
-    assert captured["provider"] == {"require_parameters": True}
+    if requires_parameters:
+        assert captured["provider"] == {"require_parameters": True}
+    else:
+        assert "provider" not in captured
     messages = captured["messages"]
     assert isinstance(messages, list)
     system_prompt = messages[0]["content"]
@@ -470,7 +697,7 @@ async def test_segmented_openrouter_transcript_uses_qwen_json_mode_for_every_seg
         assert request_body["model"] == "qwen/qwen3.7-flash:free"
         assert request_body["response_format"] == {"type": "json_object"}
         assert request_body["reasoning"] == {"effort": "none", "exclude": True}
-        assert request_body["provider"] == {"require_parameters": True}
+        assert "provider" not in request_body
         messages = request_body["messages"]
         assert isinstance(messages, list)
         user_content = messages[1]["content"]

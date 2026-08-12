@@ -77,6 +77,15 @@ def can_retry_extraction(extraction: object) -> bool:
 
 def classify_extraction_failure(error: BaseException) -> ExtractionFailure:
     detail = f"{type(error).__name__} {error}".lower()
+    provider_status = getattr(error, "status", None)
+    if isinstance(provider_status, int) and provider_status in {400, 401, 403, 404, 415, 422}:
+        return ExtractionFailure(
+            "provider_configuration",
+            True,
+            False,
+            "The configured parsing model or provider route rejected the request. You can "
+            "retry the stored original after the parsing configuration is corrected.",
+        )
     if re.search(r"timeout|timed out|abort|etimedout|deadline", detail):
         return ExtractionFailure(
             "timeout",

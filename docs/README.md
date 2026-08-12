@@ -35,6 +35,20 @@ ownership, or deployment pressure justifies it.
 
 ## Documentation map
 
+**New engineer starting point:** open the self-contained
+[Audentra Engineering Atlas](./architecture/audentra-system-flow-explorer.html)
+in a browser. It contains the complete documented inventory of 57 student,
+staff, platform/AI, integration, reliability, and leadership use cases plus six
+guided cross-system tours. Select any stage to see whether it runs in the
+student or staff frontend, Platform API, PostgreSQL, object storage, worker,
+external provider, or delivery runtime—together with its boundary input/output,
+durable state, failure guarantee, and owning source neighborhood. Current,
+preview/partial, and target behavior are labeled separately. The selected use
+case is rendered as a clickable swimlane graph: nodes occupy their execution
+runtime and solid/dashed arrows distinguish synchronous from asynchronous
+hand-offs. It is an internal documentation artifact and is not part of either
+portal UI.
+
 1. [System architecture](./01-system-architecture.md)
 2. [Domain data and workflow engine](./02-domain-data-and-workflow.md)
 3. [Student portal feature flows](./03-student-portal-feature-flows.md)

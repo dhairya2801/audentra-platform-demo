@@ -155,6 +155,20 @@ def test_help_request_migration_enforces_scope_lifecycle_and_queue_indexes() -> 
     assert "student_inquiry_staff_queue_idx" in migration
 
 
+def test_support_conversation_lifecycle_archives_active_inboxes_without_erasing_history() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "migrations"
+        / "0032_support_conversation_lifecycle.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "last_message_at timestamptz" in migration
+    assert "expires_at timestamptz" in migration
+    assert "archived_at timestamptz" in migration
+    assert "'archived'" in migration
+    assert "student_inquiry_active_conversation_expiry_idx" in migration
+
+
 def test_in_memory_help_request_replays_and_rejects_key_reuse() -> None:
     service = InMemoryPlatformService()
     memory_auth = AuthContext(
@@ -203,6 +217,11 @@ class FakeResult:
 
     def first(self) -> Mapping[str, Any] | None:
         return self.rows[0] if self.rows else None
+
+    def one(self) -> Mapping[str, Any]:
+        if len(self.rows) != 1:
+            raise AssertionError(f"Expected exactly one row, received {len(self.rows)}")
+        return self.rows[0]
 
     def all(self) -> list[Mapping[str, Any]]:
         return self.rows
@@ -257,9 +276,11 @@ class RecordingOutbox:
 
 def test_postgres_command_scopes_insert_and_avoids_free_text_in_lineage() -> None:
     inquiry_id: str | None = None
+    work_item_id: str | None = None
+    notification_id: str | None = None
 
     def handler(sql: str, params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        nonlocal inquiry_id
+        nonlocal inquiry_id, notification_id, work_item_id
         if "INSERT INTO student_inquiry" in sql:
             inquiry_id = str(params["id"])
             return [
@@ -276,6 +297,14 @@ def test_postgres_command_scopes_insert_and_avoids_free_text_in_lineage() -> Non
                     "updated_at": NOW,
                 }
             ]
+        if "INSERT INTO staff_work_item (" in sql:
+            work_item_id = str(params["id"])
+            return [{"id": params["id"]}]
+        if "INSERT INTO staff_interaction" in sql:
+            return [{"id": params["id"]}]
+        if "INSERT INTO staff_notification" in sql:
+            notification_id = str(params["id"])
+            return [{"id": notification_id}]
         return []
 
     engine = FakeEngine(handler)
@@ -299,9 +328,20 @@ def test_postgres_command_scopes_insert_and_avoids_free_text_in_lineage() -> Non
         "status": "new",
         "priority": "medium",
         "assigneeId": None,
+        "workItemId": work_item_id,
         "createdAt": "2026-08-02T14:30:00.000Z",
         "updatedAt": "2026-08-02T14:30:00.000Z",
         "version": 1,
+        "messages": [
+            {
+                "id": inquiry_id,
+                "direction": "student",
+                "body": "Which transcript should I use?",
+                "authorName": "You",
+                "deliveryStatus": "received",
+                "createdAt": "2026-08-02T14:30:00.000Z",
+            }
+        ],
     }
     inquiry_call = next(
         call for call in engine.connection.calls if "INSERT INTO student_inquiry" in call[0]
@@ -314,19 +354,157 @@ def test_postgres_command_scopes_insert_and_avoids_free_text_in_lineage() -> Non
         call for call in engine.connection.calls if "INSERT INTO audit_event" in call[0]
     )
     audit_metadata = json.loads(audit_call[1]["metadata"])
-    assert audit_metadata == {
-        "topicCode": "documents",
-        "status": "new",
-        "priority": "medium",
-    }
+    assert audit_metadata["topicCode"] == "documents"
+    assert audit_metadata["status"] == "new"
+    assert audit_metadata["priority"] == "medium"
+    assert audit_metadata["workItemId"] == work_item_id
+    assert audit_metadata["notificationId"] == notification_id
+    assert audit_metadata["triageComponent"] == "Enrollment Support"
     assert outbox.events[0].event_name == "student.help_request_created.v1"
     assert outbox.events[0].aggregate_id == inquiry_id
-    assert outbox.events[0].data == {
-        "studentId": STUDENT_ID,
-        "topicCode": "documents",
-        "status": "new",
-        "priority": "medium",
-    }
+    assert outbox.events[0].data["studentId"] == STUDENT_ID
+    assert outbox.events[0].data["topicCode"] == "documents"
+    assert outbox.events[0].data["workItemId"] == work_item_id
+    assert outbox.events[0].data["notificationId"] == notification_id
+    assert any("INSERT INTO staff_realtime_event" in sql for sql, _ in engine.connection.calls)
+
+
+def test_student_reply_is_visible_immediately_and_debounces_ai_enrichment() -> None:
+    inquiry_id = "40000000-0000-7000-8000-000000000001"
+    work_item_id = "20000000-0000-7000-8000-000000000001"
+    interaction_id = "30000000-0000-7000-8000-000000000001"
+    reply_id: str | None = None
+
+    def inquiry_row(version: int) -> dict[str, Any]:
+        return {
+            "id": inquiry_id,
+            "topic_code": "documents",
+            "subject": "Student question about documents",
+            "message": "Which transcript should I use?",
+            "status": "open",
+            "priority": "medium",
+            "assignee_id": None,
+            "version": version,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+
+    def handler(sql: str, params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        nonlocal reply_id
+        if "SELECT request_hash, response_body FROM idempotency_record" in sql:
+            return []
+        if "FROM student_inquiry" in sql and "FOR UPDATE" in sql:
+            return [inquiry_row(2)]
+        if "INSERT INTO student_inquiry_student_reply" in sql:
+            reply_id = str(params["id"])
+            return []
+        if "UPDATE student_inquiry" in sql:
+            return [inquiry_row(3)]
+        if "FROM staff_work_item" in sql:
+            return [
+                {
+                    "id": work_item_id,
+                    "key": "ENR-0001",
+                    "status": "in_progress",
+                    "assignee_id": None,
+                    "version": 4,
+                }
+            ]
+        if "FROM staff_interaction" in sql:
+            return [{"id": interaction_id, "source_version": 7, "completed_at": None}]
+        if "FROM student_inquiry_reply AS reply" in sql:
+            return []
+        if "FROM student_inquiry_student_reply" in sql:
+            assert reply_id is not None
+            return [{"id": reply_id, "body": params.get("body", "A follow-up"), "created_at": NOW}]
+        if "INSERT INTO staff_notification" in sql:
+            return [{"id": params["id"]}]
+        return []
+
+    engine = FakeEngine(handler)
+    outbox = RecordingOutbox()
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine), cast(OutboxRepository, outbox))
+
+    result = asyncio.run(
+        repository.create_student_inquiry_message(
+            AUTH,
+            inquiry_id,
+            {"expectedVersion": 2, "body": "A follow-up"},
+            "reply-request-12345678",
+            "request-2",
+        )
+    )
+
+    assert result["version"] == 3
+    assert result["messages"][-1]["body"] == "A follow-up"
+    reply_insert = next(
+        sql
+        for sql, _ in engine.connection.calls
+        if "INSERT INTO student_inquiry_student_reply" in sql
+    )
+    communication_insert = next(
+        sql for sql, _ in engine.connection.calls if "INSERT INTO communication_event" in sql
+    )
+    interaction_update = next(
+        sql for sql, _ in engine.connection.calls if "UPDATE staff_interaction" in sql
+    )
+    enrichment_upsert = next(
+        sql for sql, _ in engine.connection.calls if "INSERT INTO action_center_ai_job" in sql
+    )
+    work_log_insert = next(
+        sql for sql, _ in engine.connection.calls if "INSERT INTO staff_work_log" in sql
+    )
+    assert reply_insert
+    assert "'portal', 'inbound'" in communication_insert
+    assert "quiet_until=NOW() + interval '5 minutes'" in interaction_update
+    assert "action_center_ai_job.created_at + interval '15 minutes'" in enrichment_upsert
+    assert "THEN NOW()" in enrichment_upsert
+    assert "'student', :student_id" in work_log_insert
+    assert outbox.events[-1].event_name == "student.inquiry_message_created.v1"
+    assert any("INSERT INTO staff_realtime_event" in sql for sql, _ in engine.connection.calls)
+
+
+def test_student_reply_rejects_a_stale_conversation_version_before_writing() -> None:
+    inquiry_id = "40000000-0000-7000-8000-000000000001"
+
+    def handler(sql: str, _params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT request_hash, response_body FROM idempotency_record" in sql:
+            return []
+        if "FROM student_inquiry" in sql and "FOR UPDATE" in sql:
+            return [
+                {
+                    "id": inquiry_id,
+                    "topic_code": "support",
+                    "subject": "Support question",
+                    "message": "Initial message",
+                    "status": "waiting_on_student",
+                    "priority": "high",
+                    "assignee_id": None,
+                    "version": 3,
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                }
+            ]
+        return []
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    with pytest.raises(ConflictError) as raised:
+        asyncio.run(
+            repository.create_student_inquiry_message(
+                AUTH,
+                inquiry_id,
+                {"expectedVersion": 2, "body": "My answer"},
+                "stale-reply-12345678",
+                "request-3",
+            )
+        )
+
+    assert raised.value.code == "VERSION_CONFLICT"
+    assert not any(
+        "INSERT INTO student_inquiry_student_reply" in sql for sql, _ in engine.connection.calls
+    )
 
 
 def test_staff_help_request_read_seam_is_tenant_scoped_and_workspace_shaped() -> None:
@@ -519,6 +697,53 @@ def _integration_schema_statements(schema: str) -> tuple[str, ...]:
           status text NOT NULL, priority text NOT NULL, assignee_id uuid,
           version integer NOT NULL, created_at timestamptz NOT NULL,
           updated_at timestamptz NOT NULL
+        )""",
+        f"""CREATE TABLE {schema}.staff_work_item (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
+          key text NOT NULL, title text NOT NULL, description text NOT NULL,
+          status text NOT NULL, priority text NOT NULL, work_type text NOT NULL,
+          component text NOT NULL, due_at timestamptz, escalated boolean NOT NULL,
+          assignee_id uuid, source_type text, source_id uuid, version integer NOT NULL,
+          action_type text NOT NULL, selected_channel text,
+          created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL
+        )""",
+        f"""CREATE UNIQUE INDEX staff_work_item_source_{schema}
+          ON {schema}.staff_work_item(tenant_id, source_type, source_id)
+          WHERE source_type IS NOT NULL AND source_id IS NOT NULL""",
+        f"""CREATE TABLE {schema}.staff_interaction (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
+          work_item_id uuid NOT NULL, objective text NOT NULL, status text NOT NULL,
+          selected_channel text, source_version bigint NOT NULL,
+          covered_source_version bigint NOT NULL, version integer NOT NULL,
+          quiet_until timestamptz, last_activity_at timestamptz,
+          request_key text NOT NULL, created_at timestamptz NOT NULL,
+          updated_at timestamptz NOT NULL
+        )""",
+        f"""CREATE TABLE {schema}.communication_event (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid,
+          channel text NOT NULL, direction text NOT NULL, subject text,
+          body_excerpt text, metadata jsonb NOT NULL, resolution_status text NOT NULL,
+          occurred_at timestamptz NOT NULL, created_at timestamptz NOT NULL,
+          interaction_id uuid, source_type text, source_id uuid,
+          source_sequence bigint, delivery_status text NOT NULL
+        )""",
+        f"""CREATE UNIQUE INDEX communication_event_source_{schema}
+          ON {schema}.communication_event(tenant_id, source_type, source_id)
+          WHERE source_type IS NOT NULL AND source_id IS NOT NULL""",
+        f"""CREATE TABLE {schema}.action_center_ai_job (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, purpose text NOT NULL,
+          dedupe_key text NOT NULL, student_id uuid NOT NULL, work_item_id uuid,
+          interaction_id uuid, status text NOT NULL,
+          requested_source_version bigint NOT NULL,
+          covered_source_version bigint NOT NULL, not_before timestamptz NOT NULL,
+          attempts integer NOT NULL, max_attempts integer NOT NULL,
+          created_at timestamptz NOT NULL, updated_at timestamptz NOT NULL,
+          UNIQUE (tenant_id, purpose, dedupe_key)
+        )""",
+        f"""CREATE TABLE {schema}.staff_work_log (
+          id uuid PRIMARY KEY, tenant_id uuid NOT NULL, work_item_id uuid NOT NULL,
+          actor_type text NOT NULL, actor_id uuid, actor_name text NOT NULL,
+          action text NOT NULL, message text NOT NULL, occurred_at timestamptz NOT NULL
         )""",
         f"""CREATE TABLE {schema}.idempotency_record (
           tenant_id uuid NOT NULL, actor_id uuid NOT NULL, operation text NOT NULL,

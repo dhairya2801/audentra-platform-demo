@@ -328,6 +328,17 @@ def test_corrupt_image_failure_is_terminal_and_student_safe() -> None:
     assert failure.automatic_retryable is False
 
 
+def test_provider_model_route_404_is_manually_retryable() -> None:
+    failure = classify_extraction_failure(
+        ProviderCompletionError("OpenRouter returned HTTP 404", status=404)
+    )
+
+    assert failure.code == "provider_configuration"
+    assert failure.retryable is True
+    assert failure.automatic_retryable is False
+    assert "stored original" in failure.warning
+
+
 def test_unreadable_pdf_returns_only_the_stable_error_code() -> None:
     with pytest.raises(DocumentPreprocessingError) as raised:
         asyncio.run(preprocess_student_document(b"%PDF-not-a-real-pdf", "application/pdf"))

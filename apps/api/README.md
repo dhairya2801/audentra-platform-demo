@@ -128,6 +128,7 @@ These changes are intentional:
 | Previous setting | Python setting/status |
 |---|---|
 | `WORKER_POLL_INTERVAL_MS` | `WORKER_POLL_INTERVAL_SECONDS` (seconds, supports decimals) |
+| *(new)* | `AGENTIC_WORKFLOW_INTERVAL_SECONDS` (scheduled inbox/engagement scan cadence; default 300) |
 | `WORKER_HEALTH_PORT` | Removed; the Python worker does not expose an HTTP health port |
 | `DOCUMENT_PYTHON_BIN` | Removed; document processing runs directly in this Python process |
 | `OPENROUTER_STORE_RESPONSES` | Removed; provider diagnostics use the durable repository journal |

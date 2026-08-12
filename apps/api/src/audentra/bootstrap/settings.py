@@ -31,6 +31,7 @@ class WorkerSettings:
     api_internal_url: str
     command_timeout_seconds: float
     poll_interval_seconds: float
+    scheduled_interval_seconds: float
     batch_size: int
     lease_seconds: int
     max_attempts: int
@@ -191,6 +192,10 @@ class RuntimeSettings:
                     "OPENROUTER_DOCUMENT_MODEL", "qwen/qwen3.7-flash"
                 ).strip()
                 or "qwen/qwen3.7-flash",
+                openrouter_transcription_model=values.get(
+                    "OPENROUTER_TRANSCRIPTION_MODEL", "openai/whisper-large-v3"
+                ).strip()
+                or "openai/whisper-large-v3",
                 app_url=values.get("OPENROUTER_APP_URL", "http://localhost:3000").strip(),
                 app_name=values.get("OPENROUTER_APP_NAME", "Aster Student Portal").strip(),
                 document_timeout_seconds=openrouter_timeout_ms / 1_000,
@@ -240,6 +245,9 @@ class RuntimeSettings:
                 command_timeout_seconds=worker_command_timeout,
                 poll_interval_seconds=_bounded_float(
                     values, "WORKER_POLL_INTERVAL_SECONDS", 1.0, 0.05, 60.0
+                ),
+                scheduled_interval_seconds=_bounded_float(
+                    values, "AGENTIC_WORKFLOW_INTERVAL_SECONDS", 300.0, 60.0, 3_600.0
                 ),
                 batch_size=_bounded_int(values, ("WORKER_BATCH_SIZE",), 20, 1, 500),
                 lease_seconds=worker_lease_seconds,

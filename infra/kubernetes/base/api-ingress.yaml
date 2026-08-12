@@ -1,0 +1,23 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: audentra-platform-api
+  labels:
+    app.kubernetes.io/name: audentra-platform
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: audentra
+spec:
+  tls:
+    - hosts: [api.example.edu]
+      secretName: audentra-platform-tls
+  rules:
+    - host: api.example.edu
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: audentra-platform-api
+                port:
+                  name: http

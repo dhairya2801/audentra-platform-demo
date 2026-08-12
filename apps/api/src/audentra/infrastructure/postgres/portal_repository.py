@@ -15,7 +15,7 @@ import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -31,6 +31,9 @@ from audentra.domain.onboarding import (
 )
 from audentra.infrastructure.messaging.envelope import DomainEventActor, DomainEventEnvelope
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
+from audentra.infrastructure.postgres.journey_routing import (
+    reconcile_student_journey_routes,
+)
 
 JsonDict = dict[str, Any]
 IdempotentHandler = Callable[[AsyncConnection], Awaitable[JsonDict]]
@@ -161,7 +164,7 @@ def _json(value: object) -> str:
 
 
 def _json_default(value: object) -> str:
-    if isinstance(value, (date, datetime, Decimal)):
+    if isinstance(value, (date, datetime, Decimal, UUID)):
         return str(value)
     raise TypeError(f"{type(value).__name__} is not JSON serializable")
 
@@ -269,6 +272,9 @@ def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
                 configuration["fields"] = [
                     dict(field) for field in raw_fields if isinstance(field, Mapping)
                 ]
+            raw_form = input_config.get("form")
+            if isinstance(raw_form, Mapping):
+                configuration["form"] = dict(raw_form)
             if step == "about_you":
                 raw_required = input_config.get(
                     "required_fields", input_config.get("requiredFields")
@@ -465,6 +471,28 @@ def _validate_configured_values(values: JsonDict, fields_value: object) -> JsonD
                     raise _invalid_requirement_response(
                         f"Field {field_id} must be an ISO date"
                     ) from error
+        elif field_type == "number":
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+            ):
+                raise _invalid_requirement_response(f"Field {field_id} must be a number")
+            numeric_value = float(value)
+            minimum = field.get("minimum")
+            maximum = field.get("maximum")
+            step = field.get("step")
+            if isinstance(minimum, (int, float)) and numeric_value < float(minimum):
+                raise _invalid_requirement_response(f"Field {field_id} is below its minimum")
+            if isinstance(maximum, (int, float)) and numeric_value > float(maximum):
+                raise _invalid_requirement_response(f"Field {field_id} exceeds its maximum")
+            if isinstance(step, (int, float)) and float(step) > 0:
+                origin = float(minimum) if isinstance(minimum, (int, float)) else 0.0
+                increments = (numeric_value - origin) / float(step)
+                if not math.isclose(increments, round(increments), abs_tol=1e-9):
+                    raise _invalid_requirement_response(
+                        f"Field {field_id} does not match its allowed step"
+                    )
         elif field_type == "checkbox":
             if not isinstance(value, bool):
                 raise _invalid_requirement_response(f"Field {field_id} must be true or false")
@@ -518,10 +546,17 @@ def _normalize_requirement_response(
         _response_keys(response, required={"values"})
         if not isinstance(response["values"], dict):
             raise _invalid_requirement_response("Form values must be an object")
-        fields = input_config.get(
-            "fields" if interaction_type == "form" else "flow",
-            [],
-        )
+        fields = input_config.get("fields" if interaction_type == "form" else "flow", [])
+        form = _mapping(input_config.get("form"))
+        pages = _list(form.get("pages"))
+        if pages:
+            fields = [
+                field
+                for page in pages
+                if isinstance(page, Mapping)
+                for field in _list(page.get("fields"))
+                if isinstance(field, Mapping)
+            ]
         return {"values": _validate_configured_values(response["values"], fields)}
     if interaction_type == "single_select":
         _response_keys(response, required={"selectedOption"})
@@ -728,7 +763,7 @@ def _map_payment(row: Mapping[str, Any]) -> JsonDict:
 
 
 def _map_help_request(row: Mapping[str, Any]) -> JsonDict:
-    return {
+    item = {
         "id": str(row["id"]),
         "topicCode": row["topic_code"],
         "subject": row["subject"],
@@ -740,6 +775,15 @@ def _map_help_request(row: Mapping[str, Any]) -> JsonDict:
         "updatedAt": _iso(row["updated_at"]),
         "version": int(row["version"]),
     }
+    if row.get("last_message_at") is not None:
+        item["lastMessageAt"] = _iso(row["last_message_at"])
+    if row.get("expires_at") is not None:
+        item["expiresAt"] = _iso(row["expires_at"])
+    if row.get("requirement_id") is not None:
+        item["requirementId"] = str(row["requirement_id"])
+    if row.get("work_item_id") is not None:
+        item["workItemId"] = str(row["work_item_id"])
+    return item
 
 
 def _map_source(row: Mapping[str, Any]) -> JsonDict | None:
@@ -765,6 +809,7 @@ def _map_course(row: Mapping[str, Any]) -> JsonDict:
         "instructorNames": _list(row.get("instructor_names")),
         "meetingPattern": row.get("meeting_pattern"),
         "resources": _list(row.get("resources")),
+        "relatedVideos": _list(row.get("related_videos")),
         "source": _map_source(row),
     }
 
@@ -789,6 +834,11 @@ class PostgresPortalRepository:
         self.outbox = outbox or OutboxRepository(
             engine, OutboxRepositoryConfig(worker_id="audentra-api")
         )
+
+    @staticmethod
+    def _require_student(auth: AuthContext) -> None:
+        if auth.actor_type != "student":
+            raise ApiError(403, "STUDENT_ACCESS_REQUIRED", "Student access is required")
 
     async def _all(self, statement: str, params: Mapping[str, Any]) -> list[JsonDict]:
         async with self.engine.connect() as connection:
@@ -1371,7 +1421,7 @@ class PostgresPortalRepository:
                         UPDATE document_record SET status='processing',
                           extraction=CAST(:processing AS jsonb), updated_at=NOW()
                         WHERE tenant_id=:tenant_id AND student_id=:student_id
-                          AND id=:document_id AND status='uploaded'
+                          AND id=:document_id AND status IN ('uploaded','needs_review')
                           AND extraction IS NOT NULL AND (
                             extraction->>'status'='pending_configuration' OR (
                               extraction->>'status'='failed'
@@ -1623,7 +1673,10 @@ class PostgresPortalRepository:
         async with self.engine.begin() as connection:
             extraction_data = dict(extraction)
             completed = extraction_data.get("status") == "completed"
-            status = "needs_review" if completed else "uploaded"
+            # A failed extraction is still a reviewable stored original. Keep it
+            # out of the upload queue and expose an explicit retry/human-review
+            # state without deleting or replacing the original object.
+            status = "needs_review"
             inferred = self._category_for_document_type(str(extraction_data.get("documentType")))
             result = await connection.execute(
                 text(
@@ -1659,7 +1712,7 @@ class PostgresPortalRepository:
             )
             linked_requirement: Mapping[str, Any] | None = None
             candidate_requirement_ids: list[str] = []
-            if completed and classification_matches and updated.get("requirement_id"):
+            if updated.get("requirement_id") and (not completed or classification_matches):
                 candidate_requirement_ids.append(str(updated["requirement_id"]))
             if completed and not updated.get("requirement_id"):
                 candidate_requirement_ids.extend(
@@ -1704,20 +1757,45 @@ class PostgresPortalRepository:
             requirement_transitioned = False
             if linked_requirement is not None:
                 linked_requirement_id = str(linked_requirement["id"])
+                active_help_result = await connection.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM student_inquiry
+                        WHERE tenant_id=:tenant_id AND student_id=:student_id
+                          AND requirement_id=:requirement_id
+                          AND status IN ('new','open','waiting_on_student')
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "requirement_id": linked_requirement_id,
+                    },
+                )
+                has_active_help = active_help_result.mappings().first() is not None
+                requirement_status = (
+                    "under_review" if completed or not has_active_help else "help_requested"
+                )
                 requirement_update = await connection.execute(
                     text(
                         """
-                        UPDATE student_requirement SET status='under_review',
+                        UPDATE student_requirement SET status=:status,
                           progress_percent=LEAST(80, GREATEST(progress_percent, 80)),
                           version=version+1, updated_at=NOW()
                         WHERE tenant_id=:tenant_id AND id=:requirement_id
-                          AND status IN ('ready','in_progress','rejected')
+                          AND status IN (
+                            'ready','help_requested','in_progress','rejected','under_review'
+                          )
+                          AND status IS DISTINCT FROM :status
                         RETURNING id
                         """
                     ),
                     {
                         "tenant_id": auth.tenant_id,
                         "requirement_id": linked_requirement_id,
+                        "status": requirement_status,
                     },
                 )
                 requirement_transitioned = requirement_update.mappings().first() is not None
@@ -1754,13 +1832,27 @@ class PostgresPortalRepository:
                     await self._insert_student_message(
                         connection,
                         auth,
-                        subject=f"{linked_requirement['title']} submitted for review",
-                        body=(
-                            "Your document matched this enrollment task. Your submission is "
-                            "complete for now and the enrollment team will make the official "
-                            "decision."
+                        subject=(
+                            f"{linked_requirement['title']} submitted for review"
+                            if completed
+                            else f"{linked_requirement['title']} needs staff review"
                         ),
-                        kind="requirement_under_review",
+                        body=(
+                            (
+                                "Your document matched this enrollment task. Your submission is "
+                                "complete for now and the enrollment team will make the official "
+                                "decision."
+                            )
+                            if completed
+                            else (
+                                "Your original file is safely stored, but automatic parsing did "
+                                "not finish. Staff review has been requested; you may also retry "
+                                "the stored file without uploading it again."
+                            )
+                        ),
+                        kind=(
+                            "requirement_under_review" if completed else "document_review_requested"
+                        ),
                         href=(
                             "/enrollment/requirements/"
                             + REQUIREMENT_SLUGS.get(
@@ -1831,11 +1923,31 @@ class PostgresPortalRepository:
                         "student_id": auth.student_id,
                     },
                 )
-            work_item_created = False
-            if completed:
-                work_item_created = await self._ensure_document_review_work_item(
-                    connection, auth, updated
+            recovered_help_count = 0
+            recovered_review_count = 0
+            if completed and classification_matches and linked_requirement is not None:
+                recovered = await self._resolve_requirement_help_after_success(
+                    connection,
+                    auth=auth,
+                    requirement_id=str(linked_requirement["id"]),
+                    replacement_document_id=document_id,
+                    request_id=request_id,
                 )
+                recovered_help_count = int(recovered["helpRequestsResolved"])
+                recovered_review_count = int(recovered["reviewItemsResolved"])
+            work_item_result = await self._ensure_document_review_work_item(
+                connection,
+                auth,
+                updated,
+                parse_failure=not completed,
+                failure_code=(
+                    str(extraction_data.get("failureCode"))
+                    if extraction_data.get("failureCode") is not None
+                    else None
+                ),
+                request_id=request_id,
+            )
+            work_item_created = bool(work_item_result["created"])
             await self._insert_audit(
                 connection,
                 auth,
@@ -1853,6 +1965,8 @@ class PostgresPortalRepository:
                     "automaticallyProjectedTranscript": automatic_transcript,
                     "requirementTransitionedToReview": requirement_transitioned,
                     "staffWorkItemCreated": work_item_created,
+                    "helpRequestsAutoResolved": recovered_help_count,
+                    "parseReviewItemsAutoResolved": recovered_review_count,
                 },
             )
             await self._insert_outbox(
@@ -1874,7 +1988,9 @@ class PostgresPortalRepository:
                         if updated.get("requirement_id") is not None
                         else None
                     ),
-                    "staffReviewQueued": completed,
+                    "staffReviewQueued": True,
+                    "helpRequestsAutoResolved": recovered_help_count,
+                    "parseReviewItemsAutoResolved": recovered_review_count,
                 },
             )
             document = _map_document(updated)
@@ -2454,6 +2570,12 @@ class PostgresPortalRepository:
                 },
             )
             response_row = inserted_response.mappings().one()
+            route_transitions = await reconcile_student_journey_routes(
+                connection,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                journey_id=current["journey_id"],
+            )
             await self._award_rewards(
                 connection,
                 auth,
@@ -2474,40 +2596,6 @@ class PostgresPortalRepository:
                         str(current["code"]), str(current["code"]).replace("_", "-")
                     )
                 ),
-            )
-            await connection.execute(
-                text(
-                    """
-                    UPDATE student_requirement candidate SET status='ready',
-                      version=candidate.version+1, updated_at=NOW()
-                    FROM requirement_definition_version definition,
-                         enrollment_journey journey
-                    WHERE candidate.tenant_id=:tenant_id
-                      AND candidate.journey_id=journey.id
-                      AND journey.student_id=:student_id
-                      AND candidate.requirement_definition_version_id=definition.id
-                      AND candidate.retired_at IS NULL
-                      AND candidate.status='blocked'
-                      AND NOT EXISTS (
-                        SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
-                        WHERE NOT EXISTS (
-                          SELECT 1 FROM student_requirement prerequisite
-                          JOIN requirement_definition_version prerequisite_definition
-                            ON prerequisite_definition.id=
-                               prerequisite.requirement_definition_version_id
-                           AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                          WHERE prerequisite.tenant_id=:tenant_id
-                            AND prerequisite.journey_id=candidate.journey_id
-                            AND prerequisite.retired_at IS NULL
-                            AND prerequisite_definition.code=dependency.code
-                            AND prerequisite.status IN (
-                              'completed','waived','not_applicable'
-                            )
-                        )
-                      )
-                    """
-                ),
-                {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
             )
             await connection.execute(
                 text(
@@ -2582,6 +2670,14 @@ class PostgresPortalRepository:
                     "interactionType": interaction_type,
                     "requirementVersion": updated_version,
                     "responseVersion": response_version,
+                    "routeTransitions": [
+                        {
+                            "requirementCode": transition.code,
+                            "from": transition.previous_status,
+                            "to": transition.status,
+                        }
+                        for transition in route_transitions
+                    ],
                 },
             )
             await self._insert_outbox(
@@ -2634,6 +2730,75 @@ class PostgresPortalRepository:
         )
         items = [_map_message(row) for row in rows]
         return {"items": items, "unreadCount": sum(x["readAt"] is None for x in items)}
+
+    async def get_student_realtime_events(
+        self,
+        auth: AuthContext,
+        after_cursor: int | None,
+        limit: int = 100,
+    ) -> JsonDict:
+        """Read a bounded, tenant- and student-scoped invalidation window."""
+
+        self._require_student(auth)
+        bounded_limit = max(1, min(limit, 100))
+        if after_cursor is not None and after_cursor < 0:
+            raise BadRequestError(
+                "INVALID_EVENT_CURSOR",
+                "The realtime event cursor must be non-negative",
+            )
+        async with self.engine.connect() as connection:
+            if after_cursor is None:
+                current_result = await connection.execute(
+                    text(
+                        """
+                        SELECT COALESCE(MAX(cursor), 0) AS cursor
+                        FROM student_realtime_event
+                        WHERE tenant_id=:tenant_id AND student_id=:student_id
+                        """
+                    ),
+                    {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+                )
+                current = current_result.mappings().first()
+                return {
+                    "events": [],
+                    "cursor": int(current["cursor"]) if current is not None else 0,
+                }
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT cursor, event_type, resource_type, resource_id,
+                           payload, created_at
+                    FROM student_realtime_event
+                    WHERE tenant_id=:tenant_id AND student_id=:student_id
+                      AND cursor>:after_cursor
+                    ORDER BY cursor
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "after_cursor": after_cursor,
+                    "limit": bounded_limit,
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+        events = [
+            {
+                "cursor": int(row["cursor"]),
+                "type": str(row["event_type"]),
+                "resourceType": str(row["resource_type"]),
+                "resourceId": str(row["resource_id"]),
+                "data": dict(row["payload"]) if isinstance(row["payload"], Mapping) else {},
+                "occurredAt": _iso(row["created_at"]),
+            }
+            for row in rows
+        ]
+        next_cursor = int(rows[-1]["cursor"]) if rows else after_cursor
+        return {
+            "events": events,
+            "cursor": next_cursor,
+        }
 
     async def mark_student_message_read(
         self, auth: AuthContext, message_id: str, request_id: str
@@ -3543,7 +3708,8 @@ class PostgresPortalRepository:
             """
             SELECT cc.id, cc.code, cc.title, cc.description, cc.credits, cc.level,
                    cc.availability_label, cc.instructor_names, cc.meeting_pattern,
-                   cc.resources, COALESCE(cc.source_url, ccv.source_url) AS source_url,
+                   cc.resources, cc.related_videos,
+                   COALESCE(cc.source_url, ccv.source_url) AS source_url,
                    ccv.source_label, ccv.source_status,
                    COALESCE(json_agg(json_build_object(
                      'courseCode', prerequisite.code,
@@ -3698,7 +3864,8 @@ class PostgresPortalRepository:
             """
             SELECT cc.id, cc.code, cc.title, cc.description, cc.credits, cc.level,
                    cc.availability_label, cc.instructor_names, cc.meeting_pattern,
-                   cc.resources, COALESCE(cc.source_url, ccv.source_url) AS source_url,
+                   cc.resources, cc.related_videos,
+                   COALESCE(cc.source_url, ccv.source_url) AS source_url,
                    ccv.source_label, ccv.source_status, ccv.code AS catalog_code,
                    COALESCE(json_agg(json_build_object(
                      'courseCode', prerequisite.code,
@@ -4021,7 +4188,13 @@ class PostgresPortalRepository:
                    category, featured, accent, source_label, source_url,
                    source_status, registration_url, visual_theme, image_url,
                    image_alt, image_attribution, image_source_url,
-                   advertisement_starts_at, advertisement_ends_at
+                   advertisement_starts_at, advertisement_ends_at, version,
+                   (SELECT registration.status
+                    FROM campus_event_registration registration
+                    WHERE registration.tenant_id=campus_event.tenant_id
+                      AND registration.event_id=campus_event.id
+                      AND registration.student_id=:student_id
+                    LIMIT 1) AS registration_status
             FROM campus_event WHERE tenant_id=:tenant_id AND active=true
               AND (
                 :include_scheduled
@@ -4034,6 +4207,7 @@ class PostgresPortalRepository:
             """,
             {
                 "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
                 "include_scheduled": auth.actor_type == "staff",
             },
         )
@@ -4044,6 +4218,7 @@ class PostgresPortalRepository:
                    club.latest_update, club.next_activity, club.source_label,
                    club.source_url, club.source_status, club.social_links,
                    club.long_description, club.meeting_schedule, club.membership_open,
+                   club.version, club.updated_at,
                    COALESCE(media.public_path, '/media/clubs/code-collective.jpg') AS image_url,
                    COALESCE(media.alt_text, 'Students collaborating in a campus club') AS image_alt,
                    COALESCE(media.attribution, 'Default Aster club image') AS image_attribution,
@@ -4085,6 +4260,8 @@ class PostgresPortalRepository:
                 "advertisementEndsAt": _nullable_iso(row.get("advertisement_ends_at")),
                 "source": _map_source(row),
                 "registrationUrl": row.get("registration_url"),
+                "version": int(row["version"]),
+                "registrationStatus": row.get("registration_status"),
             }
             for row in event_rows
         ]
@@ -4110,6 +4287,8 @@ class PostgresPortalRepository:
                     "longDescription": row.get("long_description"),
                     "meetingSchedule": row.get("meeting_schedule"),
                     "membershipOpen": bool(row["membership_open"]),
+                    "version": int(row["version"]),
+                    "updatedAt": _iso(row["updated_at"]),
                     "events": [
                         {
                             "id": str(event["id"]),
@@ -4128,6 +4307,159 @@ class PostgresPortalRepository:
             )
         return {"events": events, "clubs": clubs, "generatedAt": _iso(_utc_now())}
 
+    async def register_campus_event(
+        self,
+        auth: AuthContext,
+        event_id: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+        request_id: str,
+    ) -> JsonDict:
+        self._require_student(auth)
+
+        async def handler(connection: AsyncConnection) -> JsonDict:
+            event_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, title, starts_at, ends_at, location, active, version
+                    FROM campus_event
+                    WHERE tenant_id=:tenant_id AND id=:event_id
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "event_id": event_id},
+            )
+            campus_event = event_result.mappings().first()
+            if campus_event is None:
+                raise NotFoundError("CAMPUS_EVENT_NOT_FOUND", "The campus event was not found")
+            if not bool(campus_event["active"]) or campus_event["ends_at"] <= _utc_now():
+                raise ConflictError(
+                    "CAMPUS_EVENT_UNAVAILABLE",
+                    "This event is no longer accepting registrations",
+                )
+            expected_version = int(payload["expectedVersion"])
+            actual_version = int(campus_event["version"])
+            if expected_version != actual_version:
+                raise ConflictError(
+                    "CAMPUS_EVENT_CHANGED",
+                    "This event changed. Refresh the page and review the latest details.",
+                )
+
+            registration_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, status, registered_at
+                    FROM campus_event_registration
+                    WHERE tenant_id=:tenant_id AND event_id=:event_id
+                      AND student_id=:student_id
+                    FOR UPDATE
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "event_id": event_id,
+                    "student_id": auth.student_id,
+                },
+            )
+            existing = registration_result.mappings().first()
+            if existing is not None and existing["status"] == "registered":
+                return {
+                    "id": str(existing["id"]),
+                    "eventId": event_id,
+                    "status": "registered",
+                    "eventVersion": actual_version,
+                    "registeredAt": _iso(existing["registered_at"]),
+                }
+
+            registration_id = str(existing["id"]) if existing is not None else str(uuid4())
+            if existing is None:
+                registration_write = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO campus_event_registration (
+                          id, tenant_id, event_id, student_id, status, event_version,
+                          registered_at, cancelled_at, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :event_id, :student_id, 'registered',
+                          :event_version, NOW(), NULL, NOW(), NOW()
+                        )
+                        RETURNING registered_at
+                        """
+                    ),
+                    {
+                        "id": registration_id,
+                        "tenant_id": auth.tenant_id,
+                        "event_id": event_id,
+                        "student_id": auth.student_id,
+                        "event_version": actual_version,
+                    },
+                )
+            else:
+                registration_write = await connection.execute(
+                    text(
+                        """
+                        UPDATE campus_event_registration
+                        SET status='registered', event_version=:event_version,
+                            registered_at=NOW(), cancelled_at=NULL, updated_at=NOW()
+                        WHERE id=:id AND tenant_id=:tenant_id
+                        RETURNING registered_at
+                        """
+                    ),
+                    {
+                        "id": registration_id,
+                        "tenant_id": auth.tenant_id,
+                        "event_version": actual_version,
+                    },
+                )
+            registered_at = registration_write.scalar_one()
+            await self._insert_student_message(
+                connection,
+                auth,
+                subject=f"Registration confirmed: {campus_event['title']}",
+                body=(
+                    f"You are registered for {campus_event['title']} at "
+                    f"{campus_event['location']}. We will notify you if the event changes."
+                ),
+                kind="campus_event_registered",
+                href="/campus-life",
+            )
+            await self._insert_audit(
+                connection,
+                auth,
+                "campus_event.registered",
+                "campus_event_registration",
+                registration_id,
+                request_id,
+                {"eventId": event_id, "eventVersion": actual_version},
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "student.campus_event_registered.v1",
+                "campus_event_registration",
+                registration_id,
+                1,
+                request_id,
+                {"studentId": auth.student_id, "eventId": event_id},
+            )
+            return {
+                "id": registration_id,
+                "eventId": event_id,
+                "status": "registered",
+                "eventVersion": actual_version,
+                "registeredAt": _iso(registered_at),
+            }
+
+        return await self._run_idempotent(
+            auth,
+            idempotency_key,
+            request_id,
+            "student_campus_event.register",
+            {"eventId": event_id, **dict(payload)},
+            200,
+            handler,
+        )
+
     async def get_student_help(self, auth: AuthContext) -> JsonDict:
         rows = await self._all(
             """
@@ -4136,6 +4468,34 @@ class PostgresPortalRepository:
             """,
             {"tenant_id": auth.tenant_id},
         )
+        inquiry_rows = await self._all(
+            """
+            SELECT id, topic_code, subject, message, status, priority,
+                   assignee_id, requirement_id, version, created_at, updated_at,
+                   last_message_at, expires_at
+            FROM student_inquiry
+            WHERE tenant_id=:tenant_id AND student_id=:student_id
+              AND archived_at IS NULL
+            ORDER BY updated_at DESC, id DESC
+            LIMIT 50
+            """,
+            {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+        )
+        async with self.engine.connect() as connection:
+            requests = [
+                {
+                    **_map_help_request(row),
+                    "messages": await self._student_inquiry_messages(
+                        connection,
+                        tenant_id=auth.tenant_id,
+                        student_id=auth.student_id,
+                        inquiry_id=str(row["id"]),
+                        initial_body=str(row["message"]),
+                        initial_created_at=row["created_at"],
+                    ),
+                }
+                for row in inquiry_rows
+            ]
         return {
             "articles": [
                 {
@@ -4146,6 +4506,7 @@ class PostgresPortalRepository:
                 }
                 for row in rows
             ],
+            "requests": requests,
             "support": {
                 "email": "enrollment-support@vv.example",
                 "phone": "+1 555 010 2027",
@@ -4162,24 +4523,137 @@ class PostgresPortalRepository:
     ) -> JsonDict:
         topic_code = str(payload["topicCode"])
         message = str(payload["message"])
-        subject = f"Student question about {topic_code.replace('_', ' ')}"
+        requirement_value = payload.get("requirementId")
+        requirement_id = str(requirement_value) if requirement_value is not None else None
         priority = "high" if topic_code == "support" else "medium"
 
         async def handler(connection: AsyncConnection) -> JsonDict:
+            subject = f"Student question about {topic_code.replace('_', ' ')}"
+            requirement: Mapping[str, Any] | None = None
+            if requirement_id is not None:
+                await connection.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                    {"lock_key": f"requirement-help:{auth.tenant_id}:{requirement_id}"},
+                )
+                requirement_result = await connection.execute(
+                    text(
+                        """
+                        SELECT requirement.id, requirement.status, requirement.version,
+                               definition.title, definition.responsible_office,
+                               definition.flow_kind
+                        FROM student_requirement requirement
+                        JOIN enrollment_journey journey
+                          ON journey.id=requirement.journey_id
+                         AND journey.tenant_id=requirement.tenant_id
+                        JOIN requirement_definition_version definition
+                          ON definition.id=requirement.requirement_definition_version_id
+                         AND definition.tenant_id=requirement.tenant_id
+                        WHERE requirement.tenant_id=:tenant_id
+                          AND requirement.id=:requirement_id
+                          AND journey.student_id=:student_id
+                          AND requirement.retired_at IS NULL
+                        FOR UPDATE OF requirement
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "requirement_id": requirement_id,
+                    },
+                )
+                requirement_row = requirement_result.mappings().first()
+                if requirement_row is None:
+                    raise NotFoundError(
+                        "STUDENT_REQUIREMENT_NOT_FOUND",
+                        "This enrollment or onboarding task is no longer available",
+                    )
+                requirement = dict(requirement_row)
+                if str(requirement["status"]) in {
+                    "not_applicable",
+                    "completed",
+                    "waived",
+                    "expired",
+                }:
+                    raise ConflictError(
+                        "REQUIREMENT_HELP_NOT_AVAILABLE",
+                        "Help cannot be requested for a completed or inactive task",
+                    )
+                active_result = await connection.execute(
+                    text(
+                        """
+                        SELECT inquiry.id, inquiry.topic_code, inquiry.subject,
+                               inquiry.message, inquiry.status, inquiry.priority,
+                               inquiry.assignee_id, inquiry.requirement_id,
+                               inquiry.version, inquiry.created_at, inquiry.updated_at,
+                               item.id AS work_item_id
+                        FROM student_inquiry inquiry
+                        LEFT JOIN staff_work_item item
+                          ON item.tenant_id=inquiry.tenant_id
+                         AND item.source_type='message'
+                         AND item.source_id=inquiry.id
+                        WHERE inquiry.tenant_id=:tenant_id
+                          AND inquiry.student_id=:student_id
+                          AND inquiry.requirement_id=:requirement_id
+                          AND inquiry.status IN ('new','open','waiting_on_student')
+                        ORDER BY inquiry.created_at, inquiry.id
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "requirement_id": requirement_id,
+                    },
+                )
+                active_row = active_result.mappings().first()
+                if active_row is not None:
+                    active = dict(active_row)
+                    response = _map_help_request(active)
+                    response["workItemId"] = (
+                        str(active["work_item_id"])
+                        if active.get("work_item_id") is not None
+                        else None
+                    )
+                    response["messages"] = await self._student_inquiry_messages(
+                        connection,
+                        tenant_id=auth.tenant_id,
+                        student_id=auth.student_id,
+                        inquiry_id=str(active["id"]),
+                        initial_body=str(active["message"]),
+                        initial_created_at=active["created_at"],
+                    )
+                    return response
+
+                subject = f"Help with {requirement['title']}"
+
+            target = await self._resolve_staff_triage_target(
+                connection,
+                tenant_id=auth.tenant_id,
+                preferred_component=(
+                    str(requirement["responsible_office"])
+                    if requirement is not None
+                    else "Enrollment Support"
+                ),
+            )
             inquiry_id = str(uuid4())
             result = await connection.execute(
                 text(
                     """
                     INSERT INTO student_inquiry (
                       id, tenant_id, student_id, topic_code, subject, message,
-                      status, priority, assignee_id, version, created_at, updated_at
+                      status, priority, assignee_id, requirement_id,
+                      status_before_help, version, created_at, updated_at,
+                      last_message_at, expires_at
                     )
                     SELECT :id, student.tenant_id, student.id, :topic_code, :subject,
-                           :message, 'new', :priority, NULL, 1, NOW(), NOW()
+                           :message, 'new', :priority, :assignee_id, :requirement_id,
+                           :status_before_help, 1, NOW(), NOW(), NOW(),
+                           NOW() + interval '5 days'
                     FROM student
                     WHERE student.tenant_id=:tenant_id AND student.id=:student_id
                     RETURNING id, topic_code, subject, message, status, priority,
-                              assignee_id, version, created_at, updated_at
+                              assignee_id, requirement_id, version, created_at, updated_at,
+                              last_message_at, expires_at
                     """
                 ),
                 {
@@ -4190,12 +4664,246 @@ class PostgresPortalRepository:
                     "subject": subject,
                     "message": message,
                     "priority": priority,
+                    "assignee_id": target.get("staffMemberId"),
+                    "requirement_id": requirement_id,
+                    "status_before_help": (
+                        str(requirement["status"]) if requirement is not None else None
+                    ),
                 },
             )
             row = result.mappings().first()
             if row is None:
                 raise NotFoundError("STUDENT_NOT_FOUND", "The authenticated student was not found")
+            if requirement is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE student_requirement
+                        SET status='help_requested', version=version+1, updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:requirement_id
+                          AND status NOT IN (
+                            'not_applicable','completed','waived','expired'
+                          )
+                        """
+                    ),
+                    {"tenant_id": auth.tenant_id, "requirement_id": requirement_id},
+                )
+            work_item_id = str(uuid4())
+            work_key = f"INQ-{inquiry_id.replace('-', '')[:8].upper()}"
+            work_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_item (
+                      id, tenant_id, student_id, key, title, description,
+                      status, priority, work_type, component, due_at, escalated,
+                      assignee_id, source_type, source_id, version, action_type,
+                      selected_channel, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :key, :title, :description,
+                      'todo', :priority, 'communication', :component,
+                      NOW() + interval '1 day', false, :assignee_id,
+                      'message', :source_id, 1,
+                      'communication_response', 'portal', NOW(), NOW()
+                    )
+                    ON CONFLICT (tenant_id, source_type, source_id)
+                    WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                    DO UPDATE SET updated_at = staff_work_item.updated_at
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": work_item_id,
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "key": work_key,
+                    "title": subject,
+                    "description": message,
+                    "priority": priority,
+                    "component": target["workComponent"],
+                    "assignee_id": target.get("staffMemberId"),
+                    "source_id": inquiry_id,
+                },
+            )
+            work_item = work_result.mappings().first()
+            if work_item is None:
+                raise RuntimeError("The inquiry work item could not be created")
+            work_item_id = str(work_item["id"])
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_item_link (
+                      id, tenant_id, work_item_id, entity_type, entity_id,
+                      relationship, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'inquiry', :inquiry_id,
+                      'source', NOW()
+                    )
+                    ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id)
+                    DO NOTHING
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "inquiry_id": inquiry_id,
+                },
+            )
+            if requirement_id is not None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_work_item_link (
+                          id, tenant_id, work_item_id, entity_type, entity_id,
+                          relationship, created_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'requirement',
+                          :requirement_id, 'help_requested_for', NOW()
+                        )
+                        ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id)
+                        DO NOTHING
+                        """
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "tenant_id": auth.tenant_id,
+                        "work_item_id": work_item_id,
+                        "requirement_id": requirement_id,
+                    },
+                )
+            interaction_id = str(uuid4())
+            interaction_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_interaction (
+                      id, tenant_id, student_id, work_item_id, objective, status,
+                      selected_channel, source_version, covered_source_version,
+                      version, quiet_until, last_activity_at, request_key,
+                      created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, :work_item_id, :objective,
+                      'enrichment_pending', 'portal', 1, 0, 1,
+                      NOW() + interval '5 minutes', NOW(), :request_key,
+                      NOW(), NOW()
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": interaction_id,
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "work_item_id": work_item_id,
+                    "objective": subject,
+                    "request_key": f"portal-inquiry:{inquiry_id}",
+                },
+            )
+            interaction = interaction_result.mappings().first()
+            if interaction is None:
+                raise RuntimeError("The inquiry interaction could not be created")
+            interaction_id = str(interaction["id"])
+            communication_id = str(uuid4())
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO communication_event (
+                      id, tenant_id, student_id, channel, direction, subject,
+                      body_excerpt, metadata, resolution_status, occurred_at,
+                      created_at, interaction_id, source_type, source_id,
+                      source_sequence, delivery_status
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, 'portal', 'inbound', :subject,
+                      :body, :metadata, 'unresolved', NOW(), NOW(), :interaction_id,
+                      'student_inquiry', :source_id, 1, 'received'
+                    )
+                    ON CONFLICT (tenant_id, source_type, source_id)
+                    WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                    DO NOTHING
+                    """
+                ),
+                {
+                    "id": communication_id,
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "subject": subject,
+                    "body": message,
+                    "metadata": json.dumps({"topicCode": topic_code}, separators=(",", ":")),
+                    "interaction_id": interaction_id,
+                    "source_id": inquiry_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO action_center_ai_job (
+                      id, tenant_id, purpose, dedupe_key, student_id, work_item_id,
+                      interaction_id, status, requested_source_version,
+                      covered_source_version, not_before, attempts, max_attempts,
+                      created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, 'interaction_enrichment', :dedupe_key,
+                      :student_id, :work_item_id, :interaction_id, 'pending',
+                      1, 0, NOW() + interval '5 minutes', 0, 5, NOW(), NOW()
+                    )
+                    ON CONFLICT (tenant_id, purpose, dedupe_key) DO NOTHING
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "dedupe_key": f"interaction:{interaction_id}",
+                    "student_id": auth.student_id,
+                    "work_item_id": work_item_id,
+                    "interaction_id": interaction_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_log (
+                      id, tenant_id, work_item_id, actor_type, actor_id,
+                      actor_name, action, message, occurred_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'system', NULL,
+                      'Audentra workflow', 'created',
+                      :message, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "message": (
+                        "Created from a student help request linked to an enrollment or "
+                        "onboarding requirement."
+                        if requirement_id is not None
+                        else "Created from a student portal inquiry."
+                    ),
+                },
+            )
+            notification_id = await self._insert_staff_notification(
+                connection,
+                auth=auth,
+                target=target,
+                work_item_id=work_item_id,
+                kind="new_student_inquiry",
+                title="New student inquiry",
+                body=f"{work_key}: {subject}",
+                dedupe_key=f"work-item:{work_item_id}:attention",
+            )
             response = _map_help_request(dict(row))
+            response["workItemId"] = work_item_id
+            response["messages"] = [
+                {
+                    "id": inquiry_id,
+                    "direction": "student",
+                    "body": message,
+                    "authorName": "You",
+                    "deliveryStatus": "received",
+                    "createdAt": _iso(row["created_at"]),
+                }
+            ]
             await self._insert_audit(
                 connection,
                 auth,
@@ -4207,6 +4915,10 @@ class PostgresPortalRepository:
                     "topicCode": topic_code,
                     "status": "new",
                     "priority": priority,
+                    "requirementId": requirement_id,
+                    "workItemId": work_item_id,
+                    "notificationId": notification_id,
+                    "triageComponent": target["workComponent"],
                 },
             )
             await self._insert_outbox(
@@ -4222,6 +4934,9 @@ class PostgresPortalRepository:
                     "topicCode": topic_code,
                     "status": "new",
                     "priority": priority,
+                    "requirementId": requirement_id,
+                    "workItemId": work_item_id,
+                    "notificationId": notification_id,
                 },
             )
             return response
@@ -4231,10 +4946,722 @@ class PostgresPortalRepository:
             idempotency_key,
             request_id,
             "help.request.create",
-            {"topicCode": topic_code, "message": message},
+            {
+                "topicCode": topic_code,
+                "message": message,
+                "requirementId": requirement_id,
+            },
             200,
             handler,
         )
+
+    async def create_student_inquiry_message(
+        self,
+        auth: AuthContext,
+        inquiry_id: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+        request_id: str,
+    ) -> JsonDict:
+        expected_version = int(payload["expectedVersion"])
+        body = str(payload["body"]).strip()
+
+        async def handler(connection: AsyncConnection) -> JsonDict:
+            inquiry_result = await connection.execute(
+                text(
+                    """
+                    SELECT inquiry.id, inquiry.topic_code, inquiry.subject,
+                           inquiry.message, inquiry.status, inquiry.priority,
+                           inquiry.assignee_id, inquiry.requirement_id,
+                           inquiry.status_before_help, inquiry.version,
+                           inquiry.created_at, inquiry.updated_at,
+                           inquiry.last_message_at, inquiry.expires_at,
+                           inquiry.archived_at,
+                           definition.responsible_office
+                    FROM student_inquiry inquiry
+                    LEFT JOIN student_requirement requirement
+                      ON requirement.tenant_id=inquiry.tenant_id
+                     AND requirement.id=inquiry.requirement_id
+                    LEFT JOIN requirement_definition_version definition
+                      ON definition.tenant_id=requirement.tenant_id
+                     AND definition.id=requirement.requirement_definition_version_id
+                    WHERE inquiry.tenant_id=:tenant_id
+                      AND inquiry.student_id=:student_id
+                      AND inquiry.id=:inquiry_id
+                    FOR UPDATE OF inquiry
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "inquiry_id": inquiry_id,
+                },
+            )
+            inquiry = inquiry_result.mappings().first()
+            if inquiry is None:
+                raise NotFoundError(
+                    "STUDENT_INQUIRY_NOT_FOUND",
+                    "This support conversation is no longer available",
+                )
+            if int(inquiry["version"]) != expected_version:
+                raise ConflictError(
+                    "VERSION_CONFLICT",
+                    "This conversation changed in another session. Refresh before sending.",
+                )
+            if inquiry.get("archived_at") is not None or str(inquiry["status"]) == "archived":
+                raise ConflictError(
+                    "SUPPORT_CONVERSATION_EXPIRED",
+                    (
+                        "This conversation was archived after five days without messages. "
+                        "Start a new request if you still need help."
+                    ),
+                )
+            expires_at = inquiry.get("expires_at")
+            if isinstance(expires_at, datetime) and expires_at <= datetime.now(UTC):
+                raise ConflictError(
+                    "SUPPORT_CONVERSATION_EXPIRED",
+                    (
+                        "This conversation was archived after five days without messages. "
+                        "Start a new request if you still need help."
+                    ),
+                )
+            target = await self._resolve_staff_triage_target(
+                connection,
+                tenant_id=auth.tenant_id,
+                assignee_id=(
+                    str(inquiry["assignee_id"]) if inquiry.get("assignee_id") is not None else None
+                ),
+                preferred_component=(
+                    str(inquiry["responsible_office"])
+                    if inquiry.get("responsible_office") is not None
+                    else "Enrollment Support"
+                ),
+            )
+
+            reply_id = str(uuid4())
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO student_inquiry_student_reply (
+                      id, tenant_id, inquiry_id, student_id, request_key,
+                      body, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :inquiry_id, :student_id, :request_key,
+                      :body, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": reply_id,
+                    "tenant_id": auth.tenant_id,
+                    "inquiry_id": inquiry_id,
+                    "student_id": auth.student_id,
+                    "request_key": idempotency_key,
+                    "body": body,
+                },
+            )
+            updated_result = await connection.execute(
+                text(
+                    """
+                    UPDATE student_inquiry
+                    SET status='open', last_message_at=NOW(),
+                        expires_at=NOW() + interval '5 days',
+                        version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND student_id=:student_id
+                      AND id=:inquiry_id
+                    RETURNING id, topic_code, subject, message, status, priority,
+                              assignee_id, requirement_id, version, created_at, updated_at,
+                              last_message_at, expires_at
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "inquiry_id": inquiry_id,
+                },
+            )
+            updated = cast(Mapping[str, Any], updated_result.mappings().one())
+            if inquiry.get("requirement_id") is not None:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE student_requirement
+                        SET status='help_requested', version=version+1, updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:requirement_id
+                          AND status NOT IN (
+                            'not_applicable','completed','waived','expired'
+                          )
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "requirement_id": str(inquiry["requirement_id"]),
+                    },
+                )
+
+            work_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, key, status, assignee_id, version
+                    FROM staff_work_item
+                    WHERE tenant_id=:tenant_id
+                      AND (
+                        (source_type='message' AND source_id=:inquiry_id)
+                        OR EXISTS (
+                          SELECT 1 FROM staff_work_item_link link
+                          WHERE link.tenant_id=staff_work_item.tenant_id
+                            AND link.work_item_id=staff_work_item.id
+                            AND link.entity_type='inquiry'
+                            AND link.entity_id=:inquiry_id
+                        )
+                      )
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "inquiry_id": inquiry_id},
+            )
+            existing_work = work_result.mappings().first()
+            terminal = existing_work is None or str(existing_work["status"]) in {
+                "done",
+                "cancelled",
+            }
+            if terminal:
+                work_item_id = str(uuid4())
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_work_item (
+                          id, tenant_id, student_id, key, title, description,
+                          status, priority, work_type, component, due_at,
+                          escalated, assignee_id, source_type, source_id,
+                          version, action_type,
+                          selected_channel, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :student_id, :key, :title, :description,
+                          'in_progress', :priority, 'communication',
+                          :component, NOW() + interval '1 day', false,
+                          :assignee_id, 'message', :source_id, 1,
+                          'communication_response',
+                          'portal', NOW(), NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": work_item_id,
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "key": f"MSG-{reply_id.replace('-', '')[:8].upper()}",
+                        "title": f"Student replied: {updated['subject']}",
+                        "description": body,
+                        "priority": updated["priority"],
+                        "component": target["workComponent"],
+                        "assignee_id": target.get("staffMemberId"),
+                        "source_id": reply_id,
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_work_item_link (
+                          id, tenant_id, work_item_id, entity_type,
+                          entity_id, relationship, created_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'inquiry',
+                          :inquiry_id, 'reopened_from', NOW()
+                        )
+                        ON CONFLICT (
+                          tenant_id, work_item_id, entity_type, entity_id
+                        ) DO NOTHING
+                        """
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "tenant_id": auth.tenant_id,
+                        "work_item_id": work_item_id,
+                        "inquiry_id": inquiry_id,
+                    },
+                )
+                if inquiry.get("requirement_id") is not None:
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO staff_work_item_link (
+                              id, tenant_id, work_item_id, entity_type,
+                              entity_id, relationship, created_at
+                            ) VALUES (
+                              :id, :tenant_id, :work_item_id, 'requirement',
+                              :requirement_id, 'help_requested_for', NOW()
+                            )
+                            ON CONFLICT (
+                              tenant_id, work_item_id, entity_type, entity_id
+                            ) DO NOTHING
+                            """
+                        ),
+                        {
+                            "id": str(uuid4()),
+                            "tenant_id": auth.tenant_id,
+                            "work_item_id": work_item_id,
+                            "requirement_id": str(inquiry["requirement_id"]),
+                        },
+                    )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_work_log (
+                          id, tenant_id, work_item_id, actor_type, actor_id,
+                          actor_name, action, message, occurred_at
+                        ) VALUES (
+                          :id, :tenant_id, :work_item_id, 'student', :student_id,
+                          'Student portal', 'created',
+                          'Reopened from a student reply to a closed conversation.', NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": str(uuid4()),
+                        "tenant_id": auth.tenant_id,
+                        "work_item_id": work_item_id,
+                        "student_id": auth.student_id,
+                    },
+                )
+            else:
+                assert existing_work is not None
+                work_item_id = str(existing_work["id"])
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE staff_work_item
+                        SET status='in_progress', selected_channel='portal',
+                            component=:component,
+                            assignee_id=COALESCE(assignee_id, :assignee_id),
+                            follow_up_at=NULL, completed_at=NULL, cancelled_at=NULL,
+                            terminal_reason=NULL, version=version+1, updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:work_item_id
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "work_item_id": work_item_id,
+                        "component": target["workComponent"],
+                        "assignee_id": target.get("staffMemberId"),
+                    },
+                )
+
+            interaction_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, source_version, completed_at
+                    FROM staff_interaction
+                    WHERE tenant_id=:tenant_id AND work_item_id=:work_item_id
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "work_item_id": work_item_id},
+            )
+            interaction = interaction_result.mappings().first()
+            if interaction is None or interaction["completed_at"] is not None:
+                interaction_id = str(uuid4())
+                source_version = 1
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_interaction (
+                          id, tenant_id, student_id, work_item_id, objective,
+                          status, selected_channel, source_version,
+                          covered_source_version, version, quiet_until,
+                          last_activity_at, request_key, created_at, updated_at
+                        ) VALUES (
+                          :id, :tenant_id, :student_id, :work_item_id, :objective,
+                          'enrichment_pending', 'portal', 1, 0, 1,
+                          NOW() + interval '5 minutes', NOW(), :request_key,
+                          NOW(), NOW()
+                        )
+                        """
+                    ),
+                    {
+                        "id": interaction_id,
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "work_item_id": work_item_id,
+                        "objective": str(updated["subject"]),
+                        "request_key": f"student-reply:{reply_id}",
+                    },
+                )
+            else:
+                interaction_id = str(interaction["id"])
+                source_version = int(interaction["source_version"]) + 1
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE staff_interaction
+                        SET status=CASE
+                              WHEN covered_source_version > 0 THEN 'stale'
+                              ELSE 'enrichment_pending'
+                            END,
+                            source_version=:source_version,
+                            quiet_until=NOW() + interval '5 minutes',
+                            last_activity_at=NOW(), version=version+1,
+                            updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:interaction_id
+                        """
+                    ),
+                    {
+                        "source_version": source_version,
+                        "tenant_id": auth.tenant_id,
+                        "interaction_id": interaction_id,
+                    },
+                )
+
+            communication_id = str(uuid4())
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO communication_event (
+                      id, tenant_id, student_id, channel, direction,
+                      subject, body_excerpt, metadata, resolution_status,
+                      occurred_at, created_at, interaction_id, source_type,
+                      source_id, source_sequence, request_key, delivery_status
+                    ) VALUES (
+                      :id, :tenant_id, :student_id, 'portal', 'inbound',
+                      :subject, :body, CAST(:metadata AS jsonb), 'unresolved',
+                      NOW(), NOW(), :interaction_id,
+                      'student_inquiry_student_reply', :source_id,
+                      :source_sequence, :request_key, 'received'
+                    )
+                    """
+                ),
+                {
+                    "id": communication_id,
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "subject": str(updated["subject"]),
+                    "body": body,
+                    "metadata": json.dumps({"inquiryId": inquiry_id}, separators=(",", ":")),
+                    "interaction_id": interaction_id,
+                    "source_id": reply_id,
+                    "source_sequence": source_version,
+                    "request_key": f"student-reply:{reply_id}",
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO action_center_ai_job (
+                      id, tenant_id, purpose, dedupe_key, student_id,
+                      work_item_id, interaction_id, status,
+                      requested_source_version, covered_source_version,
+                      not_before, attempts, max_attempts, created_at, updated_at
+                    ) VALUES (
+                      :id, :tenant_id, 'interaction_enrichment', :dedupe_key,
+                      :student_id, :work_item_id, :interaction_id, 'pending',
+                      :source_version, 0, NOW() + interval '5 minutes',
+                      0, 5, NOW(), NOW()
+                    )
+                    ON CONFLICT (tenant_id, purpose, dedupe_key)
+                    DO UPDATE SET
+                      requested_source_version=GREATEST(
+                        action_center_ai_job.requested_source_version,
+                        EXCLUDED.requested_source_version
+                      ),
+                      status=CASE
+                        WHEN action_center_ai_job.status='running' THEN 'running'
+                        ELSE 'pending'
+                      END,
+                      not_before=CASE
+                        WHEN action_center_ai_job.status IN (
+                          'succeeded', 'dead_letter', 'cancelled'
+                        ) THEN EXCLUDED.not_before
+                        ELSE LEAST(
+                          GREATEST(action_center_ai_job.not_before, EXCLUDED.not_before),
+                          action_center_ai_job.created_at + interval '15 minutes'
+                        )
+                      END,
+                      attempts=CASE
+                        WHEN action_center_ai_job.status='dead_letter' THEN 0
+                        ELSE action_center_ai_job.attempts
+                      END,
+                      created_at=CASE
+                        WHEN action_center_ai_job.status IN (
+                          'succeeded', 'dead_letter', 'cancelled'
+                        ) THEN NOW()
+                        ELSE action_center_ai_job.created_at
+                      END,
+                      completed_at=NULL, last_error_code=NULL,
+                      last_error_message=NULL, updated_at=NOW()
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "dedupe_key": f"interaction:{interaction_id}",
+                    "student_id": auth.student_id,
+                    "work_item_id": work_item_id,
+                    "interaction_id": interaction_id,
+                    "source_version": source_version,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_log (
+                      id, tenant_id, work_item_id, actor_type, actor_id,
+                      actor_name, action, message, occurred_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'student', :student_id,
+                      'Student portal', 'communication_recorded',
+                      'Student replied in the portal.', NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "student_id": auth.student_id,
+                },
+            )
+            notification_id = await self._insert_staff_notification(
+                connection,
+                auth=auth,
+                target=target,
+                work_item_id=work_item_id,
+                kind="student_inquiry_reply",
+                title="Student replied",
+                body=f"{updated['subject']}: a new portal message is ready for review.",
+                dedupe_key=f"inquiry-reply:{reply_id}:attention",
+            )
+            version = int(updated["version"])
+            await self._insert_audit(
+                connection,
+                auth,
+                "student.inquiry_message_created",
+                "student_inquiry",
+                inquiry_id,
+                request_id,
+                {
+                    "submittedVersion": expected_version,
+                    "committedVersion": version,
+                    "reopened": str(inquiry["status"]) == "resolved",
+                },
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "student.inquiry_message_created.v1",
+                "student_inquiry",
+                inquiry_id,
+                version,
+                request_id,
+                {
+                    "studentId": auth.student_id,
+                    "messageId": reply_id,
+                    "workItemId": work_item_id,
+                    "notificationId": notification_id,
+                },
+            )
+            response = _map_help_request(updated)
+            response["workItemId"] = work_item_id
+            response["messages"] = await self._student_inquiry_messages(
+                connection,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                inquiry_id=inquiry_id,
+                initial_body=str(updated["message"]),
+                initial_created_at=updated["created_at"],
+            )
+            return response
+
+        return await self._run_idempotent(
+            auth,
+            idempotency_key,
+            request_id,
+            "help.request.message.create",
+            {
+                "inquiryId": inquiry_id,
+                "expectedVersion": expected_version,
+                "body": body,
+            },
+            200,
+            handler,
+        )
+
+    async def _student_inquiry_messages(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        student_id: str,
+        inquiry_id: str,
+        initial_body: str,
+        initial_created_at: object,
+    ) -> list[JsonDict]:
+        staff_result = await connection.execute(
+            text(
+                """
+                SELECT reply.id, reply.response_note AS body,
+                       staff.display_name AS author_name, reply.created_at
+                FROM student_inquiry_reply AS reply
+                JOIN staff_member AS staff
+                  ON staff.tenant_id=reply.tenant_id
+                 AND staff.id=reply.staff_member_id
+                WHERE reply.tenant_id=:tenant_id
+                  AND reply.student_id=:student_id
+                  AND reply.inquiry_id=:inquiry_id
+                  AND reply.notify_student=true
+                ORDER BY reply.created_at, reply.id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        student_result = await connection.execute(
+            text(
+                """
+                SELECT id, body, created_at
+                FROM student_inquiry_student_reply
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND inquiry_id=:inquiry_id
+                ORDER BY created_at, id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        messages: list[JsonDict] = [
+            {
+                "id": inquiry_id,
+                "direction": "student",
+                "body": initial_body,
+                "authorName": "You",
+                "deliveryStatus": "received",
+                "createdAt": _iso(initial_created_at),
+            }
+        ]
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "staff",
+                "body": str(row["body"]),
+                "authorName": str(row["author_name"]),
+                "deliveryStatus": "delivered",
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in staff_result.mappings().all()
+        )
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "student",
+                "body": str(row["body"]),
+                "authorName": "You",
+                "deliveryStatus": "received",
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in student_result.mappings().all()
+        )
+        return sorted(messages, key=lambda message: str(message["createdAt"]))
+
+    async def _staff_inquiry_messages(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        student_id: str,
+        inquiry_id: str,
+        initial_body: str,
+        initial_created_at: object,
+    ) -> list[JsonDict]:
+        """Return the canonical support thread, including staff-only notes.
+
+        Student-facing reads deliberately omit non-notified notes. Staff needs
+        the full thread so a response remains understandable when someone else
+        takes over the case.
+        """
+
+        staff_result = await connection.execute(
+            text(
+                """
+                SELECT reply.id, reply.response_note AS body,
+                       staff.display_name AS author_name, reply.notify_student,
+                       reply.created_at
+                FROM student_inquiry_reply AS reply
+                JOIN staff_member AS staff
+                  ON staff.tenant_id=reply.tenant_id
+                 AND staff.id=reply.staff_member_id
+                WHERE reply.tenant_id=:tenant_id
+                  AND reply.student_id=:student_id
+                  AND reply.inquiry_id=:inquiry_id
+                ORDER BY reply.created_at, reply.id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        student_result = await connection.execute(
+            text(
+                """
+                SELECT id, body, created_at
+                FROM student_inquiry_student_reply
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND inquiry_id=:inquiry_id
+                ORDER BY created_at, id
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "student_id": student_id,
+                "inquiry_id": inquiry_id,
+            },
+        )
+        messages: list[JsonDict] = [
+            {
+                "id": inquiry_id,
+                "direction": "student",
+                "body": initial_body,
+                "authorName": "Student",
+                "deliveryStatus": "received",
+                "privateToStaff": False,
+                "createdAt": _iso(initial_created_at),
+            }
+        ]
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "staff",
+                "body": str(row["body"]),
+                "authorName": str(row["author_name"]),
+                "deliveryStatus": ("delivered" if bool(row["notify_student"]) else "recorded"),
+                "privateToStaff": not bool(row["notify_student"]),
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in staff_result.mappings().all()
+        )
+        messages.extend(
+            {
+                "id": str(row["id"]),
+                "direction": "student",
+                "body": str(row["body"]),
+                "authorName": "Student",
+                "deliveryStatus": "received",
+                "privateToStaff": False,
+                "createdAt": _iso(row["created_at"]),
+            }
+            for row in student_result.mappings().all()
+        )
+        return sorted(messages, key=lambda message: str(message["createdAt"]))
 
     async def list_staff_help_requests(self, auth: AuthContext) -> list[JsonDict]:
         rows = await self._all(
@@ -4242,6 +5669,7 @@ class PostgresPortalRepository:
             SELECT inquiry.id, inquiry.topic_code, inquiry.subject, inquiry.message,
                    inquiry.status, inquiry.priority, inquiry.assignee_id,
                    inquiry.version, inquiry.created_at, inquiry.updated_at,
+                   inquiry.last_message_at, inquiry.expires_at,
                    student.id AS student_id, student.class_year,
                    person.first_name, person.last_name,
                    COALESCE(profile.preferred_name, person.preferred_name,
@@ -4269,6 +5697,7 @@ class PostgresPortalRepository:
               LIMIT 1
             ) latest_program ON true
             WHERE inquiry.tenant_id=:tenant_id
+              AND inquiry.archived_at IS NULL
             ORDER BY inquiry.updated_at DESC, inquiry.id
             LIMIT 200
             """,
@@ -4287,6 +5716,46 @@ class PostgresPortalRepository:
             }
             for row in rows
         ]
+
+    async def get_staff_inquiry_thread(self, auth: AuthContext, inquiry_id: str) -> JsonDict:
+        if auth.actor_type != "staff":
+            raise ApiError(403, "STAFF_ROLE_REQUIRED", "A staff account is required")
+        async with self.engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT id, student_id, message, status, version, created_at,
+                           last_message_at, expires_at, archived_at
+                    FROM student_inquiry
+                    WHERE tenant_id=:tenant_id AND id=:inquiry_id
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "inquiry_id": inquiry_id},
+            )
+            inquiry = result.mappings().first()
+            if inquiry is None:
+                raise NotFoundError(
+                    "STAFF_INQUIRY_NOT_FOUND",
+                    "This student conversation was not found",
+                )
+            return {
+                "id": str(inquiry["id"]),
+                "status": str(inquiry["status"]),
+                "version": int(inquiry["version"]),
+                "lastMessageAt": _iso(inquiry["last_message_at"]),
+                "expiresAt": _iso(inquiry["expires_at"]),
+                "archivedAt": _iso(inquiry["archived_at"])
+                if inquiry["archived_at"] is not None
+                else None,
+                "messages": await self._staff_inquiry_messages(
+                    connection,
+                    tenant_id=auth.tenant_id,
+                    student_id=str(inquiry["student_id"]),
+                    inquiry_id=str(inquiry["id"]),
+                    initial_body=str(inquiry["message"]),
+                    initial_created_at=inquiry["created_at"],
+                ),
+            }
 
     async def _locked_onboarding(self, connection: AsyncConnection, auth: AuthContext) -> JsonDict:
         result = await connection.execute(
@@ -4466,6 +5935,215 @@ class PostgresPortalRepository:
             )
             return response
 
+    async def _resolve_staff_triage_target(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        assignee_id: str | None = None,
+        preferred_component: str | None = None,
+    ) -> JsonDict:
+        """Resolve only reachable tenant staff targets, with deterministic fallback."""
+
+        if assignee_id is not None:
+            assignee_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, component
+                    FROM staff_member
+                    WHERE tenant_id=:tenant_id AND id=:staff_member_id AND active=true
+                    """
+                ),
+                {"tenant_id": tenant_id, "staff_member_id": assignee_id},
+            )
+            assignee = assignee_result.mappings().first()
+            if assignee is not None:
+                return {
+                    "staffMemberId": str(assignee["id"]),
+                    "teamComponent": None,
+                    "tenantWide": False,
+                    "workComponent": str(assignee["component"]),
+                }
+
+        work_component: str | None = None
+        if preferred_component:
+            component_result = await connection.execute(
+                text(
+                    """
+                    SELECT component
+                    FROM staff_member
+                    WHERE tenant_id=:tenant_id AND active=true
+                      AND lower(component)=lower(:component)
+                    ORDER BY component, id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": tenant_id, "component": preferred_component},
+            )
+            component = component_result.mappings().first()
+            if component is not None:
+                work_component = str(component["component"])
+
+        admissions_result = await connection.execute(
+            text(
+                """
+                SELECT component
+                FROM staff_member
+                WHERE tenant_id=:tenant_id AND active=true
+                  AND lower(component)='admissions'
+                ORDER BY component, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        admissions = admissions_result.mappings().first()
+        if work_component is None and admissions is not None:
+            work_component = str(admissions["component"])
+
+        fallback_result = await connection.execute(
+            text(
+                """
+                SELECT id, component
+                FROM staff_member
+                WHERE tenant_id=:tenant_id AND active=true
+                ORDER BY component, display_name, id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        fallback = fallback_result.mappings().first()
+        if work_component is None and fallback is not None:
+            work_component = str(fallback["component"])
+
+        # Unassigned triage must be visible to every active staff member in the
+        # tenant. Ownership still uses a deterministic component, but the alert
+        # cannot be component-scoped: a tenant may have no member in the
+        # configured/preferred component, and the currently signed-in triager
+        # may legitimately belong to another team.
+        return {
+            "staffMemberId": None,
+            "teamComponent": None,
+            "tenantWide": True,
+            "workComponent": work_component or preferred_component or "Tenant Triage",
+        }
+
+    async def _insert_staff_notification(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        target: Mapping[str, Any],
+        work_item_id: str,
+        kind: str,
+        title: str,
+        body: str,
+        dedupe_key: str,
+    ) -> str:
+        notification_id = str(uuid4())
+        inserted_result = await connection.execute(
+            text(
+                """
+                INSERT INTO staff_notification (
+                  id, tenant_id, staff_member_id, team_component, tenant_wide,
+                  kind, title, body, resource_type, resource_id, dedupe_key,
+                  created_at
+                ) VALUES (
+                  :id, :tenant_id, :staff_member_id, :team_component, :tenant_wide,
+                  :kind, :title, :body, 'staff_work_item', :work_item_id,
+                  :dedupe_key, NOW()
+                )
+                ON CONFLICT (tenant_id, dedupe_key) DO NOTHING
+                RETURNING id
+                """
+            ),
+            {
+                "id": notification_id,
+                "tenant_id": auth.tenant_id,
+                "staff_member_id": target.get("staffMemberId"),
+                "team_component": target.get("teamComponent"),
+                "tenant_wide": bool(target.get("tenantWide")),
+                "kind": kind,
+                "title": title,
+                "body": body[:2_000],
+                "work_item_id": work_item_id,
+                "dedupe_key": dedupe_key[:240],
+            },
+        )
+        inserted = inserted_result.mappings().first()
+        if inserted is None:
+            existing_result = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM staff_notification
+                    WHERE tenant_id=:tenant_id AND dedupe_key=:dedupe_key
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "dedupe_key": dedupe_key[:240]},
+            )
+            existing = existing_result.mappings().first()
+            if existing is None:
+                raise RuntimeError("The staff notification could not be persisted")
+            return str(existing["id"])
+        notification_id = str(inserted["id"])
+        await self._insert_realtime_event(
+            connection,
+            tenant_id=auth.tenant_id,
+            event_type="staff.notification.created",
+            resource_type="staff_notification",
+            resource_id=notification_id,
+            work_item_id=work_item_id,
+            target=target,
+            payload={
+                "notificationId": notification_id,
+                "workItemId": work_item_id,
+                "kind": kind,
+                "invalidate": ["notifications", "workspace", "messages"],
+            },
+        )
+        return notification_id
+
+    async def _insert_realtime_event(
+        self,
+        connection: AsyncConnection,
+        *,
+        tenant_id: str,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        work_item_id: str | None,
+        target: Mapping[str, Any],
+        payload: Mapping[str, Any],
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_realtime_event (
+                  id, tenant_id, event_type, resource_type, resource_id,
+                  work_item_id, staff_member_id, team_component, tenant_wide,
+                  payload, created_at
+                ) VALUES (
+                  :id, :tenant_id, :event_type, :resource_type, :resource_id,
+                  :work_item_id, :staff_member_id, :team_component, :tenant_wide,
+                  CAST(:payload AS jsonb), NOW()
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": tenant_id,
+                "event_type": event_type,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "work_item_id": work_item_id,
+                "staff_member_id": target.get("staffMemberId"),
+                "team_component": target.get("teamComponent"),
+                "tenant_wide": bool(target.get("tenantWide")),
+                "payload": _json(payload),
+            },
+        )
+
     async def _insert_audit(
         self,
         connection: AsyncConnection,
@@ -4544,6 +6222,7 @@ class PostgresPortalRepository:
         kind: str = "general",
         href: str | None = None,
     ) -> None:
+        message_id = str(uuid4())
         await connection.execute(
             text(
                 """
@@ -4557,7 +6236,7 @@ class PostgresPortalRepository:
                 """
             ),
             {
-                "id": str(uuid4()),
+                "id": message_id,
                 "tenant_id": auth.tenant_id,
                 "student_id": auth.student_id,
                 "subject": subject,
@@ -4566,13 +6245,290 @@ class PostgresPortalRepository:
                 "href": href,
             },
         )
+        await self._insert_student_realtime_event(
+            connection,
+            auth=auth,
+            event_type="student.message.created",
+            resource_type="student_message",
+            resource_id=message_id,
+            payload={
+                "messageId": message_id,
+                "kind": kind,
+                "href": href,
+                "invalidate": ["messages", "bootstrap"],
+            },
+        )
+
+    async def _insert_student_realtime_event(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO student_realtime_event (
+                  id, tenant_id, student_id, event_type, resource_type,
+                  resource_id, payload, created_at
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :event_type, :resource_type,
+                  :resource_id, CAST(:payload AS jsonb), NOW()
+                )
+                """
+            ),
+            {
+                "id": str(uuid4()),
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "event_type": event_type,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "payload": _json(dict(payload)),
+            },
+        )
+
+    async def _resolve_requirement_help_after_success(
+        self,
+        connection: AsyncConnection,
+        *,
+        auth: AuthContext,
+        requirement_id: str,
+        replacement_document_id: str,
+        request_id: str,
+    ) -> JsonDict:
+        """Resolve active help/review work after a valid replacement is parsed."""
+
+        resolution_message = "Student successfully uploaded/parsed replacement document"
+        inquiry_result = await connection.execute(
+            text(
+                """
+                SELECT id
+                FROM student_inquiry
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND requirement_id=:requirement_id
+                  AND status IN ('new','open','waiting_on_student')
+                ORDER BY created_at, id
+                FOR UPDATE
+                """
+            ),
+            {
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "requirement_id": requirement_id,
+            },
+        )
+        active_inquiry_ids = {str(row["id"]) for row in inquiry_result.mappings().all()}
+        work_item_result = await connection.execute(
+            text(
+                """
+                SELECT item.id, item.assignee_id, item.component,
+                       CASE WHEN item.source_type='message' AND EXISTS (
+                         SELECT 1 FROM student_inquiry inquiry
+                         WHERE inquiry.tenant_id=item.tenant_id
+                           AND inquiry.id=item.source_id
+                           AND inquiry.student_id=:student_id
+                           AND inquiry.requirement_id=:requirement_id
+                           AND inquiry.status IN ('new','open','waiting_on_student')
+                       ) THEN true ELSE false END AS help_item
+                FROM staff_work_item item
+                WHERE item.tenant_id=:tenant_id
+                  AND item.student_id=:student_id
+                  AND item.status NOT IN ('done','cancelled')
+                  AND (
+                    (
+                      item.source_type='message'
+                      AND EXISTS (
+                        SELECT 1 FROM student_inquiry inquiry
+                        WHERE inquiry.tenant_id=item.tenant_id
+                          AND inquiry.id=item.source_id
+                          AND inquiry.student_id=:student_id
+                          AND inquiry.requirement_id=:requirement_id
+                          AND inquiry.status IN ('new','open','waiting_on_student')
+                      )
+                    )
+                    OR (
+                      item.blocker_code='document_parse_failure'
+                      AND EXISTS (
+                        SELECT 1 FROM staff_work_item_link link
+                        WHERE link.tenant_id=item.tenant_id
+                          AND link.work_item_id=item.id
+                          AND link.entity_type='requirement'
+                          AND link.entity_id=:requirement_id
+                      )
+                    )
+                  )
+                ORDER BY item.created_at, item.id
+                FOR UPDATE
+                """
+            ),
+            {
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "requirement_id": requirement_id,
+            },
+        )
+        work_items = [dict(row) for row in work_item_result.mappings().all()]
+
+        resolved_inquiry_count = 0
+        if active_inquiry_ids:
+            resolved_result = await connection.execute(
+                text(
+                    """
+                    UPDATE student_inquiry
+                    SET status='resolved', resolved_at=NOW(),
+                        resolution_reason='replacement_document_parsed',
+                        status_before_help=NULL, version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND student_id=:student_id
+                      AND requirement_id=:requirement_id
+                      AND status IN ('new','open','waiting_on_student')
+                    RETURNING id
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "requirement_id": requirement_id,
+                },
+            )
+            resolved_inquiry_count = len(resolved_result.mappings().all())
+
+        resolved_review_count = 0
+        for item in work_items:
+            work_item_id = str(item["id"])
+            updated_result = await connection.execute(
+                text(
+                    """
+                    UPDATE staff_work_item
+                    SET status='done', outcome_code='document_uploaded',
+                        resolution_code='replacement_document_parsed',
+                        next_step=:message, blocker_code=NULL,
+                        blocker_detail=NULL, blocker_review_at=NULL,
+                        completed_at=NOW(), cancelled_at=NULL,
+                        version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:work_item_id
+                      AND status NOT IN ('done','cancelled')
+                    RETURNING version
+                    """
+                ),
+                {
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "message": resolution_message,
+                },
+            )
+            updated_item = updated_result.mappings().first()
+            if updated_item is None:
+                continue
+            if not bool(item["help_item"]):
+                resolved_review_count += 1
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_log (
+                      id, tenant_id, work_item_id, actor_type, actor_id,
+                      actor_name, action, message, occurred_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'student', :actor_id,
+                      'Student self-service', 'status_changed', :message, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "actor_id": auth.actor_id,
+                    "message": resolution_message,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_item_link (
+                      id, tenant_id, work_item_id, entity_type, entity_id,
+                      relationship, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'document',
+                      :document_id, 'resolved_by_replacement', NOW()
+                    )
+                    ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id)
+                    DO NOTHING
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "document_id": replacement_document_id,
+                },
+            )
+            target = await self._resolve_staff_triage_target(
+                connection,
+                tenant_id=auth.tenant_id,
+                assignee_id=(
+                    str(item["assignee_id"]) if item.get("assignee_id") is not None else None
+                ),
+                preferred_component=str(item["component"]),
+            )
+            notification_id = await self._insert_staff_notification(
+                connection,
+                auth=auth,
+                target=target,
+                work_item_id=work_item_id,
+                kind="student_document_recovered",
+                title="Student document issue resolved",
+                body=resolution_message,
+                dedupe_key=(f"work-item:{work_item_id}:replacement:{replacement_document_id}"),
+            )
+            work_item_version = int(updated_item["version"])
+            event_data = {
+                "workItemId": work_item_id,
+                "studentId": auth.student_id,
+                "requirementId": requirement_id,
+                "replacementDocumentId": replacement_document_id,
+                "notificationId": notification_id,
+                "message": resolution_message,
+            }
+            await self._insert_audit(
+                connection,
+                auth,
+                "staff_work_item.auto_resolved_by_document",
+                "staff_work_item",
+                work_item_id,
+                request_id,
+                event_data,
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "staff.work_item_auto_resolved_by_document.v1",
+                "staff_work_item",
+                work_item_id,
+                work_item_version,
+                request_id,
+                event_data,
+            )
+
+        return {
+            "helpRequestsResolved": resolved_inquiry_count,
+            "reviewItemsResolved": resolved_review_count,
+        }
 
     async def _ensure_document_review_work_item(
         self,
         connection: AsyncConnection,
         auth: AuthContext,
         document: Mapping[str, Any],
-    ) -> bool:
+        *,
+        parse_failure: bool,
+        failure_code: str | None,
+        request_id: str,
+    ) -> JsonDict:
         """Materialize one durable staff task for a reviewable document.
 
         The unique source index also protects the lazy staff-action-center
@@ -4580,25 +6536,35 @@ class PostgresPortalRepository:
         """
 
         category = str(document.get("category") or "other")
-        component, priority = (
+        preferred_component, priority = (
             ("Financial Aid", "urgent")
             if category == "financial_aid"
             else (("Student Health", "high") if category == "health" else ("Registrar", "high"))
         )
-        assignee_result = await connection.execute(
+        target = await self._resolve_staff_triage_target(
+            connection,
+            tenant_id=auth.tenant_id,
+            preferred_component=preferred_component,
+        )
+        document_id = str(document["id"])
+        existing_result = await connection.execute(
             text(
                 """
-                SELECT id FROM staff_member
-                WHERE tenant_id=:tenant_id AND active=true
-                ORDER BY CASE WHEN component=:component THEN 0 ELSE 1 END,
-                         display_name, id
-                LIMIT 1
+                SELECT status
+                FROM staff_work_item
+                WHERE tenant_id=:tenant_id AND source_type='document'
+                  AND source_id=:document_id
+                FOR UPDATE
                 """
             ),
-            {"tenant_id": auth.tenant_id, "component": component},
+            {"tenant_id": auth.tenant_id, "document_id": document_id},
         )
-        assignee = assignee_result.mappings().first()
-        document_id = str(document["id"])
+        existing = existing_result.mappings().first()
+        reopened = bool(
+            parse_failure
+            and existing is not None
+            and str(existing["status"]) in {"done", "cancelled"}
+        )
         work_item_id = str(uuid4())
         inserted = await connection.execute(
             text(
@@ -4606,16 +6572,95 @@ class PostgresPortalRepository:
                 INSERT INTO staff_work_item (
                   id, tenant_id, student_id, key, title, description,
                   status, priority, work_type, component, due_at,
-                  escalated, assignee_id, source_type, source_id, version
+                  escalated, assignee_id, source_type, source_id, version,
+                  action_type, blocker_code, blocker_detail
                 ) VALUES (
-                  :id, :tenant_id, :student_id, :key, :title,
-                  'Verify the stored original, extracted evidence, and proposed record matches.',
+                  :id, :tenant_id, :student_id, :key, :title, :description,
                   'todo', :priority, 'document_review', :component,
                   NOW() + INTERVAL '2 days', false, :assignee_id,
-                  'document', :document_id, 1
+                  'document', :document_id, 1, 'document_review',
+                  :blocker_code, :blocker_detail
                 )
-                ON CONFLICT (tenant_id, source_type, source_id) DO NOTHING
-                RETURNING id
+                ON CONFLICT (tenant_id, source_type, source_id)
+                WHERE source_type IS NOT NULL AND source_id IS NOT NULL
+                DO UPDATE SET
+                  title = CASE
+                    WHEN :parse_failure THEN EXCLUDED.title
+                    ELSE staff_work_item.title
+                  END,
+                  description = CASE
+                    WHEN :parse_failure THEN EXCLUDED.description
+                    ELSE staff_work_item.description
+                  END,
+                  status = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN 'todo'
+                    ELSE staff_work_item.status
+                  END,
+                  priority = CASE
+                    WHEN :parse_failure THEN EXCLUDED.priority
+                    ELSE staff_work_item.priority
+                  END,
+                  component = CASE
+                    WHEN :parse_failure THEN EXCLUDED.component
+                    ELSE staff_work_item.component
+                  END,
+                  assignee_id = CASE
+                    WHEN :parse_failure THEN COALESCE(
+                      staff_work_item.assignee_id, EXCLUDED.assignee_id
+                    )
+                    ELSE staff_work_item.assignee_id
+                  END,
+                  due_at = CASE
+                    WHEN :parse_failure THEN EXCLUDED.due_at
+                    ELSE staff_work_item.due_at
+                  END,
+                  blocker_code = CASE
+                    WHEN :parse_failure THEN :blocker_code
+                    ELSE staff_work_item.blocker_code
+                  END,
+                  blocker_detail = CASE
+                    WHEN :parse_failure THEN :blocker_detail
+                    ELSE staff_work_item.blocker_detail
+                  END,
+                  completed_at = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.completed_at
+                  END,
+                  cancelled_at = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.cancelled_at
+                  END,
+                  terminal_reason = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.terminal_reason
+                  END,
+                  outcome_code = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.outcome_code
+                  END,
+                  resolution_code = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.resolution_code
+                  END,
+                  next_step = CASE
+                    WHEN :parse_failure
+                     AND staff_work_item.status IN ('done','cancelled') THEN NULL
+                    ELSE staff_work_item.next_step
+                  END,
+                  version = CASE
+                    WHEN :parse_failure THEN staff_work_item.version + 1
+                    ELSE staff_work_item.version
+                  END,
+                  updated_at = CASE
+                    WHEN :parse_failure THEN NOW() ELSE staff_work_item.updated_at
+                  END
+                RETURNING id, version, (xmax = 0) AS inserted
                 """
             ),
             {
@@ -4623,35 +6668,164 @@ class PostgresPortalRepository:
                 "tenant_id": auth.tenant_id,
                 "student_id": auth.student_id,
                 "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
-                "title": f"Review {document['file_name']}",
+                "title": (
+                    f"Human review needed: {document['file_name']}"
+                    if parse_failure
+                    else f"Review {document['file_name']}"
+                ),
+                "description": (
+                    "The original is safely stored, but automatic parsing did not complete. "
+                    "Review the original and either record the result or retry extraction."
+                    if parse_failure
+                    else (
+                        "Verify the stored original, extracted evidence, and proposed record "
+                        "matches."
+                    )
+                ),
                 "priority": priority,
-                "component": component,
-                "assignee_id": assignee["id"] if assignee is not None else None,
+                "component": target["workComponent"],
+                "assignee_id": target.get("staffMemberId"),
                 "document_id": document_id,
+                "blocker_code": "document_parse_failure" if parse_failure else None,
+                "blocker_detail": (
+                    f"Automatic parsing failed ({failure_code or 'unknown'}); original retained."
+                    if parse_failure
+                    else None
+                ),
+                "parse_failure": parse_failure,
             },
         )
-        if inserted.mappings().first() is None:
-            return False
-        await connection.execute(
-            text(
-                """
-                INSERT INTO staff_work_log (
-                  id, tenant_id, work_item_id, actor_type, actor_id,
-                  actor_name, action, message, occurred_at
-                ) VALUES (
-                  :id, :tenant_id, :work_item_id, 'system', NULL,
-                  'Audentra workflow', 'created',
-                  'Created when the student document entered staff review.', NOW()
-                )
-                """
-            ),
-            {
-                "id": str(uuid4()),
-                "tenant_id": auth.tenant_id,
-                "work_item_id": work_item_id,
-            },
-        )
-        return True
+        work_item = inserted.mappings().first()
+        if work_item is None:
+            raise RuntimeError("The document review work item could not be persisted")
+        work_item_id = str(work_item["id"])
+        created = bool(work_item["inserted"])
+        requirement_value = document.get("requirement_id")
+        if requirement_value is not None:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_item_link (
+                      id, tenant_id, work_item_id, entity_type, entity_id,
+                      relationship, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'requirement',
+                      :requirement_id, :relationship, NOW()
+                    )
+                    ON CONFLICT (tenant_id, work_item_id, entity_type, entity_id)
+                    DO NOTHING
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "requirement_id": str(requirement_value),
+                    "relationship": ("parse_failure" if parse_failure else "document_submission"),
+                },
+            )
+        if created or parse_failure:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_work_log (
+                      id, tenant_id, work_item_id, actor_type, actor_id,
+                      actor_name, action, message, occurred_at
+                    ) VALUES (
+                      :id, :tenant_id, :work_item_id, 'system', NULL,
+                      'Audentra workflow', :action, :message, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": str(uuid4()),
+                    "tenant_id": auth.tenant_id,
+                    "work_item_id": work_item_id,
+                    "action": "created" if created else "status_changed",
+                    "message": (
+                        (
+                            "Automatic document parsing failed; the original was retained "
+                            "and human review was requested."
+                            if created
+                            else (
+                                "A document parsing retry failed; the original was retained "
+                                + (
+                                    "and the human-review task was reopened."
+                                    if reopened
+                                    else "and the existing human-review task was refreshed."
+                                )
+                            )
+                        )
+                        if parse_failure
+                        else "Created when the student document entered staff review."
+                    ),
+                },
+            )
+
+        notification_id: str | None = None
+        if created or parse_failure:
+            notification_id = await self._insert_staff_notification(
+                connection,
+                auth=auth,
+                target=target,
+                work_item_id=work_item_id,
+                kind=("document_parse_review" if parse_failure else "document_review_ready"),
+                title=(
+                    "Document parsing needs human review"
+                    if parse_failure
+                    else "Student document ready for review"
+                ),
+                body=(
+                    f"{document['file_name']} could not be parsed automatically. "
+                    "The original is safe and available for review or retry."
+                    if parse_failure
+                    else f"{document['file_name']} is ready for staff review."
+                ),
+                dedupe_key=(
+                    f"work-item:{work_item_id}:parse-failure:{request_id}"
+                    if parse_failure
+                    else f"work-item:{work_item_id}:attention"
+                ),
+            )
+
+        if parse_failure:
+            details = {
+                "documentId": document_id,
+                "studentId": auth.student_id,
+                "workItemId": work_item_id,
+                "requirementId": document.get("requirement_id"),
+                "notificationId": notification_id,
+                "failureCode": failure_code,
+                "originalRetained": True,
+                "workItemCreated": created,
+                "workItemReopened": reopened,
+            }
+            await self._insert_audit(
+                connection,
+                auth,
+                "document.human_review_requested",
+                "document_record",
+                document_id,
+                request_id,
+                details,
+            )
+            await self._insert_outbox(
+                connection,
+                auth,
+                "document.human_review_requested.v1",
+                "document_record",
+                document_id,
+                1,
+                request_id,
+                details,
+            )
+
+        return {
+            "created": created,
+            "reopened": reopened,
+            "workItemId": work_item_id,
+            "notificationId": notification_id,
+        }
 
     async def _complete_requirement(
         self, connection: AsyncConnection, auth: AuthContext, requirement_code: str
@@ -4668,7 +6842,7 @@ class PostgresPortalRepository:
                   AND rdv.code=:requirement_code
                   AND sr.retired_at IS NULL
                   AND sr.status NOT IN ('completed','waived','not_applicable')
-                RETURNING sr.id
+                RETURNING sr.id, sr.journey_id
                 """
             ),
             {
@@ -4708,36 +6882,13 @@ class PostgresPortalRepository:
                 kind=kind,
                 href=href,
             )
-        await connection.execute(
-            text(
-                """
-                UPDATE student_requirement candidate SET status='ready',
-                  version=candidate.version+1, updated_at=NOW()
-                FROM requirement_definition_version definition,
-                     enrollment_journey journey
-                WHERE candidate.tenant_id=:tenant_id
-                  AND candidate.journey_id=journey.id AND journey.student_id=:student_id
-                  AND candidate.requirement_definition_version_id=definition.id
-                  AND candidate.retired_at IS NULL
-                  AND candidate.status='blocked'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM unnest(definition.depends_on_codes) dependency(code)
-                    WHERE NOT EXISTS (
-                      SELECT 1 FROM student_requirement prerequisite
-                      JOIN requirement_definition_version prerequisite_definition
-                        ON prerequisite_definition.id=prerequisite.requirement_definition_version_id
-                       AND prerequisite_definition.tenant_id=prerequisite.tenant_id
-                      WHERE prerequisite.tenant_id=:tenant_id
-                        AND prerequisite.journey_id=candidate.journey_id
-                        AND prerequisite_definition.code=dependency.code
-                        AND prerequisite.retired_at IS NULL
-                        AND prerequisite.status IN ('completed','waived','not_applicable')
-                    )
-                  )
-                """
-            ),
-            {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
-        )
+        for journey_id in {row["journey_id"] for row in completed_rows}:
+            await reconcile_student_journey_routes(
+                connection,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                journey_id=journey_id,
+            )
         completed_journeys = await connection.execute(
             text(
                 """
@@ -4969,15 +7120,20 @@ class PostgresPortalRepository:
                       id, tenant_id, student_id, source_document_id, source_type,
                       source_code, title, grade_or_score, credits, institution_name,
                       evidence, reviewed_at
-                    ) SELECT :id, :tenant_id, :student_id, :document_id, :source_type,
-                      :source_code, :title, :grade_or_score, :credits, :institution_name,
+                    ) SELECT CAST(:id AS uuid), CAST(:tenant_id AS uuid),
+                      CAST(:student_id AS uuid), CAST(:document_id AS uuid),
+                      CAST(:source_type AS varchar), CAST(:source_code AS varchar),
+                      CAST(:title AS varchar), CAST(:grade_or_score AS varchar),
+                      CAST(:credits AS numeric), CAST(:institution_name AS varchar),
                       CAST(:evidence AS jsonb), NOW()
                     WHERE NOT EXISTS (
                       SELECT 1 FROM student_transcript_credit credit
-                      WHERE credit.tenant_id=:tenant_id AND credit.student_id=:student_id
-                        AND credit.source_document_id=:document_id
-                        AND COALESCE(credit.source_code,'')=COALESCE(:source_code,'')
-                        AND credit.title=:title
+                      WHERE credit.tenant_id=CAST(:tenant_id AS uuid)
+                        AND credit.student_id=CAST(:student_id AS uuid)
+                        AND credit.source_document_id=CAST(:document_id AS uuid)
+                        AND COALESCE(credit.source_code,'')=
+                          COALESCE(CAST(:source_code AS varchar),'')
+                        AND credit.title=CAST(:title AS varchar)
                     )
                     """
                 ),
@@ -5039,7 +7195,8 @@ class PostgresPortalRepository:
                       AND rule.catalog_version_id=:catalog_version_id AND rule.active=true
                     WHERE credit.tenant_id=:tenant_id AND credit.student_id=:student_id
                       AND credit.source_document_id=:document_id
-                      AND COALESCE(credit.source_code,'')=COALESCE(:source_code,'')
+                      AND COALESCE(credit.source_code,'')=
+                        COALESCE(CAST(:source_code AS varchar),'')
                       AND credit.title=:source_title
                     ON CONFLICT (
                       tenant_id, student_id, transcript_credit_id,
