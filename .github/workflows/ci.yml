@@ -229,6 +229,7 @@ jobs:
       # restricts tokens to this repository, refs/heads/main, and environment.
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/906906351296/locations/global/workloadIdentityPools/github-audentra/providers/github
       GCP_SERVICE_ACCOUNT: audentra-platform-cd@audentra.iam.gserviceaccount.com
+      DEFER_AUTHENTICATED_READINESS_CHECK: "true"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -276,7 +277,8 @@ jobs:
       - name: Migrate, seed, deploy API, and configure bounded worker jobs
         run: bash infra/cloud-run/deploy-preview.sh
 
-      - name: Verify the deployed Cloud Run revision
+      - id: deployed-api
+        name: Verify the deployed Cloud Run revision
         run: |
           published_image="$(gcloud artifacts docker images describe "${IMAGE_TAG_URI}" \
             --format='value(image_summary.fully_qualified_digest)')"
@@ -291,3 +293,41 @@ jobs:
             --region="${GCP_REGION}" \
             --format='value(spec.template.spec.containers[0].image)')"
           test "${deployed_image}" = "${IMAGE_URI}"
+          api_url="$(gcloud run services describe "${API_SERVICE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --format='value(status.url)')"
+          test -n "${api_url}"
+          echo "api_url=${api_url}" >>"${GITHUB_OUTPUT}"
+
+      - id: cloud-run-id-token
+        name: Mint a short-lived ID token for private readiness
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+          token_format: id_token
+          id_token_audience: ${{ steps.deployed-api.outputs.api_url }}
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Verify authenticated API readiness
+        env:
+          API_URL: ${{ steps.deployed-api.outputs.api_url }}
+          CLOUD_RUN_ID_TOKEN: ${{ steps.cloud-run-id-token.outputs.id_token }}
+        run: |
+          test -n "${CLOUD_RUN_ID_TOKEN}"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error \
+              --header="Authorization: Bearer ${CLOUD_RUN_ID_TOKEN}" \
+              "${API_URL}/health/ready" >/dev/null; then
+              exit 0
+            fi
+            if [[ "${attempt}" -eq 12 ]]; then
+              echo "Authenticated Cloud Run readiness check failed." >&2
+              exit 1
+            fi
+            sleep 5
+          done

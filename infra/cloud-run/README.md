@@ -58,6 +58,14 @@ GitHub Actions invokes `deploy-preview.sh` only after all CI jobs pass on
 The jobs start from zero for every execution. Long document/AI work runs in a
 job, never on the interactive API request path.
 
+Direct invocations perform the private API readiness check inline with a
+Google-signed identity token. GitHub Actions sets
+`DEFER_AUTHENTICATED_READINESS_CHECK=true`, finishes the worker and scheduler
+reconciliation, then uses its pinned Google authentication action to mint a
+short-lived ID token for the exact Cloud Run URL and verifies
+`/health/ready`. This keeps the service private without granting the deployment
+account broad token-creation permissions.
+
 ## Security boundaries
 
 - Runtime values are Secret Manager references, not GitHub secrets or YAML.
