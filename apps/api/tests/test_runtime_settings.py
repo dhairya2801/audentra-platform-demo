@@ -7,6 +7,7 @@ from audentra.bootstrap.settings import (
     LOCAL_WORKER_TOKEN,
     RuntimeSettings,
 )
+from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
@@ -18,6 +19,7 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.database_url == LOCAL_DATABASE_URL
     assert settings.document_worker_token == LOCAL_WORKER_TOKEN
     assert len(settings.staff_invitation_code) >= 16
+    assert isinstance(settings.object_storage, S3StorageSettings)
     assert settings.object_storage.endpoint_url == "http://localhost:9000"
     assert settings.object_storage.force_path_style is True
     assert settings.worker.consumer_name == "student-dashboard-v1"
@@ -92,6 +94,27 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
 
     assert settings.environment == "preview"
     assert settings.http_settings().secure_cookies is True
+
+
+def test_gcs_storage_uses_application_default_credentials(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {
+            "AUDENTRA_ENV": "preview",
+            "DATABASE_URL": "postgresql://example/preview",
+            "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
+            "OBJECT_STORAGE_PROVIDER": "gcs",
+            "OBJECT_STORAGE_BUCKET": "audentra-preview-documents",
+            "GOOGLE_CLOUD_PROJECT": "audentra",
+            "API_INTERNAL_AUDIENCE": "https://audentra-api-preview.run.app",
+        },
+        package_root=tmp_path,
+    )
+
+    assert isinstance(settings.object_storage, GcsStorageSettings)
+    assert settings.object_storage.bucket == "audentra-preview-documents"
+    assert settings.object_storage.project_id == "audentra"
+    assert settings.worker.api_internal_audience == "https://audentra-api-preview.run.app"
 
 
 def test_preview_requires_a_private_staff_invitation_code(tmp_path: Path) -> None:

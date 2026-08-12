@@ -9,6 +9,7 @@ import pytest
 from pydantic import JsonValue
 
 from audentra.infrastructure.messaging.envelope import DomainEventActor, DomainEventEnvelope
+from audentra.infrastructure.worker import document_commands
 from audentra.infrastructure.worker.document_commands import (
     DocumentCommandSettings,
     DocumentExtractionRunner,
@@ -50,7 +51,7 @@ def _event(
         {"api_internal_url": "ftp://api", "worker_token": "secret"},
         {"api_internal_url": "http://api", "worker_token": "  "},
         {"api_internal_url": "http://api", "worker_token": "secret", "timeout_seconds": 0.9},
-        {"api_internal_url": "http://api", "worker_token": "secret", "timeout_seconds": 61},
+        {"api_internal_url": "http://api", "worker_token": "secret", "timeout_seconds": 301},
     ),
 )
 def test_document_command_settings_fail_closed(kwargs: dict[str, object]) -> None:
@@ -100,6 +101,35 @@ def test_document_runner_sends_tenant_scoped_authenticated_internal_command(
     assert requests[0].headers["x-demo-student-id"] == "student-1"
     assert requests[0].headers["x-demo-actor-id"] == "actor-1"
     assert requests[0].headers["x-correlation-id"] == "correlation-1"
+
+
+def test_document_runner_adds_cloud_run_identity_when_an_audience_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    monkeypatch.setattr(
+        document_commands, "_fetch_google_id_token", lambda _audience: "signed-token"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async def exercise() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            runner = DocumentExtractionRunner(
+                DocumentCommandSettings(
+                    api_internal_url="https://api.internal/",
+                    api_internal_audience="https://api.internal/",
+                    worker_token=WORKER_TEST_TOKEN,
+                ),
+                client=client,
+            )
+            await runner.handle(_event())
+
+    asyncio.run(exercise())
+
+    assert requests[0].headers["x-serverless-authorization"] == "Bearer signed-token"
 
 
 @pytest.mark.parametrize(

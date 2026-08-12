@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
+from google.auth.transport.requests import Request
+from google.oauth2 import id_token
 
 from audentra.infrastructure.messaging.envelope import DomainEventEnvelope, get_event_string
 
@@ -13,16 +17,21 @@ from audentra.infrastructure.messaging.envelope import DomainEventEnvelope, get_
 @dataclass(frozen=True, slots=True)
 class DocumentCommandSettings:
     api_internal_url: str = "http://localhost:4000"
+    api_internal_audience: str | None = None
     worker_token: str = ""
     timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         if not self.api_internal_url.startswith(("http://", "https://")):
             raise ValueError("api_internal_url must be HTTP(S)")
+        if self.api_internal_audience is not None and not self.api_internal_audience.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("api_internal_audience must be HTTP(S)")
         if not self.worker_token.strip():
             raise ValueError("worker_token is required")
-        if not 1 <= self.timeout_seconds <= 60:
-            raise ValueError("timeout_seconds must be between 1 and 60")
+        if not 1 <= self.timeout_seconds <= 300:
+            raise ValueError("timeout_seconds must be between 1 and 300")
 
 
 class DocumentExtractionRunner:
@@ -60,6 +69,12 @@ class DocumentExtractionRunner:
             "x-demo-actor-id": actor_id,
             "x-correlation-id": event.correlation_id or event.event_id,
         }
+        if self._settings.api_internal_audience is not None:
+            token = await asyncio.to_thread(
+                _fetch_google_id_token,
+                self._settings.api_internal_audience,
+            )
+            headers["x-serverless-authorization"] = f"Bearer {token}"
         if self._client is None:
             async with httpx.AsyncClient(timeout=self._settings.timeout_seconds) as client:
                 response = await client.post(url, headers=headers)
@@ -78,3 +93,9 @@ class DocumentExtractionRunner:
                 "status": response.status_code,
             },
         )
+
+
+def _fetch_google_id_token(audience: str) -> str:
+    """Get an ID token from Cloud Run's metadata-backed workload identity."""
+
+    return cast(str, id_token.fetch_id_token(Request(), audience))  # type: ignore[no-untyped-call]
