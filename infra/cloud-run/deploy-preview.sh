@@ -19,6 +19,7 @@ set -euo pipefail
 
 OPENROUTER_API_KEY_SECRET="${OPENROUTER_API_KEY_SECRET:-}"
 WEB_ORIGIN="${WEB_ORIGIN:-http://localhost:3000}"
+DEFER_AUTHENTICATED_READINESS_CHECK="${DEFER_AUTHENTICATED_READINESS_CHECK:-false}"
 
 API_SERVICE="${API_SERVICE:-audentra-api-preview}"
 MIGRATION_JOB="${MIGRATION_JOB:-audentra-migrate-preview}"
@@ -109,19 +110,21 @@ gcloud run services add-iam-policy-binding "${API_SERVICE}" \
   --role=roles/run.invoker \
   --quiet
 
-identity_token="$(gcloud auth print-identity-token --audiences="${api_url}")"
-for attempt in {1..12}; do
-  if curl --fail --silent --show-error \
-    --header="Authorization: Bearer ${identity_token}" \
-    "${api_url}/health/ready" >/dev/null; then
-    break
-  fi
-  if [[ "${attempt}" -eq 12 ]]; then
-    echo "Authenticated Cloud Run readiness check failed." >&2
-    exit 1
-  fi
-  sleep 5
-done
+if [[ "${DEFER_AUTHENTICATED_READINESS_CHECK}" != "true" ]]; then
+  identity_token="$(gcloud auth print-identity-token --audiences="${api_url}")"
+  for attempt in {1..12}; do
+    if curl --fail --silent --show-error \
+      --header="Authorization: Bearer ${identity_token}" \
+      "${api_url}/health/ready" >/dev/null; then
+      break
+    fi
+    if [[ "${attempt}" -eq 12 ]]; then
+      echo "Authenticated Cloud Run readiness check failed." >&2
+      exit 1
+    fi
+    sleep 5
+  done
+fi
 
 gcloud run jobs deploy "${WORKER_JOB}" \
   --image="${IMAGE_URI}" \
