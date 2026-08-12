@@ -304,6 +304,12 @@ def _compose_documents(
     accepted = [item for item in states if item["submissionState"] == "accepted"]
     if accepted:
         summary_parts.append(f"{_join_titles(accepted)} accepted")
+    needs_attention = [item for item in states if item["submissionState"] == "needs_attention"]
+    if needs_attention:
+        summary_parts.append(
+            f"{_join_titles(needs_attention)} "
+            f"{'needs' if len(needs_attention) == 1 else 'need'} your attention"
+        )
     missing = state.missing_documents
     if missing:
         summary_parts.append(f"{_join_titles(missing)} not submitted yet")
@@ -312,6 +318,23 @@ def _compose_documents(
         if summary_parts
         else "Here's where your documents stand."
     )
+    # When the student named a specific document, answer about that document
+    # first so the direct question gets a direct sentence.
+    reference = classification.requirement_reference
+    if reference:
+        matched = [item for item in states if reference in item["title"].lower()]
+        if len(matched) == 1:
+            item = matched[0]
+            state_prose = {
+                "accepted": "has been accepted",
+                "under_review": "is under review",
+                "not_submitted": "has not been submitted yet",
+                "needs_attention": "needs your attention before review can continue",
+            }.get(item["submissionState"], item["submissionState"])
+            message = (
+                f"Your {reference} document {state_prose}"
+                f" (checklist item: {item['title']}). {message}"
+            )
     block = table_block(
         [{"key": "document", "label": "Document"}, {"key": "status", "label": "Status"}],
         rows,

@@ -225,18 +225,30 @@ def classify(request: NormalizedRequest) -> Classification | None:
         return Classification("registration_status", 1)
 
     if re.search(r"document|upload|transcript|immuni[sz]|ferpa|identity|residency", text):
+        # Remember which document the student named so composition can lead
+        # with that document's state instead of a whole-checklist summary.
+        document_reference = None
+        for keyword, reference in (
+            ("transcript", "transcript"),
+            ("immuni", "immunization"),
+            ("identity", "identity"),
+            ("residency", "residency"),
+        ):
+            if keyword in text:
+                document_reference = reference
+                break
         if re.search(
             r"(?:missing|still need|need to (?:send|submit|upload)"
             r"|haven'?t (?:sent|submitted|uploaded))",
             text,
         ):
-            return Classification("missing_documents", 1)
+            return Classification("missing_documents", 1, requirement_reference=document_reference)
         if re.search(
             r"(?:status|reviewed?|under review|accepted|received|got|uploaded|submitted|have i)",
             text,
         ):
-            return Classification("document_status", 1)
-        return Classification("document_status", 0.9)
+            return Classification("document_status", 1, requirement_reference=document_reference)
+        return Classification("document_status", 0.9, requirement_reference=document_reference)
 
     if re.search(
         r"\bacademic plan\b|\bdegree plan\b|\bcourse plan\b|\bcurriculum\b|\bcatalog\b"
