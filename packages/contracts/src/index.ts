@@ -1977,6 +1977,39 @@ export interface AssistantConversationMessagesResponse {
   messages: AssistantConversationMessage[];
 }
 
+export interface CreateAssistantVoiceSessionInput {
+  conversationId: string;
+  pageContext: AssistantPageContext;
+}
+
+export interface AssistantVoiceSessionCredentials {
+  server_url: string;
+  participant_token: string;
+  voice_session_id: string;
+  expires_at: string;
+}
+
+export interface AssistantVoiceSessionDetails {
+  voiceSessionId: string;
+  conversationId: string;
+  provider: "livekit";
+  roomName: string;
+  participantIdentity: string;
+  pageContext: AssistantPageContext;
+  status: "active" | "ended";
+  expiresAt: string;
+  endedAt: string | null;
+  createdAt: string;
+}
+
+export interface SubmitAssistantVoiceTurnInput {
+  clientMessageId: string;
+  text: string;
+  inputMode: "voice";
+  pageContext: AssistantPageContext;
+  livekitStreamId: string;
+}
+
 export interface CatalogCourse {
   id: string;
   code: string;
