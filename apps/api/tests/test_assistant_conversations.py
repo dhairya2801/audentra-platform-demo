@@ -10,6 +10,7 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from audentra.core.auth import AuthContext
@@ -120,6 +121,7 @@ def test_postgres_conversation_round_trip_and_replay() -> None:
     schema = f"assistant_{uuid4().hex}"
     tenant_id = str(uuid4())
     student_id = str(uuid4())
+    foreign_student_id = str(uuid4())
 
     async def scenario() -> None:
         admin = create_async_engine(normalize_database_url(database_url))
@@ -139,7 +141,8 @@ def test_postgres_conversation_round_trip_and_replay() -> None:
                       page_path varchar(240), page_label varchar(240),
                       created_at timestamptz NOT NULL DEFAULT now(),
                       last_message_at timestamptz NOT NULL DEFAULT now(),
-                      closed_at timestamptz
+                      closed_at timestamptz,
+                      UNIQUE (id, tenant_id, student_id)
                     )""",
                     f"""CREATE TABLE {schema}.assistant_message (
                       id uuid PRIMARY KEY, tenant_id uuid NOT NULL,
@@ -152,15 +155,28 @@ def test_postgres_conversation_round_trip_and_replay() -> None:
                       context_receipts jsonb NOT NULL DEFAULT '[]'::jsonb,
                       suggested_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
                       widgets jsonb NOT NULL DEFAULT '[]'::jsonb,
-                      created_at timestamptz NOT NULL DEFAULT now()
+                      created_at timestamptz NOT NULL DEFAULT now(),
+                      FOREIGN KEY (conversation_id, tenant_id, student_id)
+                        REFERENCES {schema}.assistant_conversation(id, tenant_id, student_id)
+                        ON DELETE CASCADE
                     )""",
+                    f"""CREATE UNIQUE INDEX am_client_{schema}
+                      ON {schema}.assistant_message(
+                        tenant_id, student_id, client_message_id
+                      ) WHERE client_message_id IS NOT NULL AND role='user'
+                    """,
                 ):
                     await connection.execute(text(statement))
                 await connection.execute(
                     text(
-                        f"INSERT INTO {schema}.student (id, tenant_id) VALUES (:id, :tenant_id)"  # noqa: S608
+                        f"""INSERT INTO {schema}.student (id, tenant_id)
+                            VALUES (:id, :tenant_id), (:foreign_id, :tenant_id)"""  # noqa: S608
                     ),
-                    {"id": student_id, "tenant_id": tenant_id},
+                    {
+                        "id": student_id,
+                        "foreign_id": foreign_student_id,
+                        "tenant_id": tenant_id,
+                    },
                 )
 
             engine = create_async_engine(
@@ -214,6 +230,103 @@ def test_postgres_conversation_round_trip_and_replay() -> None:
             )
             roles = [item["role"] for item in history["messages"]]
             assert roles == ["user", "assistant"]
+
+            async def append_concurrent_replay() -> dict[str, object]:
+                return await repository.append_assistant_exchange(
+                    auth,
+                    conversation_id=None,
+                    page_path="/edward",
+                    page_label="Concurrent replay contract",
+                    user_message={
+                        "content": "Show my enrollment status.",
+                        "clientMessageId": "client-concurrent-replay",
+                        "inputMode": "text",
+                    },
+                    assistant_message={
+                        "content": "Your enrollment is on track.",
+                        "provider": "guided",
+                        "model": None,
+                        "usage": None,
+                        "blocks": None,
+                        "contextReceipts": [],
+                        "suggestedActions": [],
+                        "widgets": [],
+                    },
+                    request_id="request-concurrent-replay",
+                )
+
+            concurrent = await asyncio.gather(
+                append_concurrent_replay(), append_concurrent_replay()
+            )
+            assert concurrent[0]["conversationId"] == concurrent[1]["conversationId"]
+            assert concurrent[0]["userMessageId"] == concurrent[1]["userMessageId"]
+            assert concurrent[0]["assistantMessageId"] == concurrent[1]["assistantMessageId"]
+
+            async with engine.connect() as connection:
+                replay_counts = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT
+                                  COUNT(*) FILTER (
+                                    WHERE role='user'
+                                      AND client_message_id='client-concurrent-replay'
+                                  ) AS user_count,
+                                  COUNT(*) FILTER (WHERE role='assistant') AS assistant_count
+                                FROM assistant_message
+                                WHERE conversation_id=:conversation_id
+                                """
+                            ),
+                            {"conversation_id": concurrent[0]["conversationId"]},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                conversation_count = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT COUNT(*) AS count FROM assistant_conversation
+                                WHERE page_label='Concurrent replay contract'
+                                """
+                            )
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+            assert int(replay_counts["user_count"]) == 1
+            assert int(replay_counts["assistant_count"]) == 1
+            assert int(conversation_count["count"]) == 1
+
+            # The database must reject a message whose student ownership does
+            # not match the conversation, even when the tenant is the same.
+            async with engine.begin() as connection:
+                savepoint = await connection.begin_nested()
+                with pytest.raises(IntegrityError):
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO assistant_message (
+                              id, tenant_id, conversation_id, student_id,
+                              role, input_mode, content
+                            ) VALUES (
+                              :id, :tenant_id, :conversation_id, :student_id,
+                              'user', 'text', 'cross-student message'
+                            )
+                            """
+                        ),
+                        {
+                            "id": str(uuid4()),
+                            "tenant_id": tenant_id,
+                            "conversation_id": str(conversation["id"]),
+                            "student_id": foreign_student_id,
+                        },
+                    )
+                await savepoint.rollback()
 
             # Tenant isolation: a different student sees nothing.
             foreign_auth = AuthContext(

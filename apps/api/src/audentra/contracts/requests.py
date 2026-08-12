@@ -2,7 +2,7 @@
 
 import unicodedata
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from pydantic import (
@@ -488,7 +488,9 @@ class CreateDepositPaymentRequest(StrictRequest):
 
 class UpdateStudentProfileRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
-    preferred_name: ShortText | None = None
+    # ``None`` is only the omission default. Explicit JSON null must be rejected
+    # because the canonical API and PostgreSQL column are both non-nullable.
+    preferred_name: ShortText = cast(ShortText, None)
     pronouns: Annotated[StrictStr, StringConstraints(max_length=80)] | None = None
     mobile_phone: (
         Annotated[StrictStr, StringConstraints(pattern=r"^\+?[0-9 ()-]{7,32}$")] | None

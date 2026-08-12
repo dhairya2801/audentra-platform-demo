@@ -772,13 +772,12 @@ def test_activity_validation_happens_before_opening_transaction() -> None:
     assert engine.begin_entries == 0
 
 
-def test_ai_response_journal_preserves_json_and_exact_delivery_conflict_target() -> None:
-    engine = FakeEngine(lambda _sql, _parameters: [])
-    attempt = {
+def _ai_response_attempt(*, document_id: str | None) -> dict[str, object]:
+    return {
         "id": "00000000-0000-7000-8000-000000000801",
         "tenantId": TENANT_ID,
         "studentId": STUDENT_ID,
-        "documentId": "00000000-0000-7000-8000-000000000802",
+        "documentId": document_id,
         "requestId": "request-1",
         "attempt": 1,
         "operation": "document_extraction",
@@ -803,14 +802,33 @@ def test_ai_response_journal_preserves_json_and_exact_delivery_conflict_target()
         "promptCacheStatus": "hit",
     }
 
+
+def test_ai_response_journal_preserves_json_and_document_conflict_target() -> None:
+    engine = FakeEngine(lambda _sql, _parameters: [])
+    attempt = _ai_response_attempt(document_id="00000000-0000-7000-8000-000000000802")
+
     run(repository(engine).record_ai_provider_response(attempt))
     sql, parameters = engine.connection.calls[0]
 
     assert engine.commits == 1
     assert (
-        "on conflict ( tenant_id, document_id, request_id, attempt_number ) do nothing"
-        in normalized(sql)
+        "on conflict ( tenant_id, document_id, request_id, operation, attempt_number ) "
+        "where document_id is not null do nothing" in normalized(sql)
     )
     assert json.loads(str(parameters["usage"])) == {"total_tokens": 12}
     assert json.loads(str(parameters["response_body"])) == {"id": "provider-1"}
     assert parameters["tenant_id"] == UUID(TENANT_ID)
+
+
+def test_ai_response_journal_uses_general_conflict_target_without_document() -> None:
+    engine = FakeEngine(lambda _sql, _parameters: [])
+
+    run(repository(engine).record_ai_provider_response(_ai_response_attempt(document_id=None)))
+    sql, parameters = engine.connection.calls[0]
+
+    assert engine.commits == 1
+    assert (
+        "on conflict ( tenant_id, student_id, request_id, operation, attempt_number ) "
+        "where document_id is null do nothing" in normalized(sql)
+    )
+    assert parameters["document_id"] is None

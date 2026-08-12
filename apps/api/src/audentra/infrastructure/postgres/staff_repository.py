@@ -28,6 +28,7 @@ from audentra.core.errors import (
     ConflictError,
     NotFoundError,
 )
+from audentra.domain.documents import bounded_document_label
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
@@ -4439,10 +4440,9 @@ class PostgresStaffRepository:
                 connection,
                 auth=auth,
                 student_id=str(document["student_id"]),
-                subject=(
-                    f"{document['file_name']} was accepted"
-                    if decision == "accepted"
-                    else f"{document['file_name']} needs changes"
+                subject=bounded_document_label(
+                    document["file_name"],
+                    suffix=(" was accepted" if decision == "accepted" else " needs changes"),
                 ),
                 body=note
                 if notification_requested
@@ -4585,7 +4585,7 @@ class PostgresStaffRepository:
                         "tenant_id": _uuid(auth.tenant_id),
                         "student_id": _uuid(str(document["student_id"])),
                         "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
-                        "title": f"Review {document['file_name']}",
+                        "title": bounded_document_label(document["file_name"], prefix="Review "),
                         "priority": priority,
                         "component": component,
                         "assignee_id": assignee_id,

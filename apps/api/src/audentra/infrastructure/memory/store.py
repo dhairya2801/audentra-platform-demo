@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
-from audentra.domain.documents import can_retry_extraction
+from audentra.domain.documents import bounded_document_label, can_retry_extraction
 from audentra.domain.onboarding import (
     ONBOARDING_STEPS,
     is_skippable_onboarding_step,
@@ -1142,7 +1142,7 @@ class InMemoryPlatformStore:
                 {
                     "id": work_item_id,
                     "key": f"DOC-{document['id'].replace('-', '')[:8].upper()}",
-                    "title": f"Review {document['fileName']}",
+                    "title": bounded_document_label(document["fileName"], prefix="Review "),
                     "description": (
                         "Verify the stored original and make the official staff decision."
                     ),
@@ -1393,9 +1393,10 @@ class InMemoryPlatformStore:
         )
         notification = {
             "id": str(uuid4()),
-            "subject": f"{document['fileName']} was accepted"
-            if decision == "accepted"
-            else f"{document['fileName']} needs changes",
+            "subject": bounded_document_label(
+                document["fileName"],
+                suffix=" was accepted" if decision == "accepted" else " needs changes",
+            ),
             "body": str(review["note"]).strip()
             if review.get("notifyStudent")
             else (
@@ -1429,7 +1430,7 @@ class InMemoryPlatformStore:
         if isinstance(page_context, dict):
             page_path = str(page_context.get("path") or "") or None
             page_label = str(page_context.get("label") or "") or None
-        conversation = {
+        conversation: dict[str, Any] = {
             "id": str(uuid4()),
             "status": "active",
             "pagePath": page_path,

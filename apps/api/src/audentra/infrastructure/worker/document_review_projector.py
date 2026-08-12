@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from audentra.domain.documents import bounded_document_label
 from audentra.infrastructure.messaging.envelope import DomainEventEnvelope
 
 _REVIEWABLE_STATUSES = {"needs_review", "under_review"}
@@ -115,7 +116,7 @@ class DocumentReviewProjector:
                     "tenant_id": event.tenant_id,
                     "student_id": document["student_id"],
                     "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
-                    "title": f"Review {document['file_name']}",
+                    "title": bounded_document_label(document["file_name"], prefix="Review "),
                     "priority": priority,
                     "component": component,
                     "assignee_id": assignee["id"] if assignee is not None else None,

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.domain.documents import bounded_document_label
 from audentra.domain.onboarding import (
     ABOUT_YOU_REQUIRED_FIELDS,
     ONBOARDING_STEPS,
@@ -3586,6 +3587,8 @@ class PostgresPortalRepository:
     async def update_student_profile(
         self, auth: AuthContext, update: Mapping[str, Any], request_id: str
     ) -> JsonDict:
+        if "preferredName" in update and update["preferredName"] is None:
+            raise BadRequestError("INVALID_PREFERRED_NAME", "Preferred name cannot be null")
         fields = ("preferredName", "pronouns", "mobilePhone", "communicationPreference")
         changed = [field for field in fields if field in update]
         if not changed:
@@ -4112,10 +4115,22 @@ class PostgresPortalRepository:
         request_id: str,
     ) -> JsonDict:
         async def handler(connection: AsyncConnection) -> JsonDict:
+            student_result = await connection.execute(
+                text(
+                    """
+                    SELECT id FROM student
+                    WHERE tenant_id=:tenant_id AND id=:student_id
+                    FOR NO KEY UPDATE
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
+            )
+            if student_result.mappings().first() is None:
+                raise NotFoundError("STUDENT_NOT_FOUND", "The authenticated student was not found")
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, academic_year FROM student_payment_plan
+                    SELECT id, academic_year, status, version FROM student_payment_plan
                     WHERE id=:plan_id AND tenant_id=:tenant_id
                       AND student_id=:student_id AND status<>'cancelled'
                     FOR UPDATE
@@ -4132,15 +4147,17 @@ class PostgresPortalRepository:
                 raise NotFoundError(
                     "PAYMENT_PLAN_NOT_FOUND", "The selected payment plan was not found"
                 )
+            if str(plan["status"]) == "enrolled":
+                return {"planId": str(plan["id"]), "status": "enrolled"}
             await connection.execute(
                 text(
                     """
                     UPDATE student_payment_plan
-                    SET status=CASE WHEN id=:plan_id THEN 'enrolled' ELSE 'available' END,
-                        enrolled_at=CASE WHEN id=:plan_id THEN NOW() ELSE NULL END,
+                    SET status='available', enrolled_at=NULL,
                         version=version+1, updated_at=NOW()
                     WHERE tenant_id=:tenant_id AND student_id=:student_id
-                      AND academic_year=:academic_year AND status<>'cancelled'
+                      AND academic_year=:academic_year AND status='enrolled'
+                      AND id<>:plan_id
                     """
                 ),
                 {
@@ -4150,6 +4167,32 @@ class PostgresPortalRepository:
                     "academic_year": plan["academic_year"],
                 },
             )
+            selected_result = await connection.execute(
+                text(
+                    """
+                    UPDATE student_payment_plan
+                    SET status='enrolled', enrolled_at=NOW(),
+                        version=version+1, updated_at=NOW()
+                    WHERE id=:plan_id AND tenant_id=:tenant_id
+                      AND student_id=:student_id AND academic_year=:academic_year
+                      AND status='available'
+                    RETURNING version
+                    """
+                ),
+                {
+                    "plan_id": str(plan["id"]),
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "academic_year": plan["academic_year"],
+                },
+            )
+            selected = selected_result.mappings().first()
+            if selected is None:
+                raise ConflictError(
+                    "PAYMENT_PLAN_STATE_CHANGED",
+                    "The selected payment plan changed in another session",
+                )
+            selected_version = int(selected["version"])
             await self._insert_audit(
                 connection,
                 auth,
@@ -4157,7 +4200,10 @@ class PostgresPortalRepository:
                 "student_payment_plan",
                 str(plan["id"]),
                 request_id,
-                {"academicYear": plan["academic_year"]},
+                {
+                    "academicYear": plan["academic_year"],
+                    "version": selected_version,
+                },
             )
             await self._insert_outbox(
                 connection,
@@ -4165,7 +4211,7 @@ class PostgresPortalRepository:
                 "student_financial.payment_plan_selected.v1",
                 "student_payment_plan",
                 str(plan["id"]),
-                1,
+                selected_version,
                 request_id,
                 {"studentId": auth.student_id},
             )
@@ -6668,10 +6714,9 @@ class PostgresPortalRepository:
                 "tenant_id": auth.tenant_id,
                 "student_id": auth.student_id,
                 "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
-                "title": (
-                    f"Human review needed: {document['file_name']}"
-                    if parse_failure
-                    else f"Review {document['file_name']}"
+                "title": bounded_document_label(
+                    document["file_name"],
+                    prefix="Human review needed: " if parse_failure else "Review ",
                 ),
                 "description": (
                     "The original is safely stored, but automatic parsing did not complete. "
@@ -7368,40 +7413,59 @@ class PostgresPortalRepository:
         """Replay support: the stored assistant turn for a retried user send."""
 
         self._require_student(auth)
-        user_row = await self._one(
-            """
-            SELECT id, conversation_id, created_at FROM assistant_message
-            WHERE tenant_id=:tenant_id AND student_id=:student_id
-              AND client_message_id=:client_message_id AND role='user'
-            """,
+        async with self.engine.connect() as connection:
+            return await self._find_assistant_exchange_on_connection(
+                connection, auth, client_message_id
+            )
+
+    async def _find_assistant_exchange_on_connection(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        client_message_id: str,
+    ) -> JsonDict | None:
+        user_result = await connection.execute(
+            text(
+                """
+                SELECT id, conversation_id, created_at FROM assistant_message
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND client_message_id=:client_message_id AND role='user'
+                """
+            ),
             {
                 "tenant_id": auth.tenant_id,
                 "student_id": auth.student_id,
                 "client_message_id": client_message_id,
             },
         )
+        user_row = user_result.mappings().first()
         if user_row is None:
             return None
-        assistant_row = await self._one(
-            """
-            SELECT id, conversation_id, role, input_mode, content, client_message_id,
-                   request_id, provider, model, usage, blocks, context_receipts,
-                   suggested_actions, widgets, created_at
-            FROM assistant_message
-            WHERE tenant_id=:tenant_id AND conversation_id=:conversation_id
-              AND role='assistant' AND created_at >= :created_at
-            ORDER BY created_at, id
-            LIMIT 1
-            """,
+        assistant_result = await connection.execute(
+            text(
+                """
+                SELECT id, conversation_id, role, input_mode, content, client_message_id,
+                       request_id, provider, model, usage, blocks, context_receipts,
+                       suggested_actions, widgets, created_at
+                FROM assistant_message
+                WHERE tenant_id=:tenant_id AND student_id=:student_id
+                  AND conversation_id=:conversation_id
+                  AND role='assistant' AND created_at >= :created_at
+                ORDER BY created_at, id
+                LIMIT 1
+                """
+            ),
             {
                 "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
                 "conversation_id": str(user_row["conversation_id"]),
                 "created_at": user_row["created_at"],
             },
         )
+        assistant_row = assistant_result.mappings().first()
         if assistant_row is None:
             return None
-        assistant = _map_assistant_message(assistant_row)
+        assistant = _map_assistant_message(dict(assistant_row))
         return {
             "conversationId": str(user_row["conversation_id"]),
             "userMessageId": str(user_row["id"]),
@@ -7431,30 +7495,81 @@ class PostgresPortalRepository:
         """Persist one user/assistant exchange, opening a conversation if needed."""
 
         self._require_student(auth)
-        if conversation_id is None:
-            conversation = await self.create_assistant_conversation(
-                auth, page_path=page_path, page_label=page_label
-            )
-            conversation_id = str(conversation["id"])
-        else:
-            existing = await self._one(
-                """
-                SELECT id FROM assistant_conversation
-                WHERE tenant_id=:tenant_id AND student_id=:student_id AND id=:conversation_id
-                """,
-                {
-                    "tenant_id": auth.tenant_id,
-                    "student_id": auth.student_id,
-                    "conversation_id": conversation_id,
-                },
-            )
-            if existing is None:
-                raise NotFoundError(
-                    "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
-                )
         user_id = str(uuid4())
         assistant_id = str(uuid4())
+        client_message_id = user_message.get("clientMessageId")
         async with self.engine.begin() as connection:
+            if isinstance(client_message_id, str) and client_message_id:
+                # The unique partial index prevents duplicate user messages, while
+                # this transaction-scoped lock makes the whole two-message exchange
+                # replay-safe. It also prevents a concurrent retry from leaving an
+                # otherwise unused auto-created conversation behind.
+                await connection.execute(
+                    text(
+                        """
+                        SELECT pg_advisory_xact_lock(
+                          hashtextextended(CAST(:replay_key AS text), 0)
+                        )
+                        """
+                    ),
+                    {
+                        "replay_key": (
+                            f"assistant-exchange:{auth.tenant_id}:"
+                            f"{auth.student_id}:{client_message_id}"
+                        )
+                    },
+                )
+                replay = await self._find_assistant_exchange_on_connection(
+                    connection, auth, client_message_id
+                )
+                if replay is not None:
+                    return replay
+
+            if conversation_id is None:
+                conversation_id = str(uuid4())
+                conversation_result = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO assistant_conversation (
+                          id, tenant_id, student_id, status, page_path, page_label
+                        )
+                        SELECT :id, student.tenant_id, student.id, 'active',
+                               :page_path, :page_label
+                        FROM student
+                        WHERE student.tenant_id=:tenant_id AND student.id=:student_id
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "id": conversation_id,
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "page_path": (page_path or "")[:240] or None,
+                        "page_label": (page_label or "")[:240] or None,
+                    },
+                )
+                if conversation_result.mappings().first() is None:
+                    raise NotFoundError("STUDENT_NOT_FOUND", "The student record was not found")
+            else:
+                existing_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id FROM assistant_conversation
+                        WHERE tenant_id=:tenant_id AND student_id=:student_id
+                          AND id=:conversation_id
+                        """
+                    ),
+                    {
+                        "tenant_id": auth.tenant_id,
+                        "student_id": auth.student_id,
+                        "conversation_id": conversation_id,
+                    },
+                )
+                if existing_result.mappings().first() is None:
+                    raise NotFoundError(
+                        "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+                    )
+
             await connection.execute(
                 text(
                     """
@@ -7474,7 +7589,7 @@ class PostgresPortalRepository:
                     "student_id": auth.student_id,
                     "input_mode": str(user_message.get("inputMode") or "text"),
                     "content": str(user_message.get("content") or "")[:8000],
-                    "client_message_id": user_message.get("clientMessageId"),
+                    "client_message_id": client_message_id,
                     "request_id": request_id,
                 },
             )
