@@ -779,6 +779,39 @@ describe("preview shared student graph answers", () => {
   });
 });
 
+describe("preview aid answers before acceptance", () => {
+  it("grounds the default demo student's aid question instead of safe-failing", async () => {
+    // The default fixture has an aid package but has not accepted its offer.
+    // "No acceptance yet" must read as valid aid state, not as a failed read.
+    const { baseUrl, aiCalls } = await startPreview({ seedOptions: {} });
+    const result = await ask(baseUrl, "What financial aid do I have?", {
+      pageContext: { path: "/financials", label: "Financials" },
+    });
+
+    assert.equal(result.response.status, 200);
+    assert.equal(result.payload.studentAssistant.safeFailure, null);
+    assert.match(result.payload.studentAssistant.requestType, /^aid_/);
+    assert.doesNotMatch(
+      result.payload.message,
+      /couldn't verify all of the current onboarding data/i,
+    );
+    assert.ok(
+      result.payload.contextReceipts.some((receipt) =>
+        ["financial_aid", "financials"].includes(receipt.source),
+      ),
+    );
+    assert.equal(aiCalls.length, 0);
+
+    // The pre-acceptance summary names what finalizes the package.
+    const summary = result.payload.studentAssistant.financialAid?.summary;
+    if (summary?.gates) {
+      assert.ok(
+        summary.gates.some((gate) => gate.code === "offer_accepted"),
+      );
+    }
+  });
+});
+
 describe("preview shared graph safe failures", () => {
   it("does not claim student state for an ineligible account", async () => {
     const { baseUrl, aiCalls } = await startPreview({

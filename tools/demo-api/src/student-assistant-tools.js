@@ -89,19 +89,19 @@ export function createPreviewStudentAssistantTools({
     },
 
     async getFinancialAidStatus(context) {
-      return readAcceptedStudent(store, context, clock, (state) =>
+      return readAidState(store, context, clock, (state) =>
         normalizedFinancialAidStatus(state, clock),
       );
     },
 
     async getFinancialAidSupportOptions(context) {
-      return readAcceptedStudent(store, context, clock, (state) =>
+      return readAidState(store, context, clock, (state) =>
         normalizedFinancialAidSupport(state),
       );
     },
 
     async retrieveApprovedFinancialAidPolicy(context, request) {
-      return readAcceptedStudent(store, context, clock, (state) => {
+      return readAidState(store, context, clock, (state) => {
         const policy = (state.financialAidPolicies ?? []).find(
           (candidate) =>
             candidate.status === "published" &&
@@ -126,13 +126,13 @@ export function createPreviewStudentAssistantTools({
     },
 
     async getFinancialAidSummary(context) {
-      return readAcceptedStudent(store, context, clock, (state) =>
+      return readAidState(store, context, clock, (state) =>
         syntheticAidSummary(state, clock),
       );
     },
 
     async getAidDisbursements(context) {
-      return readAcceptedStudent(store, context, clock, (state) =>
+      return readAidState(store, context, clock, (state) =>
         syntheticAidDisbursements(state, clock),
       );
     },
@@ -201,6 +201,22 @@ export function trustedStudentAssistantIdentity(store) {
     tenantId: identity.tenantId,
     studentId: identity.studentId,
   };
+}
+
+/*
+ * Aid reads are deliberately not gated on an accepted offer: an admitted
+ * student has an aid package to ask about before they accept, and a student
+ * with no aid on file deserves "nothing on file yet, here is how to start"
+ * rather than a failed read. "No data" is a valid empty state; "unavailable"
+ * is reserved for reads that actually could not be performed.
+ */
+function readAidState(store, context, clock, project) {
+  return readAvailable(store, context, clock, (state) => {
+    if (!state.financials || typeof state.financials !== "object") {
+      return unavailable("not_found", false);
+    }
+    return project(state);
+  });
 }
 
 function readAcceptedStudent(store, context, clock, project) {
@@ -1093,6 +1109,22 @@ function syntheticAidSummary(state, clock) {
       navigationRoute: "/financials",
       relatedRequirementCode: "fafsa",
     },
+    // Only surfaced while unsatisfied so an accepted student's summary is
+    // unchanged; before acceptance it names the step that finalizes a package.
+    ...(state.offer?.status !== "accepted"
+      ? [
+          {
+            code: "offer_accepted",
+            label: "Enrollment offer accepted",
+            satisfied: false,
+            reason:
+              "Your aid package is finalized after you accept your enrollment offer.",
+            resolutionOwner: "Admissions",
+            navigationRoute: "/enrollment",
+            relatedRequirementCode: null,
+          },
+        ]
+      : []),
     ...(verification
       ? [
           {
