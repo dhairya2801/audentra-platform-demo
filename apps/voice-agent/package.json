@@ -1,0 +1,31 @@
+{
+  "name": "@vv/voice-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts dev",
+    "start": "node dist/index.js start",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.6.1",
+    "@livekit/agents-plugin-assemblyai": "1.6.1",
+    "@livekit/agents-plugin-cartesia": "1.6.1",
+    "@livekit/rtc-node": "0.13.33",
+    "@vv/contracts": "file:../../packages/contracts",
+    "zod": "4.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.9",
+    "tsx": "4.21.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=22.13.0 <23"
+  }
+}

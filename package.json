@@ -5,7 +5,8 @@
   "workspaces": [
     "packages/*",
     "tools/demo-api",
-    "tools/edward-eval"
+    "tools/edward-eval",
+    "apps/voice-agent"
   ],
   "scripts": {
     "build": "npm run build:api && npm run build:node",
@@ -27,6 +28,7 @@
     "dev:worker": "uv run --directory apps/api --locked audentra-worker",
     "worker:once": "uv run --directory apps/api --locked audentra-worker --once",
     "dev:demo-api": "npm --workspace @vv/demo-api run dev",
+    "dev:voice-agent": "npm --workspace @vv/voice-agent run dev",
     "demo:reset": "npm --workspace @vv/demo-api run reset",
     "test:demo-api": "npm --workspace @vv/demo-api test",
     "test:assistant-core": "npm --workspace @vv/student-assistant-core test",
