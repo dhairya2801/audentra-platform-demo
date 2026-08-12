@@ -114,7 +114,7 @@ if [[ "${DEFER_AUTHENTICATED_READINESS_CHECK}" != "true" ]]; then
   identity_token="$(gcloud auth print-identity-token --audiences="${api_url}")"
   for attempt in {1..12}; do
     if curl --fail --silent --show-error \
-      --header="Authorization: Bearer ${identity_token}" \
+      --header "Authorization: Bearer ${identity_token}" \
       "${api_url}/health/ready" >/dev/null; then
       break
     fi

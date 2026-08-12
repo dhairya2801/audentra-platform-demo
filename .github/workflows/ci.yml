@@ -326,7 +326,7 @@ jobs:
           test -n "${CLOUD_RUN_ID_TOKEN}"
           for attempt in {1..12}; do
             if curl --fail --silent --show-error \
-              --header="Authorization: Bearer ${CLOUD_RUN_ID_TOKEN}" \
+              --header "Authorization: Bearer ${CLOUD_RUN_ID_TOKEN}" \
               "${API_URL}/health/ready" >/dev/null; then
               exit 0
             fi
