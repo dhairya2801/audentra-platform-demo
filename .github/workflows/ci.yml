@@ -186,6 +186,11 @@ jobs:
             "import shutil; names=('audentra-api','audentra-worker','audentra-migrate','audentra-seed'); assert all(shutil.which(name) for name in names)"
           test "$(docker image inspect audentra-platform:test --format '{{.Config.User}}')" = "audentra"
 
+      - name: Verify onboarding PDF templates in the production image
+        run: |
+          docker run --rm --entrypoint python audentra-platform:test -c \
+            "from audentra.bootstrap.settings import RuntimeSettings; root=RuntimeSettings.from_environment().onboarding_template_dir; names=('aster-ferpa-release.pdf','aster-enrollment-acknowledgment.pdf','harvard-ferpa-release.pdf','harvard-enrollment-acknowledgment.pdf'); assert all((root / name).read_bytes().startswith(b'%PDF-') for name in names), root"
+
   deploy-preview:
     name: Deploy Vekend Cloud Run preview
     if: >-
