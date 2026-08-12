@@ -283,11 +283,16 @@ jobs:
           published_image="$(gcloud artifacts docker images describe "${IMAGE_TAG_URI}" \
             --format='value(image_summary.fully_qualified_digest)')"
           test "${published_image}" = "${IMAGE_URI}"
-          ready="$(gcloud run services describe "${API_SERVICE}" \
+          latest_created_revision="$(gcloud run services describe "${API_SERVICE}" \
             --project="${GCP_PROJECT_ID}" \
             --region="${GCP_REGION}" \
-            --format='value(status.conditions[?type=Ready].status)')"
-          test "${ready}" = "True"
+            --format='value(status.latestCreatedRevisionName)')"
+          latest_ready_revision="$(gcloud run services describe "${API_SERVICE}" \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --format='value(status.latestReadyRevisionName)')"
+          test -n "${latest_created_revision}"
+          test "${latest_created_revision}" = "${latest_ready_revision}"
           deployed_image="$(gcloud run services describe "${API_SERVICE}" \
             --project="${GCP_PROJECT_ID}" \
             --region="${GCP_REGION}" \
