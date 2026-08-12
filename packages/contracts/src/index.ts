@@ -1775,9 +1775,27 @@ export interface EdwardChatMessage {
   content: string;
 }
 
+export type AssistantConversationStatus = "active" | "closed";
+export type AssistantMessageRole = "user" | "assistant";
+export type AssistantInputMode = "text" | "voice";
+
+export interface AssistantPageContext {
+  path: string;
+  label: string;
+}
+
+export interface CreateAssistantConversationInput {
+  pageContext: AssistantPageContext;
+}
+
 export interface AskEdwardInput {
+  /** Omitted on the first turn; the platform then opens a conversation. */
+  conversationId?: string;
+  /** Client-generated id so a retried send never duplicates a message. */
+  clientMessageId?: string;
   message: string;
-  pageContext: string;
+  inputMode?: AssistantInputMode;
+  pageContext: string | AssistantPageContext;
   history?: EdwardChatMessage[];
 }
 
@@ -1795,6 +1813,14 @@ export interface EdwardContextReceipt {
     | "payments"
     | "academics"
     | "financials"
+    | "financial_aid"
+    | "housing"
+    | "holds"
+    | "registration"
+    | "deadlines"
+    | "appointments"
+    | "policies"
+    | "account"
     | "messages"
     | "campus_life";
 }
@@ -1826,9 +1852,68 @@ export type EdwardActionWidget =
       href: string;
     };
 
+/* ---------------------------------------------------------------------------
+ * Assistant presentation blocks.
+ *
+ * The portal renders these; `message` stays the plain-text channel for voice
+ * and transcripts. Deliberately not markdown: the assistant never authors
+ * layout, so malformed markup is unrepresentable and a table can never arrive
+ * as a wall of pipe characters.
+ *
+ * Every block carries `fallbackText`, its own plain-text rendering, so a client
+ * that does not recognise a block type still shows something true. That is what
+ * makes this list safe to extend toward cards, badges, and appointment pickers.
+ * ------------------------------------------------------------------------- */
+
+export interface AssistantBlockListItem {
+  text: string;
+  /** A read-only portal route. Never an action or an external link. */
+  href?: string;
+}
+
+export interface AssistantBlockNextStep extends AssistantBlockListItem {
+  owner?: "student" | "university";
+}
+
+export interface AssistantBlockTableColumn {
+  key: string;
+  label: string;
+  align?: "left" | "right";
+}
+
+export type AssistantResponseBlock =
+  | { type: "text"; fallbackText: string; text: string }
+  | {
+      type: "bullet_list";
+      fallbackText: string;
+      title?: string;
+      items: AssistantBlockListItem[];
+    }
+  | {
+      type: "numbered_list";
+      fallbackText: string;
+      title?: string;
+      items: AssistantBlockListItem[];
+    }
+  | {
+      type: "table";
+      fallbackText: string;
+      caption?: string;
+      columns: AssistantBlockTableColumn[];
+      rows: Record<string, string>[];
+    }
+  | {
+      type: "next_steps";
+      fallbackText: string;
+      title?: string;
+      items: AssistantBlockNextStep[];
+    };
+
 export interface AskEdwardResponse {
   message: string;
-  provider: "openrouter" | "guided";
+  /** Structured rendering of `message`. Absent on legacy gateway replies. */
+  blocks?: AssistantResponseBlock[];
+  provider: "openai" | "openrouter" | "guided";
   model: string | null;
   usage: {
     promptTokens: number;
@@ -1841,6 +1926,41 @@ export interface AskEdwardResponse {
   }[];
   contextReceipts: EdwardContextReceipt[];
   widgets: EdwardActionWidget[];
+  /** Present when the platform persisted this exchange to a conversation. */
+  conversationId?: string;
+  userMessageId?: string;
+  assistantMessageId?: string;
+  requestId?: string;
+}
+
+export interface AssistantConversationMessage {
+  id: string;
+  conversationId: string;
+  role: AssistantMessageRole;
+  inputMode: AssistantInputMode;
+  content: string;
+  clientMessageId: string | null;
+  requestId: string | null;
+  provider: AskEdwardResponse["provider"] | null;
+  model: string | null;
+  usage: AskEdwardResponse["usage"];
+  blocks?: AssistantResponseBlock[];
+  contextReceipts: EdwardContextReceipt[];
+  suggestedActions: AskEdwardResponse["suggestedActions"];
+  widgets: EdwardActionWidget[];
+  createdAt: string;
+}
+
+export interface AssistantConversation {
+  id: string;
+  status: AssistantConversationStatus;
+  messages: AssistantConversationMessage[];
+  createdAt: string;
+}
+
+export interface AssistantConversationMessagesResponse {
+  conversationId: string;
+  messages: AssistantConversationMessage[];
 }
 
 export interface CatalogCourse {
