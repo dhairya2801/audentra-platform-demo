@@ -7,7 +7,7 @@ import hashlib
 import logging
 import os
 import re
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +42,8 @@ from audentra.integrations.ai.edward_safety import (
     normalize_response,
 )
 from audentra.integrations.ai.extraction import match_document_to_student_context
+from audentra.integrations.assistant.pipeline import AssistantPipeline
+from audentra.integrations.assistant.tools import AssistantToolHost
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .platform_repository import PostgresPlatformRepository
@@ -70,22 +72,6 @@ SIGNED_TEMPLATES = (
 
 HARVARD_TENANT_ID = "00000000-0000-7000-8000-000000000002"
 
-_EDWARD_DOCUMENT_TOPIC = re.compile(r"document|upload|transcript|fafsa|ferpa|verification", re.I)
-_EDWARD_ONBOARDING_TOPIC = re.compile(
-    r"onboarding|offer|housing|roommate|emergency contact|sign", re.I
-)
-_EDWARD_PAYMENT_TOPIC = re.compile(r"payment|deposit|pay|balance|billing|financial|aid|loan", re.I)
-_EDWARD_MESSAGE_TOPIC = re.compile(r"message|inbox|notification|unread", re.I)
-_EDWARD_ACADEMIC_TOPIC = re.compile(
-    r"academic|class|classroom|course|catalog|major|program|prerequisite|exempt|credit",
-    re.I,
-)
-_EDWARD_FINANCIAL_TOPIC = re.compile(
-    r"financial|aid|fafsa|loan|award|balance|billing|payment plan|sap", re.I
-)
-_EDWARD_CAMPUS_TOPIC = re.compile(
-    r"campus|club|event|activity|activities|organization|community|social life", re.I
-)
 _EDWARD_DEPOSIT_ACTION = re.compile(
     r"(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)", re.I
 )
@@ -136,65 +122,16 @@ def _safe_upload_file_name(value: str) -> str:
     return (cleaned or "call-recording")[:255]
 
 
-def _academic_summary(value: Mapping[str, Any]) -> JsonDict:
-    selected = _mapping(value.get("selectedProgram"))
-    recommendations = _sequence(value.get("exemptionRecommendations"))
-    plan: list[JsonDict] = []
-    for raw in _sequence(value.get("plan"))[:16]:
-        item = _mapping(raw)
-        course = _mapping(item.get("course"))
-        plan.append(
-            {
-                "code": str(course.get("code") or ""),
-                "title": str(course.get("title") or ""),
-                "recommendedTerm": item.get("recommendedTerm"),
-                "status": item.get("status"),
-                "missingPrerequisites": list(_sequence(item.get("missingPrerequisiteCodes"))[:12]),
-            }
-        )
-    return {
-        "selectedProgram": str(selected.get("name") or ""),
-        "degree": str(selected.get("degree") or ""),
-        "catalogVersion": str(value.get("catalogVersion") or ""),
-        "suggestedExemptions": [
-            str(_mapping(item).get("targetCourseCode") or "")
-            for item in recommendations[:16]
-            if _mapping(item).get("targetCourseCode")
-        ],
-        "plan": plan,
-    }
+def _assistant_page_context(value: object) -> tuple[str | None, str | None]:
+    """Accept both the legacy string form and the structured page context."""
 
-
-def _financial_summary(value: Mapping[str, Any]) -> JsonDict:
-    sap = _mapping(value.get("sap"))
-    required_documents = [
-        _mapping(item)
-        for item in _sequence(value.get("requiredDocuments"))
-        if _mapping(item).get("status") == "action_required"
-    ]
-    return {
-        "remainingBalanceCents": _integer(value.get("remainingBalanceCents")),
-        "acceptedAidCents": _integer(value.get("acceptedAidCents")),
-        "actionRequiredDocuments": [
-            str(item.get("code") or "") for item in required_documents[:16] if item.get("code")
-        ],
-        "sapStatus": str(sap.get("status") or ""),
-    }
-
-
-def _campus_life_summary(value: Mapping[str, Any]) -> JsonDict:
-    return {
-        "upcomingEvents": [
-            {key: item.get(key) for key in ("title", "startsAt", "location", "category")}
-            for raw in _sequence(value.get("events"))[:8]
-            if (item := _mapping(raw))
-        ],
-        "clubs": [
-            {key: item.get(key) for key in ("name", "category", "description", "nextActivity")}
-            for raw in _sequence(value.get("clubs"))[:16]
-            if (item := _mapping(raw))
-        ],
-    }
+    if isinstance(value, Mapping):
+        path = str(value.get("path") or "").strip() or None
+        label = str(value.get("label") or "").strip() or None
+        return path, label
+    if isinstance(value, str) and value.strip():
+        return value.strip(), None
+    return None, None
 
 
 def _student_document_context(
@@ -712,6 +649,15 @@ class PostgresPlatformService:
             )
         if operation == "student.ask_edward":
             return await self._ask_edward(auth, payload, call.request_id)
+        if operation == "student.create_assistant_conversation":
+            page = _assistant_page_context(payload.get("pageContext"))
+            return await portal.create_assistant_conversation(
+                auth, page_path=page[0], page_label=page[1]
+            )
+        if operation == "student.get_assistant_conversation_messages":
+            return await portal.get_assistant_conversation_messages(
+                auth, self._path(call, "conversationId", "id")
+            )
         if operation == "student.list_appointments":
             return await portal.get_student_appointments(auth)
         if operation == "student.create_appointment":
@@ -1492,102 +1438,173 @@ class PostgresPlatformService:
         )
         return await self.repository.portal.get_student_document(auth, document_id)
 
+    def _assistant_host(self, auth: AuthContext) -> AssistantToolHost:
+        """Primitive live reads for the assistant pipeline, per request.
+
+        Every primitive is the same repository read the portal page uses, so
+        Edward's answer is exactly as fresh as the page a student would open.
+        """
+
+        portal = self.repository.portal
+        platform = self.repository.platform
+        return AssistantToolHost(
+            {
+                "profile": lambda: portal.get_student_profile(auth),
+                "requirements": lambda: portal.get_student_requirements(auth),
+                "documents": lambda: portal.get_student_documents(auth),
+                "payments": lambda: portal.get_student_payments(auth),
+                "financials": lambda: portal.get_student_financials(auth),
+                "dashboard": lambda: platform.get_student_dashboard(auth),
+                "housing_plan": lambda: portal.get_student_housing_plan(auth),
+                "appointments": lambda: portal.get_student_appointments(auth),
+                "help": lambda: portal.get_student_help(auth),
+            }
+        )
+
     async def _ask_edward(
         self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
     ) -> JsonDict:
         message = str(payload.get("message", ""))
-        page_context = str(payload.get("pageContext", ""))
+        page_path, page_label = _assistant_page_context(payload.get("pageContext"))
+        conversation_id = payload.get("conversationId")
+        client_message_id = payload.get("clientMessageId")
+        persist = conversation_id is not None or client_message_id is not None
+
+        if isinstance(client_message_id, str) and client_message_id:
+            replay = await self.repository.portal.find_assistant_exchange_by_client_id(
+                auth, client_message_id
+            )
+            if replay is not None:
+                return replay
+
         guarded = guarded_response(message)
         if guarded is not None:
-            return guarded
+            response = dict(guarded)
+        else:
+            history = payload.get("history", [])
+            pipeline = AssistantPipeline(
+                self._assistant_host(auth),
+                model_composer=self._assistant_composer(auth, request_id),
+            )
+            result = await pipeline.execute(
+                message=message,
+                history=history if isinstance(history, list) else [],
+                page_path=page_path,
+                page_label=page_label,
+            )
+            response = {
+                "message": result.message,
+                "blocks": result.blocks,
+                "provider": result.provider,
+                "model": result.model,
+                "usage": result.usage,
+                "suggestedActions": result.suggested_actions,
+                "contextReceipts": result.context_receipts,
+                "widgets": [
+                    {"type": "deposit_payment"},
+                    {"type": "document_upload"},
+                    {"type": "appointment"},
+                ],
+            }
+            response = normalize_response(
+                response, await self._edward_action_authority(auth, message)
+            )
+            response["contextReceipts"] = result.context_receipts
 
-        search = f"{message} {page_context}"
-        dashboard, profile = await asyncio.gather(
-            self.repository.platform.get_student_dashboard(auth),
-            self.repository.portal.get_student_profile(auth),
-        )
-        offer = _mapping(dashboard.get("offer"))
-        journey = _mapping(dashboard.get("journey"))
-        offer_id = str(offer.get("id") or "")
-        context: JsonDict = {
-            "dashboard": dashboard,
-            "profile": profile,
-            "offerId": offer_id,
-            "depositAmountCents": _integer(offer.get("depositAmountCents")),
-            "depositPaid": False,
-            "nextAction": journey.get("nextAction"),
-        }
-        sources = ["dashboard", "profile"]
-        loads: list[tuple[str, Awaitable[JsonDict]]] = []
-        if _EDWARD_DOCUMENT_TOPIC.search(search):
-            loads.append(("documents", self.repository.portal.get_student_documents(auth)))
-        if _EDWARD_ONBOARDING_TOPIC.search(search):
-            loads.append(("onboarding", self.repository.portal.get_student_onboarding(auth)))
-        if _EDWARD_PAYMENT_TOPIC.search(search):
-            loads.append(("payments", self.repository.portal.get_student_payments(auth)))
-        if _EDWARD_MESSAGE_TOPIC.search(search):
-            loads.append(("messages", self.repository.portal.get_student_messages(auth)))
-        if _EDWARD_ACADEMIC_TOPIC.search(search):
-            loads.append(("academics", self.repository.portal.get_student_academics(auth)))
-        if _EDWARD_FINANCIAL_TOPIC.search(search):
-            loads.append(("financials", self.repository.portal.get_student_financials(auth)))
-        if _EDWARD_CAMPUS_TOPIC.search(search):
-            loads.append(("campus_life", self.repository.portal.get_campus_life(auth)))
+        if persist:
+            stored = await self.repository.portal.append_assistant_exchange(
+                auth,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                page_path=page_path,
+                page_label=page_label,
+                user_message={
+                    "content": message,
+                    "clientMessageId": client_message_id,
+                    "inputMode": payload.get("inputMode") or "text",
+                },
+                assistant_message={
+                    "content": response.get("message"),
+                    "provider": response.get("provider"),
+                    "model": response.get("model"),
+                    "usage": response.get("usage"),
+                    "blocks": response.get("blocks"),
+                    "contextReceipts": response.get("contextReceipts"),
+                    "suggestedActions": response.get("suggestedActions"),
+                    "widgets": response.get("widgets"),
+                },
+                request_id=request_id,
+            )
+            response.update(stored)
+            response["requestId"] = request_id
+        return response
 
-        loaded = await asyncio.gather(*(call for _, call in loads))
-        for (source, _), value in zip(loads, loaded, strict=True):
-            sources.append(source)
-            if source in {"documents", "onboarding", "payments"}:
-                context[source] = value
-            if source == "payments":
-                context["depositPaid"] = any(
-                    _mapping(item).get("type") == "enrollment_deposit"
-                    and _mapping(item).get("status") == "succeeded"
-                    and str(_mapping(item).get("offerId") or "") == offer_id
-                    for item in _sequence(value.get("items"))
-                )
-            elif source == "messages":
-                context["unreadMessages"] = _integer(value.get("unreadCount"))
-            elif source == "academics":
-                context["academicSummary"] = _academic_summary(value)
-            elif source == "financials":
-                context["financialSummary"] = _financial_summary(value)
-            elif source == "campus_life":
-                context["campusLifeSummary"] = _campus_life_summary(value)
-        context["contextReceipts"] = [{"source": source} for source in sources]
+    async def _edward_action_authority(
+        self, auth: AuthContext, message: str
+    ) -> EdwardActionAuthority:
+        """Server-side authority over action widgets, loaded only when an
+        action intent appears in the message."""
 
-        history = payload.get("history", [])
-        response = await self.ai.ask_edward(
-            message=message,
-            page_context=page_context,
-            history=history if isinstance(history, list) else [],
-            student_context=context,
-            tenant_id=auth.tenant_id,
-            student_id=auth.student_id,
-            request_id=request_id,
-        )
+        wants_deposit = bool(_EDWARD_DEPOSIT_ACTION.search(message))
+        wants_document = bool(_EDWARD_DOCUMENT_ACTION.search(message))
+        wants_appointment = bool(_EDWARD_APPOINTMENT_ACTION.search(message))
+        offer_id = ""
+        deposit_amount = 0
+        deposit_paid = False
+        if wants_deposit:
+            dashboard, payments = await asyncio.gather(
+                self.repository.platform.get_student_dashboard(auth),
+                self.repository.portal.get_student_payments(auth),
+            )
+            offer = _mapping(dashboard.get("offer"))
+            offer_id = str(offer.get("id") or "")
+            deposit_amount = _integer(offer.get("depositAmountCents"))
+            deposit_paid = any(
+                _mapping(item).get("type") == "enrollment_deposit"
+                and _mapping(item).get("status") == "succeeded"
+                and str(_mapping(item).get("offerId") or "") == offer_id
+                for item in _sequence(payments.get("items"))
+            )
         document_upload_category = None
-        if _EDWARD_DOCUMENT_ACTION.search(message):
+        if wants_document:
             document_upload_category = (
                 "transcript" if "transcript" in message.lower() else "financial_aid"
             )
         appointment_type = None
-        if _EDWARD_APPOINTMENT_ACTION.search(message):
+        if wants_appointment:
             appointment_type = (
                 "financial_aid"
                 if _EDWARD_FINANCIAL_APPOINTMENT.search(message)
                 else "enrollment_support"
             )
-        normalized = normalize_response(
-            response,
-            EdwardActionAuthority(
-                offer_id=offer_id,
-                deposit_amount_cents=_integer(offer.get("depositAmountCents")),
-                deposit_paid=bool(context["depositPaid"]),
-                allow_deposit_payment=bool(offer_id and _EDWARD_DEPOSIT_ACTION.search(message)),
-                document_upload_category=document_upload_category,
-                appointment_type=appointment_type,
-            ),
+        return EdwardActionAuthority(
+            offer_id=offer_id,
+            deposit_amount_cents=deposit_amount,
+            deposit_paid=deposit_paid,
+            allow_deposit_payment=bool(offer_id and wants_deposit),
+            document_upload_category=document_upload_category,
+            appointment_type=appointment_type,
         )
-        normalized["contextReceipts"] = [{"source": source} for source in sources]
-        return normalized
+
+    def _assistant_composer(self, auth: AuthContext, request_id: str):
+        writer = getattr(self.ai, "write_grounded_answer", None)
+        if writer is None:
+            return None
+
+        async def compose(
+            *,
+            question: str,
+            evidence_texts: list[str],
+            draft_answer: str,
+            feedback: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return await writer(
+                question=question,
+                evidence_texts=evidence_texts,
+                draft_answer=draft_answer,
+                feedback=feedback,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                request_id=request_id,
+            )
+
+        return compose

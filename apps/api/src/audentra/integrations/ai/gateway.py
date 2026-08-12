@@ -295,6 +295,89 @@ class StudentAIGateway:
             "widgets": widgets(message, student_context),
         }
 
+    async def write_grounded_answer(
+        self,
+        *,
+        question: str,
+        evidence_texts: Sequence[str],
+        draft_answer: str,
+        feedback: str | None = None,
+        tenant_id: str | None = None,
+        student_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Rewrite a deterministic draft as better prose from supplied evidence.
+
+        The caller re-checks the result with the deterministic claim guard, so
+        this returns untrusted prose plus usage — never a final answer. Returns
+        None when no provider key is configured so the pipeline stays fully
+        deterministic in that mode.
+        """
+
+        if not self._settings.openrouter_api_key.strip():
+            return None
+        runtime = await self._runtime(
+            tenant_id,
+            "assistant_composer",
+            system_prompt=(
+                "You are Edward, a university enrollment assistant. Rewrite the "
+                "draft answer as warm, plain prose for the student, using ONLY "
+                "facts present in the evidence list. Never introduce an amount, "
+                "date, cause, contact detail, or document state that is not in "
+                "the evidence. Never claim to have changed anything. No URLs, "
+                "links, or route paths. At most 120 words."
+            ),
+            model=self._settings.openrouter_model,
+            max_output_tokens=380,
+            temperature=0.2,
+        )
+        evidence = "\n".join(f"- {line}" for line in list(evidence_texts)[:60])
+        user_content = (
+            f"Student question:\n{question[:2000]}\n\n"
+            f"Evidence (exhaustive — anything not listed is not known):\n{evidence}\n\n"
+            f"Draft answer to improve:\n{draft_answer[:1200]}"
+        )
+        if feedback:
+            user_content += f"\n\nReviewer feedback on your previous attempt:\n{feedback}"
+        body = {
+            "model": runtime.model,
+            "temperature": runtime.temperature,
+            "max_tokens": runtime.max_output_tokens,
+            "messages": [
+                {"role": "system", "content": runtime.system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+        }
+        payload = await self._completions.complete(
+            body,
+            self._openrouter(),
+            self._completion_context(
+                runtime,
+                tenant_id,
+                student_id,
+                None,
+                request_id,
+                1,
+                45,
+                {"evidenceLines": len(list(evidence_texts))},
+            ),
+        )
+        usage = payload.get("usage")
+        return {
+            "answer": sanitize_prose(message_content(payload)),
+            "provider": "openrouter",
+            "model": payload.get("model") or runtime.model,
+            "usage": (
+                {
+                    "promptTokens": int(usage.get("prompt_tokens", 0)),
+                    "completionTokens": int(usage.get("completion_tokens", 0)),
+                    "totalTokens": int(usage.get("total_tokens", 0)),
+                }
+                if isinstance(usage, Mapping)
+                else None
+            ),
+        }
+
     async def enrich_action_center(
         self,
         *,

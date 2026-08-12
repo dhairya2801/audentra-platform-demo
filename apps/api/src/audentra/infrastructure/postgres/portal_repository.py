@@ -7276,3 +7276,276 @@ class PostgresPortalRepository:
             ),
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
+
+    # ------------------------------------------------------------------
+    # Assistant conversations (Edward)
+    # ------------------------------------------------------------------
+
+    async def create_assistant_conversation(
+        self,
+        auth: AuthContext,
+        *,
+        page_path: str | None = None,
+        page_label: str | None = None,
+    ) -> JsonDict:
+        self._require_student(auth)
+        conversation_id = str(uuid4())
+        async with self.engine.begin() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO assistant_conversation (
+                              id, tenant_id, student_id, status, page_path, page_label
+                            )
+                            SELECT :id, student.tenant_id, student.id, 'active',
+                                   :page_path, :page_label
+                            FROM student
+                            WHERE student.tenant_id=:tenant_id AND student.id=:student_id
+                            RETURNING id, status, created_at
+                            """
+                        ),
+                        {
+                            "id": conversation_id,
+                            "tenant_id": auth.tenant_id,
+                            "student_id": auth.student_id,
+                            "page_path": (page_path or "")[:240] or None,
+                            "page_label": (page_label or "")[:240] or None,
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            raise NotFoundError("STUDENT_NOT_FOUND", "The student record was not found")
+        return {
+            "id": str(row["id"]),
+            "status": str(row["status"]),
+            "messages": [],
+            "createdAt": _iso(row["created_at"]),
+        }
+
+    async def get_assistant_conversation_messages(
+        self, auth: AuthContext, conversation_id: str
+    ) -> JsonDict:
+        self._require_student(auth)
+        conversation = await self._one(
+            """
+            SELECT id FROM assistant_conversation
+            WHERE tenant_id=:tenant_id AND student_id=:student_id AND id=:conversation_id
+            """,
+            {
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "conversation_id": conversation_id,
+            },
+        )
+        if conversation is None:
+            raise NotFoundError(
+                "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+            )
+        rows = await self._all(
+            """
+            SELECT id, conversation_id, role, input_mode, content, client_message_id,
+                   request_id, provider, model, usage, blocks, context_receipts,
+                   suggested_actions, widgets, created_at
+            FROM assistant_message
+            WHERE tenant_id=:tenant_id AND conversation_id=:conversation_id
+            ORDER BY created_at, CASE role WHEN 'user' THEN 0 ELSE 1 END, id
+            """,
+            {"tenant_id": auth.tenant_id, "conversation_id": conversation_id},
+        )
+        return {
+            "conversationId": conversation_id,
+            "messages": [_map_assistant_message(row) for row in rows],
+        }
+
+    async def find_assistant_exchange_by_client_id(
+        self, auth: AuthContext, client_message_id: str
+    ) -> JsonDict | None:
+        """Replay support: the stored assistant turn for a retried user send."""
+
+        self._require_student(auth)
+        user_row = await self._one(
+            """
+            SELECT id, conversation_id, created_at FROM assistant_message
+            WHERE tenant_id=:tenant_id AND student_id=:student_id
+              AND client_message_id=:client_message_id AND role='user'
+            """,
+            {
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "client_message_id": client_message_id,
+            },
+        )
+        if user_row is None:
+            return None
+        assistant_row = await self._one(
+            """
+            SELECT id, conversation_id, role, input_mode, content, client_message_id,
+                   request_id, provider, model, usage, blocks, context_receipts,
+                   suggested_actions, widgets, created_at
+            FROM assistant_message
+            WHERE tenant_id=:tenant_id AND conversation_id=:conversation_id
+              AND role='assistant' AND created_at >= :created_at
+            ORDER BY created_at, id
+            LIMIT 1
+            """,
+            {
+                "tenant_id": auth.tenant_id,
+                "conversation_id": str(user_row["conversation_id"]),
+                "created_at": user_row["created_at"],
+            },
+        )
+        if assistant_row is None:
+            return None
+        assistant = _map_assistant_message(assistant_row)
+        return {
+            "conversationId": str(user_row["conversation_id"]),
+            "userMessageId": str(user_row["id"]),
+            "assistantMessageId": assistant["id"],
+            "requestId": assistant.get("requestId"),
+            "message": assistant["content"],
+            "blocks": assistant.get("blocks"),
+            "provider": assistant.get("provider") or "guided",
+            "model": assistant.get("model"),
+            "usage": assistant.get("usage"),
+            "suggestedActions": assistant.get("suggestedActions", []),
+            "contextReceipts": assistant.get("contextReceipts", []),
+            "widgets": assistant.get("widgets", []),
+        }
+
+    async def append_assistant_exchange(
+        self,
+        auth: AuthContext,
+        *,
+        conversation_id: str | None,
+        page_path: str | None,
+        page_label: str | None,
+        user_message: Mapping[str, Any],
+        assistant_message: Mapping[str, Any],
+        request_id: str,
+    ) -> JsonDict:
+        """Persist one user/assistant exchange, opening a conversation if needed."""
+
+        self._require_student(auth)
+        if conversation_id is None:
+            conversation = await self.create_assistant_conversation(
+                auth, page_path=page_path, page_label=page_label
+            )
+            conversation_id = str(conversation["id"])
+        else:
+            existing = await self._one(
+                """
+                SELECT id FROM assistant_conversation
+                WHERE tenant_id=:tenant_id AND student_id=:student_id AND id=:conversation_id
+                """,
+                {
+                    "tenant_id": auth.tenant_id,
+                    "student_id": auth.student_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+            if existing is None:
+                raise NotFoundError(
+                    "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+                )
+        user_id = str(uuid4())
+        assistant_id = str(uuid4())
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO assistant_message (
+                      id, tenant_id, conversation_id, student_id, role, input_mode,
+                      content, client_message_id, request_id
+                    ) VALUES (
+                      :id, :tenant_id, :conversation_id, :student_id, 'user', :input_mode,
+                      :content, :client_message_id, :request_id
+                    )
+                    """
+                ),
+                {
+                    "id": user_id,
+                    "tenant_id": auth.tenant_id,
+                    "conversation_id": conversation_id,
+                    "student_id": auth.student_id,
+                    "input_mode": str(user_message.get("inputMode") or "text"),
+                    "content": str(user_message.get("content") or "")[:8000],
+                    "client_message_id": user_message.get("clientMessageId"),
+                    "request_id": request_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO assistant_message (
+                      id, tenant_id, conversation_id, student_id, role, input_mode,
+                      content, request_id, provider, model, usage, blocks,
+                      context_receipts, suggested_actions, widgets
+                    ) VALUES (
+                      :id, :tenant_id, :conversation_id, :student_id, 'assistant', 'text',
+                      :content, :request_id, :provider, :model, CAST(:usage AS jsonb),
+                      CAST(:blocks AS jsonb), CAST(:context_receipts AS jsonb),
+                      CAST(:suggested_actions AS jsonb), CAST(:widgets AS jsonb)
+                    )
+                    """
+                ),
+                {
+                    "id": assistant_id,
+                    "tenant_id": auth.tenant_id,
+                    "conversation_id": conversation_id,
+                    "student_id": auth.student_id,
+                    "content": str(assistant_message.get("content") or "")[:8000],
+                    "request_id": request_id,
+                    "provider": assistant_message.get("provider"),
+                    "model": assistant_message.get("model"),
+                    "usage": _json(assistant_message.get("usage"))
+                    if assistant_message.get("usage") is not None
+                    else None,
+                    "blocks": _json(assistant_message.get("blocks"))
+                    if assistant_message.get("blocks") is not None
+                    else None,
+                    "context_receipts": _json(assistant_message.get("contextReceipts") or []),
+                    "suggested_actions": _json(assistant_message.get("suggestedActions") or []),
+                    "widgets": _json(assistant_message.get("widgets") or []),
+                },
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE assistant_conversation SET last_message_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:conversation_id
+                    """
+                ),
+                {"tenant_id": auth.tenant_id, "conversation_id": conversation_id},
+            )
+        return {
+            "conversationId": conversation_id,
+            "userMessageId": user_id,
+            "assistantMessageId": assistant_id,
+        }
+
+
+def _map_assistant_message(row: Mapping[str, Any]) -> JsonDict:
+    item: JsonDict = {
+        "id": str(row["id"]),
+        "conversationId": str(row["conversation_id"]),
+        "role": str(row["role"]),
+        "inputMode": str(row["input_mode"]),
+        "content": str(row["content"]),
+        "clientMessageId": row.get("client_message_id"),
+        "requestId": row.get("request_id"),
+        "provider": row.get("provider"),
+        "model": row.get("model"),
+        "usage": _mapping(row["usage"]) if row.get("usage") is not None else None,
+        "contextReceipts": _list(row.get("context_receipts") or []),
+        "suggestedActions": _list(row.get("suggested_actions") or []),
+        "widgets": _list(row.get("widgets") or []),
+        "createdAt": _iso(row["created_at"]),
+    }
+    if row.get("blocks") is not None:
+        item["blocks"] = _list(row["blocks"])
+    return item

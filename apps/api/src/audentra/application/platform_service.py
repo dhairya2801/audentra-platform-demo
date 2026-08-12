@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -21,6 +21,9 @@ from audentra.domain.documents import (
 )
 from audentra.infrastructure.memory.adapters import FakeDocumentStorage, FakeStudentAI
 from audentra.infrastructure.memory.store import InMemoryPlatformStore
+from audentra.integrations.ai.edward_safety import guarded_response, normalize_response
+from audentra.integrations.assistant.pipeline import AssistantPipeline
+from audentra.integrations.assistant.tools import AssistantToolHost
 
 ACTIVITY_PROPERTY_ALLOWLISTS: dict[str, frozenset[str]] = {
     "ui.portal_session_started.v1": frozenset({"entry_point"}),
@@ -190,7 +193,15 @@ class InMemoryPlatformService:
                 auth, self._path(call, "id", "document_id", "documentId")
             )
         if operation == "student.ask_edward":
-            return await self._ask_edward(auth, payload)
+            return await self._ask_edward(auth, payload, call.request_id)
+        if operation == "student.create_assistant_conversation":
+            self.store.authorize(auth)
+            return self.store.create_assistant_conversation(auth, payload.get("pageContext"))
+        if operation == "student.get_assistant_conversation_messages":
+            self.store.authorize(auth)
+            return self.store.get_assistant_conversation_messages(
+                auth, self._path(call, "conversationId", "id")
+            )
         if operation == "student.list_appointments":
             return self.store.get_appointments(auth)
         if operation == "student.create_appointment":
@@ -476,48 +487,88 @@ class InMemoryPlatformService:
         self.store.claim_document_processing(auth, document_id)
         return self.store.get_document(auth, document_id)
 
-    async def _ask_edward(self, auth: AuthContext, payload: Mapping[str, Any]) -> dict[str, Any]:
+    async def _ask_edward(
+        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+    ) -> dict[str, Any]:
         self.store.authorize(auth)
         message = str(payload.get("message", ""))
-        page_context = str(payload.get("pageContext", ""))
-        context = f"{message} {page_context}".lower()
-        wants_documents = any(
-            term in context
-            for term in ("document", "upload", "transcript", "fafsa", "ferpa", "verification")
+        conversation_id = payload.get("conversationId")
+        client_message_id = payload.get("clientMessageId")
+        persist = conversation_id is not None or client_message_id is not None
+        if isinstance(client_message_id, str) and client_message_id:
+            replay = self.store.find_assistant_exchange_by_client_id(auth, client_message_id)
+            if replay is not None:
+                return replay
+
+        guarded = guarded_response(message)
+        if guarded is not None:
+            return dict(guarded)
+
+        page_context = payload.get("pageContext")
+        page_path = None
+        page_label = None
+        if isinstance(page_context, Mapping):
+            page_path = str(page_context.get("path") or "") or None
+            page_label = str(page_context.get("label") or "") or None
+        elif isinstance(page_context, str) and page_context.strip():
+            page_path = page_context.strip()
+
+        def sync_read(reader: Callable[[AuthContext], dict[str, Any]]) -> Any:
+            async def read() -> dict[str, Any]:
+                return reader(auth)
+
+            return read
+
+        host = AssistantToolHost(
+            {
+                "profile": sync_read(self.store.get_profile),
+                "requirements": sync_read(self.store.get_requirements),
+                "documents": sync_read(self.store.get_documents),
+                "payments": sync_read(self.store.get_payments),
+                "financials": sync_read(self.store.get_financials),
+                "dashboard": sync_read(self.store.get_dashboard),
+                "housing_plan": sync_read(self.store.get_housing_plan),
+                "appointments": sync_read(self.store.get_appointments),
+                "help": sync_read(self.store.get_help),
+            }
         )
-        wants_onboarding = any(
-            term in context
-            for term in ("onboarding", "offer", "housing", "roommate", "emergency contact", "sign")
+        history = payload.get("history", [])
+        pipeline = AssistantPipeline(host)
+        result = await pipeline.execute(
+            message=message,
+            history=history if isinstance(history, list) else [],
+            page_path=page_path,
+            page_label=page_label,
         )
-        wants_payments = any(
-            term in context
-            for term in (
-                "payment",
-                "deposit",
-                "pay",
-                "balance",
-                "billing",
-                "financial",
-                "aid",
-                "loan",
+        response: dict[str, Any] = normalize_response(
+            {
+                "message": result.message,
+                "blocks": result.blocks,
+                "provider": result.provider,
+                "model": result.model,
+                "usage": result.usage,
+                "suggestedActions": result.suggested_actions,
+                "contextReceipts": result.context_receipts,
+                "widgets": [],
+            }
+        )
+        response["contextReceipts"] = result.context_receipts
+        if persist:
+            stored = self.store.append_assistant_exchange(
+                auth,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                page_path=page_path,
+                page_label=page_label,
+                user_message={
+                    "content": message,
+                    "clientMessageId": client_message_id,
+                    "inputMode": payload.get("inputMode") or "text",
+                },
+                assistant_message=response,
+                request_id=request_id,
             )
-        )
-        response = await self.ai.ask_edward(
-            question=deepcopy(dict(payload)),
-            dashboard=self.store.get_dashboard(auth),
-            profile=self.store.get_profile(auth),
-        )
-        sources = ["dashboard", "profile"]
-        if wants_documents:
-            self.store.get_documents(auth)
-            sources.append("documents")
-        if wants_onboarding:
-            self.store.get_onboarding(auth)
-            sources.append("onboarding")
-        if wants_payments:
-            self.store.get_payments(auth)
-            sources.append("payments")
-        response["contextReceipts"] = [{"source": source} for source in sources]
+            response.update(stored)
+            response["requestId"] = request_id
         return response
 
     async def _ensure_signed_documents(

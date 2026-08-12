@@ -205,3 +205,19 @@ def test_postgres_migration_session_can_take_and_release_lock() -> None:
             await engine.dispose()
 
     asyncio.run(exercise())
+
+
+def test_assistant_conversation_migration_scopes_and_replay_protects_messages() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0033_assistant_conversations.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "tenant_id uuid NOT NULL REFERENCES tenant(id)" in migration
+    assert "student_id uuid NOT NULL REFERENCES student(id) ON DELETE CASCADE" in migration
+    assert "role IN ('user', 'assistant')" in migration
+    assert "input_mode IN ('text', 'voice')" in migration
+    assert "char_length(content) BETWEEN 1 AND 8000" in migration
+    assert "assistant_message_client_uidx" in migration
+    assert "WHERE client_message_id IS NOT NULL AND role = 'user'" in migration
+    assert "assistant_message_history_idx" in migration
+    assert "jsonb_typeof(context_receipts) = 'array'" in migration

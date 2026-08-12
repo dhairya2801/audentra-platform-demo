@@ -148,6 +148,8 @@ class InMemoryPlatformStore:
         ]
         self.payments: list[dict[str, Any]] = []
         self.help_requests: list[dict[str, Any]] = []
+        self.assistant_conversations: dict[str, dict[str, Any]] = {}
+        self.assistant_messages: list[dict[str, Any]] = []
         self.profile: dict[str, Any] = {
             "studentId": DEMO_IDS["student_id"],
             "preferredName": "Alex",
@@ -1412,4 +1414,158 @@ class InMemoryPlatformStore:
             "document": _clone(document),
             "workItem": _clone(item),
             "notification": _clone(notification),
+        }
+
+    # ------------------------------------------------------------------
+    # Assistant conversations (Edward)
+    # ------------------------------------------------------------------
+
+    def create_assistant_conversation(
+        self, auth: AuthContext, page_context: Any = None
+    ) -> dict[str, Any]:
+        self.authorize(auth)
+        page_path = None
+        page_label = None
+        if isinstance(page_context, dict):
+            page_path = str(page_context.get("path") or "") or None
+            page_label = str(page_context.get("label") or "") or None
+        conversation = {
+            "id": str(uuid4()),
+            "status": "active",
+            "pagePath": page_path,
+            "pageLabel": page_label,
+            "createdAt": _now(),
+        }
+        self.assistant_conversations[conversation["id"]] = conversation
+        return {
+            "id": conversation["id"],
+            "status": "active",
+            "messages": [],
+            "createdAt": conversation["createdAt"],
+        }
+
+    def get_assistant_conversation_messages(
+        self, auth: AuthContext, conversation_id: str
+    ) -> dict[str, Any]:
+        self.authorize(auth)
+        if conversation_id not in self.assistant_conversations:
+            raise NotFoundError(
+                "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+            )
+        return {
+            "conversationId": conversation_id,
+            "messages": _clone(
+                [
+                    item
+                    for item in self.assistant_messages
+                    if item["conversationId"] == conversation_id
+                ]
+            ),
+        }
+
+    def find_assistant_exchange_by_client_id(
+        self, auth: AuthContext, client_message_id: str
+    ) -> dict[str, Any] | None:
+        self.authorize(auth)
+        user_index = next(
+            (
+                index
+                for index, item in enumerate(self.assistant_messages)
+                if item["role"] == "user" and item.get("clientMessageId") == client_message_id
+            ),
+            None,
+        )
+        if user_index is None:
+            return None
+        user_message = self.assistant_messages[user_index]
+        assistant_message = next(
+            (
+                item
+                for item in self.assistant_messages[user_index + 1 :]
+                if item["role"] == "assistant"
+                and item["conversationId"] == user_message["conversationId"]
+            ),
+            None,
+        )
+        if assistant_message is None:
+            return None
+        return {
+            "conversationId": user_message["conversationId"],
+            "userMessageId": user_message["id"],
+            "assistantMessageId": assistant_message["id"],
+            "requestId": assistant_message.get("requestId"),
+            "message": assistant_message["content"],
+            "blocks": _clone(assistant_message.get("blocks")),
+            "provider": assistant_message.get("provider") or "guided",
+            "model": assistant_message.get("model"),
+            "usage": _clone(assistant_message.get("usage")),
+            "suggestedActions": _clone(assistant_message.get("suggestedActions") or []),
+            "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
+            "widgets": _clone(assistant_message.get("widgets") or []),
+        }
+
+    def append_assistant_exchange(
+        self,
+        auth: AuthContext,
+        *,
+        conversation_id: str | None,
+        page_path: str | None,
+        page_label: str | None,
+        user_message: dict[str, Any],
+        assistant_message: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        self.authorize(auth)
+        if conversation_id is None:
+            created = self.create_assistant_conversation(
+                auth, {"path": page_path, "label": page_label}
+            )
+            conversation_id = str(created["id"])
+        elif conversation_id not in self.assistant_conversations:
+            raise NotFoundError(
+                "ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+            )
+        user_id = str(uuid4())
+        assistant_id = str(uuid4())
+        self.assistant_messages.append(
+            {
+                "id": user_id,
+                "conversationId": conversation_id,
+                "role": "user",
+                "inputMode": str(user_message.get("inputMode") or "text"),
+                "content": str(user_message.get("content") or "")[:8000],
+                "clientMessageId": user_message.get("clientMessageId"),
+                "requestId": request_id,
+                "provider": None,
+                "model": None,
+                "usage": None,
+                "contextReceipts": [],
+                "suggestedActions": [],
+                "widgets": [],
+                "createdAt": _now(),
+            }
+        )
+        self.assistant_messages.append(
+            {
+                "id": assistant_id,
+                "conversationId": conversation_id,
+                "role": "assistant",
+                "inputMode": "text",
+                "content": str(assistant_message.get("message") or "")[:8000],
+                "clientMessageId": None,
+                "requestId": request_id,
+                "provider": assistant_message.get("provider"),
+                "model": assistant_message.get("model"),
+                "usage": _clone(assistant_message.get("usage")),
+                "blocks": _clone(assistant_message.get("blocks")),
+                "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
+                "suggestedActions": _clone(assistant_message.get("suggestedActions") or []),
+                "widgets": _clone(assistant_message.get("widgets") or []),
+                "createdAt": _now(),
+            }
+        )
+        return {
+            "conversationId": conversation_id,
+            "userMessageId": user_id,
+            "assistantMessageId": assistant_id,
         }

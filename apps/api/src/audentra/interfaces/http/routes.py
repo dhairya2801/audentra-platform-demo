@@ -19,6 +19,7 @@ from audentra.contracts.requests import (
     CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
     ConfirmStudentDocumentExtractionRequest,
+    CreateAssistantConversationRequest,
     CreateDepositPaymentRequest,
     CreateStaffActionRuleRequest,
     CreateStaffClubRequest,
@@ -1070,6 +1071,42 @@ async def ask_edward(
         operation="student.ask_edward",
         auth=auth,
         payload=body.public_payload(),
+    )
+
+
+@router.post("/v1/student/assistant/conversations", status_code=201, response_model=None)
+async def create_assistant_conversation(
+    body: CreateAssistantConversationRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.create_assistant_conversation",
+        auth=auth,
+        payload=body.public_payload(),
+    )
+
+
+@router.get(
+    "/v1/student/assistant/conversations/{id}/messages",
+    status_code=200,
+    response_model=None,
+)
+async def get_assistant_conversation_messages(
+    conversation_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.get_assistant_conversation_messages",
+        auth=auth,
+        path_params={"conversationId": _uuid(conversation_id)},
     )
 
 

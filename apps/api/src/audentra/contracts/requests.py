@@ -409,10 +409,30 @@ class EdwardChatMessageRequest(StrictRequest):
     content: Annotated[StrictStr, StringConstraints(min_length=1, max_length=1_200)]
 
 
+class AssistantPageContextRequest(StrictRequest):
+    path: Annotated[StrictStr, StringConstraints(max_length=240)]
+    label: Annotated[StrictStr, StringConstraints(max_length=240)]
+
+
 class AskEdwardRequest(StrictRequest):
     message: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2_000)]
-    page_context: Annotated[StrictStr, StringConstraints(max_length=120)]
+    page_context: (
+        Annotated[StrictStr, StringConstraints(max_length=240)] | AssistantPageContextRequest
+    )
     history: list[EdwardChatMessageRequest] | None = Field(default=None, max_length=8)
+    conversation_id: UUID | None = None
+    client_message_id: (
+        Annotated[
+            StrictStr,
+            StringConstraints(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+        ]
+        | None
+    ) = None
+    input_mode: Literal["text", "voice"] | None = None
+
+
+class CreateAssistantConversationRequest(StrictRequest):
+    page_context: AssistantPageContextRequest
 
 
 class CreateStudentAppointmentRequest(StrictRequest):

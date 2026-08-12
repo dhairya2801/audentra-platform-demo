@@ -397,9 +397,10 @@ def test_messages_requirements_profile_appointments_help_and_edward() -> None:
             )
         )
     )
-    assert edward["usage"]["totalTokens"] == 58
-    assert edward["contextReceipts"] == [
-        {"source": "dashboard"},
-        {"source": "profile"},
-        {"source": "documents"},
-    ]
+    # The assistant pipeline answers deterministically (no provider tokens)
+    # from the checklist and document reads of this turn.
+    assert edward["provider"] == "guided"
+    assert edward["usage"] is None
+    sources = {receipt["source"] for receipt in edward["contextReceipts"]}
+    assert {"onboarding", "documents"} <= sources
+    assert edward["blocks"], "the assistant response carries presentation blocks"

@@ -1047,21 +1047,17 @@ def test_internal_reservation_recovery_requires_stored_original_before_claim() -
     assert any(call.name == "claim_student_document_processing" for call in rig.portal.calls)
 
 
-def test_edward_context_is_tenant_bounded_and_loaded_only_for_relevant_topics() -> None:
+def test_edward_plans_multi_domain_reads_and_stays_tenant_bounded() -> None:
     rig = _rig()
-    rig.platform.responses["get_student_dashboard"] = {"journey": "active"}
+    rig.platform.responses["get_student_dashboard"] = {
+        "offer": {"id": "offer-1", "depositAmountCents": 50_000},
+        "journey": {},
+    }
     rig.portal.responses.update(
         {
             "get_student_profile": {"preferredName": "Alex"},
-            "get_student_documents": {"items": []},
-            "get_student_onboarding": {"status": "in_progress"},
-            "get_student_payments": {"items": []},
-            "get_student_financials": {
-                "remainingBalanceCents": 0,
-                "acceptedAidCents": 0,
-                "requiredDocuments": [],
-                "sap": {"status": "good_standing"},
-            },
+            "get_student_requirements": {"items": []},
+            "get_student_housing_plan": {"preference": None, "residences": []},
         }
     )
 
@@ -1072,8 +1068,8 @@ def test_edward_context_is_tenant_bounded_and_loaded_only_for_relevant_topics() 
                 _call(
                     "student.ask_edward",
                     payload={
-                        "message": "Can I pay after my transcript upload and housing sign step?",
-                        "pageContext": "billing",
+                        "message": "I paid my deposit. Why can't I apply for housing?",
+                        "pageContext": "/dashboard",
                         "history": "untrusted-non-list",
                     },
                 )
@@ -1081,31 +1077,16 @@ def test_edward_context_is_tenant_bounded_and_loaded_only_for_relevant_topics() 
         ),
     )
 
-    assert response["contextReceipts"] == [
-        {"source": "dashboard"},
-        {"source": "profile"},
-        {"source": "documents"},
-        {"source": "onboarding"},
-        {"source": "payments"},
-        {"source": "financials"},
-    ]
-    ai_call = next(call for call in rig.ai.calls if call.name == "ask_edward")
-    assert ai_call.kwargs["tenant_id"] == AUTH.tenant_id
-    assert ai_call.kwargs["student_id"] == AUTH.student_id
-    assert ai_call.kwargs["history"] == []
-    assert set(cast(Mapping[str, object], ai_call.kwargs["student_context"])) == {
-        "dashboard",
-        "profile",
-        "offerId",
-        "depositAmountCents",
-        "depositPaid",
-        "nextAction",
-        "documents",
-        "onboarding",
-        "payments",
-        "financialSummary",
-        "contextReceipts",
-    }
+    # A cross-domain question reads both the housing plan and the blocker
+    # state, and every repository read carries the authenticated tenant scope.
+    sources = {receipt["source"] for receipt in response["contextReceipts"]}
+    assert {"housing", "holds"} <= sources
+    assert response["blocks"]
+    for call in [*rig.portal.calls, *rig.platform.calls]:
+        assert call.args[0] is AUTH
+    # The provider chat gateway is never consulted; the pipeline composed the
+    # answer deterministically from the reads above.
+    assert not [call for call in rig.ai.calls if call.name == "ask_edward"]
 
 
 def test_edward_guard_rejects_capability_escalation_before_loading_student_data() -> None:
@@ -1135,7 +1116,7 @@ def test_edward_guard_rejects_capability_escalation_before_loading_student_data(
     assert rig.ai.calls == []
 
 
-def test_edward_loads_bounded_academic_context_and_records_its_receipt() -> None:
+def test_edward_answers_academic_questions_without_unsupported_reads() -> None:
     rig = _rig()
     rig.platform.responses["get_student_dashboard"] = {
         "offer": {"id": "offer-1", "depositAmountCents": 50_000},
@@ -1144,25 +1125,7 @@ def test_edward_loads_bounded_academic_context_and_records_its_receipt() -> None
     rig.portal.responses.update(
         {
             "get_student_profile": {"preferredName": "Alex"},
-            "get_student_academics": {
-                "selectedProgram": {"name": "Computer Science", "degree": "BS"},
-                "catalogVersion": "2027",
-                "exemptionRecommendations": [
-                    {"targetCourseCode": "CS-101", "sensitiveEvidence": "omit"}
-                ],
-                "plan": [
-                    {
-                        "course": {
-                            "code": "CS-201",
-                            "title": "Data Structures",
-                            "description": "not sent to the provider",
-                        },
-                        "recommendedTerm": 1,
-                        "status": "eligible",
-                        "missingPrerequisiteCodes": [],
-                    }
-                ],
-            },
+            "get_student_requirements": {"items": []},
         }
     )
 
@@ -1182,32 +1145,16 @@ def test_edward_loads_bounded_academic_context_and_records_its_receipt() -> None
         ),
     )
 
-    assert response["contextReceipts"] == [
-        {"source": "dashboard"},
-        {"source": "profile"},
-        {"source": "academics"},
-    ]
-    ai_call = next(call for call in rig.ai.calls if call.name == "ask_edward")
-    context = cast(Mapping[str, Any], ai_call.kwargs["student_context"])
-    assert context["academicSummary"] == {
-        "selectedProgram": "Computer Science",
-        "degree": "BS",
-        "catalogVersion": "2027",
-        "suggestedExemptions": ["CS-101"],
-        "plan": [
-            {
-                "code": "CS-201",
-                "title": "Data Structures",
-                "recommendedTerm": 1,
-                "status": "eligible",
-                "missingPrerequisites": [],
-            }
-        ],
-    }
-    assert "academics" not in context
+    # Academic planning has no approved assistant read yet; the pipeline
+    # answers from safe general guidance instead of inventing a plan, and no
+    # academics projection is sent anywhere.
+    assert response["provider"] == "guided"
+    assert not any(call.name == "get_student_academics" for call in rig.portal.calls)
+    assert "academics" not in {r["source"] for r in response["contextReceipts"]}
+    assert response["message"]
 
 
-def test_edward_rebuilds_hostile_provider_actions_from_authoritative_payment_state() -> None:
+def test_edward_builds_action_widgets_only_from_authoritative_payment_state() -> None:
     rig = _rig()
     rig.platform.responses["get_student_dashboard"] = {
         "offer": {"id": "offer-authoritative", "depositAmountCents": 50_000},
@@ -1217,18 +1164,15 @@ def test_edward_rebuilds_hostile_provider_actions_from_authoritative_payment_sta
         {
             "get_student_profile": {"preferredName": "Alex"},
             "get_student_payments": {"items": [], "total": 0},
+            "get_student_requirements": {"items": []},
         }
     )
+    # Even a hostile provider response cannot reach the student: the pipeline
+    # composes deterministically and widgets are rebuilt from the record.
     rig.ai.edward_response = {
-        "message": (
-            "<script>window.pwned=true</script> "
-            "[leave](javascript:window.pwned=true) https://evil.example"
-        ),
+        "message": "<script>window.pwned=true</script> https://evil.example",
         "provider": "openrouter",
-        "suggestedActions": [
-            {"label": "Leave", "href": "https://evil.example"},
-            {"label": "Execute", "href": "javascript:window.pwned=true"},
-        ],
+        "suggestedActions": [{"label": "Leave", "href": "https://evil.example"}],
         "contextReceipts": [{"source": "attacker"}],
         "widgets": [
             {
@@ -1247,7 +1191,7 @@ def test_edward_rebuilds_hostile_provider_actions_from_authoritative_payment_sta
                 _call(
                     "student.ask_edward",
                     payload={
-                        "message": "I want to pay my deposit [E2E_MALICIOUS_PROVIDER]",
+                        "message": "I want to pay my deposit",
                         "pageContext": "/edward",
                         "history": [],
                     },
@@ -1258,12 +1202,7 @@ def test_edward_rebuilds_hostile_provider_actions_from_authoritative_payment_sta
 
     assert "script" not in response["message"]
     assert "evil.example" not in response["message"]
-    assert response["suggestedActions"] == []
-    assert response["contextReceipts"] == [
-        {"source": "dashboard"},
-        {"source": "profile"},
-        {"source": "payments"},
-    ]
+    assert "attacker" not in {r["source"] for r in response["contextReceipts"]}
     assert response["widgets"] == [
         {
             "type": "deposit_payment",
