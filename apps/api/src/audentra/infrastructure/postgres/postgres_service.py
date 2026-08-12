@@ -42,7 +42,9 @@ from audentra.integrations.ai.edward_safety import (
     normalize_response,
 )
 from audentra.integrations.ai.extraction import match_document_to_student_context
+from audentra.integrations.assistant.classify import REQUEST_TYPES
 from audentra.integrations.assistant.pipeline import AssistantPipeline
+from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
 from audentra.integrations.assistant.tools import AssistantToolHost
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
@@ -1488,6 +1490,7 @@ class PostgresPlatformService:
             pipeline = AssistantPipeline(
                 self._assistant_host(auth),
                 model_composer=self._assistant_composer(auth, request_id),
+                model_planner=self._assistant_planner(auth, request_id),
             )
             result = await pipeline.execute(
                 message=message,
@@ -1587,6 +1590,30 @@ class PostgresPlatformService:
             document_upload_category=document_upload_category,
             appointment_type=appointment_type,
         )
+
+    def _assistant_planner(self, auth: AuthContext, request_id: str):
+        planner = getattr(self.ai, "plan_assistant_tool_reads", None)
+        if planner is None:
+            return None
+
+        async def plan(
+            *,
+            message: str,
+            page_label: str | None = None,
+            page_path: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return await planner(
+                message=message,
+                page_label=page_label,
+                page_path=page_path,
+                allowed_request_types=REQUEST_TYPES,
+                available_tools=TOOL_DESCRIPTIONS,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                request_id=request_id,
+            )
+
+        return plan
 
     def _assistant_composer(self, auth: AuthContext, request_id: str):
         writer = getattr(self.ai, "write_grounded_answer", None)

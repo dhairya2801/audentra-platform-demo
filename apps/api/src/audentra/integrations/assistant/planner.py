@@ -34,6 +34,52 @@ TOOL_NAMES = (
     "getStudentMessages",
 )
 
+# The catalog a model planner sees. Descriptions are ported from
+# student-assistant-core's studentAssistantToolCatalog, trimmed to the tools
+# this platform hosts; the three portal-specific reads carry their own text.
+TOOL_DESCRIPTIONS: Mapping[str, str] = {
+    "getStudentProfile": "Read the authenticated student's basic profile.",
+    "getOnboardingChecklist": "Read onboarding requirements and completion states.",
+    "getDocumentStatuses": "Read document submission and review statuses.",
+    "getEnrollmentHolds": "Read official enrollment holds and derived blockers.",
+    "getStudentDeadlines": "Read enrollment, requirement, and appointment deadlines.",
+    "getSupportOptions": "Read approved general support contacts and articles.",
+    "getFinancialAidStatus": (
+        "Read bounded financial-aid requirements, verification, and award acceptance statuses."
+    ),
+    "getFinancialAidSummary": (
+        "Read how much aid the student has: FAFSA state, whether the package is "
+        "estimated or finalized, every award with its offered and accepted "
+        "amount, what the aid covers against the cost of attendance, and each "
+        "condition still holding the package open."
+    ),
+    "getAidDisbursements": (
+        "Read when aid money actually moves: what has paid out, what is "
+        "scheduled and when, and the exhaustive list of reasons a disbursement "
+        "is being held."
+    ),
+    "getStudentHousingStatus": "Read the housing plan and housing requirement state.",
+    "getHousingOptions": "Read tenant-listed housing preference options.",
+    "getRegistrationStatus": (
+        "Read course-registration eligibility for the current term: each gate "
+        "blocking registration and what clears it."
+    ),
+    "getStudentAccountSummary": (
+        "Read the student account: balance, charges, posted and pending "
+        "payments, and whether the balance blocks registration."
+    ),
+    "getStudentAppointments": (
+        "Read scheduled advising, orientation, financial-aid, and housing "
+        "appointments, plus where the student can book one."
+    ),
+    "getAcademicPlan": (
+        "Read the student's academic program and planned courses, including "
+        "missing prerequisites and suggested exemptions."
+    ),
+    "getCampusLife": "Read upcoming campus events and student clubs.",
+    "getStudentMessages": "Read the unread-message count and latest message subjects.",
+}
+
 RECEIPT_SOURCES: Mapping[str, str] = {
     "getStudentProfile": "profile",
     "getOnboardingChecklist": "onboarding",

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 AiOperation = Literal[
     "action_center_enrichment",
     "assistant_composer",
+    "assistant_planner",
     "edward_chat",
     "document_classification",
     "document_extraction",
@@ -43,7 +44,7 @@ class RuntimeConfig:
     user_prompt_template: str | None
     context_policy: Mapping[str, object]
     output_schema: Mapping[str, object] | None
-    provider: Literal["openrouter", "groq"]
+    provider: Literal["openrouter", "openai", "groq"]
     model: str
     max_output_tokens: int
     temperature: float

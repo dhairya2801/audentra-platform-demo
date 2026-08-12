@@ -89,7 +89,9 @@ class AssistantPipeline:
         ):
             try:
                 candidate = await self._model_planner(
-                    message=request.resolved_text, page_label=request.page_label
+                    message=request.resolved_text,
+                    page_label=request.page_label,
+                    page_path=request.page_path,
                 )
             except Exception:
                 candidate = None

@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -210,6 +211,23 @@ def openrouter_transport(api_key: str, app_url: str, app_name: str) -> ProviderT
             "HTTP-Referer": app_url,
             "X-Title": app_name,
         },
+    )
+
+
+def openai_transport(api_key: str) -> ProviderTransport:
+    """Direct OpenAI, selected whenever OPENAI_API_KEY is configured.
+
+    Matches the VV_Edgent-voice preview host: an OpenAI key short-circuits
+    OpenRouter for every chat-completion operation, so Edward's planner and
+    prose run on the exact provider the original implementation used.
+    """
+
+    return ProviderTransport(
+        provider="openai",
+        label="OpenAI",
+        url=OPENAI_URL,
+        api_key=api_key,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
     )
 
 
