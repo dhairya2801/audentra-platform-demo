@@ -530,6 +530,9 @@ class InMemoryPlatformService:
                 "housing_plan": sync_read(self.store.get_housing_plan),
                 "appointments": sync_read(self.store.get_appointments),
                 "help": sync_read(self.store.get_help),
+                "academics": sync_read(self.store.get_academics),
+                "campus_life": sync_read(self.store.get_campus_life),
+                "messages": sync_read(self.store.get_messages),
             }
         )
         history = payload.get("history", [])

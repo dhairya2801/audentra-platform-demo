@@ -436,6 +436,70 @@ async def _tool_account(host: AssistantToolHost, _now: datetime) -> JsonDict:
     }
 
 
+async def _tool_academics(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    academics = await _primitive(host, "academics")
+    selected = _mapping(academics.get("selectedProgram"))
+    plan: list[JsonDict] = []
+    for raw in _sequence(academics.get("plan"))[:16]:
+        item = _mapping(raw)
+        course = _mapping(item.get("course"))
+        plan.append(
+            {
+                "code": str(course.get("code") or ""),
+                "title": str(course.get("title") or ""),
+                "recommendedTerm": item.get("recommendedTerm"),
+                "status": item.get("status"),
+                "missingPrerequisites": [
+                    str(code) for code in _sequence(item.get("missingPrerequisiteCodes"))[:12]
+                ],
+            }
+        )
+    return {
+        "selectedProgram": str(selected.get("name") or ""),
+        "degree": str(selected.get("degree") or ""),
+        "catalogVersion": str(academics.get("catalogVersion") or ""),
+        "suggestedExemptions": [
+            str(_mapping(item).get("targetCourseCode") or "")
+            for item in _sequence(academics.get("exemptionRecommendations"))[:16]
+            if _mapping(item).get("targetCourseCode")
+        ],
+        "plan": plan,
+        "total": len(plan),
+    }
+
+
+async def _tool_campus_life(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    campus = await _primitive(host, "campus_life")
+    events = [
+        {key: item.get(key) for key in ("title", "startsAt", "location", "category")}
+        for raw in _sequence(campus.get("events"))[:8]
+        if (item := _mapping(raw))
+    ]
+    clubs = [
+        {key: item.get(key) for key in ("name", "category", "description", "nextActivity")}
+        for raw in _sequence(campus.get("clubs"))[:16]
+        if (item := _mapping(raw))
+    ]
+    return {"upcomingEvents": events, "clubs": clubs, "total": len(events) + len(clubs)}
+
+
+async def _tool_messages(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    messages = await _primitive(host, "messages")
+    latest = [
+        {
+            "subject": item.get("subject") or item.get("title"),
+            "sentAt": item.get("sentAt") or item.get("createdAt"),
+            "unread": item.get("readAt") is None,
+        }
+        for raw in _sequence(messages.get("items"))[:5]
+        if (item := _mapping(raw))
+    ]
+    unread = messages.get("unreadCount")
+    if not isinstance(unread, int):
+        unread = sum(1 for item in latest if item["unread"])
+    return {"unreadCount": unread, "latest": latest, "href": "/messages"}
+
+
 async def _tool_appointments(host: AssistantToolHost, _now: datetime) -> JsonDict:
     appointments = await _primitive(host, "appointments")
     items = [
@@ -466,6 +530,9 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getRegistrationStatus": _tool_registration,
     "getStudentAccountSummary": _tool_account,
     "getStudentAppointments": _tool_appointments,
+    "getAcademicPlan": _tool_academics,
+    "getCampusLife": _tool_campus_life,
+    "getStudentMessages": _tool_messages,
 }
 
 
@@ -515,7 +582,16 @@ def _record_count(data: Any) -> int:
     if isinstance(data, Mapping):
         if isinstance(data.get("items"), Sequence):
             return len(data["items"])
-        for key in ("awards", "derivedBlockers", "gates", "residences", "requiredDocuments"):
+        for key in (
+            "awards",
+            "derivedBlockers",
+            "gates",
+            "residences",
+            "requiredDocuments",
+            "plan",
+            "upcomingEvents",
+            "latest",
+        ):
             if isinstance(data.get(key), Sequence):
                 return len(data[key])
         return 1

@@ -47,6 +47,9 @@ REQUEST_TYPES = (
     "registration_status",
     "student_account",
     "appointments",
+    "academic_plan",
+    "campus_life",
+    "messages_unread",
     "general_question",
     "unsupported_or_out_of_scope",
 )
@@ -234,6 +237,27 @@ def classify(request: NormalizedRequest) -> Classification | None:
         ):
             return Classification("document_status", 1)
         return Classification("document_status", 0.9)
+
+    if re.search(
+        r"\bacademic plan\b|\bdegree plan\b|\bcourse plan\b|\bcurriculum\b|\bcatalog\b"
+        r"|\bprerequisites?\b|\b(?:my|which|what) (?:classes|courses)\b|\bclass schedule\b"
+        r"|\bexemptions?\b|\bmajor requirements\b",
+        text,
+    ):
+        return Classification("academic_plan", 1)
+
+    if re.search(
+        r"\bclubs?\b|\bcampus (?:life|events?|activit\w+)\b|\bstudent organi[sz]ations?\b"
+        r"|\bintramurals?\b|\bevents? (?:on campus|this (?:week|month|semester))"
+        r"|\bactivities (?:can i|to) join\b|\bwhat.{0,24}(?:events|activities)\b",
+        text,
+    ):
+        return Classification("campus_life", 1)
+
+    if re.search(r"\bunread\b|\bmessages?\b|\binbox\b|\bnotifications?\b", text) and not re.search(
+        r"\bsend\b|\bwrite\b|\breply\b", text
+    ):
+        return Classification("messages_unread", 1)
 
     if re.search(r"deadline|due date|\bdue\b|overdue|by when|how long do i have", text):
         return Classification("deadlines", 1)

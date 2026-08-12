@@ -29,6 +29,9 @@ TOOL_NAMES = (
     "getRegistrationStatus",
     "getStudentAccountSummary",
     "getStudentAppointments",
+    "getAcademicPlan",
+    "getCampusLife",
+    "getStudentMessages",
 )
 
 RECEIPT_SOURCES: Mapping[str, str] = {
@@ -46,6 +49,9 @@ RECEIPT_SOURCES: Mapping[str, str] = {
     "getRegistrationStatus": "registration",
     "getStudentAccountSummary": "account",
     "getStudentAppointments": "appointments",
+    "getAcademicPlan": "academics",
+    "getCampusLife": "campus_life",
+    "getStudentMessages": "messages",
 }
 
 _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
@@ -89,6 +95,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     ),
     "student_account": ("getStudentAccountSummary", "getEnrollmentHolds"),
     "appointments": ("getStudentAppointments",),
+    "academic_plan": ("getAcademicPlan",),
+    "campus_life": ("getCampusLife",),
+    "messages_unread": ("getStudentMessages",),
     "general_question": ("getOnboardingChecklist", "getEnrollmentHolds", "getStudentDeadlines"),
     "unsupported_or_out_of_scope": (),
 }
@@ -104,6 +113,9 @@ _REQUIRED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "aid_coverage": ("getFinancialAidSummary", "getStudentAccountSummary"),
     "aid_disbursement": ("getAidDisbursements", "getFinancialAidSummary"),
     "registration_status": ("getRegistrationStatus",),
+    "academic_plan": ("getAcademicPlan",),
+    "campus_life": ("getCampusLife",),
+    "messages_unread": ("getStudentMessages",),
 }
 
 

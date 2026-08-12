@@ -35,6 +35,9 @@ class DerivedState:
     housing: JsonDict | None = None
     housing_options: JsonDict | None = None
     appointments: JsonDict | None = None
+    academics: JsonDict | None = None
+    campus_life: JsonDict | None = None
+    messages: JsonDict | None = None
     support: JsonDict | None = None
     profile: JsonDict | None = None
     priority: JsonDict | None = None
@@ -102,6 +105,9 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.appointments = (
         dict(reads["getStudentAppointments"]) if "getStudentAppointments" in reads else None
     )
+    state.academics = dict(reads["getAcademicPlan"]) if "getAcademicPlan" in reads else None
+    state.campus_life = dict(reads["getCampusLife"]) if "getCampusLife" in reads else None
+    state.messages = dict(reads["getStudentMessages"]) if "getStudentMessages" in reads else None
     state.support = dict(reads["getSupportOptions"]) if "getSupportOptions" in reads else None
     state.profile = dict(reads["getStudentProfile"]) if "getStudentProfile" in reads else None
 

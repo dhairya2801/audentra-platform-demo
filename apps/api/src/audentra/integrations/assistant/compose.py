@@ -130,6 +130,38 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
                 f"Appointment: {appointment.get('type')} at {appointment.get('startsAt')} "
                 f"({appointment.get('status')})"
             )
+    if state.academics:
+        if state.academics.get("selectedProgram"):
+            lines.append(
+                f"Academic program: {state.academics['selectedProgram']} "
+                f"({state.academics.get('degree') or 'degree not recorded'})"
+            )
+        for course in state.academics.get("plan", []):
+            missing = course.get("missingPrerequisites") or []
+            lines.append(
+                f"Planned course {course.get('code')} {course.get('title')}: "
+                f"status {course.get('status')}, recommended term "
+                f"{course.get('recommendedTerm')}"
+                + (f", missing prerequisites: {', '.join(missing)}" if missing else "")
+            )
+        for exemption in state.academics.get("suggestedExemptions", []):
+            lines.append(f"Suggested course exemption: {exemption}")
+    if state.campus_life:
+        for event in state.campus_life.get("upcomingEvents", []):
+            lines.append(
+                f"Campus event: {event.get('title')} at {event.get('location')} "
+                f"on {event.get('startsAt')}"
+            )
+        for club in state.campus_life.get("clubs", []):
+            lines.append(f"Campus club: {club.get('name')} ({club.get('category')})")
+    if state.messages:
+        lines.append(f"Unread messages: {state.messages.get('unreadCount')}")
+        for entry in state.messages.get("latest", []):
+            if entry.get("subject"):
+                lines.append(
+                    f"Message: {entry['subject']}"
+                    + (" (unread)" if entry.get("unread") else " (read)")
+                )
     if state.priority:
         lines.append(f"Priority action: {state.priority['title']} — {state.priority['reason']}")
     return lines
@@ -680,6 +712,128 @@ def _compose_unsupported(
     return ComposedAnswer(message=message, blocks=[text_block(message)])
 
 
+def _compose_academics(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    academics = state.academics or {}
+    plan = academics.get("plan", [])
+    program = academics.get("selectedProgram") or ""
+    if not plan:
+        message = (
+            f"No planned courses are on your academic plan yet"
+            f"{f' for {program}' if program else ''}. "
+            "The Academics page is where your plan appears once it is built."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    with_missing = [course for course in plan if course.get("missingPrerequisites")]
+    message = (
+        f"Your academic plan{f' for {program}' if program else ''} lists {len(plan)} course(s)."
+    )
+    if with_missing:
+        message += (
+            f" {len(with_missing)} of them still list missing prerequisites, shown in the table."
+        )
+    block = table_block(
+        columns=[
+            {"key": "code", "label": "Course"},
+            {"key": "title", "label": "Title"},
+            {"key": "term", "label": "Recommended term"},
+            {"key": "status", "label": "Status"},
+            {"key": "prerequisites", "label": "Missing prerequisites"},
+        ],
+        rows=[
+            {
+                "code": str(course.get("code") or ""),
+                "title": str(course.get("title") or ""),
+                "term": str(course.get("recommendedTerm") or ""),
+                "status": str(course.get("status") or ""),
+                "prerequisites": ", ".join(course.get("missingPrerequisites") or []) or "none",
+            }
+            for course in plan
+        ],
+        caption="Your planned courses",
+    )
+    return ComposedAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_campus_life(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    campus = state.campus_life or {}
+    events = campus.get("upcomingEvents", [])
+    clubs = campus.get("clubs", [])
+    if not events and not clubs:
+        message = (
+            "No campus events or clubs are published for you right now. "
+            "The Campus life page is where new ones appear."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    message = (
+        f"Campus life currently lists {len(clubs)} club(s) and {len(events)} upcoming event(s)."
+    )
+    blocks = [text_block(message)]
+    if clubs:
+        blocks.append(
+            bullet_list_block(
+                [{"text": f"{club.get('name')} — {club.get('category')}"} for club in clubs],
+                title="Clubs you can join",
+            )
+        )
+    if events:
+        blocks.append(
+            bullet_list_block(
+                [
+                    {
+                        "text": f"{event.get('title')} — {event.get('startsAt')}"
+                        + (f" at {event['location']}" if event.get("location") else "")
+                    }
+                    for event in events
+                ],
+                title="Upcoming events",
+            )
+        )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_messages(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    messages = state.messages or {}
+    unread = messages.get("unreadCount")
+    if not isinstance(unread, int):
+        message = "I couldn't check your messages just now. The Messages page has the full inbox."
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    if unread == 0:
+        message = "You have no unread messages."
+    else:
+        message = f"You have {unread} unread message(s). The Messages page has the full inbox."
+    blocks = [text_block(message)]
+    unread_subjects = [
+        entry
+        for entry in messages.get("latest", [])
+        if entry.get("unread") and entry.get("subject")
+    ]
+    if unread_subjects:
+        blocks.append(
+            bullet_list_block(
+                [{"text": str(entry["subject"]), "href": "/messages"} for entry in unread_subjects],
+                title="Unread messages",
+            )
+        )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
 def _compose_general(
     classification: Classification, state: DerivedState, name: str | None
 ) -> ComposedAnswer:
@@ -718,6 +872,9 @@ _COMPOSERS = {
     "registration_status": _compose_registration,
     "student_account": _compose_account,
     "appointments": _compose_appointments,
+    "academic_plan": _compose_academics,
+    "campus_life": _compose_campus_life,
+    "messages_unread": _compose_messages,
     "unsupported_or_out_of_scope": _compose_unsupported,
     "general_question": _compose_general,
 }

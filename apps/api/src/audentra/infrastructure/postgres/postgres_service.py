@@ -1458,6 +1458,9 @@ class PostgresPlatformService:
                 "housing_plan": lambda: portal.get_student_housing_plan(auth),
                 "appointments": lambda: portal.get_student_appointments(auth),
                 "help": lambda: portal.get_student_help(auth),
+                "academics": lambda: portal.get_student_academics(auth),
+                "campus_life": lambda: portal.get_campus_life(auth),
+                "messages": lambda: portal.get_student_messages(auth),
             }
         )
 

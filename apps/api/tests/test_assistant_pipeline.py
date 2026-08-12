@@ -117,6 +117,60 @@ def _full_primitives() -> dict[str, dict[str, Any]]:
         "housing_plan": {"preference": "on_campus", "residences": []},
         "appointments": {"items": []},
         "help": {"articles": []},
+        "academics": {
+            "selectedProgram": {"name": "Computer Science", "degree": "Bachelor of Science"},
+            "catalogVersion": "2026",
+            "plan": [
+                {
+                    "course": {"code": "CS 101", "title": "Programming Fundamentals"},
+                    "recommendedTerm": "Fall 2026",
+                    "status": "planned",
+                    "missingPrerequisiteCodes": [],
+                },
+                {
+                    "course": {"code": "CS 210", "title": "Data Structures"},
+                    "recommendedTerm": "Spring 2027",
+                    "status": "planned",
+                    "missingPrerequisiteCodes": ["CS 101"],
+                },
+            ],
+            "exemptionRecommendations": [],
+        },
+        "campus_life": {
+            "events": [
+                {
+                    "title": "Welcome Week Fair",
+                    "startsAt": "2026-08-24T17:00:00Z",
+                    "location": "Main Quad",
+                    "category": "social",
+                }
+            ],
+            "clubs": [
+                {
+                    "name": "Robotics Club",
+                    "category": "engineering",
+                    "description": "Build robots.",
+                    "nextActivity": None,
+                }
+            ],
+        },
+        "messages": {
+            "items": [
+                {
+                    "id": "msg-1",
+                    "subject": "Orientation schedule posted",
+                    "sentAt": "2026-08-10T12:00:00Z",
+                    "readAt": None,
+                },
+                {
+                    "id": "msg-2",
+                    "subject": "Welcome to Aster",
+                    "sentAt": "2026-08-01T12:00:00Z",
+                    "readAt": "2026-08-02T12:00:00Z",
+                },
+            ],
+            "unreadCount": 1,
+        },
     }
 
 
@@ -141,6 +195,46 @@ def test_capability_overview_reads_nothing() -> None:
 
     assert host.read_primitives == []
     assert "checklist" in result.message
+
+
+def test_academic_plan_question_reads_academics_not_the_checklist() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(
+        AssistantPipeline(host), "Which classes and prerequisites are in my academic plan?"
+    )
+
+    assert result.classification is not None
+    assert result.classification.request_type == "academic_plan"
+    assert host.read_primitives == ["academics"]
+    assert [receipt["source"] for receipt in result.context_receipts] == ["academics"]
+    assert "Computer Science" in result.message
+    table = next(block for block in result.blocks if block["type"] == "table")
+    assert any(row.get("code") == "CS 210" for row in table["rows"])
+    assert any("CS 101" in row.get("prerequisites", "") for row in table["rows"])
+
+
+def test_campus_life_question_reads_campus_life_only() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "Which clubs and campus events can I join?")
+
+    assert result.classification is not None
+    assert result.classification.request_type == "campus_life"
+    assert host.read_primitives == ["campus_life"]
+    assert [receipt["source"] for receipt in result.context_receipts] == ["campus_life"]
+    assert "Robotics Club" in "".join(str(block) for block in result.blocks)
+    assert "Welcome Week Fair" in "".join(str(block) for block in result.blocks)
+
+
+def test_unread_messages_question_reads_messages_only() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "Do I have unread messages?")
+
+    assert result.classification is not None
+    assert result.classification.request_type == "messages_unread"
+    assert host.read_primitives == ["messages"]
+    assert [receipt["source"] for receipt in result.context_receipts] == ["messages"]
+    assert "1 unread message" in result.message
+    assert "Orientation schedule posted" in "".join(str(block) for block in result.blocks)
 
 
 def test_model_tool_plan_is_allowlist_filtered_not_discarded() -> None:

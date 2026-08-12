@@ -1116,16 +1116,27 @@ def test_edward_guard_rejects_capability_escalation_before_loading_student_data(
     assert rig.ai.calls == []
 
 
-def test_edward_answers_academic_questions_without_unsupported_reads() -> None:
+def test_edward_answers_academic_questions_from_the_academics_read() -> None:
     rig = _rig()
-    rig.platform.responses["get_student_dashboard"] = {
-        "offer": {"id": "offer-1", "depositAmountCents": 50_000},
-        "journey": {"nextAction": {"label": "Review academics"}},
-    }
     rig.portal.responses.update(
         {
             "get_student_profile": {"preferredName": "Alex"},
-            "get_student_requirements": {"items": []},
+            "get_student_academics": {
+                "selectedProgram": {
+                    "name": "Computer Science",
+                    "degree": "Bachelor of Science",
+                },
+                "catalogVersion": "2026",
+                "plan": [
+                    {
+                        "course": {"code": "CS 101", "title": "Programming Fundamentals"},
+                        "recommendedTerm": "Fall 2026",
+                        "status": "planned",
+                        "missingPrerequisiteCodes": [],
+                    }
+                ],
+                "exemptionRecommendations": [],
+            },
         }
     )
 
@@ -1145,13 +1156,12 @@ def test_edward_answers_academic_questions_without_unsupported_reads() -> None:
         ),
     )
 
-    # Academic planning has no approved assistant read yet; the pipeline
-    # answers from safe general guidance instead of inventing a plan, and no
-    # academics projection is sent anywhere.
+    # Academic-plan questions read the same academics projection the portal
+    # page uses — nothing broader — and the answer is grounded in it.
     assert response["provider"] == "guided"
-    assert not any(call.name == "get_student_academics" for call in rig.portal.calls)
-    assert "academics" not in {r["source"] for r in response["contextReceipts"]}
-    assert response["message"]
+    assert any(call.name == "get_student_academics" for call in rig.portal.calls)
+    assert {r["source"] for r in response["contextReceipts"]} == {"academics"}
+    assert "Computer Science" in response["message"]
 
 
 def test_edward_builds_action_widgets_only_from_authoritative_payment_state() -> None:
