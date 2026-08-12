@@ -6,7 +6,10 @@ x-runtime-environment: &runtime-environment
   BROWSER_AUTH_REQUIRED: "true"
   API_HOST: 0.0.0.0
   API_PORT: "4000"
-  WEB_ORIGIN: https://${SITE_HOST}
+  # Comma-separated CORS allowlist. The portal is served from Vercel on its own
+  # host, so this is no longer derivable from SITE_HOST (the API's own host).
+  # Falls back to the previous single-origin behaviour when unset.
+  WEB_ORIGIN: ${WEB_ORIGIN:-https://${SITE_HOST}}
   DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
   DB_POOL_SIZE: "4"
   DB_MAX_OVERFLOW: "0"
@@ -40,7 +43,8 @@ x-runtime-environment: &runtime-environment
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
   OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4o-mini}
   OPENROUTER_DOCUMENT_MODEL: ${OPENROUTER_DOCUMENT_MODEL:-qwen/qwen3.7-flash}
-  OPENROUTER_APP_URL: https://${SITE_HOST}
+  # Sent to OpenRouter as HTTP-Referer; must be the portal origin, not the API host.
+  OPENROUTER_APP_URL: ${PORTAL_ORIGIN:-https://${SITE_HOST}}
   OPENROUTER_APP_NAME: Audentra Preview
   OPENROUTER_DOCUMENT_TIMEOUT_MS: "120000"
   OPENROUTER_DOCUMENT_MAX_TOKENS: "6000"
