@@ -2,16 +2,13 @@ name: Platform CI
 
 on:
   pull_request:
-  workflow_dispatch:
   push:
     branches:
       - main
 
 concurrency:
   group: platform-ci-${{ github.ref }}
-  # Keep main deployments serialized to completion. Pull-request superseding
-  # commits may still cancel obsolete validation runs.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -187,43 +184,28 @@ jobs:
           test "$(docker image inspect audentra-platform:test --format '{{.Config.User}}')" = "audentra"
 
   deploy-preview:
-    name: Deploy Vekend Cloud Run preview
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    name: Deploy GCP preview
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
       - container
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 45
     environment: preview
     concurrency:
-      group: audentra-platform-cloud-run-preview
+      group: audentra-platform-preview
       cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
     env:
-      GCP_PROJECT_ID: audentra
+      GCP_PROJECT_ID: even-advantage-502610-n1
       GCP_REGION: us-central1
+      GCP_ZONE: us-central1-a
+      GCP_INSTANCE: deneme-harness
       ARTIFACT_REPOSITORY: audentra-platform
       ARTIFACT_IMAGE: api
-      API_SERVICE: audentra-api-preview
-      MIGRATION_JOB: audentra-migrate-preview
-      SEED_JOB: audentra-seed-preview
-      WORKER_JOB: audentra-worker-once-preview
-      SCHEDULER_JOB: audentra-worker-dispatch-preview
-      RUNTIME_SERVICE_ACCOUNT: audentra-platform-runtime@audentra.iam.gserviceaccount.com
-      SCHEDULER_SERVICE_ACCOUNT: audentra-platform-scheduler@audentra.iam.gserviceaccount.com
-      CLOUD_SQL_INSTANCE: audentra:us-central1:audentra-preview-postgres
-      GCS_BUCKET: audentra-906906351296-preview-documents
-      DATABASE_URL_SECRET: audentra-preview-database-url
-      DOCUMENT_WORKER_TOKEN_SECRET: audentra-preview-document-worker-token
-      STAFF_INVITATION_CODE_SECRET: audentra-preview-staff-invitation-code
-      # Optional for the synthetic preview. Set this environment variable to
-      # audentra-preview-openrouter-api-key after a Vekend-owned key is stored.
-      OPENROUTER_API_KEY_SECRET: ${{ vars.OPENROUTER_API_KEY_SECRET }}
-      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/906906351296/locations/global/workloadIdentityPools/github-audentra/providers/github
-      GCP_SERVICE_ACCOUNT: audentra-platform-cd@audentra.iam.gserviceaccount.com
+      GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39355369148/locations/global/workloadIdentityPools/github-vv-edgent/providers/github
+      GCP_SERVICE_ACCOUNT: vv-edgent-cd@even-advantage-502610-n1.iam.gserviceaccount.com
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -231,7 +213,7 @@ jobs:
           persist-credentials: false
 
       - id: google-auth
-        name: Exchange GitHub OIDC token for short-lived Vekend credentials
+        name: Exchange GitHub OIDC token for short-lived Google credentials
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
@@ -252,27 +234,50 @@ jobs:
           image_uri="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/${ARTIFACT_IMAGE}:${GITHUB_SHA}"
           if gcloud artifacts docker images describe "${image_uri}" --quiet >/dev/null 2>&1; then
             echo "Immutable platform image already exists; reusing ${image_uri}."
-          else
-            docker build \
-              --file infra/docker/api.Dockerfile \
-              --tag "${image_uri}" \
-              .
-            docker push "${image_uri}"
+            exit 0
           fi
-          echo "IMAGE_URI=${image_uri}" >>"${GITHUB_ENV}"
+          docker build \
+            --file infra/docker/api.Dockerfile \
+            --tag "${image_uri}" \
+            .
+          docker push "${image_uri}"
 
-      - name: Migrate, seed, deploy API, and configure bounded worker jobs
-        run: bash infra/cloud-run/deploy-preview.sh
-
-      - name: Verify the deployed Cloud Run revision
+      - name: Package reviewed deployment configuration
         run: |
-          ready="$(gcloud run services describe "${API_SERVICE}" \
-            --project="${GCP_PROJECT_ID}" \
-            --region="${GCP_REGION}" \
-            --format='value(status.conditions[?type=Ready].status)')"
-          test "${ready}" = "True"
-          deployed_image="$(gcloud run services describe "${API_SERVICE}" \
-            --project="${GCP_PROJECT_ID}" \
-            --region="${GCP_REGION}" \
-            --format='value(spec.template.spec.containers[0].image)')"
-          test "${deployed_image}" = "${IMAGE_URI}"
+          seed_revision="$(
+            git ls-tree -r --full-tree "${GITHUB_SHA}" -- \
+              apps/api/src/audentra/infrastructure/seeding \
+              apps/api/assets/config/tenants \
+              apps/api/assets/portal-media \
+              apps/api/migrations \
+              | sha256sum | cut -d' ' -f1
+          )"
+          test "${#seed_revision}" -eq 64
+          echo "SEED_REVISION=${seed_revision}" >>"${GITHUB_ENV}"
+          git archive \
+            --format=tar.gz \
+            --output="${RUNNER_TEMP}/audentra-platform-release-${GITHUB_SHA}.tar.gz" \
+            "${GITHUB_SHA}" \
+            infra/preview-vm
+
+      - name: Upload immutable release through IAP
+        run: >-
+          gcloud compute scp
+          "${RUNNER_TEMP}/audentra-platform-release-${GITHUB_SHA}.tar.gz"
+          "${GCP_INSTANCE}:/tmp/"
+          --project="${GCP_PROJECT_ID}"
+          --zone="${GCP_ZONE}"
+          --tunnel-through-iap
+          --ssh-key-expire-after=30m
+          --quiet
+
+      - name: Deploy, migrate, seed, and health-check platform
+        run: >-
+          gcloud compute ssh
+          "${GCP_INSTANCE}"
+          --project="${GCP_PROJECT_ID}"
+          --zone="${GCP_ZONE}"
+          --tunnel-through-iap
+          --ssh-key-expire-after=30m
+          --quiet
+          --command="sudo /usr/local/sbin/audentra-platform-deploy ${GITHUB_SHA} ${SEED_REVISION}"
