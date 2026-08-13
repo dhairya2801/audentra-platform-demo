@@ -120,7 +120,7 @@ _ABOUT_YOU_FIELDS = frozenset(
 
 
 class PostgresManagedConfigurationRepository:
-    """Publish managed YAML atomically and project it into canonical portal tables."""
+    """Publish DB-canonical tenant documents and project them into portal tables."""
 
     def __init__(
         self,
@@ -137,14 +137,13 @@ class PostgresManagedConfigurationRepository:
         self,
         auth: AuthContext,
         kind: str,
-        fallback_config: Mapping[str, Any],
     ) -> JsonDict:
         self._require_staff(auth)
         normalized = _configuration_kind(kind)
         async with self.engine.connect() as connection:
             row = await self._active_row(connection, auth.tenant_id, normalized)
         if row is None:
-            return _validated_fallback(normalized, fallback_config)
+            raise _not_provisioned(normalized)
         return _public_configuration(row)
 
     async def list_active(self, auth: AuthContext) -> dict[str, JsonDict]:
@@ -162,35 +161,26 @@ class PostgresManagedConfigurationRepository:
                 ),
                 {"tenant_id": _uuid(auth.tenant_id)},
             )
-            return {
+            configurations = {
                 str(row["kind"]): _public_configuration(dict(row))
                 for row in result.mappings().all()
             }
+        missing = [kind for kind in _CONFIGURATION_NAMES if kind not in configurations]
+        if missing:
+            raise _not_provisioned(missing[0], missing=missing)
+        return configurations
 
     async def publish(
         self,
         auth: AuthContext,
         kind: str,
         payload: Mapping[str, Any],
-        fallback_config: Mapping[str, Any],
         request_id: str,
     ) -> JsonDict:
         self._require_staff(auth)
         normalized = _configuration_kind(kind)
-        yaml_text = str(payload.get("yaml") or "")
-        document = parse_managed_configuration(
-            normalized,
-            yaml_text,
-            tenant_slug=auth.tenant_slug,
-        )
-        # The fallback is a historical snapshot used only for optimistic-version
-        # comparison when no database version exists yet.  It can predate newer
-        # input-schema validation rules, so it must remain readable while the
-        # incoming document above is always validated strictly.
-        fallback = _validated_fallback(
-            normalized,
-            fallback_config,
-            validate_materialized_inputs=False,
+        document, yaml_text = managed_configuration_input(
+            normalized, payload, tenant_slug=auth.tenant_slug
         )
         expected_version = _positive_integer(payload.get("expectedVersion"), "expectedVersion")
         change_summary = _optional_string(payload.get("changeSummary"), maximum=500)
@@ -207,35 +197,28 @@ class PostgresManagedConfigurationRepository:
                 normalized,
                 for_update=True,
             )
-            actual_version = int(current["version"]) if current else int(fallback["version"])
+            if current is None:
+                raise _not_provisioned(normalized)
+            actual_version = int(current["version"])
             if actual_version != expected_version:
                 raise ConflictError(
                     "VERSION_CONFLICT",
                     "This managed configuration changed in another session",
                 )
-            previous_document = (
-                _mapping(current.get("document"))
-                if current is not None
-                else parse_managed_configuration(
-                    normalized,
-                    str(fallback["yaml"]),
-                    tenant_slug=None,
-                )
-            )
+            previous_document = _mapping(current.get("document"))
             if normalized == "journeys":
                 _validate_core_onboarding_invariants(document, previous_document)
             version = actual_version + 1
-            if current is not None:
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE staff_managed_configuration_version
-                        SET active=false
-                        WHERE id=:id AND tenant_id=:tenant_id
-                        """
-                    ),
-                    {"id": current["id"], "tenant_id": _uuid(auth.tenant_id)},
-                )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_managed_configuration_version
+                    SET active=false
+                    WHERE id=:id AND tenant_id=:tenant_id
+                    """
+                ),
+                {"id": current["id"], "tenant_id": _uuid(auth.tenant_id)},
+            )
 
             record_count = _record_count(normalized, document)
             published_at = self._clock()
@@ -314,11 +297,178 @@ class PostgresManagedConfigurationRepository:
             "fileName": _CONFIGURATION_FILES[normalized],
             "version": version,
             "yaml": yaml_text,
+            "document": copy.deepcopy(document),
             "recordCount": record_count,
             "updatedAt": _iso(published_at),
             "updatedBy": auth.actor_id,
             **({"changeSummary": change_summary} if change_summary else {}),
         }
+
+    async def provision_if_missing(
+        self,
+        auth: AuthContext,
+        kind: str,
+        document: Mapping[str, Any],
+        request_id: str,
+        *,
+        change_summary: str = "Imported by the reviewed tenant seed workflow",
+        rematerialize_existing: bool = False,
+    ) -> JsonDict:
+        """Create the first DB version and materialize it without replacing staff work."""
+
+        self._require_staff(auth)
+        normalized = _configuration_kind(kind)
+        validated = validate_managed_configuration_document(
+            normalized,
+            document,
+            tenant_slug=auth.tenant_slug,
+        )
+        yaml_text = yaml.safe_dump(validated, sort_keys=False, allow_unicode=True)
+        publication_id = self._uuid_factory()
+        published_at = self._clock()
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"managed-config:{auth.tenant_id}:{normalized}"},
+            )
+            current = await self._active_row(
+                connection,
+                auth.tenant_id,
+                normalized,
+                for_update=True,
+            )
+            if current is not None:
+                if rematerialize_existing:
+                    current_document = _mapping(current.get("document"))
+                    current_publication_id = _uuid(current["id"])
+                    if normalized == "journeys":
+                        await self._materialize_journeys(
+                            connection,
+                            auth,
+                            current_document,
+                            current_document,
+                            current_publication_id,
+                            published_at,
+                        )
+                    elif normalized == "campus_life":
+                        await self._materialize_campus_life(
+                            connection,
+                            auth,
+                            current_document,
+                            current_document,
+                        )
+                    else:
+                        await self._materialize_academics(connection, auth, current_document)
+                return _public_configuration(current)
+            record_count = _record_count(normalized, validated)
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_managed_configuration_version (
+                      id, tenant_id, kind, version, yaml, document, record_count,
+                      change_summary, created_by, active, created_at, published_at
+                    ) VALUES (
+                      :id, :tenant_id, :kind, 1, :yaml, CAST(:document AS jsonb),
+                      :record_count, :change_summary, :created_by, true,
+                      :published_at, :published_at
+                    )
+                    """
+                ),
+                {
+                    "id": publication_id,
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "kind": normalized,
+                    "yaml": yaml_text,
+                    "document": _json(validated),
+                    "record_count": record_count,
+                    "change_summary": change_summary,
+                    "created_by": _uuid(auth.actor_id),
+                    "published_at": published_at,
+                },
+            )
+            materialized = 0
+            if normalized == "journeys":
+                materialized = await self._materialize_journeys(
+                    connection,
+                    auth,
+                    validated,
+                    validated,
+                    publication_id,
+                    published_at,
+                )
+            elif normalized == "campus_life":
+                materialized = await self._materialize_campus_life(connection, auth, validated, {})
+            else:
+                materialized = await self._materialize_academics(connection, auth, validated)
+            await self._insert_publication_audit(
+                connection,
+                auth,
+                publication_id,
+                normalized,
+                1,
+                record_count,
+                materialized,
+                request_id,
+            )
+            await self._insert_publication_outbox(
+                connection,
+                auth,
+                publication_id,
+                normalized,
+                1,
+                record_count,
+                materialized,
+                request_id,
+                published_at,
+            )
+        return {
+            "id": str(publication_id),
+            "kind": normalized,
+            "fileName": _CONFIGURATION_FILES[normalized],
+            "version": 1,
+            "yaml": yaml_text,
+            "document": copy.deepcopy(validated),
+            "recordCount": record_count,
+            "updatedAt": _iso(published_at),
+            "updatedBy": auth.actor_id,
+            "changeSummary": change_summary,
+        }
+
+    async def rematerialize_active(self, auth: AuthContext, kind: str) -> JsonDict:
+        """Replay one active DB document after an explicit demo-data reset."""
+
+        self._require_staff(auth)
+        normalized = _configuration_kind(kind)
+        replayed_at = self._clock()
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"managed-config:{auth.tenant_id}:{normalized}"},
+            )
+            current = await self._active_row(
+                connection,
+                auth.tenant_id,
+                normalized,
+                for_update=True,
+            )
+            if current is None:
+                raise _not_provisioned(normalized)
+            document = _mapping(current.get("document"))
+            publication_id = _uuid(current["id"])
+            if normalized == "journeys":
+                await self._materialize_journeys(
+                    connection,
+                    auth,
+                    document,
+                    document,
+                    publication_id,
+                    replayed_at,
+                )
+            elif normalized == "campus_life":
+                await self._materialize_campus_life(connection, auth, document, {})
+            else:
+                await self._materialize_academics(connection, auth, document)
+        return _public_configuration(current)
 
     async def list_student_updates(self, auth: AuthContext) -> list[JsonDict]:
         self._require_student(auth)
@@ -1837,10 +1987,29 @@ def parse_managed_configuration(
     if not isinstance(value, dict):
         raise BadRequestError("INVALID_MANAGED_YAML", "The managed YAML must be an object")
     document = cast(JsonDict, _json_safe(value))
+    return validate_managed_configuration_document(
+        normalized,
+        document,
+        tenant_slug=tenant_slug,
+        validate_materialized_inputs=validate_materialized_inputs,
+    )
+
+
+def validate_managed_configuration_document(
+    kind: str,
+    value: Mapping[str, Any],
+    *,
+    tenant_slug: str | None,
+    validate_materialized_inputs: bool = True,
+) -> JsonDict:
+    """Validate a structured managed document without routing it through YAML."""
+
+    normalized = _configuration_kind(kind)
+    document = cast(JsonDict, _json_safe(copy.deepcopy(dict(value))))
     if document.get("configuration") != _CONFIGURATION_NAMES[normalized]:
         raise BadRequestError(
             "MANAGED_CONFIGURATION_KIND_MISMATCH",
-            "The YAML configuration kind does not match this resource",
+            "The managed document kind does not match this resource",
         )
     declared_tenant = document.get("tenant")
     if tenant_slug and declared_tenant and str(declared_tenant) != tenant_slug:
@@ -1851,7 +2020,7 @@ def parse_managed_configuration(
     collection_name = _COLLECTION_NAMES[normalized]
     if not isinstance(document.get(collection_name), list):
         raise BadRequestError(
-            "INVALID_MANAGED_YAML",
+            "INVALID_MANAGED_CONFIGURATION",
             f"The {collection_name} collection is required",
         )
     if normalized == "journeys":
@@ -1864,6 +2033,234 @@ def parse_managed_configuration(
     else:
         academic_courses(document)
     return document
+
+
+def managed_configuration_input(
+    kind: str,
+    payload: Mapping[str, Any],
+    *,
+    tenant_slug: str | None,
+) -> tuple[JsonDict, str]:
+    """Resolve the canonical JSON document and optional YAML import representation."""
+
+    normalized = _configuration_kind(kind)
+    raw_document = payload.get("document")
+    raw_yaml = payload.get("yaml")
+    yaml_text = str(raw_yaml or "")
+    if isinstance(raw_document, Mapping):
+        document = validate_managed_configuration_document(
+            normalized,
+            raw_document,
+            tenant_slug=tenant_slug,
+        )
+        if yaml_text.strip():
+            imported = parse_managed_configuration(
+                normalized,
+                yaml_text,
+                tenant_slug=tenant_slug,
+            )
+            if imported != document:
+                raise BadRequestError(
+                    "MANAGED_CONFIGURATION_INPUT_MISMATCH",
+                    "The YAML import and structured document describe different content",
+                )
+        else:
+            yaml_text = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+        return document, yaml_text
+    if yaml_text.strip():
+        return (
+            parse_managed_configuration(
+                normalized,
+                yaml_text,
+                tenant_slug=tenant_slug,
+            ),
+            yaml_text,
+        )
+    raise BadRequestError(
+        "MANAGED_CONFIGURATION_DOCUMENT_REQUIRED",
+        "Provide a structured document or a YAML import",
+    )
+
+
+def draft_managed_configuration_document(
+    kind: str,
+    document: JsonDict,
+    instruction: str,
+) -> tuple[list[str], list[str]]:
+    """Apply the bounded staff drafting grammar to an in-memory document copy."""
+
+    normalized = _configuration_kind(kind)
+    changes: list[str] = []
+    warnings: list[str] = []
+    if normalized == "journeys":
+        points = re.search(r"\b(\d{1,4})\s+points?\b", instruction, re.IGNORECASE)
+        addition = re.search(
+            r"\badd\s+[\"'](.+?)[\"']\s+to\s+(onboarding|enrollment)\b",
+            instruction,
+            re.IGNORECASE,
+        )
+        if addition:
+            task_title, flow_kind = addition.groups()
+            flow = next(
+                (
+                    candidate
+                    for candidate in _mutable_mapping_list(document.get("flows"))
+                    if str(candidate.get("kind", "")).lower() == flow_kind.lower()
+                ),
+                None,
+            )
+            if flow is None:
+                raise BadRequestError(
+                    "INVALID_MANAGED_CONFIGURATION",
+                    f"The {flow_kind.lower()} journey flow is not configured",
+                )
+            tasks = cast(list[Any], flow.setdefault("tasks", []))
+            task_id = re.sub(r"[^a-z0-9]+", "_", task_title.lower()).strip("_")
+            if any(isinstance(task, Mapping) and str(task.get("id")) == task_id for task in tasks):
+                warnings.append(f"{task_title} already exists in {flow_kind.lower()}.")
+            else:
+                lowered = instruction.lower()
+                task_type = (
+                    "multiple_select"
+                    if "multiple selection" in lowered or "multiple select" in lowered
+                    else "single_select"
+                    if "single selection" in lowered or "single select" in lowered
+                    else "upload_file"
+                    if "upload" in lowered
+                    else "payment"
+                    if "payment" in lowered or "pay " in lowered
+                    else "form"
+                )
+                options: list[str] | None = None
+                if task_type in {"single_select", "multiple_select"}:
+                    if "meal plan" in task_title.lower():
+                        options = [
+                            "Unlimited dining",
+                            "14 meals per week",
+                            "10 meals per week",
+                            "Commuter plan",
+                        ]
+                    else:
+                        option_match = re.search(
+                            r"\boptions?\s*(?:are|:)?\s*(.+?)(?:\.|$)",
+                            instruction,
+                            re.IGNORECASE,
+                        )
+                        if option_match:
+                            options = [
+                                value.strip(" \t\"'")
+                                for value in re.split(r"\s*,\s*|\s+and\s+", option_match.group(1))
+                                if value.strip(" \t\"'")
+                            ]
+                    if not options or len(set(options)) < 2:
+                        warnings.append(
+                            f"{task_title} needs at least two explicit option values "
+                            "before it can be published."
+                        )
+                        options = None
+                        return changes, warnings
+                task: JsonDict = {
+                    "id": task_id,
+                    "title": task_title,
+                    "description": f"Complete {task_title.lower()} for your student journey.",
+                    "task_type": task_type,
+                    "submission_type": (
+                        "document"
+                        if task_type == "upload_file"
+                        else "payment"
+                        if task_type == "payment"
+                        else "form"
+                    ),
+                    "owner": "Enrollment Operations",
+                    "required": "optional" not in lowered,
+                    "points": int(points.group(1)) if points else 0,
+                    "depends_on": [],
+                }
+                if options is not None:
+                    task["options"] = options
+                    if task_type == "multiple_select":
+                        task["maximum_selections"] = len(options)
+                tasks.append(task)
+                changes.append(f"Added {task_title} to {flow_kind.lower()}.")
+        elif points:
+            title_match = re.search(
+                r"(?:change|set)\s+(.+?)\s+(?:to|at)\s+\d+\s+points",
+                instruction,
+                re.IGNORECASE,
+            )
+            needle = title_match.group(1).strip(" \"'") if title_match else ""
+            target = next(
+                (
+                    task
+                    for flow in _mutable_mapping_list(document.get("flows"))
+                    for task in _mutable_mapping_list(flow.get("tasks"))
+                    if not needle or needle.lower() in str(task.get("title", "")).lower()
+                ),
+                None,
+            )
+            if target is not None:
+                target["points"] = int(points.group(1))
+                changes.append(
+                    f"Set {target.get('title', 'the journey task')} to {points.group(1)} points."
+                )
+    elif normalized == "campus_life":
+        event = re.search(
+            r"add an event called [\"'](.+?)[\"'] on (\d{4}-\d{2}-\d{2}) at (.+?)[.!]?$",
+            instruction,
+            re.IGNORECASE,
+        )
+        if event:
+            event_title, day, location = event.groups()
+            cast(list[Any], document["events"]).append(
+                {
+                    "id": re.sub(r"[^a-z0-9]+", "-", event_title.lower()).strip("-"),
+                    "title": event_title,
+                    "description": f"Tenant-authored event: {event_title}.",
+                    "starts_at": f"{day}T17:00:00.000Z",
+                    "ends_at": f"{day}T19:00:00.000Z",
+                    "location": location.strip(),
+                    "category": "social",
+                    "featured": False,
+                    "accent": "blue",
+                    "visual_theme": "community",
+                    "registration_url": None,
+                }
+            )
+            changes.append(f"Added {event_title} to the campus-life event draft.")
+    else:
+        course = re.search(
+            r"add course ([A-Z]{2,8}\s*\d{2,4}) called [\"'](.+?)[\"']"
+            r"(?: for (\d+) credits?)?",
+            instruction,
+            re.IGNORECASE,
+        )
+        if course:
+            code, title, credits = course.groups()
+            normalized_code = re.sub(r"\s+", " ", code.upper()).strip()
+            level_match = re.search(r"\d+", normalized_code)
+            if level_match is None:
+                raise BadRequestError("INVALID_COURSE_CODE", "The course code is invalid")
+            cast(list[Any], document["courses"]).append(
+                {
+                    "id": re.sub(r"[^a-z0-9]+", "-", normalized_code.lower()).strip("-"),
+                    "code": normalized_code,
+                    "title": title,
+                    "description": f"Tenant-authored catalog course: {title}.",
+                    "credits": int(credits or 3),
+                    "level": int(level_match.group()) // 100 * 100,
+                    "prerequisites": [],
+                    "instructor_names": [],
+                    "meeting_pattern": None,
+                    "availability_label": "Tenant catalog",
+                }
+            )
+            changes.append(f"Added {normalized_code} {title} to the catalog draft.")
+    if not changes and not warnings:
+        warnings.append(
+            "The draft engine could not safely translate this instruction; "
+            "review the unchanged document."
+        )
+    return changes, warnings
 
 
 def materialized_journey_tasks(
@@ -3103,34 +3500,19 @@ def _configuration_kind(value: str) -> ManagedConfigurationKind:
     return value
 
 
-def _validated_fallback(
+def _not_provisioned(
     kind: ManagedConfigurationKind,
-    fallback: Mapping[str, Any],
     *,
-    validate_materialized_inputs: bool = True,
-) -> JsonDict:
-    yaml_text = str(fallback.get("yaml") or "")
-    parse_managed_configuration(
-        kind,
-        yaml_text,
-        tenant_slug=None,
-        validate_materialized_inputs=validate_materialized_inputs,
-    )
-    version = _positive_integer(fallback.get("version", 1), "fallback version")
-    return {
-        "kind": kind,
-        "fileName": str(fallback.get("fileName") or _CONFIGURATION_FILES[kind]),
-        "version": version,
-        "yaml": yaml_text,
-        "recordCount": int(fallback.get("recordCount") or 0),
-        "updatedAt": str(fallback.get("updatedAt") or "1970-01-01T00:00:00Z"),
-        "updatedBy": str(fallback.get("updatedBy") or "Initial tenant configuration"),
-        **(
-            {"changeSummary": str(fallback["changeSummary"])}
-            if fallback.get("changeSummary")
-            else {}
+    missing: Sequence[ManagedConfigurationKind] | None = None,
+) -> NotFoundError:
+    missing_kinds = ", ".join(missing or (kind,))
+    return NotFoundError(
+        "MANAGED_CONFIGURATION_NOT_PROVISIONED",
+        (
+            "No published managed configuration exists in PostgreSQL for "
+            f"{missing_kinds}. Provision it through the reviewed seed/import workflow first."
         ),
-    }
+    )
 
 
 def _public_configuration(row: Mapping[str, Any]) -> JsonDict:
@@ -3141,6 +3523,7 @@ def _public_configuration(row: Mapping[str, Any]) -> JsonDict:
         "fileName": _CONFIGURATION_FILES[kind],
         "version": int(row["version"]),
         "yaml": str(row["yaml"]),
+        "document": copy.deepcopy(_mapping(row["document"])),
         "recordCount": int(row["record_count"]),
         "updatedAt": _iso(cast(datetime, row["published_at"])),
         "updatedBy": str(row["created_by"]),
@@ -3180,6 +3563,14 @@ def _mapping_list(value: object) -> list[JsonDict]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return []
     return [_mapping(item) for item in value if isinstance(item, Mapping)]
+
+
+def _mutable_mapping_list(value: object) -> list[JsonDict]:
+    """Return the original JSON objects when a draft needs bounded in-place edits."""
+
+    if not isinstance(value, list):
+        return []
+    return [cast(JsonDict, item) for item in value if isinstance(item, dict)]
 
 
 def _required_string(value: object, label: str, *, maximum: int) -> str:

@@ -156,8 +156,7 @@ class PostgresStaffRepository:
         """Read durable staff-only content used by the workspace editors."""
 
         self._require_staff(auth)
-        async with self._engine.begin() as connection:
-            await self._ensure_managed_content_defaults(connection, auth)
+        async with self._engine.connect() as connection:
             knowledge_result = await connection.execute(
                 text(
                     f"""
@@ -188,80 +187,6 @@ class PostgresStaffRepository:
                 ],
                 "corePlays": [_map_core_play(dict(row)) for row in play_result.mappings().all()],
             }
-
-    async def _ensure_managed_content_defaults(
-        self, connection: AsyncConnection, auth: AuthContext
-    ) -> None:
-        await connection.execute(
-            text(
-                f"""
-                INSERT INTO {self._table("staff_knowledge_card")} (
-                  id, tenant_id, title, summary, body, category, audience,
-                  status, owner_name, version, created_at, updated_at
-                )
-                SELECT md5(
-                         concat(
-                           CAST(:tenant_text AS text), chr(58),
-                           'knowledge', chr(58), seed.key
-                         )
-                       )::uuid,
-                       :tenant_id, seed.title, seed.summary, seed.body,
-                       seed.category, seed.audience, seed.status, seed.owner,
-                       1, NOW(), NOW()
-                FROM (VALUES
-                  ('deposit', 'Enrollment deposit policy',
-                   'Approved guidance for deposit deadlines, waivers, and escalation.',
-                   'Verify the offer deadline before discussing extensions or waivers.',
-                   'Enrollment', 'internal', 'published', 'Admissions Operations'),
-                  ('transcript', 'Transcript review expectations',
-                   'What students and reviewers should expect after an upload.',
-                   'Extracted fields remain suggestions until a reviewer confirms a decision.',
-                   'Documents', 'student', 'published', 'Registrar'),
-                  ('housing', 'Housing follow-up guide',
-                   'Routing notes for undecided and off-campus students.',
-                   'Use housing and accommodation preferences to select the advising queue.',
-                   'Housing', 'internal', 'draft', 'Student Life')
-                ) AS seed(key, title, summary, body, category, audience, status, owner)
-                ON CONFLICT (id) DO NOTHING
-                """
-            ),
-            {"tenant_id": _uuid(auth.tenant_id), "tenant_text": auth.tenant_id},
-        )
-        await connection.execute(
-            text(
-                f"""
-                INSERT INTO {self._table("staff_core_play")} (
-                  id, tenant_id, title, description, trigger_description,
-                  audience, steps, status, owner_name, version, created_at, updated_at
-                )
-                SELECT md5(
-                         concat(
-                           CAST(:tenant_text AS text), chr(58),
-                           'core-play', chr(58), seed.key
-                         )
-                       )::uuid,
-                       :tenant_id, seed.title, seed.description, seed.trigger,
-                       seed.audience, CAST(seed.steps AS jsonb), seed.status,
-                       seed.owner, 1, NOW(), NOW()
-                FROM (VALUES
-                  ('deposit', 'Deposit deadline rescue',
-                   'A coordinated sequence for an approaching deposit deadline.',
-                   'Deposit due within 72 hours and requirement incomplete',
-                   'Admitted students with incomplete deposits',
-                   '["Verify offer", "Check waiver", "Draft payment reminder"]',
-                   'active', 'Admissions Operations'),
-                  ('documents', 'Missing document recovery',
-                   'A follow-up path for blocking enrollment documents.',
-                   'Blocking document is rejected or seven days overdue',
-                   'Students with blocking document requirements',
-                   '["Confirm the rejection reason", "Draft resubmission instructions"]',
-                   'draft', 'Registrar')
-                ) AS seed(key, title, description, trigger, audience, steps, status, owner)
-                ON CONFLICT (id) DO NOTHING
-                """
-            ),
-            {"tenant_id": _uuid(auth.tenant_id), "tenant_text": auth.tenant_id},
-        )
 
     async def create_knowledge_card(
         self, auth: AuthContext, payload: Mapping[str, object], request_id: str
@@ -668,7 +593,7 @@ class PostgresStaffRepository:
                        COALESCE(
                          media.alt_text, 'Students collaborating in a campus club'
                        ) image_alt,
-                       COALESCE(media.attribution, 'Default Aster club image') image_attribution,
+                       COALESCE(media.attribution, 'Default tenant club image') image_attribution,
                        COALESCE(media.source_url, '') image_source_url
                 FROM {self._table("student_club")} club
                 LEFT JOIN {self._table("media_asset")} media
@@ -3666,8 +3591,8 @@ class PostgresStaffRepository:
         inquiry_id: str,
         update: Mapping[str, object],
         request_id: str,
-    ) -> dict[str, object] | None:
-        """Update a canonical inquiry, or return ``None`` for preview fallback."""
+    ) -> dict[str, object]:
+        """Update the canonical tenant inquiry and fail closed when it is absent."""
 
         self._require_staff(auth)
         expected_version = _integer(
@@ -3682,7 +3607,10 @@ class PostgresStaffRepository:
         async with self._engine.begin() as connection:
             inquiry = await self._lock_inquiry(connection, auth, inquiry_id)
             if inquiry is None:
-                return None
+                raise NotFoundError(
+                    "STAFF_INQUIRY_NOT_FOUND",
+                    "The student inquiry was not found",
+                )
             if _database_integer(inquiry["version"], "student_inquiry.version") != expected_version:
                 raise ConflictError(
                     "VERSION_CONFLICT",

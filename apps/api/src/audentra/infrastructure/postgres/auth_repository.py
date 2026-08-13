@@ -19,11 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, ConflictError, UnauthorizedError
 from audentra.core.ports import CredentialStudentSession, DemoStudentSession, StaffSession
-from audentra.infrastructure.seeding.relational import (
-    HARVARD_TENANT_ID,
-    ensure_harvard_demo_student,
-    reset_relational_data,
-)
+from audentra.infrastructure.seeding.relational import reset_relational_data
 
 _STUDENT_SESSION_LIFETIME = timedelta(days=7)
 _STAFF_SESSION_LIFETIME = timedelta(hours=8)
@@ -43,7 +39,6 @@ class PostgresDevelopmentAuth:
         *,
         environment: str,
         staff_invitation_code: str,
-        demo_student_ids: Mapping[str, str],
     ) -> None:
         if environment not in {"development", "preview", "test"}:
             raise ValueError("The development authentication adapter is disabled in production")
@@ -52,15 +47,8 @@ class PostgresDevelopmentAuth:
         self._engine = engine
         self._environment = environment
         self._staff_invitation_code = staff_invitation_code
-        self._demo_student_ids = dict(demo_student_ids)
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
-        if tenant_id == HARVARD_TENANT_ID:
-            await ensure_harvard_demo_student(
-                self._engine,
-                environment=self._environment,
-            )
-        student_id = self._demo_student_id(tenant_slug)
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -69,13 +57,18 @@ class PostgresDevelopmentAuth:
                            COALESCE(sp.preferred_name, p.preferred_name, p.first_name)
                              AS preferred_name
                     FROM student s
+                    JOIN tenant t ON t.id=s.tenant_id
                     JOIN person p ON p.id=s.person_id AND p.tenant_id=s.tenant_id
                     LEFT JOIN student_profile sp
                       ON sp.student_id=s.id AND sp.tenant_id=s.tenant_id
-                    WHERE s.tenant_id=:tenant_id AND s.id=:student_id
+                    WHERE s.tenant_id=:tenant_id
+                      AND t.status='active'
+                      AND t.demo_auth_enabled=true
+                    ORDER BY s.created_at, s.id
+                    LIMIT 1
                     """
                 ),
-                {"tenant_id": UUID(tenant_id), "student_id": UUID(student_id)},
+                {"tenant_id": UUID(tenant_id)},
             )
             row = result.mappings().first()
         if row is None:
@@ -424,7 +417,7 @@ class PostgresDevelopmentAuth:
                 ),
                 {"token_hash": token_hash},
             )
-        return self._staff_session(dict(row), tenant_id, tenant_slug)
+        return await self._staff_session(dict(row), tenant_id, tenant_slug)
 
     async def sign_up_staff(
         self,
@@ -435,11 +428,6 @@ class PostgresDevelopmentAuth:
         password: str,
         institution_access_code: str,
     ) -> StaffSession:
-        if tenant_id == HARVARD_TENANT_ID:
-            await ensure_harvard_demo_student(
-                self._engine,
-                environment=self._environment,
-            )
         invitation_matches = secrets.compare_digest(
             hashlib.sha256(institution_access_code.encode("utf-8")).digest(),
             hashlib.sha256(self._staff_invitation_code.encode("utf-8")).digest(),
@@ -522,7 +510,7 @@ class PostgresDevelopmentAuth:
                 "STAFF_AUTH_ACCOUNT_EXISTS",
                 "A staff account already exists for this email address",
             ) from error
-        return self._staff_session(
+        return await self._staff_session(
             dict(row),
             tenant_id,
             tenant_slug,
@@ -538,11 +526,6 @@ class PostgresDevelopmentAuth:
         email: str,
         password: str,
     ) -> StaffSession:
-        if tenant_id == HARVARD_TENANT_ID:
-            await ensure_harvard_demo_student(
-                self._engine,
-                environment=self._environment,
-            )
         normalized_email = _normalize_email(email)
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -601,7 +584,7 @@ class PostgresDevelopmentAuth:
                 token_hash=token_hash,
                 expires_at=expires_at,
             )
-        return self._staff_session(
+        return await self._staff_session(
             dict(row),
             tenant_id,
             tenant_slug,
@@ -766,7 +749,7 @@ class PostgresDevelopmentAuth:
             },
         )
 
-    def _staff_session(
+    async def _staff_session(
         self,
         row: Mapping[str, Any],
         tenant_id: str,
@@ -775,10 +758,34 @@ class PostgresDevelopmentAuth:
         token: str | None = None,
         expires_at_epoch: int | None = None,
     ) -> StaffSession:
+        # TODO: remove student_id from staff AuthContext. Until that contract is
+        # separated, select a tenant-scoped workspace context without requiring
+        # the tenant to opt in to public demo authentication.
+        async with self._engine.connect() as connection:
+            student_result = await connection.execute(
+                text(
+                    """
+                    SELECT student.id
+                    FROM student
+                    JOIN tenant ON tenant.id=student.tenant_id
+                    WHERE student.tenant_id=:tenant_id AND tenant.status='active'
+                    ORDER BY student.created_at, student.id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": UUID(tenant_id)},
+            )
+            student_id = student_result.scalar_one_or_none()
+        if student_id is None:
+            raise ApiError(
+                503,
+                "STAFF_WORKSPACE_CONTEXT_NOT_CONFIGURED",
+                "A staff workspace student context is not configured for this university",
+            )
         return StaffSession(
             context=AuthContext(
                 tenant_id=tenant_id,
-                student_id=self._demo_student_id(tenant_slug),
+                student_id=str(student_id),
                 actor_id=str(row["id"]),
                 actor_type="staff",
                 authentication_method="credentials",
@@ -790,11 +797,6 @@ class PostgresDevelopmentAuth:
             token=token,
             expires_at_epoch=expires_at_epoch,
         )
-
-    def _demo_student_id(self, tenant_slug: str | None) -> str:
-        if tenant_slug is not None and tenant_slug in self._demo_student_ids:
-            return self._demo_student_ids[tenant_slug]
-        return self._demo_student_ids["aster"]
 
     async def _insert_staff_session(
         self,

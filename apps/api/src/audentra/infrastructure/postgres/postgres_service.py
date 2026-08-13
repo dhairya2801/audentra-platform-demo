@@ -16,6 +16,12 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from audentra.application.staff_workspace import (
+    compose_staff_workspace,
+    draft_managed_configuration,
+    preview_edward,
+    simulate_outreach,
+)
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
@@ -34,7 +40,6 @@ from audentra.infrastructure.documents.processing import (
     create_signed_onboarding_pdf,
     extract_student_document_image_region,
 )
-from audentra.infrastructure.preview.staff_workspace import PreviewStaffWorkspaceRepository
 from audentra.infrastructure.storage.s3 import StorageError
 from audentra.integrations.ai.edward_safety import (
     EdwardActionAuthority,
@@ -51,6 +56,7 @@ from .managed_configuration_repository import PostgresManagedConfigurationReposi
 from .platform_repository import PostgresPlatformRepository
 from .portal_repository import PostgresPortalRepository
 from .staff_repository import PostgresStaffRepository
+from .tenant_repository import PostgresTenantRepository
 
 JsonDict = dict[str, Any]
 LOGGER = logging.getLogger(__name__)
@@ -72,7 +78,12 @@ SIGNED_TEMPLATES = (
     },
 )
 
+ASTER_TENANT_ID = "00000000-0000-7000-8000-000000000001"
 HARVARD_TENANT_ID = "00000000-0000-7000-8000-000000000002"
+SIGNED_TEMPLATE_TENANT_PREFIXES = {
+    ASTER_TENANT_ID: "aster",
+    HARVARD_TENANT_ID: "harvard",
+}
 
 _EDWARD_DEPOSIT_ACTION = re.compile(
     r"(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)", re.I
@@ -311,6 +322,7 @@ class PostgresRepositoryBundle:
     portal: PostgresPortalRepository
     staff: PostgresStaffRepository
     managed: PostgresManagedConfigurationRepository | None = None
+    tenant: PostgresTenantRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -382,7 +394,13 @@ class PostgresSignedDocumentGenerator:
             and signature.get("onboardingVersion") == version
         }
         requested = set(data["signedDocumentIds"])
-        tenant_prefix = "harvard" if auth.tenant_id == HARVARD_TENANT_ID else "aster"
+        tenant_prefix = SIGNED_TEMPLATE_TENANT_PREFIXES.get(auth.tenant_id)
+        if tenant_prefix is None:
+            raise ApiError(
+                503,
+                "ONBOARDING_TEMPLATE_NOT_PROVISIONED",
+                "Signed onboarding templates are not provisioned for this university",
+            )
         created = 0
         for template in SIGNED_TEMPLATES:
             if template["code"] not in requested or template["code"] in existing_codes:
@@ -453,14 +471,12 @@ class PostgresPlatformService:
         ai: StudentAI,
         signed_documents: SignedDocumentGenerator,
         worker_token: str,
-        staff_preview: PreviewStaffWorkspaceRepository | None = None,
     ) -> None:
         self.repository = repository
         self.storage = storage
         self.ai = ai
         self.signed_documents = signed_documents
         self.worker_token = worker_token
-        self.staff_preview = staff_preview
 
     async def dispatch(self, call: ServiceCall) -> object:
         operation = call.operation
@@ -477,6 +493,16 @@ class PostgresPlatformService:
             return {"status": "ready", "service": "vv-api", "timestamp": self._timestamp()}
         if operation == "public.get_portal_media":
             return await self._get_portal_media(self._path(call, "mediaFile", "file"))
+        if operation == "public.get_tenant_bootstrap":
+            tenant = self.repository.tenant
+            if tenant is None:
+                raise ApiError(
+                    503, "TENANT_CONFIGURATION_UNAVAILABLE", "Tenant configuration is unavailable"
+                )
+            slug = call.path_params.get("slug")
+            if slug is not None:
+                return await tenant.get_public_by_slug(str(slug))
+            return await tenant.get_active_by_id(self._path(call, "tenantId"))
 
         auth = self._auth(call)
         payload = dict(call.payload)
@@ -692,7 +718,6 @@ class PostgresPlatformService:
             )
         if operation == "staff.get_workspace":
             configurations = await self._managed_configurations(auth)
-            await self._preview().sync_managed_configurations(auth, configurations)
             (
                 action_center,
                 student,
@@ -708,43 +733,47 @@ class PostgresPlatformService:
                 staff.get_student_roster(auth),
                 staff.get_managed_content(auth),
             )
-            return await self._preview().get_workspace(
+            return compose_staff_workspace(
                 auth,
                 action_center=action_center,
                 student=student,
                 campus_life=campus_life,
-                canonical_inquiries=inquiries,
-                canonical_cohort=cohort,
-                canonical_knowledge=cast(
-                    Sequence[Mapping[str, Any]], managed_content.get("knowledgeBase", [])
-                ),
-                canonical_core_plays=cast(
-                    Sequence[Mapping[str, Any]], managed_content.get("corePlays", [])
-                ),
+                inquiries=cast(Sequence[Mapping[str, Any]], inquiries),
+                cohort=cast(Sequence[Mapping[str, Any]], cohort),
+                managed_content=managed_content,
+                configurations=configurations,
+                generated_at=self._timestamp(),
             )
+        if operation == "staff.get_tenant_configuration":
+            tenant = self.repository.tenant
+            if tenant is None:
+                raise ApiError(
+                    503, "TENANT_CONFIGURATION_UNAVAILABLE", "Tenant configuration is unavailable"
+                )
+            return await tenant.get_staff(auth)
+        if operation == "staff.update_tenant_configuration":
+            tenant = self.repository.tenant
+            if tenant is None:
+                raise ApiError(
+                    503, "TENANT_CONFIGURATION_UNAVAILABLE", "Tenant configuration is unavailable"
+                )
+            return await tenant.update_staff(auth, payload, call.request_id)
         if operation == "staff.upload_portal_media":
             return await self._upload_staff_portal_media(auth, call)
         if operation == "staff.get_managed_configuration":
             return await self._managed_configuration(auth, self._path(call, "kind"))
         if operation == "staff.update_managed_configuration":
             kind = self._path(call, "kind")
-            fallback = await self._preview().get_managed_configuration(auth, kind)
             if self.repository.managed is None:
-                return await self._preview().update_managed_configuration(auth, kind, payload)
-            published = await self.repository.managed.publish(
-                auth,
-                kind,
-                payload,
-                fallback,
-                call.request_id,
-            )
-            await self._preview().sync_managed_configurations(auth, {kind: published})
-            return published
+                raise NotFoundError(
+                    "MANAGED_CONFIGURATION_REPOSITORY_UNAVAILABLE",
+                    "The PostgreSQL managed configuration repository is unavailable",
+                )
+            return await self.repository.managed.publish(auth, kind, payload, call.request_id)
         if operation == "staff.draft_managed_configuration":
             kind = str(payload.get("kind") or "")
             current = await self._managed_configuration(auth, kind)
-            await self._preview().sync_managed_configurations(auth, {kind: current})
-            return await self._preview().draft_managed_configuration(auth, payload)
+            return draft_managed_configuration(auth, current, payload)
         if operation == "staff.create_knowledge_card":
             return await staff.create_knowledge_card(auth, payload, call.request_id)
         if operation == "staff.update_knowledge_card":
@@ -759,20 +788,11 @@ class PostgresPlatformService:
             )
         if operation == "staff.update_inquiry":
             inquiry_id = self._path(call, "inquiryId", "id")
-            canonical = await staff.update_inquiry(
+            return await staff.update_inquiry(
                 auth,
                 inquiry_id,
                 payload,
                 call.request_id,
-            )
-            if canonical is not None:
-                return canonical
-            center = await staff.get_action_center(auth)
-            return await self._preview().update_inquiry(
-                auth,
-                inquiry_id,
-                payload,
-                staff=cast(list[Mapping[str, Any]], center.get("staff", [])),
             )
         if operation == "staff.get_inquiry_thread":
             return await portal.get_staff_inquiry_thread(
@@ -786,9 +806,9 @@ class PostgresPlatformService:
                 auth, self._path(call, "clubId", "id"), payload, call.request_id
             )
         if operation == "staff.simulate_outreach":
-            return await self._preview().simulate_outreach(auth, payload)
+            return simulate_outreach(auth, payload)
         if operation == "staff.preview_edward":
-            return await self._preview().preview_edward(auth, payload)
+            return preview_edward(auth, payload)
         if operation == "staff.get_action_center":
             return await staff.get_action_center(auth)
         if operation == "staff.create_work_item":
@@ -930,26 +950,21 @@ class PostgresPlatformService:
             raise UnauthorizedError()
         return call.auth
 
-    def _preview(self) -> PreviewStaffWorkspaceRepository:
-        if self.staff_preview is None:
-            raise NotFoundError(
-                "STAFF_PREVIEW_DISABLED",
-                "The extended staff preview is disabled in this environment",
-            )
-        return self.staff_preview
-
     async def _managed_configuration(self, auth: AuthContext, kind: str) -> JsonDict:
-        fallback = await self._preview().get_managed_configuration(auth, kind)
         if self.repository.managed is None:
-            return fallback
-        return await self.repository.managed.get(auth, kind, fallback)
+            raise NotFoundError(
+                "MANAGED_CONFIGURATION_REPOSITORY_UNAVAILABLE",
+                "The PostgreSQL managed configuration repository is unavailable",
+            )
+        return await self.repository.managed.get(auth, kind)
 
     async def _managed_configurations(self, auth: AuthContext) -> dict[str, JsonDict]:
-        kinds = ("journeys", "campus_life", "academics")
-        configurations = await asyncio.gather(
-            *(self._managed_configuration(auth, kind) for kind in kinds)
-        )
-        return dict(zip(kinds, configurations, strict=True))
+        if self.repository.managed is None:
+            raise NotFoundError(
+                "MANAGED_CONFIGURATION_REPOSITORY_UNAVAILABLE",
+                "The PostgreSQL managed configuration repository is unavailable",
+            )
+        return await self.repository.managed.list_active(auth)
 
     @staticmethod
     def _timestamp() -> str:

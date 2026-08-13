@@ -6,7 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from audentra.core.auth import AuthContext
-from audentra.core.errors import UnauthorizedError
+from audentra.core.errors import NotFoundError, UnauthorizedError
 from audentra.core.ports import (
     CredentialStudentSession,
     DemoStudentSession,
@@ -35,6 +35,20 @@ class FakePlatformService:
 
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            tenant_ids = {"aster": TENANT_ID}
+            requested_slug = call.path_params.get("slug")
+            requested_id = call.path_params.get("tenantId")
+            tenant_id = (
+                tenant_ids.get(str(requested_slug))
+                if requested_slug is not None
+                else str(requested_id)
+                if requested_id == TENANT_ID
+                else None
+            )
+            if tenant_id is None:
+                raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
+            return {"tenantId": tenant_id, "slug": str(requested_slug or "aster")}
         return {"operation": call.operation}
 
 
@@ -231,8 +245,11 @@ async def test_demo_cookie_gates_protected_routes_and_sign_out_invalidates_it(
     assert "HttpOnly" in signed_in.headers["set-cookie"]
     assert "SameSite=lax" in signed_in.headers["set-cookie"]
     assert accepted.status_code == 200
-    assert platform_service.calls[-1].auth is not None
-    assert platform_service.calls[-1].auth.authentication_method == "demo"
+    accepted_call = next(
+        call for call in platform_service.calls if call.operation == "student.get_bootstrap"
+    )
+    assert accepted_call.auth is not None
+    assert accepted_call.auth.authentication_method == "demo"
     assert signed_out.json() == {"authenticated": False, "mode": "demo"}
     assert denied_again.status_code == 401
 
@@ -360,6 +377,42 @@ async def test_guided_reset_explicitly_selects_completed_browser_fixture(
 
     assert response.status_code == 200
     assert auth_service.reset_completed is True
+
+
+async def test_guided_reset_is_hidden_in_preview_and_does_not_mutate_fixture(
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    app = create_app(
+        service=platform_service,
+        auth_service=auth_service,
+        settings=HttpSettings(environment="preview", browser_auth_required=True),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="https://preview.example"
+    ) as preview_client:
+        response = await preview_client.post(
+            "/v1/auth/demo/start-guided-onboarding",
+            json={"completedOnboarding": False},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "GUIDED_RESET_DISABLED"
+    assert auth_service.reset_completed is None
+
+
+async def test_guided_reset_validates_tenant_before_mutating_fixture(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    response = await client.post(
+        "/v1/auth/demo/start-guided-onboarding",
+        headers={"X-Tenant-Slug": "unknown"},
+        json={"completedOnboarding": False},
+    )
+
+    assert response.status_code == 401
+    assert auth_service.reset_completed is None
 
 
 async def test_development_auth_endpoints_are_hidden_in_production(

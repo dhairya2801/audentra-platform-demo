@@ -63,7 +63,7 @@ class CallTranscriptionRunner:
         api_key: str,
         model: str = "openai/whisper-large-v3",
         app_url: str = "http://localhost:3000",
-        app_name: str = "Aster Student Portal",
+        app_name: str = "Audentra Student Portal",
         worker_id: str = "call-transcription",
         batch_size: int = 4,
         concurrency: int = 2,

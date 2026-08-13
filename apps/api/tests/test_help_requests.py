@@ -43,6 +43,8 @@ class RecordingService:
 
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            return {"tenantId": TENANT_ID, "slug": "aster"}
         return {"operation": call.operation}
 
 
@@ -104,7 +106,7 @@ async def test_help_request_route_rejects_invalid_bodies(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
-    assert service.calls == []
+    assert [call.operation for call in service.calls] == ["public.get_tenant_bootstrap"]
 
 
 @pytest.mark.anyio
@@ -119,7 +121,7 @@ async def test_help_request_route_requires_idempotency_key(
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
-    assert service.calls == []
+    assert [call.operation for call in service.calls] == ["public.get_tenant_bootstrap"]
 
 
 def test_help_request_openapi_contract_is_strict_and_camel_case() -> None:

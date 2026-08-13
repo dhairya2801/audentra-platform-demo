@@ -68,6 +68,16 @@ class RecordingVoiceService:
         return {"voiceSessionId": voice_session_id, "status": "ended"}
 
 
+class TenantLookupService:
+    async def dispatch(self, call: ServiceCall) -> object:
+        if call.operation == "public.get_tenant_bootstrap":
+            return {
+                "tenantId": "00000000-0000-7000-8000-000000000001",
+                "slug": "aster",
+            }
+        return {"operation": call.operation}
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -77,6 +87,7 @@ def anyio_backend() -> str:
 async def voice_client() -> AsyncIterator[tuple[AsyncClient, RecordingVoiceService]]:
     service = RecordingVoiceService()
     app = create_app(
+        service=TenantLookupService(),
         settings=HttpSettings(voice_agent_internal_token=INTERNAL_TOKEN),
         voice_service=service,
     )
@@ -143,7 +154,7 @@ async def test_reconnect_route_validates_the_session_id(
 
 @pytest.mark.anyio
 async def test_voice_routes_fail_closed_when_voice_is_not_configured() -> None:
-    app = create_app()
+    app = create_app(service=TenantLookupService())
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as client:
         response = await client.post(

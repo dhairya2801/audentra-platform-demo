@@ -142,7 +142,7 @@ def guarded_response(message: object) -> dict[str, Any] | None:
     reason: str | None = None
     if _CROSS_STUDENT_ACCESS.search(message):
         reason = (
-            "I can only use the signed-in student\u2019s permission-scoped Aster record. "
+            "I can only use the signed-in student\u2019s permission-scoped institution record. "
             "I can\u2019t access or reveal another student\u2019s information."
         )
     elif _FORGED_RECORD_MUTATION.search(message):
@@ -183,7 +183,7 @@ def sanitize_prose(value: object) -> str:
     normalized = _UNSAFE_CONTROL.sub("", normalized)
     normalized = re.sub(r"[ \t]{2,}", " ", normalized)
     normalized = re.sub(r"\s+([,.;:!?])", r"\1", normalized).strip()
-    return normalized[:2500] or "I prepared the relevant Aster portal action below."
+    return normalized[:2500] or "I prepared the relevant portal action below."
 
 
 def normalize_response(

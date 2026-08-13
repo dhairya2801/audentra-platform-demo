@@ -57,6 +57,7 @@ from audentra.contracts.requests import (
     UpdateStudentHousingPlanRequest,
     UpdateStudentOnboardingRequest,
     UpdateStudentProfileRequest,
+    UpdateTenantPortalConfigurationRequest,
 )
 from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.auth import AuthContext
@@ -70,6 +71,7 @@ from .dependencies import (
     VoiceAgentTokenDependency,
     VoiceSessionServiceDependency,
     WorkerTokenDependency,
+    is_valid_tenant_slug,
 )
 
 MAXIMUM_DOCUMENT_BYTES = 10_485_760
@@ -421,6 +423,25 @@ async def get_portal_media(
         path_params={"mediaFile": file_name},
     )
     return _binary_response(result)
+
+
+@router.get("/v1/tenants/{slug}/bootstrap", status_code=200, response_model=None)
+async def get_tenant_bootstrap(
+    slug: Annotated[
+        str,
+        Path(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"),
+    ],
+    request: Request,
+    service: ServiceDependency,
+) -> object:
+    if not is_valid_tenant_slug(slug):
+        raise BadRequestError("INVALID_TENANT_SLUG", "The tenant slug is not routable")
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="public.get_tenant_bootstrap",
+        path_params={"slug": slug},
+    )
 
 
 @router.get("/v1/student/dashboard", status_code=200, response_model=None)
@@ -1318,6 +1339,34 @@ async def get_staff_workspace(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="staff.get_workspace", auth=auth
+    )
+
+
+@router.get("/v1/staff/tenant-configuration", status_code=200, response_model=None)
+async def get_staff_tenant_configuration(
+    request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_tenant_configuration",
+        auth=auth,
+    )
+
+
+@router.patch("/v1/staff/tenant-configuration", status_code=200, response_model=None)
+async def update_staff_tenant_configuration(
+    body: UpdateTenantPortalConfigurationRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.update_tenant_configuration",
+        auth=auth,
+        payload=body.public_payload(),
     )
 
 

@@ -3,18 +3,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+import yaml  # type: ignore[import-untyped]
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+from audentra.core.auth import AuthContext
+from audentra.infrastructure.postgres.managed_configuration_repository import (
+    PostgresManagedConfigurationRepository,
+)
 
 from .fixture import FixtureTable, SeedFixtureError, load_demo_fixture
 from .safety import assert_seed_environment
@@ -30,6 +39,42 @@ HARVARD_CAMPUS_ID = "80000000-0000-7000-8000-000000000110"
 HARVARD_TERM_ID = "80000000-0000-7000-8000-000000000120"
 HARVARD_OFFER_ID = "80000000-0000-7000-8000-000000000201"
 HARVARD_STAFF_ID = "80000000-0000-7000-8000-000000000901"
+_MANAGED_CONFIGURATION_FILES = {
+    "journeys": "journeys.yaml",
+    "campus_life": "campus-life.yaml",
+    "academics": "academics.yaml",
+}
+_RESET_PRESERVED_TABLES = frozenset(
+    {
+        "staff_core_play",
+        "staff_knowledge_card",
+        "tenant",
+        "tenant_portal_configuration",
+        "staff_managed_configuration_version",
+    }
+)
+
+
+def _managed_configuration_root(explicit: Path | None = None) -> Path:
+    configured = os.getenv("MANAGED_CONFIGURATION_ROOT")
+    candidates = tuple(
+        dict.fromkeys(
+            candidate.resolve()
+            for candidate in (
+                explicit,
+                Path(configured) if configured else None,
+                Path.cwd() / "assets" / "config" / "tenants",
+                Path("/workspace/apps/api/assets/config/tenants"),
+                Path(__file__).resolve().parents[4] / "assets" / "config" / "tenants",
+            )
+            if candidate is not None
+        )
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise SeedFixtureError(f"Managed configuration seed root was not found; searched: {searched}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,6 +522,7 @@ async def seed_relational_data(
                 primary_keys[table.name],
             )
         await _ensure_demo_seed_supplements(connection, completed_onboarding=False)
+    await provision_demo_managed_configurations(engine)
     return RelationalSeedReport(
         tables=len(fixture),
         rows=sum(len(table.rows) for table in fixture),
@@ -488,6 +534,7 @@ async def reset_relational_data(
     *,
     environment: str,
     completed_onboarding: bool = False,
+    preserve_managed_configurations: bool = True,
 ) -> RelationalSeedReport:
     """Atomically restore the complete deterministic browser fixture.
 
@@ -498,12 +545,27 @@ async def reset_relational_data(
 
     assert_seed_environment(environment)
     fixture = load_demo_fixture()
+    preserved_configurations: list[dict[str, object]] = []
     async with engine.begin() as connection:
         await connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
             {"lock_name": _SEED_LOCK_NAME},
         )
         columns, primary_keys, dependencies = await _load_schema(connection, fixture)
+        if preserve_managed_configurations:
+            existing_configurations = await connection.execute(
+                text(
+                    """
+                    SELECT tenant_id, kind, document, created_by
+                    FROM staff_managed_configuration_version
+                    WHERE active=true
+                    ORDER BY tenant_id, kind
+                    """
+                )
+            )
+            preserved_configurations = [
+                dict(row) for row in existing_configurations.mappings().all()
+            ]
         reset_tables = await connection.execute(
             text(
                 """
@@ -514,11 +576,20 @@ async def reset_relational_data(
                 """
             )
         )
-        table_names = [str(row["tablename"]) for row in reset_tables.mappings().all()]
+        preserved_tables = (
+            _RESET_PRESERVED_TABLES
+            if preserve_managed_configurations
+            else _RESET_PRESERVED_TABLES - {"staff_managed_configuration_version"}
+        )
+        table_names = [
+            str(row["tablename"])
+            for row in reset_tables.mappings().all()
+            if str(row["tablename"]) not in preserved_tables
+        ]
         if not table_names or any(not _IDENTIFIER.fullmatch(name) for name in table_names):
             raise SeedFixtureError("The development reset found an unsafe table inventory")
         table_list = ", ".join(f'public."{name}"' for name in table_names)
-        await connection.execute(text(f"TRUNCATE TABLE {table_list} CASCADE"))
+        await connection.execute(text(f"TRUNCATE TABLE {table_list}"))
         for table in _foreign_key_order(fixture, dependencies):
             await _upsert_table(
                 connection,
@@ -529,6 +600,22 @@ async def reset_relational_data(
         await _ensure_demo_seed_supplements(
             connection,
             completed_onboarding=completed_onboarding,
+        )
+    repository = PostgresManagedConfigurationRepository(engine)
+    for configuration in preserved_configurations:
+        tenant_id = str(configuration["tenant_id"])
+        tenant_slug = "harvard" if tenant_id == HARVARD_TENANT_ID else "aster"
+        await repository.rematerialize_active(
+            AuthContext(
+                tenant_id=tenant_id,
+                student_id=(
+                    HARVARD_STUDENT_ID if tenant_id == HARVARD_TENANT_ID else ASTER_STUDENT_ID
+                ),
+                actor_id=str(configuration["created_by"]),
+                actor_type="staff",
+                tenant_slug=tenant_slug,
+            ),
+            str(configuration["kind"]),
         )
     return RelationalSeedReport(
         tables=len(fixture),
@@ -561,6 +648,50 @@ async def ensure_harvard_demo_student(
                 await _ensure_demo_student_scenario(connection, scenario)
         await _ensure_demo_staff_and_work(connection, tenant_id=HARVARD_TENANT_ID)
         await _ensure_default_action_rules(connection, (HARVARD_TENANT_ID,))
+
+
+async def provision_demo_managed_configurations(
+    engine: AsyncEngine,
+    *,
+    tenant_slugs: tuple[str, ...] = ("aster", "harvard"),
+    configuration_root: Path | None = None,
+) -> None:
+    """Import packaged demo documents once through the canonical publication path."""
+
+    root = _managed_configuration_root(configuration_root)
+    repository = PostgresManagedConfigurationRepository(engine)
+    identities = {
+        "aster": (ASTER_TENANT_ID, "00000000-0000-7000-8000-000000000901"),
+        "harvard": (HARVARD_TENANT_ID, HARVARD_STAFF_ID),
+    }
+    for tenant_slug in tenant_slugs:
+        tenant_id, staff_id = identities[tenant_slug]
+        auth = AuthContext(
+            tenant_id=tenant_id,
+            student_id=(ASTER_STUDENT_ID if tenant_slug == "aster" else HARVARD_STUDENT_ID),
+            actor_id=staff_id,
+            actor_type="staff",
+            tenant_slug=tenant_slug,
+        )
+        for kind, file_name in _MANAGED_CONFIGURATION_FILES.items():
+            source = root / tenant_slug / file_name
+            try:
+                raw_document = yaml.safe_load(
+                    await asyncio.to_thread(source.read_text, encoding="utf-8")
+                )
+            except (OSError, yaml.YAMLError) as error:
+                raise SeedFixtureError(
+                    f"The managed configuration seed could not read {source}"
+                ) from error
+            if not isinstance(raw_document, dict):
+                raise SeedFixtureError(f"The managed configuration seed is invalid: {source}")
+            await repository.provision_if_missing(
+                auth,
+                kind,
+                raw_document,
+                f"demo-managed-config:{tenant_slug}:{kind}",
+                rematerialize_existing=True,
+            )
 
 
 def _demo_uuid(namespace: str, suffix: str) -> str:

@@ -11,6 +11,9 @@ from sqlalchemy import text
 from audentra.bootstrap.settings import RuntimeSettings
 from audentra.core.auth import AuthContext
 from audentra.infrastructure.db.engine import create_database_engine
+from audentra.infrastructure.postgres.managed_configuration_repository import (
+    PostgresManagedConfigurationRepository,
+)
 from audentra.infrastructure.postgres.platform_repository import PostgresPlatformRepository
 from audentra.infrastructure.seeding.media import seed_portal_media
 from audentra.infrastructure.seeding.relational import (
@@ -40,8 +43,50 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 engine,
                 environment="test",
                 completed_onboarding=False,
+                preserve_managed_configurations=False,
             )
             first = await seed_relational_data(engine, environment="test")
+            managed_repository = PostgresManagedConfigurationRepository(engine)
+            aster_staff_auth = AuthContext(
+                tenant_id=ASTER_TENANT_ID,
+                student_id=ASTER_STUDENT_ID,
+                actor_id="00000000-0000-7000-8000-000000000901",
+                actor_type="staff",
+                tenant_slug="aster",
+            )
+            campus_configuration = await managed_repository.get(aster_staff_auth, "campus_life")
+            staff_publication = await managed_repository.publish(
+                aster_staff_auth,
+                "campus_life",
+                {
+                    "expectedVersion": campus_configuration["version"],
+                    "document": campus_configuration["document"],
+                    "changeSummary": "Staff-published version retained across seed reruns",
+                },
+                "seed-integration-staff-publication",
+            )
+            async with engine.connect() as connection:
+                configurations_before = {
+                    (str(row["tenant_id"]), str(row["kind"])): (
+                        str(row["id"]),
+                        int(row["version"]),
+                        row["document"],
+                    )
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, tenant_id, kind, version, document
+                                FROM staff_managed_configuration_version
+                                WHERE active=true
+                                ORDER BY tenant_id, kind
+                                """
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                }
             second = await seed_relational_data(engine, environment="test")
             async with engine.connect() as connection:
                 inventory_result = await connection.execute(
@@ -55,7 +100,7 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                                (SELECT COUNT(*) FROM journey_definition_version
                                 WHERE journey_definition_version.tenant_id=tenant.id
                                   AND active=1) AS active_journeys,
-                               (SELECT COUNT(*) FROM requirement_definition_version
+                               (SELECT COUNT(DISTINCT code) FROM requirement_definition_version
                                 WHERE requirement_definition_version.tenant_id=tenant.id)
                                   AS requirement_definitions,
                                (SELECT COUNT(*) FROM ai_operation_config
@@ -82,7 +127,56 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 inventory = {
                     row["tenant_id"]: dict(row) for row in inventory_result.mappings().all()
                 }
+                configurations_after = {
+                    (str(row["tenant_id"]), str(row["kind"])): (
+                        str(row["id"]),
+                        int(row["version"]),
+                        row["document"],
+                    )
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, tenant_id, kind, version, document
+                                FROM staff_managed_configuration_version
+                                WHERE active=true
+                                ORDER BY tenant_id, kind
+                                """
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                }
+                materialized_media = {
+                    str(row["code"]): dict(row)
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT code, source_id, related_videos
+                                FROM catalog_course
+                                WHERE tenant_id=CAST(:tenant_id AS uuid) AND active=true
+                                ORDER BY code
+                                """
+                            ),
+                            {"tenant_id": ASTER_TENANT_ID},
+                        )
+                    )
+                    .mappings()
+                    .all()
+                }
             assert first.rows == second.rows == 264
+            assert len(configurations_before) == 6
+            assert configurations_after == configurations_before
+            assert configurations_after[(ASTER_TENANT_ID, "campus_life")][1] == 2
+            assert staff_publication["version"] == 2
+            assert materialized_media["CS 101"]["source_id"] == "cs-101"
+            assert materialized_media["CS 101"]["related_videos"][0]["url"].startswith(
+                "https://www.youtube.com/"
+            )
+            assert materialized_media["MATH 151"]["source_id"] == "math-151"
+            assert materialized_media["MATH 151"]["related_videos"]
             assert set(inventory) == {ASTER_TENANT_ID, HARVARD_TENANT_ID}
             for tenant in inventory.values():
                 assert tenant["students"] == 3
@@ -133,6 +227,23 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
             # the deterministic demo requirement IDs collide on the next seed pass.
             await seed_relational_data(engine, environment="test")
 
+            async with engine.connect() as connection:
+                tenant_configuration_before_reset = await connection.scalar(
+                    text(
+                        """
+                        SELECT jsonb_build_object(
+                          'tenant', to_jsonb(tenant_row),
+                          'portalConfiguration', to_jsonb(portal_configuration)
+                        )
+                        FROM tenant tenant_row
+                        JOIN tenant_portal_configuration portal_configuration
+                          ON portal_configuration.tenant_id=tenant_row.id
+                        WHERE tenant_row.id=CAST(:tenant_id AS uuid)
+                        """
+                    ),
+                    {"tenant_id": ASTER_TENANT_ID},
+                )
+
             await reset_relational_data(
                 engine,
                 environment="test",
@@ -169,7 +280,45 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                     },
                 )
                 completed_rows = completed_result.mappings().all()
+                tenant_configuration_after_reset = await connection.scalar(
+                    text(
+                        """
+                        SELECT jsonb_build_object(
+                          'tenant', to_jsonb(tenant_row),
+                          'portalConfiguration', to_jsonb(portal_configuration)
+                        )
+                        FROM tenant tenant_row
+                        JOIN tenant_portal_configuration portal_configuration
+                          ON portal_configuration.tenant_id=tenant_row.id
+                        WHERE tenant_row.id=CAST(:tenant_id AS uuid)
+                        """
+                    ),
+                    {"tenant_id": ASTER_TENANT_ID},
+                )
+                managed_configurations_after_reset = {
+                    (str(row["tenant_id"]), str(row["kind"])): (
+                        str(row["id"]),
+                        int(row["version"]),
+                        row["document"],
+                    )
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id, tenant_id, kind, version, document
+                                FROM staff_managed_configuration_version
+                                WHERE active=true
+                                ORDER BY tenant_id, kind
+                                """
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                }
             assert len(completed_rows) == 2
+            assert tenant_configuration_after_reset == tenant_configuration_before_reset
+            assert managed_configurations_after_reset == configurations_before
             assert {row["tenant_id"] for row in completed_rows} == {
                 ASTER_TENANT_ID,
                 HARVARD_TENANT_ID,
@@ -183,7 +332,9 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 engine,
                 environment="test",
                 completed_onboarding=False,
+                preserve_managed_configurations=False,
             )
+            await seed_relational_data(engine, environment="test")
         finally:
             await engine.dispose()
 

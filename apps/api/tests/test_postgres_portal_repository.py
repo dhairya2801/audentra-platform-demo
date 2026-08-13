@@ -9,6 +9,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.contracts.requests import UpdateStudentHousingPlanRequest
@@ -127,6 +128,27 @@ def test_housing_plan_request_preserves_explicit_roommate_field_clears() -> None
     assert request.public_payload()["knownRoommateEmail"] is None
 
 
+def test_housing_residence_codes_are_generic_but_bounded() -> None:
+    request = UpdateStudentHousingPlanRequest.model_validate(
+        {
+            "expectedVersion": 1,
+            "preference": "on_campus",
+            "residenceOption": "harvard_yard_house_7",
+            "residencePreferences": ["harvard_yard_house_7", "river-house"],
+        }
+    )
+
+    assert request.public_payload()["residenceOption"] == "harvard_yard_house_7"
+    with pytest.raises(ValidationError):
+        UpdateStudentHousingPlanRequest.model_validate(
+            {
+                "expectedVersion": 1,
+                "preference": "on_campus",
+                "residenceOption": "Other tenant residence!",
+            }
+        )
+
+
 class FakeResult:
     def __init__(self, rows: list[Mapping[str, Any]], rowcount: int | None = None) -> None:
         self._rows = rows
@@ -197,6 +219,33 @@ AUTH = AuthContext(
     actor_id="10000000-0000-7000-8000-000000000001",
     actor_type="student",
 )
+
+
+def test_housing_residence_validation_is_active_and_tenant_scoped() -> None:
+    def handler(sql: str, params: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "FROM housing_residence_option" in sql:
+            assert "tenant_id=:tenant_id AND active=true" in sql
+            assert params == {
+                "tenant_id": AUTH.tenant_id,
+                "codes": ["available_house", "retired_house"],
+            }
+            return [{"code": "available_house"}]
+        raise AssertionError(sql)
+
+    engine = FakeEngine(handler)
+    repository = PostgresPortalRepository(cast(AsyncEngine, engine))
+
+    with pytest.raises(BadRequestError) as raised:
+        asyncio.run(
+            repository._validate_housing_residence_codes(
+                cast(AsyncConnection, engine.connection),
+                AUTH,
+                "available_house",
+                ["retired_house"],
+            )
+        )
+
+    assert raised.value.code == "HOUSING_RESIDENCE_OPTION_INVALID"
 
 
 def test_student_realtime_events_bootstrap_replay_and_bound_the_cursor_window() -> None:
