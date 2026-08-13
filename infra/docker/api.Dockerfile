@@ -28,7 +28,8 @@ FROM python:3.12.11-slim-bookworm AS runtime
 
 ENV PATH=/opt/audentra-venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    ONBOARDING_DOCUMENT_TEMPLATE_DIR=/workspace/apps/api/assets/onboarding
 
 RUN groupadd --system --gid 10001 audentra \
     && useradd --system --uid 10001 --gid audentra \
