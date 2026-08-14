@@ -123,7 +123,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 128
-    mem_limit: 160m
+    mem_limit: 512m
     networks:
       - preview
 
