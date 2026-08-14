@@ -73,18 +73,18 @@ def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: P
         )
 
 
-def test_document_model_is_wired_through_compose_and_preview_bootstrap() -> None:
+def test_document_model_is_wired_through_compose_and_environment_examples() -> None:
     compose_setting = "OPENROUTER_DOCUMENT_MODEL: ${OPENROUTER_DOCUMENT_MODEL:-qwen/qwen3.7-flash}"
     for relative_path in ("infra/compose.yaml", "infra/preview-vm/compose.yaml"):
         manifest = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
         assert compose_setting in manifest
 
-    bootstrap = (REPOSITORY_ROOT / "infra/preview-vm/bootstrap-host.sh").read_text(encoding="utf-8")
-    assert (
-        "printf 'OPENROUTER_DOCUMENT_MODEL=%s\\n' "
-        '"$(from_existing_or_legacy OPENROUTER_DOCUMENT_MODEL qwen/qwen3.7-flash)"' in bootstrap
-    )
-    for relative_path in (".env.example", "apps/api/.env.example", "infra/.env.example"):
+    for relative_path in (
+        ".env.example",
+        "apps/api/.env.example",
+        "infra/.env.example",
+        "infra/preview-vm/.env.example",
+    ):
         environment = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
         assert "OPENROUTER_DOCUMENT_MODEL=qwen/qwen3.7-flash" in environment
 

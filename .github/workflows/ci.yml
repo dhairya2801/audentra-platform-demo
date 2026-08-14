@@ -9,8 +9,7 @@ on:
 
 concurrency:
   group: platform-ci-${{ github.ref }}
-  # Pull-request runs can be superseded, but a main deployment must finish or
-  # fail cleanly so migrations and release verification are never cancelled.
+  # Pull-request runs can be superseded; main validation runs finish cleanly.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -192,10 +191,15 @@ jobs:
             "from audentra.bootstrap.settings import RuntimeSettings; root=RuntimeSettings.from_environment().onboarding_template_dir; names=('aster-ferpa-release.pdf','aster-enrollment-acknowledgment.pdf','harvard-ferpa-release.pdf','harvard-enrollment-acknowledgment.pdf'); assert all((root / name).read_bytes().startswith(b'%PDF-') for name in names), root"
 
   deploy-preview:
-    name: Deploy Vekend Cloud Run preview
+    name: Legacy Cloud Run preview (manual opt-in only)
+    # Safety gate while the new organization-owned VM environment is prepared:
+    # pushes to main must never deploy into the hard-coded legacy GCP project.
+    # Re-enabling this old path requires both a manual main-branch dispatch and
+    # an explicit repository variable; all CI/test jobs above remain unchanged.
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      vars.ENABLE_LEGACY_CLOUD_RUN_DEPLOYMENT == 'true'
     needs:
       - container
     runs-on: ubuntu-latest

@@ -9,73 +9,111 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 shared_root="/opt/audentra-platform/shared"
 environment_file="${shared_root}/.env"
-legacy_environment_file="/opt/vv-edgent/shared/.env"
+environment_example="${script_dir}/.env.example"
 
 read_value() {
   local name="$1"
-  local file="$2"
-  [[ -f "$file" ]] || return 0
-  grep -m1 "^${name}=" "$file" 2>/dev/null | cut -d= -f2- || true
+  local value
+  value="$(grep -m1 "^${name}=" "$environment_file" 2>/dev/null | cut -d= -f2- || true)"
+  value="${value%$'\r'}"
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value="${value:1:${#value}-2}"
+  elif [[ "$value" == \'*\' && "$value" == *\' ]]; then
+    value="${value:1:${#value}-2}"
+  fi
+  printf '%s' "$value"
 }
 
-from_existing_or_legacy() {
-  local name="$1"
-  local fallback="${2:-}"
-  local value
-  value="$(read_value "$name" "$environment_file")"
-  if [[ -z "$value" ]]; then
-    value="$(read_value "$name" "$legacy_environment_file")"
-  fi
-  printf '%s' "${value:-$fallback}"
+configuration_error() {
+  echo "Protected preview configuration is invalid or missing: $1" >&2
+  echo "Edit ${environment_file}; secret values were not printed." >&2
+  exit 78
 }
 
 install -d -m 0750 -o root -g root /opt/audentra-platform/releases "$shared_root"
 
-site_host="$(from_existing_or_legacy SITE_HOST)"
-if [[ -z "$site_host" ]]; then
-  echo "SITE_HOST is missing from both the current and legacy protected environments." >&2
+if [[ ! -f "$environment_file" ]]; then
+  if [[ ! -f "$environment_example" ]]; then
+    echo "Tracked preview environment example is missing: ${environment_example}" >&2
+    exit 66
+  fi
+  install -m 0600 -o root -g root "$environment_example" "$environment_file"
+  echo "Created ${environment_file} from the tracked example." >&2
+  echo "Replace every CHANGE_ME/example value, then run bootstrap again." >&2
   exit 78
 fi
 
-postgres_password="$(from_existing_or_legacy POSTGRES_PASSWORD)"
-minio_password="$(from_existing_or_legacy MINIO_ROOT_PASSWORD)"
-worker_token="$(from_existing_or_legacy DOCUMENT_WORKER_TOKEN)"
-staff_invitation_code="$(from_existing_or_legacy VV_STAFF_INVITATION_CODE)"
-if [[ -z "$staff_invitation_code" ]]; then
-  staff_invitation_code="$(from_existing_or_legacy VV_STAFF_BOOTSTRAP_PASSWORD)"
+chmod 0600 "$environment_file"
+chown root:root "$environment_file"
+
+required_names=(
+  AUDENTRA_ENV
+  AUTH_MODE
+  BROWSER_AUTH_REQUIRED
+  API_DOMAIN
+  WEB_ORIGIN
+  PLATFORM_IMAGE_REPOSITORY
+  POSTGRES_DB
+  POSTGRES_USER
+  POSTGRES_PASSWORD
+  MINIO_ROOT_USER
+  MINIO_ROOT_PASSWORD
+  MINIO_BUCKET
+  DOCUMENT_WORKER_TOKEN
+  VV_STAFF_INVITATION_CODE
+)
+
+for name in "${required_names[@]}"; do
+  value="$(read_value "$name")"
+  if [[ -z "$value" || "$value" == *CHANGE_ME* || "$value" == *REPLACE_ME* ]]; then
+    configuration_error "$name"
+  fi
+done
+
+[[ "$(read_value AUDENTRA_ENV)" == "preview" ]] || configuration_error AUDENTRA_ENV
+[[ "$(read_value AUTH_MODE)" == "demo" ]] || configuration_error AUTH_MODE
+[[ "$(read_value BROWSER_AUTH_REQUIRED)" == "true" ]] || \
+  configuration_error BROWSER_AUTH_REQUIRED
+
+api_domain="$(read_value API_DOMAIN)"
+if [[ ! "$api_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || \
+      "$api_domain" == *..* || "$api_domain" == *.example.com ]]; then
+  configuration_error API_DOMAIN
 fi
 
-[[ -n "$postgres_password" ]] || postgres_password="$(openssl rand -hex 24)"
-[[ -n "$minio_password" ]] || minio_password="$(openssl rand -hex 24)"
-[[ -n "$worker_token" ]] || worker_token="$(openssl rand -hex 32)"
-[[ -n "$staff_invitation_code" ]] || staff_invitation_code="$(openssl rand -hex 16)"
+web_origin="$(read_value WEB_ORIGIN)"
+IFS=',' read -r -a web_origins <<<"$web_origin"
+for origin in "${web_origins[@]}"; do
+  if [[ ! "$origin" =~ ^https://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$ || \
+        "$origin" == *..* ]]; then
+    configuration_error WEB_ORIGIN
+  fi
+done
 
-umask 077
-environment_next="${environment_file}.next"
-{
-  printf 'SITE_HOST=%s\n' "$site_host"
-  printf 'POSTGRES_DB=%s\n' "$(from_existing_or_legacy POSTGRES_DB audentra)"
-  printf 'POSTGRES_USER=%s\n' "$(from_existing_or_legacy POSTGRES_USER audentra)"
-  printf 'POSTGRES_PASSWORD=%s\n' "$postgres_password"
-  printf 'MINIO_ROOT_USER=%s\n' "$(from_existing_or_legacy MINIO_ROOT_USER audentra-minio)"
-  printf 'MINIO_ROOT_PASSWORD=%s\n' "$minio_password"
-  printf 'MINIO_BUCKET=%s\n' "$(from_existing_or_legacy MINIO_BUCKET audentra-documents)"
-  printf 'DOCUMENT_WORKER_TOKEN=%s\n' "$worker_token"
-  printf 'VV_STAFF_INVITATION_CODE=%s\n' "$staff_invitation_code"
-  printf 'OPENROUTER_API_KEY=%s\n' "$(from_existing_or_legacy OPENROUTER_API_KEY)"
-  printf 'OPENROUTER_MODEL=%s\n' "$(from_existing_or_legacy OPENROUTER_MODEL openai/gpt-4o-mini)"
-  printf 'OPENROUTER_DOCUMENT_MODEL=%s\n' "$(from_existing_or_legacy OPENROUTER_DOCUMENT_MODEL qwen/qwen3.7-flash)"
-  printf 'GROQ_API_KEY=%s\n' "$(from_existing_or_legacy GROQ_API_KEY)"
-  printf 'GROQ_MODEL=%s\n' "$(from_existing_or_legacy GROQ_MODEL qwen/qwen3.6-27b)"
-  printf 'TRANSCRIPT_PARSING=%s\n' "$(from_existing_or_legacy TRANSCRIPT_PARSING groq)"
-} >"$environment_next"
-chmod 0600 "$environment_next"
-chown root:root "$environment_next"
-mv -f "$environment_next" "$environment_file"
+for name in POSTGRES_DB POSTGRES_USER POSTGRES_PASSWORD; do
+  value="$(read_value "$name")"
+  [[ "$value" =~ ^[A-Za-z0-9._~-]+$ ]] || configuration_error "$name"
+done
 
-if ! docker network inspect audentra-preview >/dev/null 2>&1; then
-  docker network create audentra-preview >/dev/null
+[[ ${#api_domain} -le 253 ]] || configuration_error API_DOMAIN
+[[ ${#web_origin} -le 1000 ]] || configuration_error WEB_ORIGIN
+
+postgres_password="$(read_value POSTGRES_PASSWORD)"
+minio_password="$(read_value MINIO_ROOT_PASSWORD)"
+worker_token="$(read_value DOCUMENT_WORKER_TOKEN)"
+staff_invitation_code="$(read_value VV_STAFF_INVITATION_CODE)"
+[[ ${#postgres_password} -ge 24 ]] || configuration_error POSTGRES_PASSWORD
+[[ ${#minio_password} -ge 24 ]] || configuration_error MINIO_ROOT_PASSWORD
+[[ ${#worker_token} -ge 32 ]] || configuration_error DOCUMENT_WORKER_TOKEN
+[[ ${#staff_invitation_code} -ge 16 ]] || configuration_error VV_STAFF_INVITATION_CODE
+
+image_repository="$(read_value PLATFORM_IMAGE_REPOSITORY)"
+if [[ "$image_repository" =~ [[:space:]] || "$image_repository" == */ || \
+      "$image_repository" == *: ]]; then
+  configuration_error PLATFORM_IMAGE_REPOSITORY
 fi
 
-install -m 0755 "${script_dir}/deploy-platform.sh" /usr/local/sbin/audentra-platform-deploy
-echo "Audentra platform preview host is ready. Protected values remain in ${environment_file}."
+install -m 0755 "${script_dir}/deploy-platform.sh" \
+  /usr/local/sbin/audentra-platform-deploy
+
+echo "Audentra preview host configuration is valid; no cloud resources were created."

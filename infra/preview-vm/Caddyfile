@@ -1,0 +1,27 @@
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+
+	request_body {
+		max_size 12MB
+	}
+
+	# Low-latency flushing keeps the student/staff SSE streams responsive.
+	reverse_proxy api:4000 {
+		flush_interval -1
+	}
+
+	header {
+		-Server
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		X-XSS-Protection "0"
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+	}
+}
