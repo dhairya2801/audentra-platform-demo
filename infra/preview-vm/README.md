@@ -246,15 +246,18 @@ NEXT_PUBLIC_API_BASE_URL=https://<backend-domain>
 Set backend `WEB_ORIGIN` to the frontend's exact origin, including `https://`
 and with no trailing slash. Browser requests must use `credentials: "include"`;
 the tenant-aware requests must send `X-Tenant-Slug: aster`. The preview sign-in
-route sets an `HttpOnly`, `Secure`, `SameSite=Lax` cookie, and
+route sets an `HttpOnly`, `Secure`, `SameSite=None` cookie when
+`SESSION_COOKIE_SAMESITE=none`, and
 `BROWSER_AUTH_REQUIRED=true` rejects protected browser routes without it.
 
-For reliable cookie behavior, use same-site custom domains such as frontend
-`https://audentra.ai` and backend `https://api.audentra.ai`. A frontend left on
-`*.vercel.app` is cross-site with `api.audentra.ai`; the current `SameSite=Lax`
-session cookie will not accompany cross-site `fetch` calls. Treat the custom
-frontend domain (or a separately reviewed cookie policy change) as a cutover
-requirement. Do not disable browser authentication to work around it.
+For the current preview, set `WEB_ORIGIN` exactly to
+`https://audentra-portals-demo-web.vercel.app` and retain
+`SESSION_COOKIE_SAMESITE=none`. FastAPI returns that exact origin with
+credentialed CORS; it does not use a wildcard. Production retains
+`SameSite=Lax`, and demo authentication remains unavailable there. Browsers or
+privacy modes that block all third-party cookies can still prevent a Vercel
+site from retaining a cookie issued by an unrelated backend site; same-site
+custom domains avoid that browser-level limitation.
 
 ## GitHub Actions safety
 

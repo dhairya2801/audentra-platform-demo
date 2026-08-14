@@ -136,6 +136,7 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
 
     assert settings.environment == "preview"
     assert settings.http_settings().secure_cookies is True
+    assert settings.http_settings().session_cookie_samesite == "none"
 
 
 def test_gcs_storage_uses_application_default_credentials(tmp_path: Path) -> None:
@@ -187,6 +188,8 @@ def test_staff_invitation_code_supports_the_legacy_secret_name(tmp_path: Path) -
         ({"AUDENTRA_ENV": "staging"}, "AUDENTRA_ENV"),
         ({"API_PORT": "0"}, "API_PORT"),
         ({"WEB_ORIGIN": "javascript:alert(1)"}, "WEB_ORIGIN"),
+        ({"SESSION_COOKIE_SAMESITE": "cross-site"}, "SESSION_COOKIE_SAMESITE"),
+        ({"SESSION_COOKIE_SAMESITE": "none"}, "only in preview"),
         ({"OBJECT_STORAGE_FORCE_PATH_STYLE": "sometimes"}, "Boolean"),
         ({"DB_POOL_SIZE": "many"}, "DB_POOL_SIZE"),
         (
@@ -217,8 +220,22 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
         },
         package_root=tmp_path,
     )
+    assert settings.http_settings().session_cookie_samesite == "lax"
     with pytest.raises(ValueError, match="identity adapter"):
         settings.assert_api_deployable()
+
+    with pytest.raises(ValueError, match="only in preview"):
+        RuntimeSettings.from_environment(
+            {
+                "AUDENTRA_ENV": "production",
+                "DATABASE_URL": "postgresql://example/prod",
+                "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "OBJECT_STORAGE_SECRET_KEY": "external-secret",
+                "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
+                "SESSION_COOKIE_SAMESITE": "none",
+            },
+            package_root=tmp_path,
+        )
 
 
 def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Path) -> None:

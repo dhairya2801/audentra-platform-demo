@@ -34,6 +34,7 @@ def test_preview_vm_enforces_auth_and_preview_only_seeding() -> None:
     assert runtime["AUDENTRA_ENV"] == "preview"
     assert runtime["AUTH_MODE"] == "demo"
     assert runtime["BROWSER_AUTH_REQUIRED"] == "true"
+    assert runtime["SESSION_COOKIE_SAMESITE"] == "${SESSION_COOKIE_SAMESITE:-none}"
     assert seed_environment["AUDENTRA_ENV"] == "preview"
     assert seed_environment["AUTH_MODE"] == "demo"
 
@@ -54,6 +55,8 @@ def test_preview_vm_example_contains_no_populated_provider_secrets() -> None:
     assert "AUDENTRA_ENV=preview" in environment
     assert "AUTH_MODE=demo" in environment
     assert "BROWSER_AUTH_REQUIRED=true" in environment
+    assert "WEB_ORIGIN=https://audentra-portals-demo-web.vercel.app" in environment
+    assert "SESSION_COOKIE_SAMESITE=none" in environment
     assert "OPENAI_API_KEY=\n" in environment
     assert "OPENROUTER_API_KEY=\n" in environment
     assert "GROQ_API_KEY=\n" in environment
@@ -71,9 +74,9 @@ def test_preview_deploy_ignores_ambient_shell_configuration() -> None:
 def test_preview_deploy_orders_fresh_state_before_long_running_services() -> None:
     deploy = (PREVIEW_ROOT / "deploy-platform.sh").read_text(encoding="utf-8")
 
-    assert deploy.index('run --rm migrate') < deploy.index('run --rm minio-init')
-    assert deploy.index('run --rm minio-init') < deploy.index('run --rm seed')
-    assert deploy.index('run --rm seed') < deploy.index('up -d --no-build api worker caddy')
+    assert deploy.index("run --rm migrate") < deploy.index("run --rm minio-init")
+    assert deploy.index("run --rm minio-init") < deploy.index("run --rm seed")
+    assert deploy.index("run --rm seed") < deploy.index("up -d --no-build api worker caddy")
 
 
 def test_legacy_cloud_run_deployment_is_not_triggered_by_main_pushes() -> None:

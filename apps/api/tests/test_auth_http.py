@@ -244,6 +244,7 @@ async def test_demo_cookie_gates_protected_routes_and_sign_out_invalidates_it(
     assert "vv_demo_session=demo-session-v2" in signed_in.headers["set-cookie"]
     assert "HttpOnly" in signed_in.headers["set-cookie"]
     assert "SameSite=lax" in signed_in.headers["set-cookie"]
+    assert "Secure" not in signed_in.headers["set-cookie"]
     assert accepted.status_code == 200
     accepted_call = next(
         call for call in platform_service.calls if call.operation == "student.get_bootstrap"
@@ -434,20 +435,53 @@ async def test_development_auth_endpoints_are_hidden_in_production(
     assert response.json()["error"]["code"] == "DEVELOPMENT_AUTH_DISABLED"
 
 
-async def test_preview_auth_cookie_is_secure(
+async def test_preview_cross_site_auth_cookie_and_cors_are_credential_safe(
     auth_service: FakeBrowserAuthService,
     platform_service: FakePlatformService,
 ) -> None:
     app = create_app(
         service=platform_service,
         auth_service=auth_service,
-        settings=HttpSettings(environment="preview", browser_auth_required=True),
+        settings=HttpSettings(
+            environment="preview",
+            browser_auth_required=True,
+            web_origins=("https://audentra-portals-demo-web.vercel.app",),
+            session_cookie_samesite="none",
+        ),
     )
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="https://preview.example",
     ) as preview_client:
-        response = await preview_client.post("/v1/auth/demo/sign-in", json={})
+        demo_response = await preview_client.post(
+            "/v1/auth/demo/sign-in",
+            headers={"Origin": "https://audentra-portals-demo-web.vercel.app"},
+            json={},
+        )
+        accepted = await preview_client.get(
+            "/v1/student/bootstrap",
+            headers={"Origin": "https://audentra-portals-demo-web.vercel.app"},
+        )
+        credential_response = await preview_client.post(
+            "/v1/auth/sign-in",
+            headers={"Origin": "https://audentra-portals-demo-web.vercel.app"},
+            json={
+                "email": "browser.student@example.com",
+                "password": "Browser-student-123",
+            },
+        )
 
-    assert response.status_code == 200
-    assert "Secure" in response.headers["set-cookie"]
+    assert demo_response.status_code == 200
+    assert accepted.status_code == 200
+    assert credential_response.status_code == 200
+    for response in (demo_response, credential_response):
+        cookies = response.headers.get_list("set-cookie")
+        assert cookies
+        assert all("HttpOnly" in cookie for cookie in cookies)
+        assert all("Secure" in cookie for cookie in cookies)
+        assert all("SameSite=none" in cookie for cookie in cookies)
+    assert demo_response.headers["access-control-allow-credentials"] == "true"
+    assert demo_response.headers["access-control-allow-origin"] == (
+        "https://audentra-portals-demo-web.vercel.app"
+    )
+    assert demo_response.headers["access-control-allow-origin"] != "*"

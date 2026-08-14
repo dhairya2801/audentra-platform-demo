@@ -14,7 +14,11 @@ from audentra.infrastructure.db.engine import DatabaseEngineOptions
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings, StorageSettings
 from audentra.infrastructure.voice.config import VoiceSettings
 from audentra.integrations.ai.gateway import GatewaySettings
-from audentra.interfaces.http.config import HttpSettings
+from audentra.interfaces.http.config import (
+    CookieSameSite,
+    HttpSettings,
+    parse_session_cookie_samesite,
+)
 
 Environment = Literal["development", "preview", "test", "production"]
 AuthMode = Literal["demo"]
@@ -54,6 +58,7 @@ class RuntimeSettings:
     database: DatabaseEngineOptions
     web_origins: tuple[str, ...]
     browser_auth_required: bool
+    session_cookie_samesite: CookieSameSite
     staff_invitation_code: str
     document_worker_token: str
     demo_tenant_id: str
@@ -105,6 +110,10 @@ class RuntimeSettings:
             raise ValueError("VV_STAFF_INVITATION_CODE must contain at least 16 characters")
 
         origins = _origins(values.get("WEB_ORIGIN", "http://localhost:3000"))
+        session_cookie_samesite = parse_session_cookie_samesite(
+            values.get("SESSION_COOKIE_SAMESITE"),
+            environment=app_environment,
+        )
         object_storage_provider = _object_storage_provider(values.get("OBJECT_STORAGE_PROVIDER"))
         storage_secret = values.get("OBJECT_STORAGE_SECRET_KEY", "").strip()
         if object_storage_provider == "s3" and not storage_secret:
@@ -172,6 +181,7 @@ class RuntimeSettings:
             ),
             web_origins=origins,
             browser_auth_required=_boolean(values.get("BROWSER_AUTH_REQUIRED"), False),
+            session_cookie_samesite=session_cookie_samesite,
             staff_invitation_code=staff_invitation_code,
             document_worker_token=worker_token,
             demo_tenant_id=values.get("DEMO_TENANT_ID", "00000000-0000-7000-8000-000000000001"),
@@ -272,6 +282,7 @@ class RuntimeSettings:
             environment=self.environment,
             browser_auth_required=self.browser_auth_required,
             web_origins=self.web_origins,
+            session_cookie_samesite=self.session_cookie_samesite,
             document_worker_token=self.document_worker_token,
             voice_agent_internal_token=(self.voice.agent_internal_token if self.voice else ""),
             demo_tenant_id=self.demo_tenant_id,

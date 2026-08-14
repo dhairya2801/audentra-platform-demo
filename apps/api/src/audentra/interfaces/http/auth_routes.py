@@ -66,7 +66,7 @@ def _set_session_cookie(
         path="/",
         secure=get_settings(request).secure_cookies,
         httponly=True,
-        samesite="lax",
+        samesite=get_settings(request).session_cookie_samesite,
     )
 
 
@@ -79,7 +79,7 @@ def _expire_cookie(response: Response, request: Request, name: str) -> None:
         path="/",
         secure=get_settings(request).secure_cookies,
         httponly=True,
-        samesite="lax",
+        samesite=get_settings(request).session_cookie_samesite,
     )
 
 
@@ -92,7 +92,7 @@ def _demo_cookie(response: Response, request: Request) -> None:
         path="/",
         secure=settings.secure_cookies,
         httponly=True,
-        samesite="lax",
+        samesite=settings.session_cookie_samesite,
     )
 
 

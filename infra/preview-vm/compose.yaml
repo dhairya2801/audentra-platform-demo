@@ -8,6 +8,8 @@ x-runtime-environment: &runtime-environment
   API_PORT: "4000"
   # Exact comma-separated browser origins; credentials are enabled by FastAPI.
   WEB_ORIGIN: ${WEB_ORIGIN:?Set WEB_ORIGIN to the exact Vercel/custom frontend origin}
+  # Cross-site preview cookies remain HTTPS-only; production stays SameSite=Lax.
+  SESSION_COOKIE_SAMESITE: ${SESSION_COOKIE_SAMESITE:-none}
   DATABASE_URL: postgresql://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}
   DB_POOL_SIZE: "4"
   DB_MAX_OVERFLOW: "0"

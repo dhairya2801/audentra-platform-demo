@@ -4,12 +4,16 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+CookieSameSite = Literal["lax", "none", "strict"]
+HttpEnvironment = Literal["development", "preview", "test", "production"]
+
 
 @dataclass(frozen=True, slots=True)
 class HttpSettings:
-    environment: Literal["development", "preview", "test", "production"] = "development"
+    environment: HttpEnvironment = "development"
     browser_auth_required: bool = False
     web_origins: tuple[str, ...] = ("http://localhost:3000",)
+    session_cookie_samesite: CookieSameSite = "lax"
     # Security note: production composition rejects this explicit local-only fallback.
     document_worker_token: str = "local-development-document-worker-token"  # noqa: S105
     # Empty means voice is not configured: internal voice routes then fail closed.
@@ -40,6 +44,10 @@ class HttpSettings:
             environment=environment,  # type: ignore[arg-type]
             browser_auth_required=_boolean_environment(os.getenv("BROWSER_AUTH_REQUIRED"), False),
             web_origins=origins or ("http://localhost:3000",),
+            session_cookie_samesite=parse_session_cookie_samesite(
+                os.getenv("SESSION_COOKIE_SAMESITE"),
+                environment=environment,  # type: ignore[arg-type]
+            ),
             document_worker_token=(
                 os.getenv("DOCUMENT_WORKER_TOKEN", "").strip()
                 or "local-development-document-worker-token"
@@ -52,6 +60,22 @@ class HttpSettings:
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
         )
+
+
+def parse_session_cookie_samesite(
+    value: str | None,
+    *,
+    environment: HttpEnvironment,
+) -> CookieSameSite:
+    default = "none" if environment == "preview" else "lax"
+    normalized = (value or "").strip().lower() or default
+    if normalized not in {"lax", "none", "strict"}:
+        raise ValueError("SESSION_COOKIE_SAMESITE must be lax, none, or strict")
+    if normalized == "none" and environment != "preview":
+        raise ValueError("SESSION_COOKIE_SAMESITE=none is allowed only in preview")
+    if environment == "production" and normalized != "lax":
+        raise ValueError("SESSION_COOKIE_SAMESITE must remain lax in production")
+    return normalized  # type: ignore[return-value]
 
 
 def _boolean_environment(value: str | None, fallback: bool) -> bool:
