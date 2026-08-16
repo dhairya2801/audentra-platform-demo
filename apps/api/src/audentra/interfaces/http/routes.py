@@ -16,6 +16,7 @@ from starlette.formparsers import MultiPartException
 from audentra.contracts.requests import (
     ActivityEventBatchRequest,
     AskEdwardRequest,
+    AskStaffEdwardRequest,
     CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
     ConfirmStudentDocumentExtractionRequest,
@@ -2118,6 +2119,56 @@ async def update_staff_action_rule(
         auth=auth,
         payload=body.public_payload(),
         path_params={"ruleId": _uuid(rule_id)},
+    )
+
+
+@router.post("/v1/staff/assistant/messages", status_code=200, response_model=None)
+async def ask_staff_edward(
+    body: AskStaffEdwardRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.ask_edward",
+        auth=auth,
+        payload=body.public_payload(),
+    )
+
+
+@router.post("/v1/staff/assistant/conversations", status_code=201, response_model=None)
+async def create_staff_assistant_conversation(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.create_assistant_conversation",
+        auth=auth,
+    )
+
+
+@router.get(
+    "/v1/staff/assistant/conversations/{id}/messages",
+    status_code=200,
+    response_model=None,
+)
+async def get_staff_assistant_conversation_messages(
+    conversation_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_assistant_conversation_messages",
+        auth=auth,
+        path_params={"conversationId": _uuid(conversation_id)},
     )
 
 

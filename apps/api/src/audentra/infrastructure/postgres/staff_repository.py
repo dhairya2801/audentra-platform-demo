@@ -98,6 +98,15 @@ class PostgresStaffRepository:
     async def get_action_center(self, auth: AuthContext) -> dict[str, object]:
         self._require_staff(auth)
         await self._ensure_document_work_items(auth)
+        return await self._read_action_center(auth)
+
+    async def get_work_queue(self, auth: AuthContext) -> dict[str, object]:
+        """Read the canonical queue without reconciliation writes."""
+
+        self._require_staff(auth)
+        return await self._read_action_center(auth)
+
+    async def _read_action_center(self, auth: AuthContext) -> dict[str, object]:
         async with self._engine.connect() as connection:
             member_result = await connection.execute(
                 text(
@@ -1083,13 +1092,27 @@ class PostgresStaffRepository:
             rows = result.mappings().all()
         return [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
 
+    async def get_student_summary(
+        self, auth: AuthContext, student_id: str
+    ) -> dict[str, object] | None:
+        """Resolve a student only inside the authenticated staff tenant."""
+
+        self._require_staff(auth)
+        return await self._student_summary(auth.tenant_id, student_id)
+
     async def get_work_item_detail(
         self,
         auth: AuthContext,
         work_item_id: str,
+        *,
+        ensure_document_work_items: bool = True,
     ) -> dict[str, object]:
         self._require_staff(auth)
-        center = await self.get_action_center(auth)
+        center = (
+            await self.get_action_center(auth)
+            if ensure_document_work_items
+            else await self.get_work_queue(auth)
+        )
         center_items = cast(list[dict[str, object]], center["items"])
         work_item = next(
             (item for item in center_items if item["id"] == work_item_id),

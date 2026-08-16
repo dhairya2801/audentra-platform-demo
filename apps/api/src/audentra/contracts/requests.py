@@ -591,6 +591,20 @@ class CreateAssistantConversationRequest(StrictRequest):
     page_context: AssistantPageContextRequest
 
 
+class AskStaffEdwardRequest(StrictRequest):
+    """One server-identified, durable staff assistant turn."""
+
+    message: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2_000)]
+    conversation_id: UUID | None = None
+    client_message_id: (
+        Annotated[
+            StrictStr,
+            StringConstraints(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+        ]
+        | None
+    ) = None
+
+
 class CreateAssistantVoiceSessionRequest(StrictRequest):
     conversation_id: UUID
     page_context: AssistantPageContextRequest

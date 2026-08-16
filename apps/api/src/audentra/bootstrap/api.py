@@ -27,6 +27,9 @@ from audentra.infrastructure.postgres.postgres_service import (
     PostgresRepositoryBundle,
     PostgresSignedDocumentGenerator,
 )
+from audentra.infrastructure.postgres.staff_assistant_repository import (
+    PostgresStaffAssistantRepository,
+)
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
 from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
 from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
@@ -100,6 +103,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 staff=staff,
                 managed=managed,
                 tenant=tenant,
+                staff_assistant=PostgresStaffAssistantRepository(engine),
             ),
             storage,
             ai,

@@ -8,7 +8,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -56,10 +56,24 @@ from audentra.integrations.assistant.trace import (
     AssistantTurnTrace,
     get_assistant_trace_recorder,
 )
+from audentra.integrations.staff_assistant.catalog import STAFF_TOOL_DESCRIPTIONS
+from audentra.integrations.staff_assistant.classify import STAFF_REQUEST_TYPES
+from audentra.integrations.staff_assistant.pipeline import (
+    ModelComposer as StaffModelComposer,
+)
+from audentra.integrations.staff_assistant.pipeline import (
+    ModelPlanner as StaffModelPlanner,
+)
+from audentra.integrations.staff_assistant.pipeline import (
+    StaffAssistantPipeline,
+)
+from audentra.integrations.staff_assistant.safety import guarded_staff_response
+from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .platform_repository import PostgresPlatformRepository
 from .portal_repository import PostgresPortalRepository
+from .staff_assistant_repository import PostgresStaffAssistantRepository
 from .staff_repository import PostgresStaffRepository
 from .tenant_repository import PostgresTenantRepository
 
@@ -316,6 +330,7 @@ class PostgresRepositoryBundle:
     staff: PostgresStaffRepository
     managed: PostgresManagedConfigurationRepository | None = None
     tenant: PostgresTenantRepository | None = None
+    staff_assistant: PostgresStaffAssistantRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -907,6 +922,14 @@ class PostgresPlatformService:
                 self._path(call, "ruleId", "id", "rule_id"),
                 payload,
                 call.request_id,
+            )
+        if operation == "staff.ask_edward":
+            return await self._ask_staff_edward(auth, payload, call.request_id)
+        if operation == "staff.create_assistant_conversation":
+            return await self._staff_assistant_repo().create_conversation(auth)
+        if operation == "staff.get_assistant_conversation_messages":
+            return await self._staff_assistant_repo().get_conversation_messages(
+                auth, self._path(call, "conversationId", "id")
             )
         if operation == "staff.get_student":
             return await staff.get_student_record(
@@ -1673,6 +1696,259 @@ class PostgresPlatformService:
                     feedback=feedback,
                     tenant_id=auth.tenant_id,
                     student_id=auth.student_id,
+                    request_id=request_id,
+                    attempt=2 if feedback else 1,
+                ),
+            )
+
+        return compose
+
+    # Staff Edward (read-only staff assistant)
+    # ------------------------------------------------------------------
+
+    def _staff_assistant_repo(self) -> PostgresStaffAssistantRepository:
+        if self.repository.staff_assistant is None:
+            raise ApiError(
+                503,
+                "STAFF_ASSISTANT_UNAVAILABLE",
+                "The staff assistant is not configured on this host",
+            )
+        return self.repository.staff_assistant
+
+    def _staff_assistant_host(self, auth: AuthContext) -> StaffAssistantToolHost:
+        """Primitive live reads for the staff assistant, per request.
+
+        Every primitive is a pure, tenant-scoped read. Student-scoped
+        primitives rebind the student id only after the pipeline has resolved
+        and validated it against the tenant roster; the SQL underneath
+        filters on the authenticated tenant regardless. Nothing here touches
+        the preview workspace repository or any synthetic risk field, and
+        nothing here writes.
+        """
+
+        portal = self.repository.portal
+        staff = self.repository.staff
+        assistant = self._staff_assistant_repo()
+
+        def student_auth(student_id: str) -> AuthContext:
+            # This is an internal, read-only projection after the staff tenant
+            # and student referent have been validated. Portal repositories
+            # still enforce student read semantics; tenant and staff actor id
+            # remain server-bound.
+            return replace(auth, student_id=student_id, actor_type="student")
+
+        async def student_overview(student_id: str) -> Mapping[str, Any]:
+            overview = await assistant.get_student_overview(auth, student_id)
+            return overview or {}
+
+        async def inquiries() -> Mapping[str, Any]:
+            items = await portal.list_staff_help_requests(auth)
+            return {"items": items}
+
+        return StaffAssistantToolHost(
+            {
+                "search_students": lambda **kwargs: assistant.search_students(auth, **kwargs),
+                "student_overview": lambda student_id: student_overview(student_id),
+                "student_requirements": lambda student_id: portal.get_student_requirements(
+                    student_auth(student_id)
+                ),
+                "student_documents": lambda student_id: portal.get_student_documents(
+                    student_auth(student_id)
+                ),
+                "student_financials": lambda student_id: portal.get_student_financials(
+                    student_auth(student_id)
+                ),
+                "student_payments": lambda student_id: portal.get_student_payments(
+                    student_auth(student_id)
+                ),
+                "student_housing_plan": lambda student_id: portal.get_student_housing_plan(
+                    student_auth(student_id)
+                ),
+                "student_appointments": lambda student_id: portal.get_student_appointments(
+                    student_auth(student_id)
+                ),
+                "student_work_items": lambda student_id: assistant.get_student_work_items(
+                    auth, student_id
+                ),
+                "communication_history": (
+                    lambda student_id, channel=None: assistant.get_student_communication_history(
+                        auth, student_id, channel=channel
+                    )
+                ),
+                "engagement": lambda student_id: assistant.get_student_engagement_signals(
+                    auth, student_id
+                ),
+                "timeline": lambda student_id, limit=40: assistant.get_student_timeline(
+                    auth, student_id, limit=limit
+                ),
+                "attention": lambda limit=15: assistant.get_students_needing_attention(
+                    auth, limit=limit
+                ),
+                # Pure queue read: never the mutating get_action_center path.
+                "work_queue": lambda: staff.get_work_queue(auth),
+                "work_item_detail": lambda work_item_id: staff.get_work_item_detail(
+                    auth, work_item_id, ensure_document_work_items=False
+                ),
+                "inquiries": inquiries,
+                "inquiry_thread": lambda inquiry_id: portal.get_staff_inquiry_thread(
+                    auth, inquiry_id
+                ),
+                "guidance": lambda: assistant.get_staff_guidance(auth),
+                "action_rules": lambda: staff.get_action_rules(auth),
+            },
+            staff_member_id=auth.actor_id,
+        )
+
+    async def _ask_staff_edward(
+        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+    ) -> JsonDict:
+        if auth.actor_type != "staff":
+            raise UnauthorizedError("Staff authentication is required")
+        repo = self._staff_assistant_repo()
+        message = str(payload.get("message", ""))
+        conversation_id = payload.get("conversationId")
+        client_message_id = payload.get("clientMessageId")
+        persist = conversation_id is not None or client_message_id is not None
+        trace = AssistantTurnTrace(
+            trace_id=request_id,
+            tenant_id=auth.tenant_id,
+            assistant_kind="staff",
+            actor_type="staff",
+            staff_member_id=auth.actor_id,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_message=message,
+        )
+
+        if isinstance(client_message_id, str) and client_message_id:
+            replay = await repo.find_exchange_by_client_id(auth, client_message_id)
+            if replay is not None:
+                trace.path = "idempotent_replay"
+                trace.final_message = str(replay.get("message") or "")
+                get_assistant_trace_recorder().record(trace)
+                return replay
+
+        guarded = guarded_staff_response(message)
+        resolved_student_id: str | None = None
+        if guarded is not None:
+            response = dict(guarded)
+            trace.path = "pre_pipeline_safety_gate"
+            trace.response_source = "deterministic"
+            trace.provider = str(response.get("provider") or "guided")
+        else:
+            # The durable conversation store is the only history source for
+            # staff turns, and it also carries the active student referent so
+            # "what is she missing?" resolves server-side.
+            history: Sequence[Mapping[str, Any]] = []
+            context_student_id: str | None = None
+            if conversation_id is not None:
+                recent = await repo.get_recent_history(auth, str(conversation_id))
+                history = list(recent.get("history", []))
+                context_student_id = recent.get("activeStudentId")
+                trace.history_source = "server"
+            pipeline = StaffAssistantPipeline(
+                self._staff_assistant_host(auth),
+                model_composer=self._staff_assistant_composer(auth, request_id),
+                model_planner=self._staff_assistant_planner(auth, request_id),
+            )
+            result = await pipeline.execute(
+                message=message,
+                history=history,
+                context_student_id=context_student_id,
+                trace=trace,
+            )
+            resolved_student_id = result.resolved_student_id
+            trace.student_id = resolved_student_id
+            response = {
+                "message": result.message,
+                "blocks": result.blocks,
+                "provider": result.provider,
+                "model": result.model,
+                "usage": result.usage,
+                "contextReceipts": result.context_receipts,
+                "resolvedStudent": (
+                    {
+                        "id": result.resolved_student_id,
+                        "name": result.resolved_student_name,
+                    }
+                    if result.resolved_student_id
+                    else None
+                ),
+            }
+
+        if persist:
+            stored = await repo.append_exchange(
+                auth,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                user_message={
+                    "content": message,
+                    "clientMessageId": client_message_id,
+                },
+                assistant_message={
+                    "content": response.get("message"),
+                    "provider": response.get("provider"),
+                    "model": response.get("model"),
+                    "usage": response.get("usage"),
+                    "blocks": response.get("blocks"),
+                    "contextReceipts": response.get("contextReceipts"),
+                },
+                referenced_student_id=resolved_student_id,
+                request_id=request_id,
+            )
+            response.update(stored)
+            trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id
+            trace.user_message_id = str(stored.get("userMessageId") or "") or None
+            trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
+        response["requestId"] = request_id
+        trace.final_message = trace.final_message or str(response.get("message") or "")
+        get_assistant_trace_recorder().record(trace)
+        return response
+
+    def _staff_assistant_planner(
+        self, auth: AuthContext, request_id: str
+    ) -> StaffModelPlanner | None:
+        planner = getattr(self.ai, "plan_staff_tool_reads", None)
+        if planner is None:
+            return None
+
+        async def plan(*, message: str, student_resolved: bool = False) -> Mapping[str, Any] | None:
+            return cast(
+                Mapping[str, Any] | None,
+                await planner(
+                    message=message,
+                    allowed_request_types=STAFF_REQUEST_TYPES,
+                    available_tools=STAFF_TOOL_DESCRIPTIONS,
+                    student_resolved=student_resolved,
+                    tenant_id=auth.tenant_id,
+                    staff_member_id=auth.actor_id,
+                    request_id=request_id,
+                ),
+            )
+
+        return plan
+
+    def _staff_assistant_composer(
+        self, auth: AuthContext, request_id: str
+    ) -> StaffModelComposer | None:
+        writer = getattr(self.ai, "write_staff_grounded_answer", None)
+        if writer is None:
+            return None
+
+        async def compose(
+            *,
+            question: str,
+            evidence_texts: list[str],
+            draft_answer: str,
+            feedback: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return cast(
+                Mapping[str, Any] | None,
+                await writer(
+                    question=question,
+                    evidence_texts=evidence_texts,
+                    draft_answer=draft_answer,
+                    feedback=feedback,
+                    tenant_id=auth.tenant_id,
+                    staff_member_id=auth.actor_id,
                     request_id=request_id,
                     attempt=2 if feedback else 1,
                 ),

@@ -243,6 +243,14 @@ class InMemoryPlatformService:
             return self.store.create_help_request(
                 auth, self._without_idempotency(payload), self._idempotency_key(payload)
             )
+        if operation == "staff.ask_edward":
+            return await self._ask_staff_edward(auth, payload, call.request_id)
+        if operation == "staff.create_assistant_conversation":
+            return self.store.create_staff_assistant_conversation(auth)
+        if operation == "staff.get_assistant_conversation_messages":
+            return self.store.get_staff_assistant_conversation_messages(
+                auth, self._path(call, "conversationId", "id")
+            )
         if operation == "staff.get_action_center":
             return self.store.get_action_center(auth)
         if operation == "staff.update_work_item":
@@ -629,6 +637,229 @@ class InMemoryPlatformService:
         get_assistant_trace_recorder().record(trace)
         return response
 
+    async def _ask_staff_edward(
+        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+    ) -> dict[str, Any]:
+        """In-memory twin of the Postgres staff assistant host.
+
+        Same pipeline, same safety gate, same durable-history discipline —
+        over the store's canonical demo/persona state, so the eval harness
+        exercises the production request path without Postgres.
+        """
+
+        from audentra.integrations.staff_assistant.pipeline import StaffAssistantPipeline
+        from audentra.integrations.staff_assistant.safety import guarded_staff_response
+        from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
+
+        self.store.require_staff(auth)
+        message = str(payload.get("message", ""))
+        conversation_id = payload.get("conversationId")
+        client_message_id = payload.get("clientMessageId")
+        persist = conversation_id is not None or client_message_id is not None
+        trace = AssistantTurnTrace(
+            trace_id=request_id,
+            tenant_id=auth.tenant_id,
+            assistant_kind="staff",
+            actor_type="staff",
+            staff_member_id=auth.actor_id,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            user_message=message,
+        )
+        if isinstance(client_message_id, str) and client_message_id:
+            replay = self.store.find_staff_assistant_exchange_by_client_id(auth, client_message_id)
+            if replay is not None:
+                trace.path = "idempotent_replay"
+                trace.final_message = str(replay.get("message") or "")
+                get_assistant_trace_recorder().record(trace)
+                return replay
+
+        guarded = guarded_staff_response(message)
+        resolved_student_id: str | None = None
+        if guarded is not None:
+            response: dict[str, Any] = dict(guarded)
+            trace.path = "pre_pipeline_safety_gate"
+            trace.response_source = "deterministic"
+            trace.provider = str(response.get("provider") or "guided")
+        else:
+            store = self.store
+
+            def student_read(
+                reader: Callable[[AuthContext], dict[str, Any]],
+            ) -> Callable[..., Any]:
+                async def read(student_id: str) -> dict[str, Any]:
+                    from dataclasses import replace as dc_replace
+
+                    return reader(dc_replace(auth, student_id=student_id))
+
+                return read
+
+            def staff_read(method: Callable[..., dict[str, Any]]) -> Callable[..., Any]:
+                async def read(**kwargs: Any) -> dict[str, Any]:
+                    return method(auth, **kwargs)
+
+                return read
+
+            async def student_overview(student_id: str) -> dict[str, Any]:
+                return store.staff_student_overview(auth, student_id)
+
+            host = StaffAssistantToolHost(
+                {
+                    "search_students": staff_read(store.staff_search_students),
+                    "student_overview": student_overview,
+                    "student_requirements": student_read(store.get_requirements),
+                    "student_documents": student_read(store.get_documents),
+                    "student_financials": student_read(store.get_financials),
+                    "student_payments": student_read(store.get_payments),
+                    "student_housing_plan": student_read(store.get_housing_plan),
+                    "student_appointments": student_read(store.get_appointments),
+                    "student_work_items": (
+                        lambda student_id: _async_value(
+                            store.staff_student_work_items(auth, student_id)
+                        )
+                    ),
+                    "communication_history": (
+                        lambda student_id, channel=None: _async_value(
+                            store.staff_communication_history(auth, student_id, channel=channel)
+                        )
+                    ),
+                    "engagement": (
+                        lambda student_id: _async_value(
+                            store.staff_engagement_signals(auth, student_id)
+                        )
+                    ),
+                    "timeline": (
+                        lambda student_id, limit=40: _async_value(
+                            store.staff_timeline(auth, student_id, limit=limit)
+                        )
+                    ),
+                    "attention": (
+                        lambda limit=15: _async_value(
+                            store.staff_attention_queue(auth, limit=limit)
+                        )
+                    ),
+                    "work_queue": lambda: _async_value(store.staff_work_queue(auth)),
+                    "work_item_detail": (
+                        lambda work_item_id: _async_value(
+                            store.staff_work_item_detail(auth, work_item_id)
+                        )
+                    ),
+                    "inquiries": lambda: _async_value(store.staff_inquiries(auth)),
+                    "inquiry_thread": (
+                        lambda inquiry_id: _async_value(
+                            store.staff_inquiry_thread(auth, inquiry_id)
+                        )
+                    ),
+                    "guidance": lambda: _async_value(store.staff_guidance(auth)),
+                    "action_rules": lambda: _async_value(store.staff_action_rules(auth)),
+                },
+                staff_member_id=auth.actor_id,
+            )
+            history: Sequence[Mapping[str, Any]] = []
+            context_student_id: str | None = None
+            if conversation_id is not None:
+                recent = self.store.get_recent_staff_assistant_history(auth, str(conversation_id))
+                history = list(recent.get("history", []))
+                context_student_id = recent.get("activeStudentId")
+                trace.history_source = "server"
+            pipeline = StaffAssistantPipeline(
+                host,
+                model_composer=self._staff_assistant_composer(auth, request_id),
+                model_planner=self._staff_assistant_planner(auth, request_id),
+            )
+            result = await pipeline.execute(
+                message=message,
+                history=history,
+                context_student_id=context_student_id,
+                trace=trace,
+            )
+            resolved_student_id = result.resolved_student_id
+            trace.student_id = resolved_student_id
+            response = {
+                "message": result.message,
+                "blocks": result.blocks,
+                "provider": result.provider,
+                "model": result.model,
+                "usage": result.usage,
+                "contextReceipts": result.context_receipts,
+                "resolvedStudent": (
+                    {"id": result.resolved_student_id, "name": result.resolved_student_name}
+                    if result.resolved_student_id
+                    else None
+                ),
+            }
+        if persist:
+            stored = self.store.append_staff_assistant_exchange(
+                auth,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                user_message={
+                    "content": message,
+                    "clientMessageId": client_message_id,
+                },
+                assistant_message={
+                    "content": response.get("message"),
+                    "provider": response.get("provider"),
+                    "model": response.get("model"),
+                    "usage": response.get("usage"),
+                    "blocks": response.get("blocks"),
+                    "contextReceipts": response.get("contextReceipts"),
+                },
+                referenced_student_id=resolved_student_id,
+                request_id=request_id,
+            )
+            response.update(stored)
+            trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id
+            trace.user_message_id = str(stored.get("userMessageId") or "") or None
+            trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
+        response["requestId"] = request_id
+        trace.final_message = trace.final_message or str(response.get("message") or "")
+        get_assistant_trace_recorder().record(trace)
+        return response
+
+    def _staff_assistant_planner(self, auth: AuthContext, request_id: str) -> Any:
+        planner = getattr(self.ai, "plan_staff_tool_reads", None)
+        if planner is None:
+            return None
+        from audentra.integrations.staff_assistant.catalog import STAFF_TOOL_DESCRIPTIONS
+        from audentra.integrations.staff_assistant.classify import STAFF_REQUEST_TYPES
+
+        async def plan(*, message: str, student_resolved: bool = False) -> Mapping[str, Any] | None:
+            return await planner(  # type: ignore[no-any-return]
+                message=message,
+                allowed_request_types=STAFF_REQUEST_TYPES,
+                available_tools=STAFF_TOOL_DESCRIPTIONS,
+                student_resolved=student_resolved,
+                tenant_id=auth.tenant_id,
+                staff_member_id=auth.actor_id,
+                request_id=request_id,
+            )
+
+        return plan
+
+    def _staff_assistant_composer(self, auth: AuthContext, request_id: str) -> Any:
+        writer = getattr(self.ai, "write_staff_grounded_answer", None)
+        if writer is None:
+            return None
+
+        async def compose(
+            *,
+            question: str,
+            evidence_texts: list[str],
+            draft_answer: str,
+            feedback: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return await writer(  # type: ignore[no-any-return]
+                question=question,
+                evidence_texts=evidence_texts,
+                draft_answer=draft_answer,
+                feedback=feedback,
+                tenant_id=auth.tenant_id,
+                staff_member_id=auth.actor_id,
+                request_id=request_id,
+                attempt=2 if feedback else 1,
+            )
+
+        return compose
+
     def _assistant_planner(self, auth: AuthContext, request_id: str) -> Any:
         """Mirror of the Postgres host wiring: present only when the injected
         AI object exposes the planner (a real gateway does, the fake doesn't)."""
@@ -743,6 +974,12 @@ class InMemoryPlatformService:
 
 def _optional_str(value: object) -> str | None:
     return str(value) if value not in (None, "") else None
+
+
+async def _async_value(value: dict[str, Any]) -> dict[str, Any]:
+    """Wrap an already-computed store read for the async tool host."""
+
+    return value
 
 
 _ONE_PIXEL_JPEG = bytes.fromhex(

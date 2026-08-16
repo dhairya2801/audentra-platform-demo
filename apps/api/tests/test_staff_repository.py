@@ -158,7 +158,14 @@ class PreferenceReloadingRepository(PostgresStaffRepository):
 
 
 class ActionDetailReloadingRepository(PostgresStaffRepository):
-    async def get_work_item_detail(self, auth: AuthContext, work_item_id: str) -> dict[str, object]:
+    async def get_work_item_detail(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+        *,
+        ensure_document_work_items: bool = True,
+    ) -> dict[str, object]:
+        del ensure_document_work_items
         del auth
         return {"workItem": {"id": work_item_id}}
 

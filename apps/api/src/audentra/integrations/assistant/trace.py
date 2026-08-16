@@ -101,6 +101,13 @@ class AssistantTurnTrace:
     tenant_id: str | None = None
     student_id: str | None = None
     conversation_id: str | None = None
+    # Which assistant produced this turn and who asked. The student pipeline
+    # leaves the defaults; the staff pipeline sets assistant_kind="staff",
+    # actor_type="staff", staff_member_id=<actor>, and uses student_id for
+    # the resolved student *referent* of the turn (if any).
+    assistant_kind: str = "student"
+    actor_type: str = "student"
+    staff_member_id: str | None = None
     input_mode: str = "text"
     user_message: str = ""
     page_path: str | None = None
@@ -161,6 +168,8 @@ class AssistantTurnTrace:
         reason: str | None = None,
         result: Any = None,
         round_name: str = "initial",
+        arguments: Any = None,
+        validation: str | None = None,
     ) -> None:
         entry: JsonDict = {"tool": tool, "status": status, "round": round_name}
         if duration_ms is not None:
@@ -171,6 +180,12 @@ class AssistantTurnTrace:
             entry["reason"] = reason
         if result is not None:
             entry["result"] = sanitize_trace_value(result)
+        # Staff tools take validated arguments; recording them (sanitized)
+        # plus the validation outcome makes every read auditable.
+        if arguments is not None:
+            entry["arguments"] = sanitize_trace_value(arguments)
+        if validation is not None:
+            entry["validation"] = validation
         self.tool_calls.append(entry)
 
     def add_model_call(
@@ -212,6 +227,9 @@ class AssistantTurnTrace:
             "tenantId": self.tenant_id,
             "studentId": self.student_id,
             "conversationId": self.conversation_id,
+            "assistantKind": self.assistant_kind,
+            "actorType": self.actor_type,
+            "staffMemberId": self.staff_member_id,
             "inputMode": self.input_mode,
             "path": self.path,
             "userMessage": sanitize_trace_value(self.user_message),
@@ -288,6 +306,7 @@ class AssistantTraceRecorder:
                 "traceId": payload.get("traceId"),
                 "startedAt": payload.get("startedAt"),
                 "path": payload.get("path"),
+                "assistantKind": payload.get("assistantKind", "student"),
                 "inputMode": payload.get("inputMode"),
                 "conversationId": payload.get("conversationId"),
                 "studentId": payload.get("studentId"),

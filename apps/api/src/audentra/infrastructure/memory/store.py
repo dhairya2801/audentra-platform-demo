@@ -148,13 +148,18 @@ class InMemoryPlatformStore:
         ]
         self.payments: list[dict[str, Any]] = []
         self.help_requests: list[dict[str, Any]] = []
-        # Evaluation fixtures may overlay financial-aid state without changing
-        # the normal demo fixture used by the application tests.
+        # Evaluation fixtures overlay financial-aid state (awards, required
+        # documents, cost of attendance) onto the static demo financials.
+        # Empty in normal use, so default behavior is unchanged.
         self.financial_overrides: dict[str, Any] = {}
+        # Same overlay pattern for the academics plan and campus life data,
+        # which are otherwise static demo constants. Empty in normal use.
         self.academics_overrides: dict[str, Any] = {}
         self.campus_overrides: dict[str, Any] = {}
         self.assistant_conversations: dict[str, dict[str, Any]] = {}
         self.assistant_messages: list[dict[str, Any]] = []
+        self.staff_assistant_conversations: dict[str, dict[str, Any]] = {}
+        self.staff_assistant_messages: list[dict[str, Any]] = []
         self.profile: dict[str, Any] = {
             "studentId": DEMO_IDS["student_id"],
             "preferredName": "Alex",
@@ -369,6 +374,9 @@ class InMemoryPlatformStore:
                     "amountCents": self.dashboard["offer"]["depositAmountCents"],
                     "enrollmentFeeCents": 0,
                     "dueAt": self.dashboard["offer"]["responseDeadline"],
+                    # Postgres requires a *succeeded* deposit transaction here;
+                    # a pending payment is not a paid deposit in either
+                    # composition.
                     "status": "paid" if self._deposit_settled() else "due",
                     "projected": False,
                 }
@@ -1482,6 +1490,24 @@ class InMemoryPlatformStore:
             ),
         }
 
+    def get_recent_assistant_history(
+        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
+    ) -> list[dict[str, str]]:
+        """Bounded recent turns for model context, oldest first.
+
+        Mirrors the Postgres repository: the durable store, not the browser,
+        supplies conversation history; an unknown conversation yields [].
+        """
+
+        self.authorize(auth)
+        turns = [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in self.assistant_messages
+            if item["conversationId"] == conversation_id
+        ]
+        bounded = max(1, min(int(limit), 40))
+        return turns[-bounded:]
+
     def find_assistant_exchange_by_client_id(
         self, auth: AuthContext, client_message_id: str
     ) -> dict[str, Any] | None:
@@ -1522,22 +1548,6 @@ class InMemoryPlatformStore:
             "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
             "widgets": _clone(assistant_message.get("widgets") or []),
         }
-
-    def get_recent_assistant_history(
-        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
-    ) -> list[dict[str, str]]:
-        """Return bounded durable conversation history, oldest first."""
-
-        self.authorize(auth)
-        if conversation_id not in self.assistant_conversations:
-            return []
-        turns = [
-            {"role": str(item["role"]), "content": str(item["content"])}
-            for item in self.assistant_messages
-            if item["conversationId"] == conversation_id
-        ]
-        bounded = max(1, min(int(limit), 40))
-        return turns[-bounded:]
 
     def append_assistant_exchange(
         self,
@@ -1596,6 +1606,521 @@ class InMemoryPlatformStore:
                 "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
                 "suggestedActions": _clone(assistant_message.get("suggestedActions") or []),
                 "widgets": _clone(assistant_message.get("widgets") or []),
+                "createdAt": _now(),
+            }
+        )
+        return {
+            "conversationId": conversation_id,
+            "userMessageId": user_id,
+            "assistantMessageId": assistant_id,
+        }
+
+    # ------------------------------------------------------------------
+    # Staff assistant (Staff Edward) — pure reads over existing store state
+    # plus the staff conversation transcript. Mirrors the Postgres
+    # staff-assistant repository shapes so the eval host exercises the same
+    # pipeline contract as production. Nothing here fabricates product data:
+    # where the in-memory host has no source (engagement snapshots,
+    # intervention candidates, guidance), the read says so.
+    # ------------------------------------------------------------------
+
+    _DONE_REQUIREMENT_STATUSES = frozenset({"completed", "waived", "not_applicable"})
+    _OPEN_WORK_STATUSES = frozenset({"todo", "in_progress", "follow_up_required", "blocked"})
+
+    def _requirement_counts(self) -> dict[str, Any]:
+        items = self.get_requirements_items()
+        open_items = [
+            item for item in items if str(item.get("status")) not in self._DONE_REQUIREMENT_STATUSES
+        ]
+        due_dates = sorted(str(item.get("dueAt")) for item in open_items if item.get("dueAt"))
+        return {
+            "total": len(items),
+            "completed": len(items) - len(open_items),
+            "openBlocking": sum(1 for item in open_items if item.get("blocking")),
+            "nextDueAt": due_dates[0] if due_dates else None,
+        }
+
+    def get_requirements_items(self) -> list[dict[str, Any]]:
+        payload = self.get_requirements(
+            AuthContext(
+                tenant_id=DEMO_IDS["tenant_id"],
+                student_id=DEMO_IDS["student_id"],
+                actor_id=DEMO_IDS["student_id"],
+                actor_type="student",
+            )
+        )
+        items = payload.get("items")
+        return list(items) if isinstance(items, list) else []
+
+    def staff_search_students(
+        self, auth: AuthContext, *, query: str = "", program: str | None = None, limit: int = 10
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        summary = self._staff_student_summary()
+        haystack = f"{summary['name']} {summary['preferredName']}".lower()
+        tokens = [token for token in str(query or "").lower().split() if token]
+        matches = all(token in haystack for token in tokens) if tokens else True
+        if program and str(program).lower() not in str(summary["programName"]).lower():
+            matches = False
+        counts = self._requirement_counts()
+        items = (
+            [
+                {
+                    **summary,
+                    "offerStatus": self.dashboard["offer"]["status"],
+                    "requirements": {
+                        "total": counts["total"],
+                        "completed": counts["completed"],
+                        "openBlocking": counts["openBlocking"],
+                    },
+                    "nextDueAt": counts["nextDueAt"],
+                }
+            ]
+            if matches
+            else []
+        )
+        return {"items": items[: max(1, min(int(limit or 10), 25))], "total": len(items)}
+
+    def staff_student_overview(self, auth: AuthContext, student_id: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        if student_id != DEMO_IDS["student_id"]:
+            return {}
+        offer = self.dashboard["offer"]
+        deposit_paid = any(
+            payment.get("type") == "enrollment_deposit" and payment.get("status") == "succeeded"
+            for payment in self.payments
+        )
+        counts = self._requirement_counts()
+        open_work = [
+            item for item in self.work_items if str(item.get("status")) in self._OPEN_WORK_STATUSES
+        ]
+        return {
+            "id": DEMO_IDS["student_id"],
+            "name": "Alex Morgan",
+            "preferredName": self.profile["preferredName"],
+            "communicationPreference": self.profile.get("communicationPreference"),
+            "programName": offer["programName"],
+            "classYear": 2027,
+            "onboardingStatus": self.onboarding["status"],
+            "offer": {
+                "status": offer["status"],
+                "responseDeadline": offer["responseDeadline"],
+                "depositAmountCents": offer["depositAmountCents"],
+                "depositPaid": deposit_paid,
+            },
+            "requirements": counts,
+            "openWorkItems": len(open_work),
+        }
+
+    def staff_student_work_items(self, auth: AuthContext, student_id: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        items = [
+            {
+                "id": item["id"],
+                "key": item["key"],
+                "title": item["title"],
+                "status": item["status"],
+                "priority": item["priority"],
+                "component": item["component"],
+                "actionType": item.get("actionType"),
+                "dueAt": item.get("dueAt"),
+                "escalated": bool(item.get("escalated")),
+                "assignee": (item.get("assignee") or {}).get("name"),
+                "assigneeComponent": (item.get("assignee") or {}).get("component"),
+                "createdAt": item.get("createdAt"),
+                "updatedAt": item.get("updatedAt"),
+            }
+            for item in self.work_items
+            if item.get("student", {}).get("id") == student_id
+            and str(item.get("status")) in self._OPEN_WORK_STATUSES
+        ]
+        return {"items": _clone(items), "total": len(items)}
+
+    def staff_communication_history(
+        self, auth: AuthContext, student_id: str, *, channel: str | None = None
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        events = [
+            {
+                "id": message["id"],
+                "channel": "portal",
+                "direction": "outbound",
+                "subject": message.get("subject"),
+                "bodyExcerpt": str(message.get("body") or "")[:400],
+                "deliveryStatus": "recorded",
+                "resolutionStatus": "unresolved",
+                "occurredAt": message.get("sentAt"),
+                "interactionId": None,
+                "sourceType": "student_message",
+            }
+            for message in self.messages
+            if student_id == DEMO_IDS["student_id"]
+        ]
+        if channel:
+            events = [event for event in events if event["channel"] == channel]
+        events.sort(key=lambda event: str(event.get("occurredAt") or ""), reverse=True)
+        inquiries = [
+            {
+                "id": request.get("id"),
+                "topicCode": request.get("topicCode"),
+                "subject": request.get("subject") or request.get("topicCode"),
+                "status": request.get("status", "new"),
+                "priority": request.get("priority", "medium"),
+                "assignee": None,
+                "createdAt": request.get("createdAt"),
+                "lastMessageAt": request.get("createdAt"),
+                "resolvedAt": None,
+            }
+            for request in self.help_requests
+            if student_id == DEMO_IDS["student_id"]
+        ]
+        return {
+            "events": events,
+            "inquiries": inquiries,
+            "total": len(events),
+            "coverage": (
+                "Recorded communications only: staff-logged interactions and "
+                "portal messages. No external email/SMS integration exists and "
+                "opens/clicks are not tracked."
+            ),
+        }
+
+    def staff_engagement_signals(self, auth: AuthContext, student_id: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        return {
+            "available": False,
+            "note": (
+                "No engagement snapshot has been computed for this student "
+                "yet. The engagement scan runs on a schedule; live requirement "
+                "and deadline reads still work."
+            ),
+        }
+
+    def staff_attention_queue(self, auth: AuthContext, *, limit: int = 15) -> dict[str, Any]:
+        self.require_staff(auth)
+        return {
+            "items": [],
+            "total": 0,
+            "rankingBasis": (
+                "Deterministic engagement-scan rules. No candidates have been "
+                "computed on this host."
+            ),
+            "generatedAt": _now(),
+        }
+
+    def staff_timeline(
+        self, auth: AuthContext, student_id: str, *, limit: int = 40
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        events: list[dict[str, Any]] = []
+        if student_id == DEMO_IDS["student_id"]:
+            for document in self.documents:
+                if document.get("status") == "placeholder":
+                    continue
+                events.append(
+                    {
+                        "occurredAt": document.get("createdAt"),
+                        "kind": "document",
+                        "title": f"Document uploaded: {document.get('category')}",
+                        "detail": (
+                            f"{document.get('fileName')} (current status: {document.get('status')})"
+                        ),
+                    }
+                )
+            for payment in self.payments:
+                events.append(
+                    {
+                        "occurredAt": payment.get("createdAt"),
+                        "kind": "payment",
+                        "title": f"Enrollment deposit payment {payment.get('status')}",
+                        "detail": f"${int(payment.get('amountCents') or 0) / 100:.2f}",
+                    }
+                )
+            for appointment in self.appointments:
+                events.append(
+                    {
+                        "occurredAt": appointment.get("startsAt"),
+                        "kind": "appointment",
+                        "title": f"Appointment: {appointment.get('type')}",
+                        "detail": appointment.get("status"),
+                    }
+                )
+            for message in self.messages:
+                events.append(
+                    {
+                        "occurredAt": message.get("sentAt"),
+                        "kind": "communication",
+                        "title": "outbound portal (recorded)",
+                        "detail": message.get("subject"),
+                    }
+                )
+            for request in self.help_requests:
+                events.append(
+                    {
+                        "occurredAt": request.get("createdAt"),
+                        "kind": "inquiry",
+                        "title": (
+                            "Support inquiry opened: "
+                            f"{request.get('subject') or request.get('topicCode')}"
+                        ),
+                        "detail": request.get("status", "new"),
+                    }
+                )
+        events = [event for event in events if event.get("occurredAt")]
+        events.sort(key=lambda event: str(event["occurredAt"]), reverse=True)
+        return {
+            "events": events[: max(1, min(int(limit or 40), 80))],
+            "total": len(events),
+            "coverage": (
+                "Documents, deposit payments, recorded communications, "
+                "appointments, and inquiries on the in-memory host."
+            ),
+        }
+
+    def staff_work_queue(self, auth: AuthContext) -> dict[str, Any]:
+        """Pure queue read: same rows as the action center, no document
+        work-item reconciliation side effect."""
+
+        self.require_staff(auth)
+        items = sorted(
+            self.work_items,
+            key=lambda x: (
+                {"urgent": 0, "high": 1, "medium": 2, "low": 3}[x["priority"]],
+                x["dueAt"] or "",
+            ),
+        )
+        return {
+            "items": _clone(items),
+            "staff": _clone(self.staff_members),
+            "counts": {
+                "todo": sum(x["status"] == "todo" for x in items),
+                "inProgress": sum(x["status"] == "in_progress" for x in items),
+                "followUpRequired": sum(x["status"] == "follow_up_required" for x in items),
+                "blocked": sum(x["status"] == "blocked" for x in items),
+                "done": sum(x["status"] == "done" for x in items),
+                "cancelled": sum(x["status"] == "cancelled" for x in items),
+                "urgent": sum(x["priority"] == "urgent" for x in items),
+                "escalated": sum(bool(x["escalated"]) for x in items),
+            },
+            "generatedAt": _now(),
+        }
+
+    def staff_work_item_detail(self, auth: AuthContext, work_item_id: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        item = self._work_item(work_item_id)
+        return {
+            "workItem": _clone(item),
+            "taskInsight": None,
+            "studentSummary": None,
+            "interactions": [],
+            "comments": [],
+            "relatedItems": [],
+            "relatedDocuments": [],
+            "generatedAt": _now(),
+        }
+
+    def staff_inquiries(self, auth: AuthContext) -> dict[str, Any]:
+        self.require_staff(auth)
+        student = self._staff_student_summary()
+        items = [
+            {
+                "id": request.get("id"),
+                "subject": request.get("subject") or request.get("topicCode"),
+                "status": request.get("status", "new"),
+                "priority": request.get("priority", "medium"),
+                "assignee": None,
+                "student": _clone(student),
+                "createdAt": request.get("createdAt"),
+            }
+            for request in self.help_requests
+        ]
+        return {"items": items, "total": len(items)}
+
+    def staff_inquiry_thread(self, auth: AuthContext, inquiry_id: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        request = next((item for item in self.help_requests if item.get("id") == inquiry_id), None)
+        if request is None:
+            raise NotFoundError("STAFF_INQUIRY_NOT_FOUND", "The inquiry was not found")
+        return {
+            "id": inquiry_id,
+            "status": request.get("status", "new"),
+            "version": 1,
+            "messages": [
+                {
+                    "authorName": self._staff_student_summary()["name"],
+                    "body": request.get("message"),
+                    "createdAt": request.get("createdAt"),
+                    "direction": "inbound",
+                }
+            ],
+        }
+
+    def staff_guidance(self, auth: AuthContext) -> dict[str, Any]:
+        self.require_staff(auth)
+        return {
+            "corePlays": [],
+            "knowledgeCards": [],
+            "nature": ("Staff-authored prose guidance. None exists on this host."),
+        }
+
+    def staff_action_rules(self, auth: AuthContext) -> dict[str, Any]:
+        self.require_staff(auth)
+        return {"items": []}
+
+    # -- Durable staff conversations (in-memory twin of migration 0036) ----
+
+    def create_staff_assistant_conversation(self, auth: AuthContext) -> dict[str, Any]:
+        self.require_staff(auth)
+        conversation: dict[str, Any] = {
+            "id": str(uuid4()),
+            "staffMemberId": auth.actor_id,
+            "status": "active",
+            "activeStudentId": None,
+            "createdAt": _now(),
+        }
+        self.staff_assistant_conversations[conversation["id"]] = conversation
+        return {
+            "id": conversation["id"],
+            "status": "active",
+            "messages": [],
+            "createdAt": conversation["createdAt"],
+        }
+
+    def get_staff_assistant_conversation_messages(
+        self, auth: AuthContext, conversation_id: str
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        conversation = self.staff_assistant_conversations.get(conversation_id)
+        if conversation is None or conversation.get("staffMemberId") != auth.actor_id:
+            raise NotFoundError(
+                "STAFF_ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+            )
+        return {
+            "conversationId": conversation_id,
+            "activeStudentId": conversation.get("activeStudentId"),
+            "messages": _clone(
+                [
+                    item
+                    for item in self.staff_assistant_messages
+                    if item["conversationId"] == conversation_id
+                ]
+            ),
+        }
+
+    def get_recent_staff_assistant_history(
+        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        conversation = self.staff_assistant_conversations.get(conversation_id)
+        if conversation is None or conversation.get("staffMemberId") != auth.actor_id:
+            return {"history": [], "activeStudentId": None}
+        turns = [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in self.staff_assistant_messages
+            if item["conversationId"] == conversation_id
+        ]
+        bounded = max(1, min(int(limit), 40))
+        return {
+            "history": turns[-bounded:],
+            "activeStudentId": conversation.get("activeStudentId"),
+        }
+
+    def find_staff_assistant_exchange_by_client_id(
+        self, auth: AuthContext, client_message_id: str
+    ) -> dict[str, Any] | None:
+        self.require_staff(auth)
+        user_index = next(
+            (
+                index
+                for index, item in enumerate(self.staff_assistant_messages)
+                if item["role"] == "user"
+                and item.get("clientMessageId") == client_message_id
+                and item.get("staffMemberId") == auth.actor_id
+            ),
+            None,
+        )
+        if user_index is None:
+            return None
+        user_message = self.staff_assistant_messages[user_index]
+        assistant_message = next(
+            (
+                item
+                for item in self.staff_assistant_messages[user_index + 1 :]
+                if item["role"] == "assistant"
+                and item["conversationId"] == user_message["conversationId"]
+            ),
+            None,
+        )
+        if assistant_message is None:
+            return None
+        return {
+            "conversationId": user_message["conversationId"],
+            "userMessageId": user_message["id"],
+            "assistantMessageId": assistant_message["id"],
+            "requestId": assistant_message.get("requestId"),
+            "message": assistant_message["content"],
+            "blocks": _clone(assistant_message.get("blocks")),
+            "provider": assistant_message.get("provider") or "guided",
+            "model": assistant_message.get("model"),
+            "usage": _clone(assistant_message.get("usage")),
+            "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
+        }
+
+    def append_staff_assistant_exchange(
+        self,
+        auth: AuthContext,
+        *,
+        conversation_id: str | None,
+        user_message: dict[str, Any],
+        assistant_message: dict[str, Any],
+        referenced_student_id: str | None,
+        request_id: str,
+    ) -> dict[str, Any]:
+        self.require_staff(auth)
+        if conversation_id is None:
+            created = self.create_staff_assistant_conversation(auth)
+            conversation_id = str(created["id"])
+        conversation = self.staff_assistant_conversations.get(conversation_id)
+        if conversation is None or conversation.get("staffMemberId") != auth.actor_id:
+            raise NotFoundError(
+                "STAFF_ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
+            )
+        if referenced_student_id:
+            conversation["activeStudentId"] = referenced_student_id
+        user_id = str(uuid4())
+        assistant_id = str(uuid4())
+        self.staff_assistant_messages.append(
+            {
+                "id": user_id,
+                "conversationId": conversation_id,
+                "staffMemberId": auth.actor_id,
+                "role": "user",
+                "content": str(user_message.get("content") or "")[:8000],
+                "clientMessageId": user_message.get("clientMessageId"),
+                "requestId": request_id,
+                "provider": None,
+                "model": None,
+                "usage": None,
+                "contextReceipts": [],
+                "referencedStudentId": referenced_student_id,
+                "createdAt": _now(),
+            }
+        )
+        self.staff_assistant_messages.append(
+            {
+                "id": assistant_id,
+                "conversationId": conversation_id,
+                "staffMemberId": auth.actor_id,
+                "role": "assistant",
+                "content": str(assistant_message.get("content") or "")[:8000],
+                "clientMessageId": None,
+                "requestId": request_id,
+                "provider": assistant_message.get("provider"),
+                "model": assistant_message.get("model"),
+                "usage": _clone(assistant_message.get("usage")),
+                "blocks": _clone(assistant_message.get("blocks")),
+                "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
+                "referencedStudentId": referenced_student_id,
                 "createdAt": _now(),
             }
         )
