@@ -29,6 +29,7 @@ class BinaryPayload:
 class DemoStudentSession:
     context: AuthContext
     preferred_name: str
+    external_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +89,17 @@ class BrowserAuthService(Protocol):
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession: ...
 
+    async def demo_student_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> DemoStudentSession:
+        """Resolve a named demo student inside a demo-enabled tenant.
+
+        Distinct from `demo_student`, which answers "whoever this tenant's
+        demo identity is". This one answers "this specific student", and the
+        tenant boundary is enforced here rather than by the caller.
+        """
+        ...
+
     async def resolve_student(
         self, token: str, tenant_id: str, tenant_slug: str | None
     ) -> CredentialStudentSession | None: ...
@@ -127,6 +139,11 @@ class BrowserAuthService(Protocol):
 
 class UnavailableBrowserAuthService:
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
+        self._raise()
+
+    async def demo_student_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> DemoStudentSession:
         self._raise()
 
     async def resolve_student(

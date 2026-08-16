@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Request, Response
 
 from audentra.contracts.requests import (
+    DemoStudentSignInRequest,
     EmptyBody,
     StaffSignInRequest,
     StaffSignUpRequest,
@@ -19,6 +20,7 @@ from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.errors import ApiError
 from audentra.core.ports import CredentialStudentSession, DemoStudentSession, StaffSession
 
+from .demo_identity import DEMO_STUDENT_COOKIE, issue_demo_student_cookie
 from .dependencies import (
     AuthServiceDependency,
     get_settings,
@@ -104,6 +106,7 @@ def _demo_response(session: DemoStudentSession) -> dict[str, Any]:
         "student": {
             "id": session.context.student_id,
             "preferredName": session.preferred_name,
+            "externalRef": session.external_ref,
         },
         "notice": (
             "Development fixture only. This is not an institutional authentication session."
@@ -160,7 +163,44 @@ async def sign_in_demo_student(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
+    # Signing in as "the demo student" clears any earlier per-student choice.
+    _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
+    return _demo_response(session)
+
+
+@auth_router.post("/v1/auth/demo/sign-in-as", status_code=200, response_model=None)
+async def sign_in_demo_student_by_reference(
+    body: DemoStudentSignInRequest,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    """Open a chosen demo student's portal. Development and preview only.
+
+    This reads existing state; it never writes any. Signing in as a student who
+    has paid a deposit and stalled on a transcript shows exactly that, and
+    signing out and back in shows it again — which is the entire reason the
+    endpoint exists and the reason it must not touch the demo fixture reset.
+    """
+
+    _development_only(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    session = await auth.demo_student_by_reference(tenant_id, tenant_slug, body.student_ref)
+    await auth.sign_out_student(request.cookies.get("vv_session"))
+    _expire_cookie(response, request, "vv_session")
+    _demo_cookie(response, request)
+    _set_session_cookie(
+        response,
+        request,
+        name=DEMO_STUDENT_COOKIE,
+        token=issue_demo_student_cookie(
+            get_settings(request).demo_session_token,
+            tenant_id,
+            session.context.student_id,
+        ),
+        expires_at_epoch=int(time.time()) + 86_400,
+    )
     return _demo_response(session)
 
 
@@ -181,6 +221,7 @@ async def start_guided_onboarding(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
+    _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
     return _demo_response(session)
 
@@ -195,6 +236,7 @@ async def sign_out_demo_student(
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     return {"authenticated": False, "mode": "demo"}
 
 
