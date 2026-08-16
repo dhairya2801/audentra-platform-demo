@@ -145,6 +145,14 @@ _ACADEMIC_STANDING = re.compile(
     re.IGNORECASE,
 )
 
+# Individual course grades are not part of the reviewed academic-plan or SAP
+# reads. Treat them as explicitly unavailable instead of turning an unknown
+# question into generic enrollment advice.
+_COURSE_GRADE_QUESTION = re.compile(
+    r"\bgrades?\b(?!\s+point(?:\s+average)?\b)",
+    re.IGNORECASE,
+)
+
 # Facts the student themselves supplied during onboarding. Kept narrow so a
 # document question about residency proof does not land here.
 _PERSONAL_INFORMATION = re.compile(
@@ -312,6 +320,10 @@ def classify(request: NormalizedRequest) -> Classification | None:
     if request.contains_sensitive_financial_data:
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="sensitive_financial_data"
+        )
+    if _COURSE_GRADE_QUESTION.search(text):
+        return Classification(
+            "unsupported_or_out_of_scope", 1, requirement_reference="course_grades_unavailable"
         )
 
     # Institutional policy questions are settled before the domain branches so

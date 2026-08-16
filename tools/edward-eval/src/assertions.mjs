@@ -38,17 +38,34 @@ function normalize(value) {
     .toLowerCase();
 }
 
-export function runChecks(checks, answer, response) {
+export function runChecks(checks, answer, response, context = {}) {
   const text = normalize(answer);
   const failures = [];
   for (const check of checks) {
-    const failure = runCheck(check, text, response);
+    const failure = runCheck(check, text, response, context);
     if (failure) failures.push(failure);
   }
   return failures;
 }
 
-function runCheck(check, text, response) {
+/** Tolerant patterns for one USD string: "$17,005" ~ "$17005" ~ "$17,005.00". */
+function usdPattern(value) {
+  const digits = String(value).replace(/[^0-9.]/g, "");
+  const [whole, decimals] = digits.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",?");
+  const tail = decimals && Number(decimals) > 0 ? `\\.${decimals}` : "(\\.0{1,2})?";
+  return new RegExp(`\\$${grouped}${tail}`);
+}
+
+function factValues(context, name) {
+  const value = context?.facts?.[name];
+  if (value === undefined || value === null) return null;
+  return (Array.isArray(value) ? value : [value]).map((item) =>
+    normalize(String(item)),
+  );
+}
+
+function runCheck(check, text, response, context = {}) {
   switch (check.kind) {
     case "mentions":
       return check.any.some((needle) => text.includes(needle.toLowerCase()))
@@ -136,6 +153,106 @@ function runCheck(check, text, response) {
         }
       }
       return null;
+    }
+
+    /* ---- fact-backed checks: expectations derived from the persona ---- */
+
+    // At least `min` (default 1) of the named fact's values appear verbatim.
+    case "mentions_any_fact": {
+      const values = factValues(context, check.fact);
+      if (values === null) return `fact "${check.fact}" is not derivable`;
+      if (values.length === 0) return null; // nothing exists to mention
+      const min = check.min ?? 1;
+      const hits = values.filter((value) => value && text.includes(value));
+      return hits.length >= Math.min(min, values.length)
+        ? null
+        : `expected at least ${min} of fact ${check.fact} [${values.join(" | ")}] in the answer`;
+    }
+
+    case "mentions_all_fact": {
+      const values = factValues(context, check.fact);
+      if (values === null) return `fact "${check.fact}" is not derivable`;
+      const missing = values.filter((value) => value && !text.includes(value));
+      return missing.length === 0
+        ? null
+        : `answer omits ${check.fact} value(s): ${missing.join(", ")}`;
+    }
+
+    case "not_mentions_fact": {
+      const values = factValues(context, check.fact);
+      if (values === null) return `fact "${check.fact}" is not derivable`;
+      const leaked = values.filter((value) => value && text.includes(value));
+      return leaked.length === 0
+        ? null
+        : `answer must not mention ${check.fact} value(s): ${leaked.join(", ")}`;
+    }
+
+    // The exact canonical amount, tolerant of thousands separators/decimals.
+    case "mentions_amount": {
+      const value = context?.facts?.[check.fact];
+      if (typeof value !== "string" || !value.startsWith("$")) {
+        return `fact "${check.fact}" has no canonical USD amount`;
+      }
+      return usdPattern(value).test(text)
+        ? null
+        : `expected the canonical amount ${value} in the answer`;
+    }
+
+    // The three-valued deposit truth: unpaid / pending (exists, not posted) /
+    // posted. Collapsing pending into either neighbour is the failure.
+    case "deposit_state_consistent": {
+      const state = context?.facts?.depositState;
+      if (state === "posted") {
+        if (/\b(?:not (?:yet )?(?:paid|posted|received)|unpaid|still owe the deposit)\b/.test(text)) {
+          return "deposit is posted but the answer denies it";
+        }
+        return /\b(?:paid|posted|received|complete)\b/.test(text)
+          ? null
+          : "deposit is posted but the answer never says so";
+      }
+      if (state === "pending") {
+        return /\b(?:pending|processing|clearing|not (?:yet )?posted|hasn'?t posted|has not posted)\b/.test(
+          text,
+        )
+          ? null
+          : "a pending deposit payment exists; the answer must say it has not posted yet";
+      }
+      if (state === "unpaid") {
+        if (/\bdeposit\b[^.]{0,60}\b(?:posted|received|paid)\b/.test(text) &&
+            !/\b(?:not|hasn'?t|has not|isn'?t|once|after|when|until)\b[^.]{0,40}\b(?:posted|received|paid)\b/.test(text)) {
+          return "no deposit payment exists but the answer claims it was paid/posted";
+        }
+        return null;
+      }
+      return `unknown canonical deposit state "${state}"`;
+    }
+
+    // Fault cases: the answer must acknowledge the read did not go through
+    // rather than assert (or invent) state from the failed domain.
+    case "acknowledges_unavailable": {
+      const markers = [
+        "couldn't",
+        "could not",
+        "can't check",
+        "cannot check",
+        "can't confirm",
+        "cannot confirm",
+        "can't verify",
+        "cannot verify",
+        "unable",
+        "not available",
+        "unavailable",
+        "didn't load",
+        "did not load",
+        "right now",
+        "try again",
+        "temporarily",
+        "wasn't able",
+        "was not able",
+      ];
+      return markers.some((marker) => text.includes(marker))
+        ? null
+        : "a tool read failed but the answer never acknowledges anything was unavailable";
     }
 
     case "max_sentences": {

@@ -3,18 +3,26 @@
  * Edward evaluation CLI.
  *
  *   node tools/edward-eval/run.mjs --batch baseline
- *   node tools/edward-eval/run.mjs --batch causal-fix --categories causal,multi_domain
- *   node tools/edward-eval/run.mjs --batch smoke --limit 5 --no-judge
+ *   node tools/edward-eval/run.mjs --tier smoke --no-judge
+ *   node tools/edward-eval/run.mjs --categories cross_domain,conflict
+ *   node tools/edward-eval/run.mjs --id housing-cross-domain-017 --verbose
  *
- * Writes a full transcript and a summary to artifacts/runs/<batch>/.
- * Aborts hard if the cumulative spend ceiling is reached.
+ * Writes transcript.json, summary.json, and snapshots.json to
+ * artifacts/runs/<batch>/. Exits non-zero when a `critical` invariant case
+ * fails, regardless of aggregate score. Aborts hard at the spend ceiling.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runContractChecks, runChecks } from "./src/assertions.mjs";
-import { CRITERIA, judgeAnswer } from "./src/judge.mjs";
-import { QUESTIONS, questionsByCategory } from "./src/questions.mjs";
+import { deriveFacts, groundTruthLines } from "./src/facts.mjs";
+import { gradeTranscripts, finalizeRecords } from "./src/grade.mjs";
+import { applicableDimensions, buildJudgeEvidence, judgeTurn } from "./src/judge.mjs";
+import {
+  QUESTIONS,
+  questionsByCategory,
+  questionsByIds,
+  questionsByTier,
+} from "./src/questions.mjs";
 import { runCases } from "./src/runner.mjs";
 import {
   SpendCeilingExceededError,
@@ -22,6 +30,9 @@ import {
   costTrackedFetch,
   createConcurrencyLimiter,
 } from "./src/spend-ledger.mjs";
+import { accountRun } from "./src/accounting.mjs";
+import { printInspection } from "./src/inspect-view.mjs";
+import { summarise, printSummary } from "./src/summarize.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const artifacts = join(repoRoot, "artifacts");
@@ -30,28 +41,39 @@ function parseArgs(argv) {
   const args = {
     batch: "adhoc",
     categories: [],
+    ids: [],
+    tier: null,
     limit: 0,
     judge: true,
     repeat: 1,
     judgeConcurrency: 4,
+    verbose: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--batch") args.batch = argv[++index];
     else if (flag === "--categories") args.categories = argv[++index].split(",");
+    else if (flag === "--id" || flag === "--ids") args.ids.push(...argv[++index].split(","));
+    else if (flag === "--tier") args.tier = argv[++index];
     else if (flag === "--limit") args.limit = Number(argv[++index]);
     else if (flag === "--repeat") args.repeat = Number(argv[++index]);
-    else if (flag === "--judge-concurrency")
-      args.judgeConcurrency = Number(argv[++index]);
+    else if (flag === "--judge-concurrency") args.judgeConcurrency = Number(argv[++index]);
     else if (flag === "--no-judge") args.judge = false;
+    else if (flag === "--verbose") args.verbose = true;
+    else {
+      console.error(`Unknown flag ${flag}`);
+      process.exit(2);
+    }
   }
   return args;
 }
 
 const args = parseArgs(process.argv.slice(2));
 const apiKey = process.env.OPENAI_API_KEY;
-if (!apiKey) {
-  console.error("OPENAI_API_KEY is required to run the evaluation.");
+if (!apiKey && args.judge) {
+  console.error(
+    "OPENAI_API_KEY is required to judge. Use --no-judge for a deterministic-only run.",
+  );
   process.exit(1);
 }
 
@@ -64,29 +86,38 @@ console.log(
   `batch "${args.batch}" starting. cumulative spend so far $${startingSpend.toFixed(4)} of $${ledger.ceilingUsd.toFixed(2)} tracked ($${ledger.absoluteCeilingUsd.toFixed(2)} absolute).`,
 );
 
-let selected = questionsByCategory(args.categories);
+let selected =
+  args.ids.length > 0
+    ? questionsByIds(args.ids)
+    : args.categories.length > 0
+      ? questionsByCategory(args.categories)
+      : questionsByTier(args.tier);
 if (args.repeat > 1) {
   selected = Array.from({ length: args.repeat }, (_, run) =>
     selected.map((item) => ({ ...item, id: `${item.id}#${run + 1}` })),
   ).flat();
 }
 if (args.limit > 0) selected = selected.slice(0, args.limit);
-console.log(`${selected.length} case(s) selected of ${QUESTIONS.length} in the suite.`);
+console.log(
+  `${selected.length} case(s) / ${selected.reduce((sum, item) => sum + item.turns.length, 0)} turn(s) selected of ${QUESTIONS.length} cases in the suite.`,
+);
+if (selected.length === 0) process.exit(2);
 
 let transcripts = [];
+let snapshots = {};
 let aborted = null;
 try {
-  transcripts = await runCases({
+  const result = await runCases({
     cases: selected,
     ledger,
     onProgress: (record, done, total) => {
-      if (done % 10 === 0 || done === total) {
-        console.log(
-          `  asked ${done}/${total}  spend $${ledger.totalUsd.toFixed(4)}`,
-        );
+      if (done % 20 === 0 || done >= total) {
+        console.log(`  asked ${done}/${total} turns  spend $${ledger.totalUsd.toFixed(4)}`);
       }
     },
   });
+  transcripts = result.transcripts;
+  snapshots = result.snapshots;
 } catch (error) {
   if (error instanceof SpendCeilingExceededError) {
     aborted = error.message;
@@ -96,39 +127,61 @@ try {
   }
 }
 
-// Deterministic scoring first: it costs nothing and decides the cases that must
-// never be left to a model.
-const results = transcripts.map((record) => {
-  const contractFailures = runContractChecks(record.response);
-  const checkFailures = runChecks(record.checks ?? [], record.answer, record.response);
-  return {
-    ...record,
-    contractFailures,
-    checkFailures,
-    deterministicPass:
-      contractFailures.length === 0 && checkFailures.length === 0 && !record.error,
-  };
-});
+const factsByPersona = Object.fromEntries(
+  Object.entries(snapshots).map(([persona, snapshot]) => [persona, deriveFacts(snapshot)]),
+);
 
+// Deterministic grading first: costs nothing and decides the invariants that
+// must never be left to a model.
+const results = gradeTranscripts(transcripts, factsByPersona);
+
+// Judge pass: every judged turn, with conversation context and canonical
+// ground truth. Judge spend routes through the tracked fetch.
+const judgeTotals = { calls: 0, promptTokens: 0, completionTokens: 0, usd: 0 };
 if (args.judge && !aborted) {
   const judgeFetch = costTrackedFetch(ledger, {
+    onCall: ({ usd, promptTokens, completionTokens }) => {
+      judgeTotals.calls += 1;
+      judgeTotals.promptTokens += promptTokens;
+      judgeTotals.completionTokens += completionTokens;
+      judgeTotals.usd += usd;
+    },
     onRetry: ({ status, attempt, maxAttempts, delayMs }) =>
-      console.log(
-        `  rate limited (${status}); retry ${attempt}/${maxAttempts} in ${delayMs}ms`,
-      ),
+      console.log(`  rate limited (${status}); retry ${attempt}/${maxAttempts} in ${delayMs}ms`),
   });
-  // Judging is independent per answer, so it is the one place worth fanning
-  // out. The bound keeps that fan-out from being the thing that trips a 429.
   const runBounded = createConcurrencyLimiter(args.judgeConcurrency);
-  const pending = results.filter((result) => result.judged && !result.error);
+  const pending = [];
+  for (const record of results) {
+    const facts = factsByPersona[record.persona] ?? {};
+    const groundTruth = groundTruthLines(facts, record.judgeFacts ?? undefined);
+    record.turns.forEach((turn, turnIndex) => {
+      if (!record.judged || turn.judged === false || turn.error || !turn.answer) return;
+      const conversation = [
+        ...record.history,
+        ...record.turns.slice(0, turnIndex).flatMap((prior) => [
+          { role: "user", content: prior.question },
+          { role: "assistant", content: prior.answer },
+        ]),
+      ];
+      pending.push({ record, turn, turnIndex, conversation, groundTruth });
+    });
+  }
   let judged = 0;
   await Promise.all(
-    pending.map((result) =>
+    pending.map(({ record, turn, turnIndex, conversation, groundTruth }) =>
       runBounded(async () => {
         if (aborted) return;
         try {
-          result.judgement = await judgeAnswer({
-            record: result,
+          const dimensions = applicableDimensions(record, turnIndex, conversation);
+          turn.judgement = await judgeTurn({
+            evidence: buildJudgeEvidence({
+              question: turn.question,
+              conversation,
+              expectedBehavior: record.expectedBehavior,
+              groundTruth,
+              response: turn.response,
+            }),
+            dimensions,
             fetchImpl: judgeFetch,
             apiKey,
           });
@@ -140,10 +193,10 @@ if (args.judge && !aborted) {
             }
             return;
           }
-          result.judgementError = String(error?.message ?? error);
+          turn.judgementError = String(error?.message ?? error);
         }
         judged += 1;
-        if (judged % 10 === 0) {
+        if (judged % 25 === 0) {
           console.log(`  judged ${judged}/${pending.length}  spend $${ledger.totalUsd.toFixed(4)}`);
         }
       }),
@@ -151,122 +204,38 @@ if (args.judge && !aborted) {
   );
 }
 
-const summary = summarise(results, args.batch);
+// Taxonomy + case-level rollups after both passes.
+finalizeRecords(results);
+
+const accounting = accountRun(results, {
+  ...judgeTotals,
+  usd: Number(judgeTotals.usd.toFixed(6)),
+});
+const summary = summarise(results, args.batch, accounting);
 summary.spend = {
   batchUsd: Number((ledger.totalUsd - startingSpend).toFixed(6)),
   cumulativeUsd: Number(ledger.totalUsd.toFixed(6)),
   remainingUsd: Number(ledger.remainingUsd().toFixed(6)),
-  perQuestionUsd:
-    results.length > 0
-      ? Number(((ledger.totalUsd - startingSpend) / results.length).toFixed(6))
-      : 0,
 };
 summary.aborted = aborted;
 
 const outputDirectory = join(artifacts, "runs", args.batch);
 mkdirSync(outputDirectory, { recursive: true });
-writeFileSync(
-  join(outputDirectory, "transcript.json"),
-  `${JSON.stringify(results, null, 2)}\n`,
-);
-writeFileSync(
-  join(outputDirectory, "summary.json"),
-  `${JSON.stringify(summary, null, 2)}\n`,
-);
+writeFileSync(join(outputDirectory, "transcript.json"), `${JSON.stringify(results, null, 2)}\n`);
+writeFileSync(join(outputDirectory, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+writeFileSync(join(outputDirectory, "snapshots.json"), `${JSON.stringify(snapshots, null, 2)}\n`);
 
 printSummary(summary, results);
 
-function summarise(items, batch) {
-  const judgedItems = items.filter((item) => item.judgement);
-  const byCategory = {};
-  for (const item of items) {
-    const bucket = (byCategory[item.category] ??= {
-      total: 0,
-      deterministicPass: 0,
-      judgedCount: 0,
-      scoreSum: 0,
-      scoreMax: 0,
-    });
-    bucket.total += 1;
-    if (item.deterministicPass) bucket.deterministicPass += 1;
-    if (item.judgement) {
-      bucket.judgedCount += 1;
-      bucket.scoreSum += item.judgement.total;
-      bucket.scoreMax += item.judgement.maximum;
-    }
-  }
-  const criterionTotals = Object.fromEntries(
-    CRITERIA.map((criterion) => [criterion.key, { sum: 0, count: 0 }]),
-  );
-  for (const item of judgedItems) {
-    for (const criterion of CRITERIA) {
-      criterionTotals[criterion.key].sum += item.judgement.scores[criterion.key];
-      criterionTotals[criterion.key].count += 1;
-    }
-  }
-  return {
-    batch,
-    cases: items.length,
-    deterministicPass: items.filter((item) => item.deterministicPass).length,
-    deterministicFail: items.filter((item) => !item.deterministicPass).length,
-    judged: judgedItems.length,
-    meanScorePercent:
-      judgedItems.length > 0
-        ? Number(
-            (
-              (judgedItems.reduce((sum, item) => sum + item.judgement.total, 0) /
-                judgedItems.reduce((sum, item) => sum + item.judgement.maximum, 0)) *
-              100
-            ).toFixed(1),
-          )
-        : null,
-    byCategory: Object.fromEntries(
-      Object.entries(byCategory).map(([name, bucket]) => [
-        name,
-        {
-          ...bucket,
-          meanScorePercent:
-            bucket.scoreMax > 0
-              ? Number(((bucket.scoreSum / bucket.scoreMax) * 100).toFixed(1))
-              : null,
-        },
-      ]),
-    ),
-    byCriterion: Object.fromEntries(
-      Object.entries(criterionTotals).map(([key, value]) => [
-        key,
-        value.count > 0 ? Number((value.sum / value.count).toFixed(2)) : null,
-      ]),
-    ),
-  };
+if (args.verbose) {
+  for (const record of results) printInspection(record, factsByPersona[record.persona]);
 }
 
-function printSummary(value, items) {
-  console.log("\n=== summary ===");
-  console.log(
-    `cases ${value.cases} | deterministic pass ${value.deterministicPass}/${value.cases} | judged ${value.judged} | mean quality ${value.meanScorePercent ?? "-"}%`,
+const criticalFailures = results.filter((record) => record.critical && !record.deterministicPass);
+if (criticalFailures.length > 0) {
+  console.error(
+    `\nCRITICAL INVARIANT FAILURES (${criticalFailures.length}): ${criticalFailures.map((record) => record.id).join(", ")}`,
   );
-  console.log(
-    `batch spend $${value.spend.batchUsd.toFixed(4)} | cumulative $${value.spend.cumulativeUsd.toFixed(4)} | per question $${value.spend.perQuestionUsd.toFixed(5)}`,
-  );
-  console.log("\nby category:");
-  for (const [name, bucket] of Object.entries(value.byCategory)) {
-    console.log(
-      `  ${name.padEnd(20)} pass ${String(bucket.deterministicPass).padStart(2)}/${String(bucket.total).padEnd(3)} quality ${bucket.meanScorePercent ?? "-"}%`,
-    );
-  }
-  console.log("\nby criterion (mean of 2):");
-  for (const [key, mean] of Object.entries(value.byCriterion)) {
-    console.log(`  ${key.padEnd(22)} ${mean ?? "-"}`);
-  }
-  const failures = items.filter((item) => !item.deterministicPass);
-  if (failures.length > 0) {
-    console.log("\ndeterministic failures:");
-    for (const failure of failures.slice(0, 25)) {
-      console.log(
-        `  [${failure.id}] ${failure.question}\n      ${[...failure.contractFailures, ...failure.checkFailures, failure.error].filter(Boolean).join("; ")}`,
-      );
-    }
-  }
-  console.log(`\nwritten to artifacts/runs/${value.batch}/`);
+  process.exitCode = 1;
 }
+if (aborted) process.exitCode = 1;

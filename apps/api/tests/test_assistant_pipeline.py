@@ -389,6 +389,16 @@ def test_mutation_requests_are_refused_without_model_calls() -> None:
     assert host.read_primitives == []
 
 
+def test_unavailable_course_grade_does_not_become_generic_enrollment_advice() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "What grade did I get in my first class?")
+
+    assert result.classification is not None
+    assert result.classification.request_type == "unsupported_or_out_of_scope"
+    assert "can't check" in result.message
+    assert host.read_primitives == []
+
+
 def test_document_freshness_next_answer_reflects_mutated_state() -> None:
     """The systemic freshness invariant: state mutated between two asks is
     visible in the very next answer, because every read happens at question

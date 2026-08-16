@@ -34,6 +34,7 @@ dev = [
 
 [project.scripts]
 audentra-api = "audentra.interfaces.http.main:run"
+audentra-eval-api = "audentra.bootstrap.eval_api:main"
 audentra-migrate = "audentra.infrastructure.db.migrations:main"
 audentra-seed = "audentra.infrastructure.seeding.cli:run"
 audentra-worker = "audentra.interfaces.worker.main:run"

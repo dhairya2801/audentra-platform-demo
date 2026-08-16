@@ -176,14 +176,14 @@ describe("spend ledger", () => {
     await assert.rejects(() => tracked(chatUrl, request()), SpendCeilingExceededError);
   });
 
-  it("defaults to the $0.85 tracked ceiling with a $1.00 absolute backstop", async () => {
+  it("defaults to the $4.00 tracked ceiling with a $4.50 absolute backstop", async () => {
     const file = await ledgerFile();
     const ledger = new SpendLedger({ file });
 
-    assert.equal(TRACKED_CEILING_USD, 0.85);
-    assert.equal(ABSOLUTE_CEILING_USD, 1);
-    assert.equal(ledger.ceilingUsd, 0.85);
-    assert.equal(ledger.absoluteCeilingUsd, 1);
+    assert.equal(TRACKED_CEILING_USD, 4);
+    assert.equal(ABSOLUTE_CEILING_USD, 4.5);
+    assert.equal(ledger.ceilingUsd, 4);
+    assert.equal(ledger.absoluteCeilingUsd, 4.5);
     assert.ok(
       ABSOLUTE_CEILING_USD - TRACKED_CEILING_USD > 0.1,
       "the backstop must leave more headroom than any single call can consume",

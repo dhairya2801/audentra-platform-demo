@@ -9,15 +9,10 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-/** USD per token. Only models priced here may be called. */
-export const MODEL_PRICING = Object.freeze({
-  "gpt-4o-mini": { input: 0.15 / 1_000_000, output: 0.6 / 1_000_000 },
-  // The API echoes a dated snapshot id for the same model and price.
-  "gpt-4o-mini-2024-07-18": {
-    input: 0.15 / 1_000_000,
-    output: 0.6 / 1_000_000,
-  },
-});
+import { MODEL_PRICING, worstCasePricing } from "./pricing.mjs";
+
+/** USD per token, from the eval pricing configuration. Only priced models may be called. */
+export { MODEL_PRICING };
 
 /**
  * The tracked ceiling is the operational abort: a batch stops here. The absolute
@@ -25,9 +20,12 @@ export const MODEL_PRICING = Object.freeze({
  * deliberately larger than any single gpt-4o-mini call this harness can make, so
  * a call authorised just under the tracked ceiling still cannot reach the
  * absolute one.
+ *
+ * Raised from 0.85/1.00 when the suite grew from 115 to ~400 cases: a full
+ * judged run costs roughly $0.25, and the ledger is cumulative across runs.
  */
-export const TRACKED_CEILING_USD = 0.85;
-export const ABSOLUTE_CEILING_USD = 1;
+export const TRACKED_CEILING_USD = 4;
+export const ABSOLUTE_CEILING_USD = 4.5;
 
 export class SpendCeilingExceededError extends Error {
   constructor(spentUsd, ceilingUsd, kind = "tracked") {
@@ -171,16 +169,6 @@ export class SpendLedger {
       ),
     };
   }
-}
-
-function worstCasePricing() {
-  return Object.values(MODEL_PRICING).reduce(
-    (worst, pricing) =>
-      pricing.input + pricing.output > worst.input + worst.output
-        ? pricing
-        : worst,
-    { input: 0, output: 0 },
-  );
 }
 
 /** Statuses worth another attempt: rate limiting and transient server faults. */
