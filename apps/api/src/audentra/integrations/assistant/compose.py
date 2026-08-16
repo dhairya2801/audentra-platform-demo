@@ -9,10 +9,12 @@ disagree about what the evidence said.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from audentra.integrations.assistant import links
 from audentra.integrations.assistant.blocks import (
     bullet_list_block,
     next_steps_block,
@@ -21,6 +23,7 @@ from audentra.integrations.assistant.blocks import (
 )
 from audentra.integrations.assistant.classify import Classification
 from audentra.integrations.assistant.derive import DerivedState, deposit_state
+from audentra.integrations.assistant.links import club_page
 
 JsonDict = dict[str, Any]
 
@@ -38,13 +41,13 @@ _CAPABILITY_MESSAGE = (
 _WRITE_DESTINATIONS = {
     "housing_write_unavailable": (
         "the housing step on your enrollment checklist",
-        "/enrollment",
+        links.ENROLLMENT,
     ),
-    "financial_aid_write_unavailable": ("the Financials page", "/financials"),
-    "document_write_unavailable": ("the Documents page", "/documents"),
-    "payment_write_unavailable": ("the Payments page", "/payments"),
-    "appointment_write_unavailable": ("the Appointments page", "/appointments"),
-    "write_unavailable": ("the matching portal page", "/enrollment"),
+    "financial_aid_write_unavailable": ("the Financials page", links.FINANCIALS),
+    "document_write_unavailable": ("the Documents page", links.DOCUMENTS),
+    "payment_write_unavailable": ("the Payments page", links.PAYMENTS),
+    "appointment_write_unavailable": ("the Appointments page", links.APPOINTMENTS),
+    "write_unavailable": ("the matching portal page", links.ENROLLMENT),
 }
 
 # Student-facing names for each read, used for honest unavailability language
@@ -599,10 +602,16 @@ def _compose_checklist(
             return ComposedAnswer(
                 message=message, blocks=[text_block(message)], evidence_texts=evidence
             )
-        message = (
-            f"You've completed {len(state.completed_steps)} checklist step(s): "
-            f"{_join_titles(state.completed_steps)}."
-        )
+        if len(state.completed_steps) == 1:
+            message = (
+                f"You've completed one checklist step so far: "
+                f"{_join_titles(state.completed_steps)}."
+            )
+        else:
+            message = (
+                f"You've completed {_count(len(state.completed_steps), 'checklist step')} "
+                "so far — here they are:"
+            )
         block = bullet_list_block(
             [{"text": str(step.get("title"))} for step in state.completed_steps],
             title="Completed",
@@ -622,11 +631,22 @@ def _compose_checklist(
             return f"{title} (a payment is already pending — no action needed)"
         return title
 
-    message = (
-        f"{len(state.remaining_steps)} checklist step(s) still need attention: "
-        + ", ".join(step_label(step) for step in state.remaining_steps[:4])
-        + ("." if len(state.remaining_steps) <= 4 else ", and more.")
-    )
+    # The list itself renders once, below; the prose answers the question and
+    # surfaces what changes how the student should read that list.
+    pending = [step for step in state.remaining_steps if step.get("processingPending")]
+    if len(state.remaining_steps) == 1:
+        message = (
+            f"One checklist step still needs attention: {step_label(state.remaining_steps[0])}."
+        )
+    else:
+        message = f"{_count(len(state.remaining_steps), 'checklist step')} still need attention"
+        if pending:
+            message += (
+                f" — though {_join_titles(pending)} already "
+                f"{'has' if len(pending) == 1 else 'have'} a payment processing, "
+                "so no action is needed there"
+            )
+        message += ". Here's the list, in order:"
     block = next_steps_block(
         [
             {
@@ -679,14 +699,20 @@ def _compose_documents(
             return ComposedAnswer(
                 message=message, blocks=[text_block(message)], evidence_texts=evidence
             )
-        message = (
-            f"{len(state.missing_documents)} document(s) still need to be uploaded: "
-            f"{_join_titles(state.missing_documents)}."
-        )
+        if len(state.missing_documents) == 1:
+            message = (
+                "One document still needs to be uploaded: your "
+                f"{_document_noun(state.missing_documents[0]['title'])}."
+            )
+        else:
+            message = (
+                f"{_count(len(state.missing_documents), 'document')} still need to be "
+                "uploaded — each step below opens the right page:"
+            )
         block = next_steps_block(
             [
                 {
-                    "text": f"Upload your {item['title']}",
+                    "text": f"Upload your {_document_noun(item['title'])}",
                     "href": item.get("href"),
                     "owner": "student",
                 }
@@ -697,6 +723,33 @@ def _compose_documents(
         return ComposedAnswer(
             message=message, blocks=[text_block(message), block], evidence_texts=evidence
         )
+    state_prose = {
+        "accepted": "has been accepted",
+        "under_review": "is under review",
+        "not_submitted": "is not submitted yet",
+        "needs_attention": "needs your attention before review can continue",
+    }
+    # One requirement is a sentence, not a table.
+    if len(states) == 1:
+        only = states[0]
+        message = (
+            f"You have one required document — your {_document_noun(only['title'])} — "
+            f"and it {state_prose.get(only['submissionState'], only['submissionState'])}."
+        )
+        blocks: list[JsonDict] = [text_block(message)]
+        if only["submissionState"] in {"not_submitted", "needs_attention"} and only.get("href"):
+            blocks.append(
+                next_steps_block(
+                    [
+                        {
+                            "text": f"Upload your {_document_noun(only['title'])}",
+                            "href": only.get("href"),
+                            "owner": "student",
+                        }
+                    ]
+                )
+            )
+        return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
     label = {
         "accepted": "Accepted",
         "under_review": "Under review",
@@ -710,29 +763,29 @@ def _compose_documents(
         }
         for item in states
     ]
-    summary_parts = []
-    under_review = [item for item in states if item["submissionState"] == "under_review"]
-    if under_review:
-        summary_parts.append(
-            f"{_join_titles(under_review)} {'is' if len(under_review) == 1 else 'are'} under review"
-        )
+    # Synthesis, not repetition: the table below carries the per-document
+    # detail once; the prose gives the shape of the situation and names only
+    # what needs the student's eyes.
     accepted = [item for item in states if item["submissionState"] == "accepted"]
-    if accepted:
-        summary_parts.append(f"{_join_titles(accepted)} accepted")
+    under_review = [item for item in states if item["submissionState"] == "under_review"]
     needs_attention = [item for item in states if item["submissionState"] == "needs_attention"]
-    if needs_attention:
-        summary_parts.append(
-            f"{_join_titles(needs_attention)} "
-            f"{'needs' if len(needs_attention) == 1 else 'need'} your attention"
-        )
     missing = state.missing_documents
+    summary_parts = []
+    if accepted:
+        summary_parts.append(f"{len(accepted)} accepted")
+    if under_review:
+        summary_parts.append(f"{len(under_review)} under review")
     if missing:
-        summary_parts.append(f"{_join_titles(missing)} not submitted yet")
-    message = (
-        "Here's where your documents stand: " + "; ".join(summary_parts) + "."
-        if summary_parts
-        else "Here's where your documents stand."
-    )
+        summary_parts.append(f"{len(missing)} still to submit")
+    message = f"Of your {_count(len(states), 'required document')}"
+    message += f", {', '.join(summary_parts)}." if summary_parts else ", none have moved yet."
+    if needs_attention:
+        message += (
+            f" {_join_titles(needs_attention)} "
+            f"{'needs' if len(needs_attention) == 1 else 'need'} your attention "
+            "before review can continue."
+        )
+    message += " The table shows each one:"
     # When the student named a specific document, answer about that document
     # first so the direct question gets a direct sentence.
     reference = classification.requirement_reference
@@ -740,20 +793,16 @@ def _compose_documents(
         matched = [item for item in states if reference in item["title"].lower()]
         if len(matched) == 1:
             item = matched[0]
-            state_prose = {
-                "accepted": "has been accepted",
-                "under_review": "is under review",
-                "not_submitted": "has not been submitted yet",
-                "needs_attention": "needs your attention before review can continue",
-            }.get(item["submissionState"], item["submissionState"])
             message = (
-                f"Your {reference} document {state_prose}"
+                f"Your {reference} document "
+                f"{state_prose.get(item['submissionState'], item['submissionState'])}"
                 f" (checklist item: {item['title']}). {message}"
             )
     block = table_block(
         [{"key": "document", "label": "Document"}, {"key": "status", "label": "Status"}],
         rows,
         caption="Document status",
+        row_hrefs=[item.get("href") for item in states],
     )
     return ComposedAnswer(
         message=message, blocks=[text_block(message), block], evidence_texts=evidence
@@ -775,20 +824,30 @@ def _compose_holds(
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    parts = []
-    if state.official_holds:
-        parts.append(f"{len(state.official_holds)} hold(s): {_join_titles(state.official_holds)}")
-    if state.derived_blockers:
-        parts.append(
-            f"{len(state.derived_blockers)} item(s) blocking progress: "
-            f"{_join_titles(state.derived_blockers)}"
+    # The block below names each item with its clearing action; the prose
+    # answers the question and splits the work by who moves next.
+    blocking = [*state.official_holds, *state.derived_blockers]
+    waiting = [item for item in blocking if item.get("owner") == "university"]
+    yours = [item for item in blocking if item.get("owner") != "university"]
+    split = ""
+    if waiting and yours:
+        split = (
+            f" {_count(len(yours), 'needs action from you', 'need action from you')}; "
+            f"{len(waiting)} {'is' if len(waiting) == 1 else 'are'} waiting on the university."
         )
-    message = f"You have {' and '.join(parts)}. Each one below shows what clears it."
-    if not state.official_holds:
+    elif waiting:
+        split = " All of it is waiting on university review — no action needed from you."
+    if state.official_holds:
+        parts = [f"{_count(len(state.official_holds), 'hold')}"]
+        if state.derived_blockers:
+            parts.append(f"{_count(len(state.derived_blockers), 'item')} blocking progress")
+        message = f"You have {' and '.join(parts)}.{split} Each one below shows what clears it:"
+    else:
         message = (
             "No official hold exists — the university operates no registrar "
-            f"hold system. What you do have is {parts[0] if parts else 'nothing blocking'}. "
-            "Each item below shows what clears it."
+            f"hold system. What you do have is "
+            f"{_count(len(state.derived_blockers), 'item')} blocking progress."
+            f"{split} Each one below shows what clears it:"
         )
     block = next_steps_block(
         [
@@ -817,6 +876,29 @@ def _compose_deadlines(
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
+    overdue = [item for item in state.deadlines if item.get("bucket") == "overdue"]
+    # One deadline is a sentence with the date, not a one-row table.
+    if len(state.deadlines) == 1:
+        only = state.deadlines[0]
+        due = str(only.get("dueAt", ""))[:10]
+        past = only.get("bucket") == "overdue"
+        message = f"You have one deadline: {only.get('title')}, " + (
+            f"which was due {due} and is now past due." if past else f"due {due}."
+        )
+        blocks: list[JsonDict] = [text_block(message)]
+        if only.get("href"):
+            blocks.append(
+                next_steps_block(
+                    [
+                        {
+                            "text": f"Take care of {only.get('title')}",
+                            "href": only.get("href"),
+                            "owner": "student",
+                        }
+                    ]
+                )
+            )
+        return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
     bucket_label = {
         "overdue": "Past due",
         "this_week": "Due this week",
@@ -831,12 +913,19 @@ def _compose_deadlines(
         }
         for deadline in state.deadlines
     ]
-    overdue = [item for item in state.deadlines if item.get("bucket") == "overdue"]
-    message = (
-        f"{len(overdue)} deadline(s) are past due — start there."
-        if overdue
-        else f"You have {len(state.deadlines)} upcoming deadline(s)."
-    )
+    this_week = [item for item in state.deadlines if item.get("bucket") == "this_week"]
+    if overdue:
+        message = (
+            f"{_count(len(overdue), 'deadline is', 'deadlines are')} already past due — "
+            f"start with {_join_titles(overdue)}. The full list:"
+        )
+    else:
+        message = f"You have {_count(len(state.deadlines), 'upcoming deadline')}"
+        message += (
+            f" — {len(this_week)} due within the week. Here they are:"
+            if this_week
+            else ", none of them urgent this week. Here they are:"
+        )
     block = table_block(
         [
             {"key": "item", "label": "Item"},
@@ -845,6 +934,7 @@ def _compose_deadlines(
         ],
         rows,
         caption="Your deadlines",
+        row_hrefs=[deadline.get("href") for deadline in state.deadlines],
     )
     return ComposedAnswer(
         message=message, blocks=[text_block(message), block], evidence_texts=evidence
@@ -902,10 +992,17 @@ def _compose_financial_aid(
         open_requirements = aid.get("openRequirements", [])
         if not open_requirements:
             message = "Your financial aid file is complete — nothing is holding it open."
+        elif len(open_requirements) <= 2:
+            # Few causes: naming them is the direct answer.
+            message = (
+                f"Your aid is incomplete because {_join_titles(open_requirements)} "
+                f"{'is' if len(open_requirements) == 1 else 'are'} still open."
+            )
         else:
             message = (
-                f"Your aid is incomplete because {len(open_requirements)} requirement(s) "
-                f"are still open: {_join_titles(open_requirements)}."
+                f"Your aid is incomplete because "
+                f"{_count(len(open_requirements), 'requirement')} are still open — "
+                "they're listed below with where to act."
             )
     elif request_type == "aid_disbursement":
         disbursements = aid.get("disbursements") or {}
@@ -939,13 +1036,15 @@ def _compose_financial_aid(
             message = "Your financial aid record has no awards or open requirements yet."
         elif open_requirements:
             message = (
-                f"Your aid file lists {len(awards)} award(s), and "
-                f"{len(open_requirements)} requirement(s) still need attention: "
-                f"{_join_titles(open_requirements)}."
+                f"Your aid file lists {_count(len(awards), 'award')}, and "
+                f"{_count(len(open_requirements), 'requirement')} still "
+                f"{'needs' if len(open_requirements) == 1 else 'need'} attention — "
+                "the details are below."
             )
         else:
             message = (
-                f"Your aid file lists {len(awards)} award(s), and every requirement is satisfied."
+                f"Your aid file lists {_count(len(awards), 'award')}, "
+                "and every requirement is satisfied."
             )
     awards = aid.get("awards", [])
     if awards and request_type in {
@@ -1008,7 +1107,10 @@ def _compose_housing(
     evidence = build_evidence_bundle(state)
     if classification.request_type == "housing_options" and state.housing_options:
         residences = state.housing_options.get("residences", [])
-        message = f"{len(residences)} housing option(s) are listed."
+        message = (
+            f"{_count(len(residences), 'housing option is', 'housing options are')} "
+            "listed — here's each one:"
+        )
         block = bullet_list_block(
             [
                 {"text": f"{item.get('name')} — {item.get('description', '')}"[:160]}
@@ -1029,9 +1131,14 @@ def _compose_housing(
             if not gate.get("satisfied")
         ]
         if gates:
+            named = (
+                _join_titles(gates)
+                if len(gates) <= 2
+                else f"{_count(len(gates), 'earlier checklist item')} (listed below)"
+            )
             message = (
                 "Housing is locked right now because of earlier checklist "
-                f"items — {_join_titles(gates)} — not because of anything on "
+                f"items — {named} — not because of anything on "
                 "the housing side itself. Clear those and the housing step "
                 "opens for you to pick a preference."
             )
@@ -1121,10 +1228,12 @@ def _compose_housing_eligibility(
     if kind == "blocked":
         gates = [gate for gate in eligibility.get("gates", []) if not gate.get("satisfied")]
         if gates:
+            named = _join_titles(gates) if len(gates) <= 2 else "listed below in order"
             message = (
-                f"You can't act on housing yet: {len(gates)} earlier item(s) on your "
-                f"checklist come first — {_join_titles(gates)}. These are the only "
-                "items holding it back."
+                f"You can't act on housing yet: "
+                f"{_count(len(gates), 'earlier item')} on your "
+                f"checklist {'comes' if len(gates) == 1 else 'come'} first — {named}. "
+                "These are the only items holding it back."
             )
             block = next_steps_block(
                 [
@@ -1197,8 +1306,8 @@ def _compose_policy_lookup(
             text_block(message),
             next_steps_block(
                 [
-                    {"text": "Ask enrollment support", "href": "/help"},
-                    {"text": "Book an appointment", "href": "/appointments"},
+                    {"text": "Ask enrollment support", "href": links.HELP},
+                    {"text": "Book an appointment", "href": links.APPOINTMENTS},
                 ],
                 title="Get the official answer",
             ),
@@ -1229,9 +1338,11 @@ def _compose_registration(
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
+    named = _join_titles(gates) if len(gates) <= 2 else "each one is below with what clears it"
     message = (
-        f"{len(gates)} item(s) on your record are blocking registration: "
-        f"{_join_titles(gates)}. Clearing them is what opens registration."
+        f"{_count(len(gates), 'item')} on your record "
+        f"{'is' if len(gates) == 1 else 'are'} blocking registration — {named}. "
+        "Clearing them is what opens registration."
     )
     block = next_steps_block(
         [
@@ -1330,7 +1441,7 @@ def _compose_deposit_status(
     if not deposit.get("paid"):
         blocks.append(
             next_steps_block(
-                [{"text": "Open Payments", "href": "/payments", "owner": "student"}],
+                [{"text": "Open Payments", "href": links.PAYMENTS, "owner": "student"}],
             )
         )
     return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
@@ -1389,9 +1500,12 @@ def _compose_enrollment_state(
             else "Your enrollment deposit has not been paid yet."
         )
     if state.remaining_steps:
+        named = (
+            f": {_join_titles(state.remaining_steps)}" if len(state.remaining_steps) <= 3 else ""
+        )
         parts.append(
-            f"{len(state.remaining_steps)} checklist item(s) are still open: "
-            f"{_join_titles(state.remaining_steps)}."
+            f"{_count(len(state.remaining_steps), 'checklist item is', 'checklist items are')} "
+            f"still open{named}."
         )
     next_action = journey.get("nextAction") or {}
     message = " ".join(parts) or "I could not summarise your enrollment position."
@@ -1402,7 +1516,7 @@ def _compose_enrollment_state(
                 [
                     {
                         "text": str(next_action["label"]),
-                        "href": str(next_action.get("href") or "/enrollment"),
+                        "href": str(next_action.get("href") or links.ENROLLMENT),
                         "owner": "student",
                     }
                 ],
@@ -1527,7 +1641,7 @@ def _compose_support_requests(
             {
                 "text": f"{item.get('subject') or item.get('topicCode')} — "
                 f"{str(item.get('status') or '').replace('_', ' ')}",
-                "href": "/help",
+                "href": links.HELP,
             }
             for item in items[:5]
         ],
@@ -1594,7 +1708,7 @@ def _compose_unsupported(
         )
     elif reference and reference.endswith("write_unavailable"):
         destination, href = _WRITE_DESTINATIONS.get(
-            reference, ("the matching portal page", "/enrollment")
+            reference, ("the matching portal page", links.ENROLLMENT)
         )
         message = (
             "I can't make that change myself — I'm read-only. You can do it "
@@ -1687,9 +1801,20 @@ def _compose_campus_life(
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    message = (
-        f"Campus life currently lists {len(clubs)} club(s) and {len(events)} upcoming event(s)."
-    )
+    # Prose gives the shape (how many, what kinds); each list renders once
+    # below, with club entries linking to their portal pages.
+    categories = sorted({str(club.get("category") or "").strip() for club in clubs} - {""})
+    parts = []
+    if clubs:
+        spread = (
+            f", covering {', '.join(categories[:-1])} and {categories[-1]}"
+            if len(categories) > 1
+            else ""
+        )
+        parts.append(f"{_count(len(clubs), 'club')} you can join{spread}")
+    if events:
+        parts.append(f"{_count(len(events), 'upcoming event')}")
+    message = f"Campus life currently lists {' and '.join(parts)}. Here's a breakdown:"
     blocks = [text_block(message)]
     if clubs:
         blocks.append(
@@ -1699,7 +1824,8 @@ def _compose_campus_life(
                         "text": (
                             f"{club.get('name')} — "
                             f"{str(club.get('description') or club.get('category') or '')[:120]}"
-                        )
+                        ),
+                        "href": club_page(club.get("id")) if club.get("id") else None,
                     }
                     for club in clubs
                 ],
@@ -1748,7 +1874,10 @@ def _compose_messages(
     if unread_subjects:
         blocks.append(
             bullet_list_block(
-                [{"text": str(entry["subject"]), "href": "/messages"} for entry in unread_subjects],
+                [
+                    {"text": str(entry["subject"]), "href": links.MESSAGES}
+                    for entry in unread_subjects
+                ],
                 title="Unread messages",
             )
         )
@@ -1853,6 +1982,27 @@ def _join_titles(items: Sequence[dict[str, Any]]) -> str:
     if len(titles) <= 1:
         return titles[0] if titles else ""
     return ", ".join(titles[:-1]) + f" and {titles[-1]}"
+
+
+def _count(number: int, singular: str, plural: str | None = None) -> str:
+    """ "3 checklist steps", "1 document" — never the "(s)" shorthand."""
+
+    word = singular if number == 1 else (plural or f"{singular}s")
+    return f"{number} {word}"
+
+
+def _document_noun(title: str) -> str:
+    """Checklist titles are imperatives ("Upload an identity document");
+    inside a sentence only the noun phrase reads correctly."""
+
+    noun = re.sub(
+        r"^(?:submit|upload|complete|pay|select|provide|register for|finish|choose)\s+",
+        "",
+        title.strip(),
+        flags=re.IGNORECASE,
+    )
+    noun = re.sub(r"^(?:your|the|an|a)\s+", "", noun, flags=re.IGNORECASE)
+    return noun or title
 
 
 def _usd(cents: Any) -> str:

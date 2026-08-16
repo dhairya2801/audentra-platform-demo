@@ -158,5 +158,5 @@ async def test_pipeline_routes_cohort_without_resolving_a_student() -> None:
     assert captured and captured[0].offer_status == "accepted"
     assert captured[0].deposit_state == "unpaid"
     assert result.resolved_student_id is None
-    assert "7 student(s) match" in result.message
+    assert "7 students match" in result.message
     assert "Showing the first 1" in result.message

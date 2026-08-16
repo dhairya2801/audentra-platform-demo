@@ -30,6 +30,7 @@ from audentra.integrations.assistant.blocks import (
     table_block,
     text_block,
 )
+from audentra.integrations.staff_assistant import links as staff_links
 from audentra.integrations.staff_assistant.classify import StaffClassification
 from audentra.integrations.staff_assistant.derive import (
     StaffDerivedState,
@@ -783,11 +784,27 @@ def _compose_blockers(
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    titles = _join_titles(state.blockers)
+    # The block below names each blocker with its clearing action; the prose
+    # answers the question and says who moves next.
+    waiting = [item for item in state.blockers if item.get("owner") == "university"]
+    student_owned = [item for item in state.blockers if item.get("owner") != "university"]
+    if len(state.blockers) <= 2:
+        summary = f"{_join_titles(state.blockers)}"
+    else:
+        summary = "listed below with who clears each"
+    split = ""
+    if waiting and student_owned:
+        split = (
+            f" {len(student_owned)} need{'s' if len(student_owned) == 1 else ''} action "
+            f"from the student; {len(waiting)} {'is' if len(waiting) == 1 else 'are'} "
+            "waiting on university review."
+        )
+    elif waiting:
+        split = " All of it is waiting on university review."
     message = (
-        f"{name} is blocked by {len(state.blockers)} item(s): {titles}. "
-        "Each lists who clears it. (No registrar hold system exists — these "
-        "derived blockers are the complete list.)"
+        f"{name} is blocked by {_count(len(state.blockers), 'item')} — {summary}."
+        f"{split} (No registrar hold system exists — these derived blockers "
+        "are the complete list.)"
     )
     block = next_steps_block(
         [
@@ -1234,8 +1251,10 @@ def _compose_attention(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
     message = (
-        f"{disclaimer}{len(items)} student(s) currently carry attention flags, "
-        "ranked by the engagement scan's stored priority. Each entry shows why."
+        f"{disclaimer}"
+        f"{_count(len(items), 'student currently carries', 'students currently carry')} "
+        "attention flags, ranked by the engagement scan's stored priority. "
+        "Each entry below shows why:"
     )
     entries = []
     for item in items[:10]:
@@ -1670,15 +1689,15 @@ def _compose_work_queue(
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
+    # The table repeats every field; the prose gives the totals and points at
+    # the head of the queue without reciting its row.
     first = open_items[0]
     first_student = _m(first.get("student"))
     message = (
-        f"{len(open_items)} open item(s) in canonical order (priority, then due "
-        f"date). First up: {first.get('key')} — {first.get('title')} for "
-        f"{first_student.get('name')} ({first.get('priority')}"
-        + (f", due {str(first.get('dueAt', ''))[:10]}" if first.get("dueAt") else "")
-        + f"). {counts.get('urgent', 0)} urgent and "
-        f"{counts.get('escalated', 0)} escalated overall."
+        f"{_count(len(open_items), 'open item')} in canonical order (priority, then due "
+        f"date) — {counts.get('urgent', 0)} urgent, "
+        f"{counts.get('escalated', 0)} escalated. First up: {first.get('key')} "
+        f"for {first_student.get('name')}. The queue:"
     )
     block = table_block(
         [
@@ -1702,8 +1721,13 @@ def _compose_work_queue(
         ],
         caption="Queue (canonical order)",
     )
+    open_board = next_steps_block(
+        [{"text": "Work the queue from the task board", "href": staff_links.STAFF_TASKS}],
+    )
     return ComposedStaffAnswer(
-        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+        message=message,
+        blocks=[text_block(message), block, open_board],
+        evidence_texts=evidence,
     )
 
 
@@ -1951,22 +1975,43 @@ def _compose_cohort_search(
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    message = f"{total} student(s) match ({described})."
+    message = f"{_count(total, 'student matches', 'students match')} ({described})."
     if cohort.get("truncated"):
-        message += f" Showing the first {len(items)}."
-    block = bullet_list_block(
+        message += f" Showing the first {len(items)} — the total counts them all."
+    else:
+        message += " Here they are:"
+    block = table_block(
+        [
+            {"key": "name", "label": "Student"},
+            {"key": "program", "label": "Program"},
+            {"key": "deposit", "label": "Deposit"},
+            {"key": "blocking", "label": "Open blocking", "align": "right"},
+        ],
         [
             {
-                "text": f"{item.get('name')} — {item.get('programName')}, deposit "
-                f"{item.get('depositState') or ('paid' if item.get('depositPaid') else 'unpaid')}, "
-                f"{_m(item.get('requirements')).get('openBlocking')} open blocking"
+                "name": str(item.get("name", "")),
+                "program": str(item.get("programName", "")),
+                "deposit": str(
+                    item.get("depositState") or ("paid" if item.get("depositPaid") else "unpaid")
+                ),
+                "blocking": str(_m(item.get("requirements")).get("openBlocking", "")),
             }
             for item in items
         ],
-        title="Matching students",
+        caption="Matching students",
+    )
+    directory = next_steps_block(
+        [
+            {
+                "text": "Open the student directory for the full record view",
+                "href": staff_links.STAFF_STUDENTS,
+            }
+        ],
     )
     return ComposedStaffAnswer(
-        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+        message=message,
+        blocks=[text_block(message), block, directory],
+        evidence_texts=evidence,
     )
 
 
@@ -1985,19 +2030,29 @@ def _compose_cohort_aggregate(
     matching = int(summary.get("matchingStudents") or 0)
     represents = str(summary.get("countsRepresent") or "students")
     buckets = [_m(bucket) for bucket in summary.get("buckets") or []]
-    message = f"{matching} student(s) match ({described})."
+    message = f"{_count(matching, 'student matches', 'students match')} ({described})."
     if buckets:
-        message += f" Broken down by {summary.get('groupBy')}."
+        message += f" Broken down by {summary.get('groupBy')}:"
         if represents != "students":
             message += (
-                f" These counts are {represents}, so one student can appear in more than one row."
+                f" (these counts are {represents}, so one student can appear in more than one row)"
             )
     blocks = [text_block(message)]
     if buckets:
         blocks.append(
-            bullet_list_block(
-                [{"text": f"{bucket.get('value')}: {bucket.get('count')}"} for bucket in buckets],
-                title=f"By {summary.get('groupBy')}",
+            table_block(
+                [
+                    {"key": "group", "label": str(summary.get("groupBy") or "Group")},
+                    {"key": "count", "label": "Count", "align": "right"},
+                ],
+                [
+                    {
+                        "group": str(bucket.get("value", "")),
+                        "count": str(bucket.get("count", "")),
+                    }
+                    for bucket in buckets
+                ],
+                caption=f"By {summary.get('groupBy')}",
             )
         )
     return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
@@ -2082,6 +2137,13 @@ def _join_titles(items: Sequence[dict[str, Any]]) -> str:
     if len(titles) <= 1:
         return titles[0] if titles else ""
     return ", ".join(titles[:-1]) + f" and {titles[-1]}"
+
+
+def _count(number: int, singular: str, plural: str | None = None) -> str:
+    """ "3 open items", "1 blocker" — never the "(s)" shorthand."""
+
+    word = singular if number == 1 else (plural or f"{singular}s")
+    return f"{number} {word}"
 
 
 def _m(value: Any) -> dict[str, Any]:
