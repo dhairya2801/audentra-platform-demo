@@ -178,14 +178,19 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
             assert materialized_media["MATH 151"]["source_id"] == "math-151"
             assert materialized_media["MATH 151"]["related_videos"]
             assert set(inventory) == {ASTER_TENANT_ID, HARVARD_TENANT_ID}
-            for tenant in inventory.values():
-                assert tenant["students"] == 3
+            for tenant_id, tenant in inventory.items():
+                # Three long-standing demos plus eleven students spanning the
+                # offered, accepted, deposited, ready, and declined funnel.
+                assert tenant["students"] == 14
                 assert tenant["staff"] == 3
                 assert tenant["active_journeys"] == 1
                 assert tenant["requirement_definitions"] == 8
                 assert tenant["ai_operations"] == 9
-                assert tenant["journeys"] == 2
-                assert tenant["requirements"] == 16
+                # Both primary offers remain offered until the acceptance
+                # exercised below, so the ten accepted funnel students own
+                # the materialized journeys at this point.
+                assert tenant["journeys"] == 10, tenant_id
+                assert tenant["requirements"] == 80, tenant_id
                 assert tenant["action_rules"] == 1
 
             harvard_auth = AuthContext(

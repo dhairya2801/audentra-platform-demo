@@ -110,6 +110,14 @@ class DemoStudentScenario:
     onboarding_payload: Mapping[str, object]
     accepted_at: datetime | None
     requirement_states: Mapping[str, tuple[str, int]]
+    # Cohort-relevant state. Defaults keep every existing scenario unchanged;
+    # a realistic funnel needs students who differ on exactly these axes.
+    deposit_paid: bool = False
+    aid_documents: tuple[tuple[str, str, str], ...] = ()
+    """(code, title, status) against `financial_document_requirement.status`."""
+    uploaded_documents: tuple[tuple[str, str], ...] = ()
+    """(category, status) against `document_record`."""
+    cumulative_gpa: float | None = None
 
     @property
     def person_id(self) -> str:
@@ -467,6 +475,277 @@ _EXTRA_STUDENTS = (
     ),
 )
 
+
+# Requirement presets for the wider funnel. Each is internally consistent:
+# a student blocked on housing has an unmet prerequisite, a deposited student
+# has their deposit requirement complete and a matching payment row.
+_OFFER_ONLY_REQUIREMENT_STATES: Mapping[str, tuple[str, int]] = {
+    "profile_verification": ("ready", 0),
+    "identity_document": ("blocked", 0),
+    "official_transcript": ("blocked", 0),
+    "financial_aid_verification": ("ready", 0),
+    "immunization_record": ("blocked", 0),
+    "housing_preference": ("blocked", 0),
+    "enrollment_deposit": ("ready", 0),
+    "orientation_registration": ("blocked", 0),
+}
+
+_DEPOSITED_REQUIREMENT_STATES: Mapping[str, tuple[str, int]] = {
+    "profile_verification": ("completed", 100),
+    "identity_document": ("completed", 100),
+    "official_transcript": ("ready", 0),
+    "financial_aid_verification": ("in_progress", 40),
+    "immunization_record": ("ready", 0),
+    "housing_preference": ("ready", 0),
+    "enrollment_deposit": ("completed", 100),
+    "orientation_registration": ("ready", 0),
+}
+
+_READY_REQUIREMENT_STATES: Mapping[str, tuple[str, int]] = {
+    "profile_verification": ("completed", 100),
+    "identity_document": ("completed", 100),
+    "official_transcript": ("completed", 100),
+    "financial_aid_verification": ("completed", 100),
+    "immunization_record": ("completed", 100),
+    "housing_preference": ("completed", 100),
+    "enrollment_deposit": ("completed", 100),
+    "orientation_registration": ("completed", 100),
+}
+
+
+def _funnel_student(
+    *,
+    namespace: str,
+    tenant_id: str,
+    program_id: str,
+    campus_id: str,
+    term_id: str,
+    first_name: str,
+    last_name: str,
+    stage: str,
+    residency: str = "domestic",
+    class_year: int = 2027,
+    aid_documents: tuple[tuple[str, str, str], ...] = (),
+    uploaded_documents: tuple[tuple[str, str], ...] = (),
+    cumulative_gpa: float | None = None,
+) -> DemoStudentScenario:
+    """One student at a named point in the enrollment funnel.
+
+    `stage` fixes offer status, onboarding progress, requirement states, and
+    deposit together, so no scenario can describe a student who has paid a
+    deposit on an offer they never accepted.
+    """
+
+    stages = {
+        # Offer extended, nothing started.
+        "offered": ("offered", "not_started", "offer", (), _OFFER_ONLY_REQUIREMENT_STATES, False),
+        # Accepted, early checklist, deposit still owed.
+        "accepted": (
+            "accepted",
+            "in_progress",
+            "housing",
+            ("offer", "about_you"),
+            _EARLY_REQUIREMENT_STATES,
+            False,
+        ),
+        # Deposit posted, documents still outstanding.
+        "deposited": (
+            "deposited_marker",
+            "in_progress",
+            "review_and_sign",
+            ("offer", "about_you", "housing", "campus_life", "emergency_contacts"),
+            _DEPOSITED_REQUIREMENT_STATES,
+            True,
+        ),
+        # Everything done.
+        "ready": (
+            "accepted",
+            "completed",
+            "deposit",
+            _ONBOARDING_STEPS,
+            _READY_REQUIREMENT_STATES,
+            True,
+        ),
+        "declined": (
+            "declined",
+            "not_started",
+            "offer",
+            (),
+            _OFFER_ONLY_REQUIREMENT_STATES,
+            False,
+        ),
+    }
+    offer_status, onboarding_status, step, completed, requirements, deposit = stages[stage]
+    if offer_status == "deposited_marker":
+        offer_status = "accepted"
+    payload = _onboarding_payload(
+        first_name=first_name,
+        last_name=last_name,
+        completed=onboarding_status == "completed",
+        housing_preference="on_campus" if stage in {"deposited", "ready"} else "undecided",
+    )
+    payload["residencyStatus"] = residency
+    payload["citizenshipStatus"] = "international" if residency == "international" else "us_citizen"
+    return DemoStudentScenario(
+        namespace=namespace,
+        tenant_id=tenant_id,
+        program_id=program_id,
+        campus_id=campus_id,
+        term_id=term_id,
+        first_name=first_name,
+        last_name=last_name,
+        preferred_name=first_name,
+        class_year=class_year,
+        offer_status=offer_status,
+        onboarding_status=onboarding_status,
+        current_step=step,
+        completed_steps=tuple(completed),
+        onboarding_payload=payload,
+        accepted_at=(
+            datetime(2026, 7, 15, 12, 0, tzinfo=UTC) if offer_status == "accepted" else None
+        ),
+        requirement_states=requirements,
+        deposit_paid=deposit,
+        aid_documents=aid_documents,
+        uploaded_documents=uploaded_documents,
+        cumulative_gpa=cumulative_gpa,
+    )
+
+
+_AID_OUTSTANDING = (
+    ("fafsa", "FAFSA", "verified"),
+    ("verification_worksheet", "Verification worksheet", "action_required"),
+)
+_AID_COMPLETE = (
+    ("fafsa", "FAFSA", "verified"),
+    ("verification_worksheet", "Verification worksheet", "verified"),
+)
+_AID_IN_REVIEW = (
+    ("fafsa", "FAFSA", "verified"),
+    ("verification_worksheet", "Verification worksheet", "under_review"),
+)
+
+# A funnel with real spread: offers outstanding, accepted-but-undeposited,
+# deposited-with-documents-open, fully ready, and one declined. Names and
+# namespaces are stable so reseeding is idempotent.
+_FUNNEL_STUDENTS: tuple[tuple[str, str, str, str, dict[str, object]], ...] = (
+    ("20000000", "Priya", "Raman", "offered", {"residency": "international"}),
+    ("21000000", "Daniel", "Okafor", "offered", {}),
+    ("22000000", "Sofia", "Marino", "accepted", {"aid_documents": _AID_OUTSTANDING}),
+    (
+        "23000000",
+        "Wei",
+        "Zhang",
+        "accepted",
+        {"residency": "international", "aid_documents": _AID_OUTSTANDING},
+    ),
+    (
+        "24000000",
+        "Amara",
+        "Boateng",
+        "accepted",
+        {
+            "residency": "international",
+            "aid_documents": _AID_IN_REVIEW,
+            "uploaded_documents": (("transcript", "under_review"),),
+        },
+    ),
+    (
+        "25000000",
+        "Lucas",
+        "Fernandez",
+        "deposited",
+        {"aid_documents": _AID_OUTSTANDING, "uploaded_documents": (("identity", "accepted"),)},
+    ),
+    (
+        "26000000",
+        "Hannah",
+        "Whitfield",
+        "deposited",
+        {
+            "aid_documents": _AID_COMPLETE,
+            "uploaded_documents": (("identity", "accepted"), ("transcript", "rejected")),
+        },
+    ),
+    (
+        "27000000",
+        "Omar",
+        "Haddad",
+        "deposited",
+        {
+            "residency": "international",
+            "aid_documents": _AID_OUTSTANDING,
+            "uploaded_documents": (("identity", "accepted"),),
+            "cumulative_gpa": 1.8,
+        },
+    ),
+    (
+        "28000000",
+        "Grace",
+        "Lindqvist",
+        "ready",
+        {
+            "aid_documents": _AID_COMPLETE,
+            "uploaded_documents": (("identity", "accepted"), ("transcript", "accepted")),
+            "cumulative_gpa": 3.7,
+        },
+    ),
+    (
+        "29000000",
+        "Noah",
+        "Bergstrom",
+        "ready",
+        {
+            "aid_documents": _AID_COMPLETE,
+            "uploaded_documents": (("identity", "accepted"), ("transcript", "accepted")),
+            "cumulative_gpa": 3.1,
+        },
+    ),
+    ("2a000000", "Ines", "Duarte", "declined", {"residency": "international"}),
+)
+
+
+def _funnel_scenarios() -> tuple[DemoStudentScenario, ...]:
+    """The funnel, materialized for both demo tenants."""
+
+    scenarios: list[DemoStudentScenario] = []
+    tenants = (
+        (
+            ASTER_TENANT_ID,
+            "00000000-0000-7000-8000-000000000130",
+            "00000000-0000-7000-8000-000000000110",
+            "00000000-0000-7000-8000-000000000120",
+            "",
+        ),
+        (
+            HARVARD_TENANT_ID,
+            "80000000-0000-7000-8000-000000000101",
+            HARVARD_CAMPUS_ID,
+            HARVARD_TERM_ID,
+            # Funnel namespaces start with "2"; Harvard's copies swap that for
+            # "9". Deriving them by prefixing "8" collided with the existing
+            # 82000000 scenario and silently dropped a student.
+            "9",
+        ),
+    )
+    for tenant_id, program_id, campus_id, term_id, prefix in tenants:
+        for namespace, first, last, stage, extra in _FUNNEL_STUDENTS:
+            scenarios.append(
+                _funnel_student(
+                    namespace=(prefix + namespace[1:]) if prefix else namespace,
+                    tenant_id=tenant_id,
+                    program_id=program_id,
+                    campus_id=campus_id,
+                    term_id=term_id,
+                    first_name=first,
+                    last_name=last,
+                    stage=stage,
+                    **extra,  # type: ignore[arg-type]
+                )
+            )
+    return tuple(scenarios)
+
+
 _DEMO_STAFF = (
     DemoStaffSeed(
         ASTER_TENANT_ID,
@@ -738,7 +1017,7 @@ async def ensure_harvard_demo_student(
         )
         await _ensure_harvard_ai_runtime(connection)
         await _ensure_harvard_demo_student(connection, False)
-        for scenario in _EXTRA_STUDENTS:
+        for scenario in (*_EXTRA_STUDENTS, *_funnel_scenarios()):
             if scenario.tenant_id == HARVARD_TENANT_ID:
                 await _ensure_demo_student_scenario(connection, scenario)
         await _ensure_demo_staff_and_work(connection, tenant_id=HARVARD_TENANT_ID)
@@ -841,7 +1120,7 @@ async def _ensure_demo_seed_supplements(
             requirement_states=_PRIMARY_REQUIREMENT_STATES,
         )
 
-    for scenario in _EXTRA_STUDENTS:
+    for scenario in (*_EXTRA_STUDENTS, *_funnel_scenarios()):
         await _ensure_demo_student_scenario(connection, scenario)
     await _ensure_demo_staff_and_work(connection)
     await _ensure_default_action_rules(
@@ -1300,6 +1579,103 @@ async def _ensure_demo_student_scenario(
         ),
         {"tenant_id": UUID(scenario.tenant_id), "student_id": UUID(scenario.student_id)},
     )
+    for index, (code, title, status) in enumerate(scenario.aid_documents):
+        await connection.execute(
+            text(
+                """
+                INSERT INTO financial_document_requirement (
+                  id, tenant_id, student_id, code, title, description, status,
+                  due_at, version
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :code, :title, :description,
+                  :status, :due_at, 1
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": UUID(_demo_uuid(scenario.namespace, f"0000000009{index + 20:02d}")),
+                "tenant_id": UUID(scenario.tenant_id),
+                "student_id": UUID(scenario.student_id),
+                "code": code,
+                "title": title,
+                "description": f"{title} required for the 2027-2028 aid year.",
+                "status": status,
+                "due_at": date(2027, 7, 1),
+            },
+        )
+    for index, (category, status) in enumerate(scenario.uploaded_documents):
+        await connection.execute(
+            text(
+                """
+                INSERT INTO document_record (
+                  id, tenant_id, student_id, file_name, mime_type, size_bytes,
+                  category, processing_mode, status, storage_provider,
+                  storage_key, sha256
+                ) VALUES (
+                  :id, :tenant_id, :student_id, :file_name, 'application/pdf',
+                  120000, :category, 'agentic', :status, 'local_placeholder',
+                  :storage_key, :sha256
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": UUID(_demo_uuid(scenario.namespace, f"0000000009{index + 40:02d}")),
+                "tenant_id": UUID(scenario.tenant_id),
+                "student_id": UUID(scenario.student_id),
+                "file_name": f"{category}-{scenario.last_name.lower()}.pdf",
+                "category": category,
+                "status": status,
+                "storage_key": f"seed/{scenario.student_id}/{category}.pdf",
+                "sha256": f"{index:064d}",
+            },
+        )
+    if scenario.deposit_paid:
+        # The receipt is the canonical fact; a "paid" flag anywhere else would
+        # be a second source of truth for the same thing.
+        await connection.execute(
+            text(
+                """
+                INSERT INTO payment_transaction (
+                  id, tenant_id, student_id, offer_id, type, amount_cents,
+                  status, processor, processor_reference
+                ) SELECT :id, :tenant_id, :student_id, :offer_id,
+                  'enrollment_deposit', offer.deposit_amount_cents, 'succeeded',
+                  'dummy', :reference
+                FROM admission_offer AS offer
+                WHERE offer.id = :offer_id AND offer.tenant_id = :tenant_id
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": UUID(_demo_uuid(scenario.namespace, "000000000960")),
+                "tenant_id": UUID(scenario.tenant_id),
+                "student_id": UUID(scenario.student_id),
+                "offer_id": UUID(scenario.offer_id),
+                "reference": f"seed_{scenario.namespace}",
+            },
+        )
+    if scenario.cumulative_gpa is not None:
+        await connection.execute(
+            text(
+                """
+                UPDATE student_sap_status
+                SET cumulative_gpa = CAST(:gpa AS numeric),
+                    status = CASE
+                      WHEN CAST(:gpa AS numeric) < 2 THEN 'warning' ELSE 'meeting'
+                    END,
+                    completion_rate_percent = :rate
+                WHERE tenant_id = :tenant_id AND student_id = :student_id
+                """
+            ),
+            {
+                "gpa": scenario.cumulative_gpa,
+                "rate": 100 if scenario.cumulative_gpa >= 2 else 55,
+                "tenant_id": UUID(scenario.tenant_id),
+                "student_id": UUID(scenario.student_id),
+            },
+        )
     await connection.execute(
         text(
             """

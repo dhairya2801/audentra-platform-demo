@@ -451,14 +451,31 @@ class PostgresStaffAssistantRepository:
                 predicate = "aid.status <> 'verified'"
             elif state == "in_review":
                 predicate = "aid.status IN ('submitted', 'under_review')"
+            elif state == "verified":
+                # "Aid documents are verified" means the file is complete,
+                # not merely that one verified row exists beside another row
+                # that still requires action.
+                clauses.append(
+                    f"EXISTS (SELECT 1 FROM {aid_document} AS aid"
+                    f" WHERE aid.tenant_id = student.tenant_id"
+                    f"   AND aid.student_id = student.id)"
+                )
+                clauses.append(
+                    f"NOT EXISTS (SELECT 1 FROM {aid_document} AS aid"
+                    f" WHERE aid.tenant_id = student.tenant_id"
+                    f"   AND aid.student_id = student.id"
+                    f"   AND aid.status <> 'verified')"
+                )
+                predicate = None
             else:
                 params["cohort_aid_state"] = state
                 predicate = "aid.status = :cohort_aid_state"
-            clauses.append(
-                f"EXISTS (SELECT 1 FROM {aid_document} AS aid"
-                f" WHERE aid.tenant_id = student.tenant_id AND aid.student_id = student.id"
-                f"   AND {predicate})"
-            )
+            if predicate is not None:
+                clauses.append(
+                    f"EXISTS (SELECT 1 FROM {aid_document} AS aid"
+                    f" WHERE aid.tenant_id = student.tenant_id AND aid.student_id = student.id"
+                    f"   AND {predicate})"
+                )
 
         if cohort.housing_state:
             params["cohort_housing_state"] = cohort.housing_state
