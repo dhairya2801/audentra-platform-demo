@@ -2041,6 +2041,87 @@ export interface AssistantConversationMessagesResponse {
   messages: AssistantConversationMessage[];
 }
 
+/* ---------------------------------------------------------------------------
+ * Staff Edward — read-only staff assistant and its durable transcript.
+ *
+ * Tenant, staff member, and student referent identities are intentionally
+ * absent from the request. The API binds staff/tenant identity from the
+ * authenticated session and resolves student referents server-side.
+ * ------------------------------------------------------------------------- */
+
+export interface StaffAssistantDraftBlock {
+  type: "draft";
+  fallbackText: string;
+  channel: "email" | "sms";
+  subject?: string;
+  body: string;
+  disclaimer: string;
+}
+
+export type StaffAssistantResponseBlock = AssistantResponseBlock | StaffAssistantDraftBlock;
+
+export interface AskStaffEdwardInput {
+  message: string;
+  /** Omit for a stateless turn or when `clientMessageId` should create the conversation. */
+  conversationId?: string;
+  /** Staff-scoped replay key; retries return the exact stored exchange. */
+  clientMessageId?: string;
+}
+
+export interface StaffAssistantResolvedStudent {
+  id: string;
+  name: string;
+}
+
+export interface StaffAssistantContextReceipt {
+  source: string;
+}
+
+export interface AskStaffEdwardResponse {
+  message: string;
+  blocks?: StaffAssistantResponseBlock[];
+  provider: AskEdwardResponse["provider"];
+  model: string | null;
+  usage: AskEdwardResponse["usage"];
+  contextReceipts: StaffAssistantContextReceipt[];
+  /** Present on student-grounded turns; omitted by pre-pipeline safety replies. */
+  resolvedStudent?: StaffAssistantResolvedStudent | null;
+  requestId: string;
+  /** Present when the platform persisted this exchange. */
+  conversationId?: string;
+  userMessageId?: string;
+  assistantMessageId?: string;
+}
+
+export interface StaffAssistantConversationMessage {
+  id: string;
+  conversationId: string;
+  role: AssistantMessageRole;
+  content: string;
+  clientMessageId: string | null;
+  requestId: string | null;
+  provider: AskEdwardResponse["provider"] | null;
+  model: string | null;
+  usage: AskEdwardResponse["usage"];
+  blocks: StaffAssistantResponseBlock[] | null;
+  contextReceipts: StaffAssistantContextReceipt[];
+  referencedStudentId: string | null;
+  createdAt: string;
+}
+
+export interface StaffAssistantConversation {
+  id: string;
+  status: AssistantConversationStatus;
+  messages: StaffAssistantConversationMessage[];
+  createdAt: string;
+}
+
+export interface StaffAssistantConversationMessagesResponse {
+  conversationId: string;
+  activeStudentId: string | null;
+  messages: StaffAssistantConversationMessage[];
+}
+
 export interface CreateAssistantVoiceSessionInput {
   conversationId: string;
   pageContext: AssistantPageContext;
