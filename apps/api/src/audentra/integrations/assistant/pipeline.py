@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from audentra.integrations.assistant.blocks import render_blocks_as_text
+from audentra.integrations.assistant.blocks import (
+    describe_blocks_for_prompt,
+    render_blocks_as_text,
+)
 from audentra.integrations.assistant.classify import Classification, classify
 from audentra.integrations.assistant.compose import ComposedAnswer, compose_deterministic
 from audentra.integrations.assistant.derive import DerivedState, derive_student_state
@@ -319,6 +322,10 @@ class AssistantPipeline:
             ),
             disbursement_gates=(disbursements or {}).get("gates") if disbursements else None,
         )
+        # The prose the model writes renders above the draft's structured
+        # blocks, so the model must know what those blocks already show —
+        # otherwise it restates every row a table carries.
+        presented_blocks = describe_blocks_for_prompt(draft.blocks)
         attempts = 0
         feedback: str | None = None
         while attempts < 2:
@@ -355,6 +362,7 @@ class AssistantPipeline:
                     question=question,
                     evidence_texts=draft.evidence_texts,
                     draft_answer=draft.message,
+                    presented_blocks=presented_blocks or None,
                     feedback=feedback,
                 )
             except Exception:
