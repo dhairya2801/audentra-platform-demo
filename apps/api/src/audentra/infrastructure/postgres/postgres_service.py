@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from audentra.application.morning_brew import build_morning_brew
 from audentra.application.staff_workspace import (
     compose_staff_workspace,
     draft_managed_configuration,
@@ -71,6 +72,7 @@ from audentra.integrations.staff_assistant.safety import guarded_staff_response
 from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
+from .morning_brew_repository import PostgresMorningBrewRepository
 from .platform_repository import PostgresPlatformRepository
 from .portal_repository import PostgresPortalRepository
 from .staff_assistant_repository import PostgresStaffAssistantRepository
@@ -331,6 +333,7 @@ class PostgresRepositoryBundle:
     managed: PostgresManagedConfigurationRepository | None = None
     tenant: PostgresTenantRepository | None = None
     staff_assistant: PostgresStaffAssistantRepository | None = None
+    morning_brew: PostgresMorningBrewRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -752,6 +755,15 @@ class PostgresPlatformService:
                 configurations=configurations,
                 generated_at=self._timestamp(),
             )
+        if operation == "staff.get_morning_brew":
+            brew = self.repository.morning_brew
+            if brew is None:
+                raise ApiError(
+                    503,
+                    "MORNING_BREW_UNAVAILABLE",
+                    "The Morning Brew repository is not provisioned",
+                )
+            return await build_morning_brew(auth, brew)
         if operation == "staff.get_tenant_configuration":
             tenant = self.repository.tenant
             if tenant is None:

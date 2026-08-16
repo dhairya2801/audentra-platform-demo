@@ -20,6 +20,9 @@ from audentra.infrastructure.postgres.auth_repository import PostgresDevelopment
 from audentra.infrastructure.postgres.managed_configuration_repository import (
     PostgresManagedConfigurationRepository,
 )
+from audentra.infrastructure.postgres.morning_brew_repository import (
+    PostgresMorningBrewRepository,
+)
 from audentra.infrastructure.postgres.platform_repository import PostgresPlatformRepository
 from audentra.infrastructure.postgres.portal_repository import PostgresPortalRepository
 from audentra.infrastructure.postgres.postgres_service import (
@@ -104,6 +107,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 managed=managed,
                 tenant=tenant,
                 staff_assistant=PostgresStaffAssistantRepository(engine),
+                morning_brew=PostgresMorningBrewRepository(engine),
             ),
             storage,
             ai,

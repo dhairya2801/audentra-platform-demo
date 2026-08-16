@@ -46,11 +46,18 @@ REQUIREMENT_STATES: tuple[str, ...] = (
     "in_review",
     "complete",
     "overdue",
+    "due_soon",
     "any",
 )
 """Coarse buckets over the requirement lifecycle. `open` is anything the
 student still has to act on; `in_review` is submitted and waiting on the
-university; `complete` covers completed/waived/not_applicable."""
+university; `complete` covers completed/waived/not_applicable; `due_soon` is
+open with a due date inside `DUE_SOON_HORIZON_DAYS` and not yet past."""
+
+DUE_SOON_HORIZON_DAYS = 7
+"""The one definition of "approaching". A morning briefing that highlights a
+deadline cliff and an assistant answer listing the students behind it must use
+the same horizon, or the briefing becomes unverifiable."""
 
 DOCUMENT_STATES: tuple[str, ...] = ("missing", "submitted", "under_review", "accepted", "rejected")
 
@@ -97,6 +104,7 @@ COHORT_FILTER_FIELDS = frozenset(
         "assignedStaffId",
         "hasOpenWorkItem",
         "hasOverdueRequirement",
+        "hasOpenBlockingRequirement",
         "residencyStatus",
         "citizenshipStatus",
     }
@@ -127,6 +135,7 @@ class CohortFilter:
     assigned_staff_id: str | None = None
     has_open_work_item: bool | None = None
     has_overdue_requirement: bool | None = None
+    has_open_blocking_requirement: bool | None = None
     residency_status: str | None = None
     citizenship_status: str | None = None
 
@@ -171,6 +180,12 @@ class CohortFilter:
                 "has an overdue requirement"
                 if self.has_overdue_requirement
                 else "has no overdue requirement"
+            )
+        if self.has_open_blocking_requirement is not None:
+            clauses.append(
+                "has an open blocking requirement"
+                if self.has_open_blocking_requirement
+                else "has no open blocking requirement"
             )
         return clauses
 
@@ -276,6 +291,7 @@ def build_cohort_filter(raw: Mapping[str, Any]) -> CohortFilter:
         assigned_staff_id=_uuid_text("assignedStaffId", raw.get("assignedStaffId")),
         has_open_work_item=_boolean(raw.get("hasOpenWorkItem")),
         has_overdue_requirement=_boolean(raw.get("hasOverdueRequirement")),
+        has_open_blocking_requirement=_boolean(raw.get("hasOpenBlockingRequirement")),
         residency_status=_text(raw.get("residencyStatus"), max_length=48),
         citizenship_status=_text(raw.get("citizenshipStatus"), max_length=48),
     )
