@@ -12,15 +12,21 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from audentra.domain.student_state import (
+    REQUIREMENT_GATE_CODES as DOMAIN_REQUIREMENT_GATE_CODES,
+)
 from audentra.integrations.assistant.classify import REQUEST_TYPES, Classification
 
 TOOL_NAMES = (
     "getStudentProfile",
+    "getEnrollmentState",
+    "getOnboardingResponses",
     "getOnboardingChecklist",
     "getDocumentStatuses",
     "getEnrollmentHolds",
     "getStudentDeadlines",
     "getSupportOptions",
+    "getStudentSupportRequests",
     "getFinancialAidStatus",
     "getFinancialAidSummary",
     "getAidDisbursements",
@@ -30,6 +36,7 @@ TOOL_NAMES = (
     "getHousingOptions",
     "getRegistrationStatus",
     "getStudentAccountSummary",
+    "getAcademicStanding",
     "getStudentAppointments",
     "getAcademicPlan",
     "getCampusLife",
@@ -43,11 +50,15 @@ TOOL_NAMES = (
 # boundary that keeps demo constants out of production answers.
 TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getStudentProfile": "student_state",
+    "getEnrollmentState": "student_state",
+    "getOnboardingResponses": "student_state",
     "getOnboardingChecklist": "student_state",
     "getDocumentStatuses": "student_state",
     "getEnrollmentHolds": "student_state",
     "getStudentDeadlines": "student_state",
     "getSupportOptions": "institution_knowledge",
+    "getStudentSupportRequests": "student_state",
+    "getAcademicStanding": "student_state",
     "getFinancialAidStatus": "student_state",
     "getFinancialAidSummary": "student_state",
     "getAidDisbursements": "student_state",
@@ -81,9 +92,36 @@ UNIVERSAL_CONTEXT_TOOLS = (
 # student-assistant-core's studentAssistantToolCatalog, trimmed to the tools
 # this platform hosts; the three portal-specific reads carry their own text.
 TOOL_DESCRIPTIONS: Mapping[str, str] = {
-    "getStudentProfile": "Read the authenticated student's basic profile.",
-    "getOnboardingChecklist": "Read onboarding requirements and completion states.",
-    "getDocumentStatuses": "Read document submission and review statuses.",
+    "getStudentProfile": (
+        "Read the authenticated student's profile: names, pronouns, email and "
+        "phone with their verification state, and communication preference."
+    ),
+    "getEnrollmentState": (
+        "Read where the student stands overall: admission decision, program, "
+        "starting term, campus, class year, enrollment-deposit payment state, "
+        "enrollment journey progress and next action, and onboarding position."
+    ),
+    "getOnboardingResponses": (
+        "Read what the student answered during onboarding: citizenship and "
+        "residency, mailing address, emergency contacts, family permissions, "
+        "insurance and accommodation interest, campus interests and goals, and "
+        "the enrollment signature record."
+    ),
+    "getOnboardingChecklist": (
+        "Read enrollment and onboarding requirements with their statuses, due "
+        "dates, prerequisites, responsible office, and submitted responses."
+    ),
+    "getDocumentStatuses": (
+        "Read uploaded documents with their review status, extraction outcome, "
+        "and any staff decision."
+    ),
+    "getStudentSupportRequests": (
+        "Read the student's own support conversations and the latest reply on each."
+    ),
+    "getAcademicStanding": (
+        "Read satisfactory academic progress — cumulative GPA against the "
+        "minimum, completion rate, attempted credits — and earned credits."
+    ),
     "getEnrollmentHolds": "Read official enrollment holds and derived blockers.",
     "getStudentDeadlines": "Read enrollment, requirement, and appointment deadlines.",
     "getSupportOptions": "Read approved general support contacts and articles.",
@@ -130,11 +168,15 @@ TOOL_DESCRIPTIONS: Mapping[str, str] = {
 
 RECEIPT_SOURCES: Mapping[str, str] = {
     "getStudentProfile": "profile",
+    "getEnrollmentState": "enrollment",
+    "getOnboardingResponses": "onboarding",
     "getOnboardingChecklist": "onboarding",
     "getDocumentStatuses": "documents",
     "getEnrollmentHolds": "holds",
     "getStudentDeadlines": "deadlines",
     "getSupportOptions": "policies",
+    "getStudentSupportRequests": "support_requests",
+    "getAcademicStanding": "academic_standing",
     "getFinancialAidStatus": "financial_aid",
     "getFinancialAidSummary": "financial_aid",
     "getAidDisbursements": "financial_aid",
@@ -162,10 +204,14 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "next_action": ("getOnboardingChecklist", "getEnrollmentHolds", "getStudentDeadlines"),
     "missing_documents": ("getOnboardingChecklist", "getDocumentStatuses"),
     "document_status": ("getOnboardingChecklist", "getDocumentStatuses"),
-    "onboarding_status": ("getOnboardingChecklist",),
+    "onboarding_status": ("getOnboardingChecklist", "getEnrollmentState"),
+    "enrollment_state": ("getEnrollmentState", "getOnboardingChecklist"),
+    "personal_information": ("getOnboardingResponses", "getStudentProfile"),
+    "academic_standing": ("getAcademicStanding", "getAcademicPlan"),
+    "support_requests": ("getStudentSupportRequests", "getSupportOptions"),
     "holds_and_blockers": ("getEnrollmentHolds",),
     "deadlines": ("getStudentDeadlines",),
-    "request_support": ("getSupportOptions",),
+    "request_support": ("getSupportOptions", "getStudentSupportRequests"),
     "aid_status": ("getFinancialAidStatus",),
     "aid_remaining_steps": ("getFinancialAidStatus",),
     "aid_incomplete_reason": ("getFinancialAidStatus",),
@@ -200,6 +246,13 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getOnboardingChecklist",
     ),
     "student_account": ("getStudentAccountSummary", "getEnrollmentHolds"),
+    # "Is it paid?" needs the payment record; "what changed now that it is
+    # paid?" needs the gates it released, and both arrive as one question.
+    "deposit_status": (
+        "getStudentAccountSummary",
+        "getEnrollmentState",
+        "getEnrollmentHolds",
+    ),
     "appointments": ("getStudentAppointments",),
     "academic_plan": ("getAcademicPlan",),
     "campus_life": ("getCampusLife",),
@@ -228,6 +281,14 @@ _REQUIRED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "academic_plan": ("getAcademicPlan",),
     "campus_life": ("getCampusLife",),
     "messages_unread": ("getStudentMessages",),
+    "enrollment_state": ("getEnrollmentState",),
+    "personal_information": ("getOnboardingResponses",),
+    "academic_standing": ("getAcademicStanding",),
+    "support_requests": ("getStudentSupportRequests",),
+    # "Is my deposit paid?" is answered by the payment record, never by the
+    # checklist step alone — a completed step and a posted payment are
+    # different facts and the account read is the one that carries both.
+    "deposit_status": ("getStudentAccountSummary",),
 }
 
 
@@ -247,6 +308,11 @@ _GATE_DEPENDENCY_TOOLS: Mapping[str, tuple[str, ...]] = {
     "fafsa_received": ("getFinancialAidStatus",),
     "verification_complete": ("getFinancialAidStatus",),
     "financial_aid_verification": ("getFinancialAidStatus",),
+    "profile_verification": ("getStudentProfile",),
+    # An onboarding-authored step is explained by the answers the student gave
+    # in the wizard, not by the checklist row that mirrors it.
+    "personal_information_confirmed": ("getOnboardingResponses",),
+    "enrollment_agreement": ("getOnboardingResponses", "getDocumentStatuses"),
     # A housing step that reads "blocked" without gate evidence cannot be
     # explained — the eligibility read carries the actual blockers.
     "housing_step_blocked": ("getStudentHousingEligibility", "getEnrollmentHolds"),
@@ -254,17 +320,10 @@ _GATE_DEPENDENCY_TOOLS: Mapping[str, tuple[str, ...]] = {
 
 # Open blocking checklist items surface these gate codes even when the holds
 # read did not run, so a checklist-only turn can still fetch the verifying
-# read (e.g. the payments state behind an open deposit requirement).
-REQUIREMENT_GATE_CODES: Mapping[str, str] = {
-    "enrollment_deposit": "enrollment_deposit_posted",
-    "official_transcript": "final_transcript",
-    "transcript": "final_transcript",
-    "immunization_record": "immunization_cleared",
-    "immunization": "immunization_cleared",
-    "housing_preference": "housing_preference_selected",
-    "advising": "advising_complete",
-    "orientation": "orientation_complete",
-}
+# read (e.g. the payments state behind an open deposit requirement). The table
+# is the domain's, not the planner's: a second copy here would let the two
+# drift into disagreeing about what a requirement gates.
+REQUIREMENT_GATE_CODES: Mapping[str, str] = DOMAIN_REQUIREMENT_GATE_CODES
 
 MAX_DEPENDENCY_TOOLS = 3
 

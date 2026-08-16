@@ -7,10 +7,12 @@ and a read that failed, timed out, or is not supported by this platform is
 reported honestly instead of guessed around.
 
 The host supplies primitive reads (profile, requirements, documents, payments,
-financials, dashboard, housing plan, appointments, help). Composite tools such
-as holds, deadlines, and registration are deterministic projections over those
-primitives, computed here so both the Postgres and in-memory services share
-one derivation.
+financials, dashboard, onboarding, housing plan, appointments, help,
+academics, campus life, messages). Composite tools such as holds, deadlines,
+registration, and housing eligibility are deterministic projections over those
+primitives. Their shared derivations live in `audentra.domain.student_state`
+so the Postgres service, the in-memory service, and the action-authority check
+cannot drift into three different answers to "is the deposit paid".
 """
 
 from __future__ import annotations
@@ -22,6 +24,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from audentra.domain.student_state import (
+    AID_DOCUMENT_SATISFIED_STATUSES,
+    REQUIREMENT_DONE_STATUSES,
+    DepositState,
+    deadline_bucket,
+    derive_deposit_state,
+    derive_enrollment_blockers,
+    parse_moment,
+    requirement_href,
+)
 from audentra.integrations.assistant.planner import RECEIPT_SOURCES
 
 JsonDict = dict[str, Any]
@@ -29,21 +41,9 @@ PrimitiveRead = Callable[[], Awaitable[Mapping[str, Any]]]
 
 DEFAULT_TOOL_TIMEOUT_SECONDS = 2.5
 
-_REQUIREMENT_GATE_CODES: Mapping[str, str] = {
-    "final_transcript": "final_transcript",
-    "transcript": "final_transcript",
-    "immunization": "immunization_cleared",
-    "immunization_record": "immunization_cleared",
-    "immunization_records": "immunization_cleared",
-    "official_transcript": "final_transcript",
-    "advising": "advising_complete",
-    "orientation": "orientation_complete",
-    "housing_preference": "housing_preference_selected",
-    "enrollment_deposit": "enrollment_deposit_posted",
-}
-
-_OPEN_REQUIREMENT_STATUSES = {"blocked", "ready", "in_progress", "submitted", "under_review"}
-_DONE_REQUIREMENT_STATUSES = {"completed", "waived", "not_applicable"}
+# Onboarding answers that are not facts about the student: a base64 signature
+# image is megabytes of pixels, and no answer needs it in evidence.
+_ONBOARDING_EXCLUDED_FIELDS = frozenset({"signatureImageData"})
 
 
 @dataclass
@@ -136,154 +136,365 @@ class _UnsupportedRead(Exception):
 
 
 async def _primitive(host: AssistantToolHost, name: str) -> Mapping[str, Any]:
+    """A read the tool cannot answer without; its absence fails the tool."""
+
     if not host.supports(name):
         raise _UnsupportedRead(name)
     return await host.read(name)
 
 
+async def _optional(host: AssistantToolHost, name: str) -> Mapping[str, Any] | None:
+    """A read that enriches an answer; `None` means "could not be read".
+
+    The distinction matters downstream: a missing read must never collapse
+    into a default value that reads as a verified fact.
+    """
+
+    if not host.supports(name):
+        return None
+    try:
+        return await host.read(name)
+    except Exception:
+        return None
+
+
+async def _deposit_state(host: AssistantToolHost) -> DepositState:
+    """The one deposit derivation, shared by every tool that needs it."""
+
+    dashboard, payments, financials = await asyncio.gather(
+        _optional(host, "dashboard"),
+        _optional(host, "payments"),
+        _optional(host, "financials"),
+    )
+    return derive_deposit_state(dashboard=dashboard, payments=payments, financials=financials)
+
+
+# --------------------------------------------------------------------------
+# Identity, admission, and enrollment position
+# --------------------------------------------------------------------------
+
+
 async def _tool_profile(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Who the student is, as the Profile page shows it."""
+
     profile = await _primitive(host, "profile")
     return {
         "preferredName": profile.get("preferredName") or profile.get("firstName"),
-        "fullName": profile.get("fullName") or profile.get("legalName"),
+        "fullName": profile.get("fullName")
+        or profile.get("legalName")
+        or _full_name(profile.get("firstName"), profile.get("lastName")),
+        "firstName": profile.get("firstName"),
+        "lastName": profile.get("lastName"),
         "email": profile.get("email"),
+        "emailVerified": profile.get("emailVerified"),
+        "pronouns": profile.get("pronouns"),
+        "mobilePhone": profile.get("mobilePhone"),
+        "phoneVerified": profile.get("phoneVerified"),
+        "communicationPreference": profile.get("communicationPreference"),
+        "updatedAt": profile.get("updatedAt"),
+        "href": "/profile",
     }
 
 
-async def _tool_checklist(host: AssistantToolHost, _now: datetime) -> JsonDict:
-    requirements = await _primitive(host, "requirements")
-    items = [
+async def _tool_enrollment_state(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Admission decision, program placement, and enrollment progress.
+
+    The dashboard's program/term/campus strip, the offer's decision and
+    deadline, the journey progress bar, and the onboarding wizard's position
+    are one question for a student ("where am I in all this?") and one read
+    here. Deposit truth comes from the shared derivation, never from the
+    dashboard projection, which does not carry it.
+    """
+
+    dashboard = await _primitive(host, "dashboard")
+    onboarding = await _optional(host, "onboarding")
+    deposit = await _deposit_state(host)
+    offer = _mapping(dashboard.get("offer"))
+    student = _mapping(dashboard.get("student"))
+    journey = _mapping(dashboard.get("journey"))
+    next_action = _mapping(journey.get("nextAction"))
+    state: JsonDict = {
+        "student": {
+            "id": student.get("id"),
+            "preferredName": student.get("preferredName"),
+            "fullName": student.get("fullName"),
+            "classYear": student.get("classYear"),
+        },
+        "admission": {
+            "offerStatus": offer.get("status"),
+            "programName": offer.get("programName"),
+            "termName": offer.get("termName"),
+            "campusName": offer.get("campusName"),
+            "responseDeadline": offer.get("responseDeadline"),
+        },
+        # Same key as every other tool that carries it: the derived-state
+        # lookup finds one name, not three.
+        "depositState": deposit.as_json(),
+        "journey": {
+            "status": journey.get("status"),
+            "completionPercent": journey.get("completionPercent"),
+            "nextAction": {
+                "code": next_action.get("code"),
+                "label": next_action.get("label"),
+                "href": next_action.get("href"),
+            }
+            if next_action
+            else None,
+        },
+        "unreadMessageCount": dashboard.get("unreadMessageCount"),
+        "href": "/dashboard",
+    }
+    if onboarding is not None:
+        state["onboarding"] = {
+            "status": onboarding.get("status"),
+            "currentStep": onboarding.get("currentStep"),
+            "completedSteps": [str(step) for step in _sequence(onboarding.get("completedSteps"))],
+            "skippedSteps": [
+                str(step)
+                for step in _sequence(_mapping(onboarding.get("data")).get("skippedSteps"))
+            ],
+            "completedAt": onboarding.get("completedAt"),
+            "href": "/onboarding",
+        }
+    else:
+        state["onboarding"] = None
+        state["onboardingRead"] = "unavailable"
+    return state
+
+
+async def _tool_onboarding_responses(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """What the student actually answered in the onboarding wizard.
+
+    Residency and citizenship, the mailing address on file, emergency
+    contacts, family permissions, insurance and accommodation interest,
+    campus interests and goals, the enrollment-signature record, and any
+    tenant-authored custom fields. All of it is visible to the student in the
+    portal; none of it was reachable before.
+    """
+
+    onboarding = await _primitive(host, "onboarding")
+    data = _mapping(onboarding.get("data"))
+    answers = {
+        key: value
+        for key, value in data.items()
+        if key not in _ONBOARDING_EXCLUDED_FIELDS and value is not None and value != []
+    }
+    contacts = [
         {
+            "name": entry.get("name"),
+            "relationship": entry.get("relationship"),
+            "phone": entry.get("phone"),
+            "email": entry.get("email"),
+            "isPrimary": entry.get("isPrimary"),
+        }
+        for raw in _sequence(data.get("emergencyContacts"))
+        if (entry := _mapping(raw))
+    ]
+    permissions = [
+        {
+            "name": entry.get("name"),
+            "relationship": entry.get("relationship"),
+            "email": entry.get("email"),
+            "scopes": list(_sequence(entry.get("scopes"))),
+        }
+        for raw in _sequence(data.get("familyPermissions"))
+        if (entry := _mapping(raw))
+    ]
+    address_parts = [
+        data.get("streetAddress"),
+        data.get("addressLine2"),
+        data.get("city"),
+        data.get("stateOrProvince"),
+        data.get("postalCode"),
+        data.get("country"),
+    ]
+    mailing_address = ", ".join(str(part) for part in address_parts if part)
+    return {
+        "status": onboarding.get("status"),
+        "currentStep": onboarding.get("currentStep"),
+        "completedSteps": [str(step) for step in _sequence(onboarding.get("completedSteps"))],
+        "skippedSteps": [str(step) for step in _sequence(data.get("skippedSteps"))],
+        "completedAt": onboarding.get("completedAt"),
+        "updatedAt": onboarding.get("updatedAt"),
+        "citizenshipStatus": data.get("citizenshipStatus"),
+        "residencyStatus": data.get("residencyStatus"),
+        "residencyVerificationPath": data.get("residencyVerificationPath"),
+        "mailingAddress": mailing_address or None,
+        "accommodationInterest": data.get("accommodationInterest"),
+        "supportNeeds": list(_sequence(data.get("supportNeeds"))),
+        "insuranceInterest": data.get("insuranceInterest"),
+        "campusInterests": list(_sequence(data.get("campusInterests"))),
+        "firstMonthGoals": list(_sequence(data.get("firstMonthGoals"))),
+        "socialComfort": data.get("socialComfort"),
+        "depositChoice": data.get("depositChoice"),
+        "emergencyContacts": contacts,
+        "familyPermissions": permissions,
+        "signature": {
+            "recorded": bool(data.get("signatureFullName")),
+            "fullName": data.get("signatureFullName"),
+            "method": data.get("signatureMethod"),
+            "consent": data.get("signatureConsent"),
+            "signedDocumentIds": list(_sequence(data.get("signedDocumentIds"))),
+        },
+        "customFields": dict(_mapping(data.get("customFields"))),
+        "answers": answers,
+        "href": "/onboarding",
+    }
+
+
+# --------------------------------------------------------------------------
+# Checklist, documents, blockers, deadlines
+# --------------------------------------------------------------------------
+
+
+async def _tool_checklist(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """The enrollment checklist exactly as the Enrollment page renders it."""
+
+    requirements = await _primitive(host, "requirements")
+    items = []
+    for item in _items(requirements):
+        entry: JsonDict = {
             "id": item.get("id"),
             "code": item.get("code"),
             "slug": item.get("slug"),
             "title": item.get("title"),
+            "description": _clip(item.get("description"), 400),
             "status": item.get("status"),
             "blocking": bool(item.get("blocking")),
             "dueAt": item.get("dueAt"),
+            "progressPercent": item.get("progressPercent"),
+            "submissionType": item.get("submissionType"),
+            "flowKind": item.get("flowKind"),
             "documentCategory": item.get("documentCategory"),
             "responsibleOffice": item.get("responsibleOffice"),
-            "href": f"/enrollment/requirements/{item.get('slug')}",
+            "dependencyCodes": [str(code) for code in _sequence(item.get("dependencyCodes"))],
+            "href": requirement_href(item),
         }
-        for item in _items(requirements)
-    ]
-    return {"items": items, "total": len(items)}
+        reward = _mapping(item.get("reward"))
+        if reward:
+            entry["reward"] = {"points": reward.get("points"), "earned": reward.get("earned")}
+        response = _mapping(item.get("response"))
+        if response:
+            entry["response"] = {
+                "submittedAt": response.get("submittedAt"),
+                "interactionType": response.get("interactionType"),
+                "answers": _bounded_answers(response.get("data")),
+            }
+        items.append(entry)
+    completed = sum(1 for item in items if str(item["status"]) in REQUIREMENT_DONE_STATUSES)
+    return {
+        "items": items,
+        "total": len(items),
+        "completedCount": completed,
+        "openCount": len(items) - completed,
+        "href": "/enrollment",
+    }
 
 
 async def _tool_documents(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Uploaded documents with their review and extraction lifecycle."""
+
     documents = await _primitive(host, "documents")
-    items = [
-        {
+    items = []
+    for item in _items(documents):
+        extraction = _mapping(item.get("extraction"))
+        entry: JsonDict = {
             "id": item.get("id"),
             "fileName": item.get("fileName"),
             "category": item.get("category"),
             "status": item.get("status"),
             "requirementId": item.get("requirementId"),
             "createdAt": item.get("createdAt"),
-            "extractionStatus": (item.get("extraction") or {}).get("status")
-            if isinstance(item.get("extraction"), Mapping)
-            else None,
+            "sizeBytes": item.get("sizeBytes"),
+            "processingMode": item.get("processingMode"),
+            "extractionStatus": extraction.get("status") if extraction else None,
         }
-        for item in _items(documents)
-    ]
-    return {"items": items, "total": len(items)}
+        if extraction:
+            courses = _sequence(extraction.get("courses"))
+            entry["extraction"] = {
+                "status": extraction.get("status"),
+                "confidence": extraction.get("confidence"),
+                "courseCount": len(courses),
+                "institution": extraction.get("institution"),
+                "confirmedAt": extraction.get("confirmedAt"),
+                "failureCode": extraction.get("failureCode"),
+                "warnings": [str(note) for note in _sequence(extraction.get("warnings"))][:4],
+            }
+        decision = _mapping(item.get("decision"))
+        if decision:
+            entry["decision"] = {
+                "outcome": decision.get("outcome"),
+                "decidedAt": decision.get("decidedAt"),
+                "note": _clip(decision.get("note"), 240),
+            }
+        items.append(entry)
+    return {"items": items, "total": len(items), "href": "/documents"}
 
 
 async def _tool_holds(host: AssistantToolHost, now: datetime) -> JsonDict:
     """Official holds plus derived blockers.
 
     The platform has no registrar hold system, and saying so is part of the
-    answer. Derived blockers are computed from the same records the portal
-    shows: an unpaid deposit and open blocking requirements, each naming its
-    gate, its owner, and the action that clears it.
+    answer. Derived blockers come from the shared domain projection over the
+    same records the portal shows, each naming its gate, its owner, and the
+    action that clears it.
     """
 
     requirements = await _primitive(host, "requirements")
-    dashboard = await _primitive(host, "dashboard")
-    blockers: list[JsonDict] = []
-    offer = _mapping(dashboard.get("offer"))
-    deposit_paid = _deposit_paid(dashboard)
-    if offer and not deposit_paid and int(offer.get("depositAmountCents") or 0) > 0:
-        blockers.append(
-            {
-                "code": "enrollment_deposit_posted",
-                "title": "Enrollment deposit not posted",
-                "owner": "student",
-                "clearingAction": "Pay the enrollment deposit from the Payments page.",
-                "href": "/payments",
-                "blocksRegistration": True,
-            }
-        )
-    seen_codes = {str(blocker["code"]) for blocker in blockers}
-    for item in _items(requirements):
-        status = str(item.get("status") or "")
-        if not item.get("blocking") or status in _DONE_REQUIREMENT_STATUSES:
-            continue
-        gate_code = _REQUIREMENT_GATE_CODES.get(
-            str(item.get("code") or "").lower(), str(item.get("code") or "requirement")
-        )
-        # One blocker per gate: the offer-level deposit blocker and the
-        # deposit requirement share a code and must not appear twice.
-        if gate_code in seen_codes:
-            continue
-        seen_codes.add(gate_code)
-        submitted = status in {"submitted", "under_review"}
-        blockers.append(
-            {
-                "code": gate_code,
-                "title": str(item.get("title") or "Enrollment requirement"),
-                "owner": "university" if submitted else "student",
-                "clearingAction": (
-                    "Waiting on university review; no student action needed."
-                    if submitted
-                    else f"Complete “{item.get('title')}” from your enrollment checklist."
-                ),
-                "href": f"/enrollment/requirements/{item.get('slug')}",
-                "blocksRegistration": True,
-            }
-        )
-    return {
+    deposit = await _deposit_state(host)
+    blockers = derive_enrollment_blockers(requirements=requirements, deposit=deposit)
+    result: JsonDict = {
         "officialHolds": [],
         "holdSystem": "not_operated",
         "derivedBlockers": blockers,
+        "depositState": deposit.as_json(),
         "asOf": now.isoformat(),
     }
+    if not deposit.known:
+        # Silence here would read as "no deposit blocker"; name the gap.
+        result["undeterminedDomains"] = [
+            {
+                "domain": "enrollment_deposit",
+                "reason": "The payment record could not be read this turn.",
+            }
+        ]
+    return result
 
 
 async def _tool_deadlines(host: AssistantToolHost, now: datetime) -> JsonDict:
+    """Every dated obligation the portal shows, in one ordered list."""
+
     requirements = await _primitive(host, "requirements")
     deadlines: list[JsonDict] = []
     for item in _items(requirements):
         due_at = item.get("dueAt")
-        if not due_at or str(item.get("status") or "") in _DONE_REQUIREMENT_STATUSES:
+        if not due_at or str(item.get("status") or "") in REQUIREMENT_DONE_STATUSES:
             continue
         deadlines.append(
             {
                 "title": str(item.get("title") or "Enrollment requirement"),
                 "dueAt": due_at,
                 "kind": "requirement",
-                "href": f"/enrollment/requirements/{item.get('slug')}",
+                "href": requirement_href(item),
             }
         )
-    dashboard = await _primitive(host, "dashboard")
-    offer = _mapping(dashboard.get("offer"))
-    if offer.get("responseDeadline") and not _deposit_paid(dashboard):
+    deposit = await _deposit_state(host)
+    if deposit.due_at and deposit.outstanding:
         deadlines.append(
             {
                 "title": "Enrollment deposit",
-                "dueAt": str(offer["responseDeadline"]),
+                "dueAt": deposit.due_at,
                 "kind": "deposit",
                 "href": "/payments",
             }
         )
-    if host.supports("financials"):
-        try:
-            financials = await host.read("financials")
-        except Exception:
-            financials = {}
-        for document in _sequence(_mapping(financials).get("requiredDocuments")):
-            entry = _mapping(document)
-            if entry.get("dueAt") and str(entry.get("status")) not in {"received", "waived"}:
+    financials = await _optional(host, "financials")
+    if financials is not None:
+        for raw in _sequence(_mapping(financials).get("requiredDocuments")):
+            entry = _mapping(raw)
+            if entry.get("dueAt") and str(entry.get("status")) not in (
+                AID_DOCUMENT_SATISFIED_STATUSES
+            ):
                 deadlines.append(
                     {
                         "title": str(entry.get("title") or "Financial aid document"),
@@ -292,15 +503,124 @@ async def _tool_deadlines(host: AssistantToolHost, now: datetime) -> JsonDict:
                         "href": str(entry.get("href") or "/financials"),
                     }
                 )
+        for raw in _sequence(_mapping(financials).get("paymentSchedule")):
+            entry = _mapping(raw)
+            if (
+                _text(entry.get("kind")) == "installment"
+                and entry.get("dueAt")
+                and _text(entry.get("status")) != "paid"
+            ):
+                deadlines.append(
+                    {
+                        "title": str(entry.get("label") or "Tuition installment"),
+                        "dueAt": str(entry["dueAt"]),
+                        "kind": "installment",
+                        "projected": bool(entry.get("projected")),
+                        "href": "/financials",
+                    }
+                )
+    appointments = await _optional(host, "appointments")
+    if appointments is not None:
+        for raw in _sequence(_mapping(appointments).get("items")):
+            entry = _mapping(raw)
+            starts_at = parse_moment(entry.get("startsAt"))
+            if starts_at is None or starts_at < now or _text(entry.get("status")) == "cancelled":
+                continue
+            deadlines.append(
+                {
+                    "title": f"{_appointment_label(entry.get('type'))} appointment",
+                    "dueAt": str(entry.get("startsAt")),
+                    "kind": "appointment",
+                    "href": "/appointments",
+                }
+            )
     for deadline in deadlines:
-        deadline["bucket"] = _deadline_bucket(str(deadline["dueAt"]), now)
+        deadline["bucket"] = deadline_bucket(deadline["dueAt"], now)
     deadlines.sort(key=lambda item: str(item["dueAt"]))
-    return {"items": deadlines, "total": len(deadlines), "asOf": now.isoformat()}
+    next_deadline = next(
+        (item for item in deadlines if item["bucket"] != "overdue"),
+        None,
+    )
+    return {
+        "items": deadlines,
+        "total": len(deadlines),
+        "overdue": [item for item in deadlines if item["bucket"] == "overdue"],
+        "next": next_deadline,
+        "asOf": now.isoformat(),
+    }
+
+
+# --------------------------------------------------------------------------
+# Support
+# --------------------------------------------------------------------------
 
 
 async def _tool_support(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Approved institution-wide help articles and the support contact.
+
+    Student-specific support conversations are deliberately not here: they are
+    student state, and mixing them into an institution-knowledge read would
+    misclassify their provenance.
+    """
+
     help_data = await _primitive(host, "help")
-    return dict(help_data)
+    return {
+        "articles": [
+            {
+                "question": entry.get("question"),
+                "answer": _clip(entry.get("answer"), 600),
+                "category": entry.get("category"),
+            }
+            for raw in _sequence(help_data.get("articles"))
+            if (entry := _mapping(raw))
+        ],
+        "support": dict(_mapping(help_data.get("support"))),
+        "href": "/help",
+    }
+
+
+async def _tool_support_requests(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """The student's own support conversations and their replies."""
+
+    help_data = await _primitive(host, "help")
+    requests = []
+    for raw in _sequence(help_data.get("requests")):
+        entry = _mapping(raw)
+        messages = [_mapping(item) for item in _sequence(entry.get("messages"))]
+        requests.append(
+            {
+                "id": entry.get("id"),
+                "topicCode": entry.get("topicCode"),
+                "subject": entry.get("subject"),
+                "status": entry.get("status"),
+                "priority": entry.get("priority"),
+                "requirementId": entry.get("requirementId"),
+                "createdAt": entry.get("createdAt"),
+                "lastMessageAt": entry.get("lastMessageAt"),
+                "messageCount": len(messages),
+                "latestMessage": (
+                    {
+                        "authorType": messages[-1].get("authorType"),
+                        "body": _clip(messages[-1].get("body"), 400),
+                        "createdAt": messages[-1].get("createdAt"),
+                    }
+                    if messages
+                    else None
+                ),
+            }
+        )
+    open_requests = [item for item in requests if str(item["status"]) not in {"resolved", "closed"}]
+    return {
+        "items": requests,
+        "total": len(requests),
+        "openCount": len(open_requests),
+        "href": "/help",
+    }
+
+
+# --------------------------------------------------------------------------
+# Financial aid and the student account
+# --------------------------------------------------------------------------
 
 
 async def _tool_aid_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
@@ -309,10 +629,11 @@ async def _tool_aid_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
         {
             "code": entry.get("code"),
             "title": entry.get("title"),
+            "description": _clip(entry.get("description"), 240),
             "status": entry.get("status"),
             "dueAt": entry.get("dueAt"),
             "href": entry.get("href"),
-            "satisfied": str(entry.get("status")) in {"received", "waived"},
+            "satisfied": str(entry.get("status")) in AID_DOCUMENT_SATISFIED_STATUSES,
         }
         for entry in (_mapping(item) for item in _sequence(financials.get("requiredDocuments")))
     ]
@@ -325,6 +646,7 @@ async def _tool_aid_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
         {
             "name": entry.get("name"),
             "type": entry.get("type"),
+            "source": entry.get("source"),
             "status": entry.get("status"),
             "offeredAmountCents": entry.get("offeredAmountCents"),
             "acceptedAmountCents": entry.get("acceptedAmountCents"),
@@ -337,6 +659,7 @@ async def _tool_aid_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
         "requiredDocuments": documents,
         "awards": awards,
         "openRequirements": [item for item in documents if not item["satisfied"]],
+        "href": "/financials",
     }
 
 
@@ -350,6 +673,17 @@ async def _tool_aid_summary(host: AssistantToolHost, _now: datetime) -> JsonDict
         "paymentsCents": financials.get("paymentsCents"),
         "remainingBalanceCents": financials.get("remainingBalanceCents"),
         "awards": [dict(_mapping(item)) for item in _sequence(financials.get("awards"))],
+        "paymentPlans": [
+            {
+                "name": entry.get("name"),
+                "installmentCount": entry.get("installmentCount"),
+                "installmentAmountCents": entry.get("installmentAmountCents"),
+                "enrollmentFeeCents": entry.get("enrollmentFeeCents"),
+                "status": entry.get("status"),
+            }
+            for entry in (_mapping(item) for item in _sequence(financials.get("paymentPlans")))
+        ],
+        "href": "/financials",
     }
 
 
@@ -365,7 +699,7 @@ async def _tool_aid_disbursements(host: AssistantToolHost, now: datetime) -> Jso
         {
             "code": str(entry.get("code") or "financial_document"),
             "title": str(entry.get("title") or "Financial aid document"),
-            "satisfied": str(entry.get("status")) in {"received", "waived"},
+            "satisfied": str(entry.get("status")) in AID_DOCUMENT_SATISFIED_STATUSES,
         }
         for entry in (_mapping(item) for item in _sequence(financials.get("requiredDocuments")))
     ]
@@ -379,25 +713,180 @@ async def _tool_aid_disbursements(host: AssistantToolHost, now: datetime) -> Jso
     }
 
 
-async def _tool_housing_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
-    housing = await _primitive(host, "housing_plan")
-    requirements = await _primitive(host, "requirements")
-    requirement = next(
+async def _tool_aid_support(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Approved financial-aid support routes.
+
+    Canonical portal destinations plus the same tenant support contact and
+    help articles the Help page reads — never a synthetic office fact.
+    """
+
+    help_data = await _primitive(host, "help")
+    articles = [
+        {
+            "question": entry.get("question"),
+            "answer": _clip(entry.get("answer"), 600),
+            "category": entry.get("category"),
+        }
+        for entry in (_mapping(item) for item in _sequence(help_data.get("articles")))
+        if "aid" in str(entry.get("category") or "").lower()
+        or "financial" in f"{entry.get('question') or ''} {entry.get('category') or ''}".lower()
+    ][:6]
+    return {
+        "options": [
+            {
+                "kind": "appointment",
+                "label": "Book a financial-aid appointment",
+                "href": "/appointments",
+            },
+            {"kind": "page", "label": "Open Financials", "href": "/financials"},
+            {"kind": "page", "label": "Open Documents", "href": "/documents"},
+        ],
+        "support": dict(_mapping(help_data.get("support"))),
+        "articles": articles,
+    }
+
+
+async def _tool_account(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Balance, charges, the deposit, the plan, and the payment receipts."""
+
+    financials = await _primitive(host, "financials")
+    deposit = await _deposit_state(host)
+    payments = await _optional(host, "payments")
+    history = [
+        {
+            "type": entry.get("type"),
+            "amountCents": entry.get("amountCents"),
+            "status": entry.get("status"),
+            "createdAt": entry.get("createdAt"),
+            "processorReference": entry.get("processorReference"),
+        }
+        for raw in _sequence(_mapping(payments).get("items"))
+        if (entry := _mapping(raw))
+    ]
+    enrolled_plan = next(
         (
-            item
-            for item in _items(requirements)
-            if str(item.get("code") or "").lower() == "housing_preference"
+            entry
+            for raw in _sequence(financials.get("paymentPlans"))
+            if (entry := _mapping(raw)) and _text(entry.get("status")) == "enrolled"
         ),
         None,
     )
     return {
+        "remainingBalanceCents": financials.get("remainingBalanceCents"),
+        "paymentsCents": financials.get("paymentsCents"),
+        "acceptedAidCents": financials.get("acceptedAidCents"),
+        "costOfAttendanceCents": financials.get("costOfAttendanceCents"),
+        "depositAmountCents": deposit.amount_cents,
+        "depositPaid": deposit.paid,
+        "depositPaymentPending": deposit.pending,
+        "depositState": deposit.as_json(),
+        "enrolledPaymentPlan": (
+            {
+                "name": enrolled_plan.get("name"),
+                "installmentCount": enrolled_plan.get("installmentCount"),
+                "installmentAmountCents": enrolled_plan.get("installmentAmountCents"),
+            }
+            if enrolled_plan
+            else None
+        ),
+        "paymentSchedule": [
+            dict(_mapping(item)) for item in _sequence(financials.get("paymentSchedule"))
+        ],
+        "paymentHistory": history if payments is not None else None,
+        "href": "/financials",
+    }
+
+
+async def _tool_academic_standing(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Satisfactory academic progress and earned-credit position.
+
+    The Financials page renders the SAP card — GPA against the minimum,
+    completion rate, attempted credits against the maximum — and the
+    Classrooms page renders credit progress. Both are academic-standing facts
+    a student asks about directly ("what's my GPA?").
+    """
+
+    financials = await _primitive(host, "financials")
+    sap = _mapping(financials.get("sap"))
+    if not sap:
+        raise _UnsupportedRead("sap")
+    academics = await _optional(host, "academics")
+    progress = _mapping(_mapping(academics).get("progress")) if academics else {}
+    return {
+        "academicYear": financials.get("academicYear"),
+        "satisfactoryAcademicProgress": {
+            "status": sap.get("status"),
+            "cumulativeGpa": sap.get("cumulativeGpa"),
+            "minimumGpa": sap.get("minimumGpa"),
+            "meetingGpaMinimum": _at_least(sap.get("cumulativeGpa"), sap.get("minimumGpa")),
+            "completionRatePercent": sap.get("completionRatePercent"),
+            "minimumCompletionRatePercent": sap.get("minimumCompletionRatePercent"),
+            "attemptedCredits": sap.get("attemptedCredits"),
+            "maximumAttemptedCredits": sap.get("maximumAttemptedCredits"),
+        },
+        "credits": {
+            "completedCredits": progress.get("completedCredits"),
+            "exemptedCredits": progress.get("exemptedCredits"),
+            "requiredCredits": progress.get("requiredCredits"),
+        }
+        if progress
+        else None,
+        "href": "/financials",
+    }
+
+
+# --------------------------------------------------------------------------
+# Housing
+# --------------------------------------------------------------------------
+
+
+async def _tool_housing_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """The full housing plan the student filled in, plus its requirement."""
+
+    housing = await _primitive(host, "housing_plan")
+    requirements = await _optional(host, "requirements")
+    requirement = _find_requirement(requirements, "housing_preference")
+    preferences: JsonDict = {
+        key: housing.get(key)
+        for key in (
+            "roomType",
+            "bathroomPreference",
+            "roommateMatching",
+            "knownRoommateName",
+            "knownRoommateEmail",
+            "sleepSchedule",
+            "studyHabits",
+            "roomNoise",
+            "cleanliness",
+            "guestPreference",
+            "temperaturePreference",
+            "smokeVapeCompatibility",
+            "substanceFreeHousing",
+            "genderInclusiveHousing",
+            "accessibleHousingInformation",
+        )
+        if housing.get(key) is not None
+    }
+    return {
         "preference": housing.get("preference"),
         "residenceOption": housing.get("residenceOption"),
+        "residencePreferences": [
+            str(value) for value in _sequence(housing.get("residencePreferences"))
+        ],
+        "livingLearningCommunities": [
+            str(value) for value in _sequence(housing.get("livingLearningCommunities"))
+        ],
         "roomType": housing.get("roomType"),
+        "preferences": preferences,
+        "offCampusStatus": housing.get("offCampusStatus"),
+        "commuteMode": housing.get("commuteMode"),
+        "commuteDuration": housing.get("commuteDuration"),
         "requirementStatus": requirement.get("status") if requirement else None,
-        "requirementHref": (
-            f"/enrollment/requirements/{requirement.get('slug')}" if requirement else None
-        ),
+        "requirementHref": requirement_href(requirement) if requirement else None,
+        # The platform models no room assignment; saying nothing would invite
+        # the composer to imply one exists.
+        "roomAssignment": {"tracked": False},
+        "href": "/onboarding",
     }
 
 
@@ -407,7 +896,7 @@ async def _tool_housing_options(host: AssistantToolHost, _now: datetime) -> Json
         {
             "name": entry.get("name"),
             "value": entry.get("value"),
-            "description": entry.get("description"),
+            "description": _clip(entry.get("description"), 400),
             "amenities": list(_sequence(entry.get("amenities"))),
         }
         for entry in (_mapping(item) for item in _sequence(housing.get("residences")))
@@ -426,18 +915,11 @@ async def _tool_housing_eligibility(host: AssistantToolHost, now: datetime) -> J
     """
 
     requirements = await _primitive(host, "requirements")
-    requirement = next(
-        (
-            item
-            for item in _items(requirements)
-            if str(item.get("code") or "").lower() == "housing_preference"
-        ),
-        None,
-    )
+    requirement = _find_requirement(requirements, "housing_preference")
     status = str(requirement.get("status") or "") if requirement else None
     if requirement is None:
         eligibility = "no_housing_step"
-    elif status in _DONE_REQUIREMENT_STATUSES:
+    elif status in REQUIREMENT_DONE_STATUSES:
         eligibility = "already_completed"
     elif status == "blocked":
         eligibility = "blocked"
@@ -466,7 +948,7 @@ async def _tool_housing_eligibility(host: AssistantToolHost, now: datetime) -> J
                 "title": requirement.get("title"),
                 "status": status,
                 "dueAt": requirement.get("dueAt"),
-                "href": f"/enrollment/requirements/{requirement.get('slug')}",
+                "href": requirement_href(requirement),
             }
             if requirement
             else None
@@ -478,37 +960,9 @@ async def _tool_housing_eligibility(host: AssistantToolHost, now: datetime) -> J
     }
 
 
-async def _tool_aid_support(host: AssistantToolHost, _now: datetime) -> JsonDict:
-    """Approved financial-aid support routes.
-
-    Canonical portal destinations plus the same tenant support contact and
-    help articles the Help page reads — never a synthetic office fact.
-    """
-
-    help_data = await _primitive(host, "help")
-    articles = [
-        {
-            "question": entry.get("question"),
-            "answer": entry.get("answer"),
-            "category": entry.get("category"),
-        }
-        for entry in (_mapping(item) for item in _sequence(help_data.get("articles")))
-        if "aid" in str(entry.get("category") or "").lower()
-        or "financial" in f"{entry.get('question') or ''} {entry.get('category') or ''}".lower()
-    ][:6]
-    return {
-        "options": [
-            {
-                "kind": "appointment",
-                "label": "Book a financial-aid appointment",
-                "href": "/appointments",
-            },
-            {"kind": "page", "label": "Open Financials", "href": "/financials"},
-            {"kind": "page", "label": "Open Documents", "href": "/documents"},
-        ],
-        "support": dict(_mapping(help_data.get("support"))),
-        "articles": articles,
-    }
+# --------------------------------------------------------------------------
+# Registration, appointments, academics, campus life, messages
+# --------------------------------------------------------------------------
 
 
 async def _tool_registration(host: AssistantToolHost, now: datetime) -> JsonDict:
@@ -536,44 +990,15 @@ async def _tool_registration(host: AssistantToolHost, now: datetime) -> JsonDict
         "windowPublished": False,
         "eligible": not gates,
         "gates": gates,
+        "undeterminedDomains": holds.get("undeterminedDomains", []),
         "asOf": now.isoformat(),
-    }
-
-
-async def _tool_account(host: AssistantToolHost, _now: datetime) -> JsonDict:
-    financials = await _primitive(host, "financials")
-    dashboard = await _primitive(host, "dashboard")
-    offer = _mapping(dashboard.get("offer"))
-    # A payment that exists but has not posted is a state of its own: "you
-    # have not paid" would be wrong, and "it is paid" would be wrong too.
-    pending_deposit = False
-    if host.supports("payments"):
-        try:
-            payments = await host.read("payments")
-        except Exception:
-            payments = {}
-        pending_deposit = any(
-            str(_mapping(item).get("type") or "") == "enrollment_deposit"
-            and str(_mapping(item).get("status") or "") == "pending"
-            for item in _sequence(_mapping(payments).get("items"))
-        )
-    return {
-        "remainingBalanceCents": financials.get("remainingBalanceCents"),
-        "paymentsCents": financials.get("paymentsCents"),
-        "acceptedAidCents": financials.get("acceptedAidCents"),
-        "costOfAttendanceCents": financials.get("costOfAttendanceCents"),
-        "depositAmountCents": offer.get("depositAmountCents"),
-        "depositPaid": _deposit_paid(dashboard),
-        "depositPaymentPending": pending_deposit,
-        "paymentSchedule": [
-            dict(_mapping(item)) for item in _sequence(financials.get("paymentSchedule"))
-        ],
     }
 
 
 async def _tool_academics(host: AssistantToolHost, _now: datetime) -> JsonDict:
     academics = await _primitive(host, "academics")
     selected = _mapping(academics.get("selectedProgram"))
+    progress = _mapping(academics.get("progress"))
     plan: list[JsonDict] = []
     for raw in _sequence(academics.get("plan"))[:16]:
         item = _mapping(raw)
@@ -582,6 +1007,8 @@ async def _tool_academics(host: AssistantToolHost, _now: datetime) -> JsonDict:
             {
                 "code": str(course.get("code") or ""),
                 "title": str(course.get("title") or ""),
+                "credits": course.get("credits"),
+                "category": item.get("category"),
                 "recommendedTerm": item.get("recommendedTerm"),
                 "status": item.get("status"),
                 "missingPrerequisites": [
@@ -589,44 +1016,90 @@ async def _tool_academics(host: AssistantToolHost, _now: datetime) -> JsonDict:
                 ],
             }
         )
+    exemptions = [
+        {
+            "targetCourseCode": entry.get("targetCourseCode"),
+            "status": entry.get("status"),
+            "reason": _clip(entry.get("reason") or entry.get("rationale"), 240),
+            "ruleCode": entry.get("ruleCode"),
+        }
+        for entry in (
+            _mapping(item) for item in _sequence(academics.get("exemptionRecommendations"))[:16]
+        )
+        if entry.get("targetCourseCode")
+    ]
     return {
         "selectedProgram": str(selected.get("name") or ""),
         "degree": str(selected.get("degree") or ""),
+        "programCode": selected.get("code"),
+        "totalCredits": selected.get("totalCredits"),
         "catalogVersion": str(academics.get("catalogVersion") or ""),
+        "progress": {
+            "completedCredits": progress.get("completedCredits"),
+            "exemptedCredits": progress.get("exemptedCredits"),
+            "requiredCredits": progress.get("requiredCredits"),
+        }
+        if progress
+        else None,
+        "exemptionRecommendations": exemptions,
         "suggestedExemptions": [
-            str(_mapping(item).get("targetCourseCode") or "")
-            for item in _sequence(academics.get("exemptionRecommendations"))[:16]
-            if _mapping(item).get("targetCourseCode")
+            str(item["targetCourseCode"])
+            for item in exemptions
+            if str(item.get("status")) in {"suggested", "needs_review"}
         ],
         "plan": plan,
         "total": len(plan),
+        "href": "/classrooms",
     }
 
 
-async def _tool_campus_life(host: AssistantToolHost, _now: datetime) -> JsonDict:
+async def _tool_campus_life(host: AssistantToolHost, now: datetime) -> JsonDict:
     campus = await _primitive(host, "campus_life")
-    events = [
-        {key: item.get(key) for key in ("title", "startsAt", "location", "category")}
-        for raw in _sequence(campus.get("events"))[:8]
-        if (item := _mapping(raw))
-    ]
+    events = []
+    registered = []
+    for raw in _sequence(campus.get("events")):
+        item = _mapping(raw)
+        entry = {
+            "title": item.get("title"),
+            "startsAt": item.get("startsAt"),
+            "location": item.get("location"),
+            "category": item.get("category"),
+            "registrationStatus": item.get("registrationStatus"),
+        }
+        if _text(item.get("registrationStatus")) in {"registered", "confirmed", "waitlisted"}:
+            registered.append(entry)
+        starts_at = parse_moment(item.get("startsAt"))
+        if starts_at is None or starts_at >= now:
+            events.append(entry)
     clubs = [
         {key: item.get(key) for key in ("name", "category", "description", "nextActivity")}
         for raw in _sequence(campus.get("clubs"))[:16]
         if (item := _mapping(raw))
     ]
-    return {"upcomingEvents": events, "clubs": clubs, "total": len(events) + len(clubs)}
+    return {
+        "upcomingEvents": events[:8],
+        "myRegistrations": registered,
+        "clubs": clubs,
+        "total": len(events[:8]) + len(clubs),
+        "href": "/campus-life",
+    }
 
 
 async def _tool_messages(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Recent portal messages, with enough body to answer "what did X say?"."""
+
     messages = await _primitive(host, "messages")
     latest = [
         {
             "subject": item.get("subject") or item.get("title"),
+            "senderName": item.get("senderName"),
+            "kind": item.get("kind"),
             "sentAt": item.get("sentAt") or item.get("createdAt"),
             "unread": item.get("readAt") is None,
+            "body": _clip(item.get("body"), 600),
+            "href": item.get("href"),
         }
-        for raw in _sequence(messages.get("items"))[:5]
+        for raw in _sequence(messages.get("items"))[:8]
         if (item := _mapping(raw))
     ]
     unread = messages.get("unreadCount")
@@ -635,28 +1108,46 @@ async def _tool_messages(host: AssistantToolHost, _now: datetime) -> JsonDict:
     return {"unreadCount": unread, "latest": latest, "href": "/messages"}
 
 
-async def _tool_appointments(host: AssistantToolHost, _now: datetime) -> JsonDict:
+async def _tool_appointments(host: AssistantToolHost, now: datetime) -> JsonDict:
     appointments = await _primitive(host, "appointments")
-    items = [
-        {
+    items = []
+    upcoming = []
+    for entry in (_mapping(item) for item in _items(appointments)):
+        record = {
             "type": entry.get("type"),
+            "label": _appointment_label(entry.get("type")),
             "startsAt": entry.get("startsAt"),
             "status": entry.get("status"),
+            "notes": _clip(entry.get("notes"), 240),
         }
-        for entry in (_mapping(item) for item in _items(appointments))
-    ]
-    return {"items": items, "total": len(items)}
+        items.append(record)
+        starts_at = parse_moment(entry.get("startsAt"))
+        if (
+            _text(entry.get("status")) not in {"cancelled", "completed"}
+            and starts_at is not None
+            and starts_at >= now
+        ):
+            upcoming.append(record)
+    return {
+        "items": items,
+        "total": len(items),
+        "upcoming": upcoming,
+        "bookingHref": "/appointments",
+    }
 
 
 _TOOL_IMPLEMENTATIONS: Mapping[
     str, Callable[[AssistantToolHost, datetime], Awaitable[JsonDict]]
 ] = {
     "getStudentProfile": _tool_profile,
+    "getEnrollmentState": _tool_enrollment_state,
+    "getOnboardingResponses": _tool_onboarding_responses,
     "getOnboardingChecklist": _tool_checklist,
     "getDocumentStatuses": _tool_documents,
     "getEnrollmentHolds": _tool_holds,
     "getStudentDeadlines": _tool_deadlines,
     "getSupportOptions": _tool_support,
+    "getStudentSupportRequests": _tool_support_requests,
     "getFinancialAidStatus": _tool_aid_status,
     "getFinancialAidSummary": _tool_aid_summary,
     "getAidDisbursements": _tool_aid_disbursements,
@@ -666,6 +1157,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getHousingOptions": _tool_housing_options,
     "getRegistrationStatus": _tool_registration,
     "getStudentAccountSummary": _tool_account,
+    "getAcademicStanding": _tool_academic_standing,
     "getStudentAppointments": _tool_appointments,
     "getAcademicPlan": _tool_academics,
     "getCampusLife": _tool_campus_life,
@@ -687,32 +1179,60 @@ def _sequence(value: Any) -> Sequence[Any]:
     return ()
 
 
-def _deposit_paid(dashboard: Mapping[str, Any]) -> bool:
-    offer = _mapping(dashboard.get("offer"))
-    if isinstance(offer.get("depositPaid"), bool):
-        return bool(offer["depositPaid"])
-    journey = _mapping(dashboard.get("journey"))
-    next_action = _mapping(journey.get("nextAction"))
-    return str(next_action.get("kind") or "") not in {"pay_deposit", "enrollment_deposit"} and bool(
-        offer.get("depositPaidAt")
+def _text(value: Any) -> str:
+    return "" if value is None else str(value)
+
+
+def _clip(value: Any, limit: int) -> str | None:
+    text = _text(value).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else f"{text[: limit - 1]}…"
+
+
+def _full_name(first: Any, last: Any) -> str | None:
+    parts = [_text(first).strip(), _text(last).strip()]
+    joined = " ".join(part for part in parts if part)
+    return joined or None
+
+
+def _at_least(value: Any, minimum: Any) -> bool | None:
+    if not isinstance(value, int | float) or not isinstance(minimum, int | float):
+        return None
+    return float(value) >= float(minimum)
+
+
+def _find_requirement(
+    requirements: Mapping[str, Any] | None, code: str
+) -> Mapping[str, Any] | None:
+    return next(
+        (
+            item
+            for item in _items(_mapping(requirements))
+            if str(item.get("code") or "").lower() == code
+        ),
+        None,
     )
 
 
-def _deadline_bucket(due_at: str, now: datetime) -> str:
-    try:
-        due = datetime.fromisoformat(due_at.replace("Z", "+00:00"))
-    except ValueError:
-        return "later"
-    if due.tzinfo is None:
-        due = due.replace(tzinfo=UTC)
-    delta_days = (due - now).total_seconds() / 86_400
-    if delta_days < 0:
-        return "overdue"
-    if delta_days <= 7:
-        return "this_week"
-    if delta_days <= 30:
-        return "this_month"
-    return "later"
+def _appointment_label(value: Any) -> str:
+    return _text(value).replace("_", " ").strip().capitalize() or "Appointment"
+
+
+def _bounded_answers(value: Any) -> JsonDict:
+    """A requirement response rendered small enough to sit in evidence."""
+
+    answers: JsonDict = {}
+    for key, raw in _mapping(value).items():
+        if isinstance(raw, str):
+            answers[key] = _clip(raw, 160)
+        elif isinstance(raw, bool | int | float) or raw is None:
+            answers[key] = raw
+        elif isinstance(raw, Sequence):
+            answers[key] = [_clip(item, 80) if isinstance(item, str) else item for item in raw[:8]]
+        if len(answers) >= 12:
+            break
+    return answers
 
 
 def _record_count(data: Any) -> int:
@@ -728,6 +1248,7 @@ def _record_count(data: Any) -> int:
             "plan",
             "upcomingEvents",
             "latest",
+            "articles",
         ):
             if isinstance(data.get(key), Sequence):
                 return len(data[key])

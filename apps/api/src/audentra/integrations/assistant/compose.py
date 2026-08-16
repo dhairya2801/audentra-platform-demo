@@ -9,7 +9,7 @@ disagree about what the evidence said.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,7 +20,7 @@ from audentra.integrations.assistant.blocks import (
     text_block,
 )
 from audentra.integrations.assistant.classify import Classification
-from audentra.integrations.assistant.derive import DerivedState
+from audentra.integrations.assistant.derive import DerivedState, deposit_state
 
 JsonDict = dict[str, Any]
 
@@ -67,7 +67,17 @@ _SOURCE_LABELS = {
     "getAcademicPlan": "your academic plan",
     "getCampusLife": "campus events and clubs",
     "getStudentMessages": "your messages",
+    "getStudentProfile": "your profile",
+    "getEnrollmentState": "your enrollment record",
+    "getOnboardingResponses": "your onboarding answers",
+    "getAcademicStanding": "your academic-progress record",
+    "getStudentSupportRequests": "your support conversations",
+    "getSupportOptions": "the help centre",
 }
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 @dataclass
@@ -122,8 +132,23 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
         lines.append(
             f"Document {document['title']}: {document['submissionState'].replace('_', ' ')}"
         )
+    # "Due 12 June" reads as future tense whatever today is, so an answer built
+    # from bare dates quietly loses the fact that a date has already passed.
+    # The bucket is computed in the read; state it in words.
+    overdue = [item for item in state.deadlines if item.get("bucket") == "overdue"]
     for deadline in state.deadlines:
-        lines.append(f"Deadline: {deadline.get('title')} due {deadline.get('dueAt')}")
+        bucket = str(deadline.get("bucket") or "")
+        note = {
+            "overdue": " — this date has already PASSED; it is OVERDUE",
+            "this_week": " — due within the next seven days",
+        }.get(bucket, "")
+        lines.append(f"Deadline: {deadline.get('title')} due {deadline.get('dueAt')}{note}")
+    if overdue:
+        lines.append(
+            f"{len(overdue)} deadline(s) are already overdue: "
+            + "; ".join(str(item.get("title")) for item in overdue)
+            + ". An answer about what is outstanding must say these are past due."
+        )
     # Hold vocabulary is part of the truth: the platform operates no registrar
     # hold system, so "you have a hold" is never a correct sentence unless an
     # official hold is actually on record.
@@ -209,13 +234,144 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
                 "back to the student. No refund schedule or date exists in the "
                 "record."
             )
-        if account.get("depositPaymentPending"):
+        enrolled_plan = account.get("enrolledPaymentPlan")
+        if isinstance(enrolled_plan, Mapping) and enrolled_plan.get("name"):
+            lines.append(
+                f"Enrolled payment plan: {enrolled_plan['name']} — "
+                f"{enrolled_plan.get('installmentCount')} installments of "
+                f"{_usd(enrolled_plan.get('installmentAmountCents'))}"
+            )
+    deposit = deposit_state(state)
+    if deposit is not None:
+        if not deposit.get("known"):
+            lines.append(
+                "Deposit payment state: NOT READABLE this turn. Do not say the "
+                "deposit is paid or unpaid — say it could not be checked."
+            )
+        elif deposit.get("pending"):
             lines.append(
                 "Deposit payment: submitted and pending — it has not posted yet, "
-                "so the deposit does not count as paid until it clears."
+                "so the deposit does not count as paid until it clears. The "
+                "student must NOT be told to pay again."
+            )
+        elif deposit.get("paid"):
+            lines.append(
+                "Deposit paid: yes — a succeeded enrollment-deposit payment is on "
+                "the record"
+                + (f" ({deposit['paidAt']})" if deposit.get("paidAt") else "")
+                + ". Nothing about the deposit is outstanding."
             )
         else:
-            lines.append(f"Deposit paid: {'yes' if account.get('depositPaid') else 'no'}")
+            lines.append(
+                "Deposit paid: no — no succeeded enrollment-deposit payment is on the record."
+            )
+    if state.enrollment:
+        admission = _mapping(state.enrollment.get("admission"))
+        for key, label in (
+            ("offerStatus", "Admission offer status"),
+            ("programName", "Program"),
+            ("termName", "Starting term"),
+            ("campusName", "Campus"),
+            ("responseDeadline", "Offer response deadline"),
+        ):
+            if admission.get(key):
+                lines.append(f"{label}: {admission[key]}")
+        journey = _mapping(state.enrollment.get("journey"))
+        if journey.get("completionPercent") is not None:
+            lines.append(f"Enrollment completion: {journey['completionPercent']}%")
+        if journey.get("status"):
+            lines.append(f"Enrollment journey status: {journey['status']}")
+        student = _mapping(state.enrollment.get("student"))
+        if student.get("classYear"):
+            lines.append(f"Class year: {student['classYear']}")
+        onboarding = _mapping(state.enrollment.get("onboarding"))
+        if onboarding.get("status"):
+            lines.append(
+                f"Onboarding status: {onboarding['status']}"
+                + (
+                    f", current step {onboarding['currentStep']}"
+                    if onboarding.get("currentStep")
+                    else ""
+                )
+            )
+    if state.onboarding_responses:
+        responses = state.onboarding_responses
+        for key, label in (
+            ("mailingAddress", "Mailing address on file"),
+            ("citizenshipStatus", "Citizenship status"),
+            ("residencyStatus", "Residency status"),
+            ("residencyVerificationPath", "Residency verification path"),
+            ("accommodationInterest", "Accommodation interest"),
+            ("insuranceInterest", "Insurance interest"),
+            ("depositChoice", "Deposit choice recorded at onboarding"),
+            ("socialComfort", "Social comfort answer"),
+        ):
+            if responses.get(key):
+                lines.append(f"{label}: {responses[key]}")
+        for contact in responses.get("emergencyContacts") or []:
+            lines.append(
+                f"Emergency contact: {contact.get('name')} "
+                f"({contact.get('relationship') or 'relationship not recorded'})"
+            )
+        for permission in responses.get("familyPermissions") or []:
+            lines.append(
+                f"Family permission granted to {permission.get('name')}: "
+                + (
+                    ", ".join(str(scope) for scope in permission.get("scopes") or [])
+                    or "no scopes recorded"
+                )
+            )
+        for key, label in (
+            ("campusInterests", "Campus interests"),
+            ("firstMonthGoals", "First-month goals"),
+            ("supportNeeds", "Support needs"),
+        ):
+            values = responses.get(key) or []
+            if values:
+                lines.append(f"{label}: {', '.join(str(value) for value in values)}")
+        signature = _mapping(responses.get("signature"))
+        if signature:
+            lines.append(
+                "Enrollment signature: "
+                + (
+                    f"signed by {signature.get('fullName')}"
+                    if signature.get("recorded")
+                    else "not signed"
+                )
+            )
+    if state.academic_standing:
+        sap = _mapping(state.academic_standing.get("satisfactoryAcademicProgress"))
+        for key, label in (
+            ("status", "Satisfactory academic progress status"),
+            ("cumulativeGpa", "Cumulative GPA"),
+            ("minimumGpa", "Minimum GPA required"),
+            ("completionRatePercent", "Completion rate percent"),
+            ("minimumCompletionRatePercent", "Minimum completion rate percent"),
+            ("attemptedCredits", "Attempted credits"),
+            ("maximumAttemptedCredits", "Maximum attempted credits"),
+        ):
+            if sap.get(key) is not None:
+                lines.append(f"{label}: {sap[key]}")
+        credits = _mapping(state.academic_standing.get("credits"))
+        for key, label in (
+            ("completedCredits", "Completed credits"),
+            ("exemptedCredits", "Exempted credits"),
+            ("requiredCredits", "Credits required for the degree"),
+        ):
+            if credits.get(key) is not None:
+                lines.append(f"{label}: {credits[key]}")
+    if state.support_requests:
+        for item in state.support_requests.get("items") or []:
+            latest = _mapping(item.get("latestMessage"))
+            lines.append(
+                f"Support request “{item.get('subject') or item.get('topicCode')}”: status "
+                f"{item.get('status')}"
+                + (
+                    f"; latest reply from {latest.get('authorType')}: {latest.get('body')}"
+                    if latest.get("body")
+                    else "; no replies yet"
+                )
+            )
     if state.housing:
         housing_status = str(state.housing.get("requirementStatus") or "unknown")
         blocked_note = (
@@ -228,6 +384,19 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
             f"Housing preference: {state.housing.get('preference') or 'not selected'}; "
             f"requirement status: {housing_status}{blocked_note}"
         )
+        for key, label in (
+            ("residenceOption", "Residence hall preference"),
+            ("roomType", "Room type preference"),
+        ):
+            if state.housing.get(key):
+                lines.append(f"{label}: {state.housing[key]}")
+        room = _mapping(state.housing.get("roomAssignment"))
+        if room and room.get("tracked") is False:
+            lines.append(
+                "Room assignment: the platform tracks NO room assignment for any "
+                "student. A preference is not an assignment — never say the "
+                "student is in, or has been assigned, a room, hall, or building."
+            )
     eligibility = state.housing_eligibility
     if eligibility:
         label = {
@@ -297,14 +466,40 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
                 + (f" — {description[:160]}" if description else "")
                 + (f"; next: {activity[:80]}" if activity else "")
             )
+    if state.campus_life:
+        for event in state.campus_life.get("myRegistrations", []):
+            lines.append(
+                f"Registered for campus event: {event.get('title')} on {event.get('startsAt')} "
+                f"(registration {event.get('registrationStatus')})"
+            )
     if state.messages:
         lines.append(f"Unread messages: {state.messages.get('unreadCount')}")
         for entry in state.messages.get("latest", []):
             if entry.get("subject"):
+                sender = entry.get("senderName")
+                body = str(entry.get("body") or "").strip()
                 lines.append(
                     f"Message: {entry['subject']}"
+                    + (f" from {sender}" if sender else "")
                     + (" (unread)" if entry.get("unread") else " (read)")
+                    + (f" — {body}" if body else "")
                 )
+    if state.profile:
+        for key, label in (
+            ("fullName", "Legal name on record"),
+            ("preferredName", "Preferred name"),
+            ("pronouns", "Pronouns on record"),
+            ("email", "Account email"),
+            ("mobilePhone", "Mobile phone on record"),
+            ("communicationPreference", "Preferred contact channel"),
+        ):
+            if state.profile.get(key):
+                lines.append(f"{label}: {state.profile[key]}")
+        if state.profile.get("emailVerified") is not None:
+            lines.append(
+                "Email verification: "
+                + ("verified" if state.profile["emailVerified"] else "not verified yet")
+            )
     if state.priority:
         lines.append(f"Priority action: {state.priority['title']} — {state.priority['reason']}")
     # Failed reads are evidence, not silence: the composer must know which
@@ -1088,6 +1283,261 @@ def _compose_account(
     return ComposedAnswer(message=message, blocks=[text_block(message)], evidence_texts=evidence)
 
 
+def _compose_deposit_status(
+    classification: Classification, state: DerivedState, name: str | None
+) -> ComposedAnswer:
+    """Answer the deposit question from the payment record itself.
+
+    Three outcomes are genuinely different and none may be collapsed into
+    another: posted, submitted-and-processing, and not paid. A fourth —
+    the payment record could not be read — must say so rather than pick one.
+    """
+
+    evidence = build_evidence_bundle(state)
+    deposit = deposit_state(state)
+    if deposit is None or not deposit.get("known"):
+        if _read_failed(state, "getStudentAccountSummary", "getEnrollmentState"):
+            return _unavailable_answer(state, "getStudentAccountSummary")
+        message = (
+            "I couldn't read your payment record just now, so I can't confirm "
+            "whether your deposit posted. Open Payments to check directly."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    amount = _usd(deposit.get("amountCents"))
+    if deposit.get("paid"):
+        paid_at = str(deposit.get("paidAt") or "")
+        when = f" on {paid_at[:10]}" if paid_at else ""
+        message = (
+            f"Yes — your {amount} enrollment deposit is paid and posted{when}. "
+            "The receipt is on your Payments page."
+        )
+    elif deposit.get("pending"):
+        message = (
+            f"Your {amount} enrollment deposit payment is submitted and still "
+            "processing — it has not posted yet. No second payment is needed "
+            "unless it fails."
+        )
+    else:
+        due = str(deposit.get("dueAt") or "")
+        by_when = f" It is due {due[:10]}." if due else ""
+        message = (
+            f"No — your {amount} enrollment deposit has not been paid yet.{by_when} "
+            "You can pay it from the Payments page."
+        )
+    blocks = [text_block(message)]
+    if not deposit.get("paid"):
+        blocks.append(
+            next_steps_block(
+                [{"text": "Open Payments", "href": "/payments", "owner": "student"}],
+            )
+        )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_enrollment_state(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    """Where the student stands: admission, program placement, progress."""
+
+    evidence = build_evidence_bundle(state)
+    enrollment = state.enrollment
+    if not enrollment:
+        if _read_failed(state, "getEnrollmentState"):
+            return _unavailable_answer(state, "getEnrollmentState")
+        return _compose_checklist(_classification, state, _name)
+    admission = enrollment.get("admission") or {}
+    journey = enrollment.get("journey") or {}
+    parts: list[str] = []
+    offer_status = str(admission.get("offerStatus") or "")
+    program = admission.get("programName")
+    term = admission.get("termName")
+    campus = admission.get("campusName")
+    if offer_status and program:
+        placement = f"your admission offer for {program}"
+        if term:
+            placement += f" starting {term}"
+        if campus:
+            placement += f" at {campus}"
+        parts.append(
+            f"You have accepted {placement}."
+            if offer_status == "accepted"
+            else f"Your status is “{offer_status.replace('_', ' ')}” for {placement}."
+        )
+    completion = journey.get("completionPercent")
+    if isinstance(completion, int | float):
+        parts.append(f"Your enrollment checklist is {int(completion)}% complete.")
+    onboarding = enrollment.get("onboarding")
+    if isinstance(onboarding, dict) and onboarding.get("status"):
+        status = str(onboarding["status"])
+        parts.append(
+            "Your onboarding is complete."
+            if status == "completed"
+            else f"Onboarding is {status.replace('_', ' ')}"
+            + (
+                f" at the “{onboarding['currentStep']}” step."
+                if onboarding.get("currentStep")
+                else "."
+            )
+        )
+    deposit = deposit_state(state)
+    if deposit and deposit.get("known") and not deposit.get("paid"):
+        parts.append(
+            "Your enrollment deposit payment is submitted and still processing."
+            if deposit.get("pending")
+            else "Your enrollment deposit has not been paid yet."
+        )
+    if state.remaining_steps:
+        parts.append(
+            f"{len(state.remaining_steps)} checklist item(s) are still open: "
+            f"{_join_titles(state.remaining_steps)}."
+        )
+    next_action = journey.get("nextAction") or {}
+    message = " ".join(parts) or "I could not summarise your enrollment position."
+    blocks = [text_block(message)]
+    if next_action.get("label"):
+        blocks.append(
+            next_steps_block(
+                [
+                    {
+                        "text": str(next_action["label"]),
+                        "href": str(next_action.get("href") or "/enrollment"),
+                        "owner": "student",
+                    }
+                ],
+                title="Next up",
+            )
+        )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_personal_information(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    """What the student told the university, read back to them."""
+
+    evidence = build_evidence_bundle(state)
+    responses = state.onboarding_responses
+    if not responses:
+        if _read_failed(state, "getOnboardingResponses"):
+            return _unavailable_answer(state, "getOnboardingResponses")
+        message = (
+            "I couldn't read your onboarding answers just now. The Onboarding "
+            "and Profile pages show what is on file."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    lines: list[dict[str, Any]] = []
+    for label, value in (
+        ("Mailing address", responses.get("mailingAddress")),
+        ("Citizenship status", responses.get("citizenshipStatus")),
+        ("Residency status", responses.get("residencyStatus")),
+        ("Accommodation interest", responses.get("accommodationInterest")),
+        ("Insurance interest", responses.get("insuranceInterest")),
+    ):
+        if value:
+            lines.append({"text": f"{label}: {str(value).replace('_', ' ')}"})
+    for contact in responses.get("emergencyContacts") or []:
+        lines.append(
+            {
+                "text": "Emergency contact: "
+                + ", ".join(
+                    str(part) for part in (contact.get("name"), contact.get("relationship")) if part
+                )
+            }
+        )
+    message = (
+        "Here is what your record holds from onboarding."
+        if lines
+        else "Your onboarding record has no personal details saved yet."
+    )
+    blocks = [text_block(message)]
+    if lines:
+        blocks.append(bullet_list_block(lines, title="On file"))
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_academic_standing(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    standing = state.academic_standing
+    if not standing:
+        if _read_failed(state, "getAcademicStanding"):
+            return _unavailable_answer(state, "getAcademicStanding")
+        message = (
+            "I couldn't read your academic-progress record just now. The "
+            "Financials page shows your satisfactory academic progress card."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    sap = standing.get("satisfactoryAcademicProgress") or {}
+    gpa = sap.get("cumulativeGpa")
+    minimum = sap.get("minimumGpa")
+    parts: list[str] = []
+    if gpa is not None:
+        parts.append(
+            f"Your cumulative GPA is {gpa}"
+            + (f", against a {minimum} minimum." if minimum is not None else ".")
+        )
+    status = str(sap.get("status") or "")
+    if status:
+        parts.append(f"Your satisfactory academic progress status is “{status.replace('_', ' ')}”.")
+    rate = sap.get("completionRatePercent")
+    if rate is not None:
+        parts.append(
+            f"Your completion rate is {rate}%"
+            + (
+                f" against a {sap['minimumCompletionRatePercent']}% minimum."
+                if sap.get("minimumCompletionRatePercent") is not None
+                else "."
+            )
+        )
+    message = " ".join(parts) or "Your academic-progress record has no values recorded."
+    return ComposedAnswer(message=message, blocks=[text_block(message)], evidence_texts=evidence)
+
+
+def _compose_support_requests(
+    classification: Classification, state: DerivedState, name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    requests = state.support_requests
+    if not requests:
+        if _read_failed(state, "getStudentSupportRequests"):
+            return _unavailable_answer(state, "getStudentSupportRequests")
+        return _compose_support(classification, state, name)
+    items = requests.get("items") or []
+    if not items:
+        message = (
+            "You have no support conversations on record. You can start one "
+            "from the Help page or book time from Appointments."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    open_count = requests.get("openCount") or 0
+    message = f"You have {len(items)} support conversation(s) on record" + (
+        f", {open_count} still open." if open_count else ", all resolved."
+    )
+    block = bullet_list_block(
+        [
+            {
+                "text": f"{item.get('subject') or item.get('topicCode')} — "
+                f"{str(item.get('status') or '').replace('_', ' ')}",
+                "href": "/help",
+            }
+            for item in items[:5]
+        ],
+        title="Your support requests",
+    )
+    return ComposedAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
 def _compose_appointments(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
@@ -1345,6 +1795,11 @@ _COMPOSERS = {
     "registration_status": _compose_registration,
     "policy_lookup": _compose_policy_lookup,
     "student_account": _compose_account,
+    "deposit_status": _compose_deposit_status,
+    "enrollment_state": _compose_enrollment_state,
+    "personal_information": _compose_personal_information,
+    "academic_standing": _compose_academic_standing,
+    "support_requests": _compose_support_requests,
     "appointments": _compose_appointments,
     "academic_plan": _compose_academics,
     "campus_life": _compose_campus_life,

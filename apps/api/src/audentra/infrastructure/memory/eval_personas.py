@@ -58,6 +58,18 @@ def _requirement(
     }
 
 
+def _course(code: str, title: str, credits: int, level: int, prerequisites: list[str]) -> JsonDict:
+    return {
+        "id": str(uuid4()),
+        "code": code,
+        "title": title,
+        "description": title,
+        "credits": credits,
+        "level": level,
+        "prerequisites": prerequisites,
+    }
+
+
 def apply_accepted_student(store: InMemoryPlatformStore, *, now: datetime | None = None) -> None:
     """The baseline every persona builds on: offer accepted, checklist open."""
 
@@ -66,7 +78,6 @@ def apply_accepted_student(store: InMemoryPlatformStore, *, now: datetime | None
     later = _iso(moment + timedelta(days=25))
 
     store.dashboard["offer"]["status"] = "accepted"
-    store.dashboard["offer"]["depositPaid"] = False
     store.dashboard["offer"]["responseDeadline"] = _iso(moment + timedelta(days=10))[:10]
     store.dashboard["journey"] = {
         "id": str(uuid4()),
@@ -133,6 +144,136 @@ def apply_accepted_student(store: InMemoryPlatformStore, *, now: datetime | None
     store.documents = []
     store.appointments = []
     store.payments = []
+    # Institution-wide campus-life data shared by every persona. The point of
+    # the fixture is intent coverage: the same club list must serve discovery
+    # ("what clubs are there?"), recommendation ("what should I join?"), and
+    # comparison ("ACM or Robotics for ML?") without changing shape.
+    store.campus_overrides = {
+        "events": [
+            {
+                "title": "Welcome Week Kickoff",
+                "startsAt": _iso(moment + timedelta(days=18)),
+                "location": "Main Quad",
+                "category": "orientation",
+            },
+            {
+                "title": "Student Club Fair",
+                "startsAt": _iso(moment + timedelta(days=21)),
+                "location": "Student Center",
+                "category": "involvement",
+            },
+            {
+                "title": "Jazz Ensemble Auditions",
+                "startsAt": _iso(moment + timedelta(days=24)),
+                "location": "Music Hall",
+                "category": "arts",
+            },
+        ],
+        "clubs": [
+            {
+                "name": "ACM Student Chapter",
+                "category": "academic",
+                "description": (
+                    "Computer science society: programming contests, tech talks, an "
+                    "annual hackathon, and a machine-learning special interest group."
+                ),
+                "nextActivity": "Intro meeting during Welcome Week",
+            },
+            {
+                "name": "Robotics Club",
+                "category": "academic",
+                "description": (
+                    "Hands-on robot design and competition team covering embedded "
+                    "programming and computer vision; beginners welcome."
+                ),
+                "nextActivity": "Build-night open house",
+            },
+            {
+                "name": "Data Science Society",
+                "category": "academic",
+                "description": "Workshops on statistics, Python, and real datasets.",
+                "nextActivity": "Kaggle night",
+            },
+            {
+                "name": "University Jazz Ensemble",
+                "category": "arts",
+                "description": "Auditioned big band performing once per term.",
+                "nextActivity": "Auditions",
+            },
+            {
+                "name": "A Cappella Society",
+                "category": "arts",
+                "description": "Student-run vocal groups; no audition required to join.",
+                "nextActivity": "Open sing",
+            },
+            {
+                "name": "Outdoor Adventure Club",
+                "category": "recreation",
+                "description": "Weekend hikes, climbing trips, and gear rental.",
+                "nextActivity": "Trailhead day hike",
+            },
+            {
+                "name": "International Students Association",
+                "category": "cultural",
+                "description": "Community and events for international and exchange students.",
+                "nextActivity": "Welcome dinner",
+            },
+            {
+                "name": "Intramural Soccer",
+                "category": "athletics",
+                "description": "Co-ed recreational league, all skill levels.",
+                "nextActivity": "Team registration",
+            },
+        ],
+    }
+    # A small but non-trivial academic plan: one eligible course, one course
+    # blocked on a prerequisite, and one suggested exemption, so prerequisite
+    # and exemption questions have canonical answers. Data the platform does
+    # not model (registration windows, section times) stays absent on purpose.
+    store.academics_overrides = {
+        "exemptionRecommendations": [
+            {
+                "targetCourseCode": "ENG 110",
+                "reason": "AP English credit on file suggests an exemption request.",
+            }
+        ],
+        "plan": [
+            {
+                "course": _course("CS 101", "Programming Fundamentals", 4, 100, []),
+                "category": "major_core",
+                "recommendedTerm": 1,
+                "status": "eligible",
+                "satisfiedPrerequisiteCodes": [],
+                "missingPrerequisiteCodes": [],
+            },
+            {
+                "course": _course("MATH 140", "Calculus I", 4, 100, []),
+                "category": "major_core",
+                "recommendedTerm": 1,
+                "status": "eligible",
+                "satisfiedPrerequisiteCodes": [],
+                "missingPrerequisiteCodes": [],
+            },
+            {
+                "course": _course("ENG 110", "College Writing", 3, 100, []),
+                "category": "general_education",
+                "recommendedTerm": 1,
+                "status": "eligible",
+                "satisfiedPrerequisiteCodes": [],
+                "missingPrerequisiteCodes": [],
+            },
+            {
+                "course": _course("CS 201", "Data Structures", 4, 200, ["CS 101"]),
+                "category": "major_core",
+                "recommendedTerm": 2,
+                # Plain-English status: course status strings render verbatim
+                # in the academic-plan table.
+                "status": "blocked",
+                "satisfiedPrerequisiteCodes": [],
+                "missingPrerequisiteCodes": ["CS 101"],
+            },
+        ],
+    }
     store.financial_overrides = {
         "academicYear": "2027-2028",
         "awards": [
@@ -145,7 +286,7 @@ def apply_accepted_student(store: InMemoryPlatformStore, *, now: datetime | None
                 "requiresAction": False,
             },
             {
-                "name": "Aster Achievement Scholarship",
+                "name": "Achievement Scholarship",
                 "type": "scholarship",
                 "status": "accepted",
                 "offeredAmountCents": 800_000,
@@ -173,7 +314,7 @@ def apply_accepted_student(store: InMemoryPlatformStore, *, now: datetime | None
             {
                 "code": "fafsa",
                 "title": "FAFSA",
-                "status": "received",
+                "status": "verified",
                 "dueAt": None,
                 "href": "/financials",
             },
@@ -201,8 +342,28 @@ def _complete(store: InMemoryPlatformStore, code: str) -> None:
             requirement["status"] = "completed"
             requirement["progressPercent"] = 100
     # Completing the deposit clears the derived deposit blocker everywhere.
+    # The checklist step is not the receipt: in the real platform the step
+    # completes *because* a payment posted, so the fixture records the payment
+    # too. Setting a `depositPaid` flag on the dashboard instead — which the
+    # Postgres projection never emits — is what let evals pass against state
+    # production could not produce.
     if code == "enrollment_deposit":
-        store.dashboard["offer"]["depositPaid"] = True
+        if not any(
+            item.get("type") == "enrollment_deposit" and item.get("status") == "succeeded"
+            for item in store.payments
+        ):
+            store.payments.append(
+                {
+                    "id": str(uuid4()),
+                    "type": "enrollment_deposit",
+                    "offerId": store.dashboard["offer"]["id"],
+                    "amountCents": store.dashboard["offer"]["depositAmountCents"],
+                    "status": "succeeded",
+                    "processor": "dummy",
+                    "processorReference": "fixture_deposit",
+                    "createdAt": store.dashboard["generatedAt"],
+                }
+            )
         store.dashboard["journey"]["nextAction"] = {
             "code": "identity_document",
             "label": "Upload an identity document",
@@ -327,7 +488,7 @@ def _persona_housing_assigned(store: InMemoryPlatformStore, now: datetime) -> No
     store.onboarding["data"].update(
         {
             "housingPreference": "on_campus",
-            "housingResidenceOption": "aster_residence_hall",
+            "housingResidenceOption": "residence_hall",
             "housingRoomType": "double",
         }
     )
@@ -348,7 +509,7 @@ def _persona_aid_verification_outstanding(store: InMemoryPlatformStore, now: dat
 
 def _persona_aid_finalized(store: InMemoryPlatformStore, now: datetime) -> None:
     for document in _aid_documents(store):
-        document["status"] = "received"
+        document["status"] = "verified"
     awards = store.financial_overrides.get("awards", [])
     assert isinstance(awards, list)
     for award in awards:

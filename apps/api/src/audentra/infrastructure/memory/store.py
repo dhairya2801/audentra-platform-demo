@@ -151,6 +151,8 @@ class InMemoryPlatformStore:
         # Evaluation fixtures may overlay financial-aid state without changing
         # the normal demo fixture used by the application tests.
         self.financial_overrides: dict[str, Any] = {}
+        self.academics_overrides: dict[str, Any] = {}
+        self.campus_overrides: dict[str, Any] = {}
         self.assistant_conversations: dict[str, dict[str, Any]] = {}
         self.assistant_messages: list[dict[str, Any]] = []
         self.profile: dict[str, Any] = {
@@ -307,7 +309,7 @@ class InMemoryPlatformStore:
             "level": 100,
             "prerequisites": [],
         }
-        return {
+        base = {
             "selectedProgram": {
                 "id": DEMO_IDS["program_id"],
                 "code": "BS-CS",
@@ -338,6 +340,7 @@ class InMemoryPlatformStore:
             "catalogVersion": "2027-2028.v1",
             "generatedAt": INITIAL_TIME,
         }
+        return {**base, **_clone(self.academics_overrides)}
 
     def search_courses(self, auth: AuthContext, query: str) -> dict[str, Any]:
         academics = self.get_academics(auth)
@@ -366,7 +369,7 @@ class InMemoryPlatformStore:
                     "amountCents": self.dashboard["offer"]["depositAmountCents"],
                     "enrollmentFeeCents": 0,
                     "dueAt": self.dashboard["offer"]["responseDeadline"],
-                    "status": "paid" if self.payments else "due",
+                    "status": "paid" if self._deposit_settled() else "due",
                     "projected": False,
                 }
             ],
@@ -383,9 +386,20 @@ class InMemoryPlatformStore:
         }
         return {**base, **_clone(self.financial_overrides)}
 
+    def _deposit_settled(self) -> bool:
+        return any(
+            payment.get("type") == "enrollment_deposit" and payment.get("status") == "succeeded"
+            for payment in self.payments
+        )
+
     def get_campus_life(self, auth: AuthContext) -> dict[str, Any]:
         self.authorize(auth)
-        return {"events": [], "clubs": [], "generatedAt": INITIAL_TIME}
+        return {
+            "events": [],
+            "clubs": [],
+            "generatedAt": INITIAL_TIME,
+            **_clone(self.campus_overrides),
+        }
 
     def accept_offer(self, auth: AuthContext, offer_id: str, key: str) -> dict[str, Any]:
         self.authorize(auth)

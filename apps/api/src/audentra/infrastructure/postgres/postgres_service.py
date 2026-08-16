@@ -33,6 +33,7 @@ from audentra.domain.documents import (
     failed_extraction,
     validate_document_upload,
 )
+from audentra.domain.student_state import derive_deposit_state
 from audentra.infrastructure.documents.processing import (
     NormalizedImageRegion,
     SignatureBox,
@@ -1464,6 +1465,7 @@ class PostgresPlatformService:
                 "payments": lambda: portal.get_student_payments(auth),
                 "financials": lambda: portal.get_student_financials(auth),
                 "dashboard": lambda: platform.get_student_dashboard(auth),
+                "onboarding": lambda: portal.get_student_onboarding(auth),
                 "housing_plan": lambda: portal.get_student_housing_plan(auth),
                 "appointments": lambda: portal.get_student_appointments(auth),
                 "help": lambda: portal.get_student_help(auth),
@@ -1597,15 +1599,11 @@ class PostgresPlatformService:
                 self.repository.platform.get_student_dashboard(auth),
                 self.repository.portal.get_student_payments(auth),
             )
-            offer = _mapping(dashboard.get("offer"))
-            offer_id = str(offer.get("id") or "")
-            deposit_amount = _integer(offer.get("depositAmountCents"))
-            deposit_paid = any(
-                _mapping(item).get("type") == "enrollment_deposit"
-                and _mapping(item).get("status") == "succeeded"
-                and str(_mapping(item).get("offerId") or "") == offer_id
-                for item in _sequence(payments.get("items"))
-            )
+            offer_id = str(_mapping(dashboard.get("offer")).get("id") or "")
+            state = derive_deposit_state(dashboard=dashboard, payments=payments)
+            deposit_amount = state.amount_cents
+            # A pending deposit must not produce a second payment widget.
+            deposit_paid = state.paid or state.pending
         document_upload_category = None
         if wants_document:
             document_upload_category = (

@@ -562,6 +562,7 @@ class InMemoryPlatformService:
                 "payments": sync_read(self.store.get_payments),
                 "financials": sync_read(self.store.get_financials),
                 "dashboard": sync_read(self.store.get_dashboard),
+                "onboarding": sync_read(self.store.get_onboarding),
                 "housing_plan": sync_read(self.store.get_housing_plan),
                 "appointments": sync_read(self.store.get_appointments),
                 "help": sync_read(self.store.get_help),

@@ -29,6 +29,9 @@ class DerivedState:
     deadlines: list[JsonDict] = field(default_factory=list)
     official_holds: list[JsonDict] = field(default_factory=list)
     derived_blockers: list[JsonDict] = field(default_factory=list)
+    # The holds read's own deposit projection, kept so a turn that read holds
+    # but not the account still knows whether the deposit is paid.
+    holds_deposit: JsonDict | None = None
     registration_gates: list[JsonDict] = field(default_factory=list)
     financial_aid: JsonDict | None = None
     aid_support: JsonDict | None = None
@@ -41,7 +44,11 @@ class DerivedState:
     campus_life: JsonDict | None = None
     messages: JsonDict | None = None
     support: JsonDict | None = None
+    support_requests: JsonDict | None = None
     profile: JsonDict | None = None
+    enrollment: JsonDict | None = None
+    onboarding_responses: JsonDict | None = None
+    academic_standing: JsonDict | None = None
     priority: JsonDict | None = None
     suggested_actions: list[JsonDict] = field(default_factory=list)
     unavailable_data: list[JsonDict] = field(default_factory=list)
@@ -87,6 +94,7 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
         state.derived_blockers = [
             dict(_mapping(item)) for item in _sequence(holds.get("derivedBlockers"))
         ]
+        state.holds_deposit = dict(holds)
 
     registration = reads.get("getRegistrationStatus")
     if registration:
@@ -125,11 +133,21 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.campus_life = dict(reads["getCampusLife"]) if "getCampusLife" in reads else None
     state.messages = dict(reads["getStudentMessages"]) if "getStudentMessages" in reads else None
     state.support = dict(reads["getSupportOptions"]) if "getSupportOptions" in reads else None
+    state.support_requests = (
+        dict(reads["getStudentSupportRequests"]) if "getStudentSupportRequests" in reads else None
+    )
     state.profile = dict(reads["getStudentProfile"]) if "getStudentProfile" in reads else None
+    state.enrollment = dict(reads["getEnrollmentState"]) if "getEnrollmentState" in reads else None
+    state.onboarding_responses = (
+        dict(reads["getOnboardingResponses"]) if "getOnboardingResponses" in reads else None
+    )
+    state.academic_standing = (
+        dict(reads["getAcademicStanding"]) if "getAcademicStanding" in reads else None
+    )
 
     # A submitted-but-unposted deposit payment changes what the open deposit
     # requirement MEANS: the student already acted; the system is processing.
-    if (state.account or {}).get("depositPaymentPending"):
+    if _deposit_pending(state):
         for step in state.remaining_steps:
             if str(step.get("code") or "").lower() == "enrollment_deposit":
                 step["processingPending"] = True
@@ -137,6 +155,25 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.priority = _derive_priority(state)
     state.suggested_actions = _derive_suggested_actions(state)
     return state
+
+
+def deposit_state(state: DerivedState) -> JsonDict | None:
+    """The deposit projection from whichever read carried it this turn.
+
+    Three tools embed the same `DepositState` (account summary, holds,
+    enrollment state) precisely so no caller has to pick a favourite; this
+    picks the first one present rather than letting each composer re-derive.
+    """
+
+    for source in (state.account, state.holds_deposit, state.enrollment):
+        candidate = _mapping((source or {}).get("depositState"))
+        if candidate:
+            return dict(candidate)
+    return None
+
+
+def _deposit_pending(state: DerivedState) -> bool:
+    return bool((deposit_state(state) or {}).get("pending"))
 
 
 def _derive_document_states(
@@ -264,7 +301,7 @@ def _derive_priority(state: DerivedState) -> JsonDict | None:
         None,
     )
     if deposit:
-        if (state.account or {}).get("depositPaymentPending"):
+        if _deposit_pending(state):
             return {
                 "kind": "deposit_pending",
                 "title": "Your deposit payment is processing",

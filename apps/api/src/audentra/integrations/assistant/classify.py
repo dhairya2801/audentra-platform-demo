@@ -25,6 +25,11 @@ REQUEST_TYPES = (
     "missing_documents",
     "document_status",
     "onboarding_status",
+    "enrollment_state",
+    "personal_information",
+    "academic_standing",
+    "support_requests",
+    "deposit_status",
     "holds_and_blockers",
     "deadlines",
     "request_support",
@@ -126,6 +131,88 @@ _POLICY_QUESTION = re.compile(
     re.IGNORECASE,
 )
 
+# Satisfactory academic progress and earned credits: the Financials page's SAP
+# card and the Classrooms credit counter. Distinct from the course plan.
+_ACADEMIC_STANDING = re.compile(
+    r"\bg\.?p\.?a\.?\b|\bgrade point average\b"
+    r"|\bsatisfactory academic progress\b|\bacademic (?:standing|probation|progress)\b"
+    r"|\bsap\b(?!\w)"
+    # Earned credits only. "How many credits am I signed up for / taking"
+    # is a course-plan question and must stay with the plan read.
+    r"|\b(?:how many|what) credits\b(?![^?]{0,32}\b(?:signed up|taking|enrolled|registered)\b)"
+    r"|\bcredits? (?:do i have|earned|completed|so far)\b"
+    r"|\bcompletion rate\b|\bam i in good standing\b",
+    re.IGNORECASE,
+)
+
+# Facts the student themselves supplied during onboarding. Kept narrow so a
+# document question about residency proof does not land here.
+_PERSONAL_INFORMATION = re.compile(
+    r"\bemergency contacts?\b|\bnext of kin\b"
+    r"|\b(?:what|which|whose)\b[^?]{0,32}\baddress\b[^?]{0,24}\b(?:on file|do you have|"
+    r"did i (?:give|put|enter)|is on my record)\b"
+    r"|\b(?:mailing|home|permanent) address\b"
+    r"|\bcitizenship (?:status)?\b"
+    r"|\b(?:what|which)\b[^?]{0,24}\bresidency status\b"
+    r"|\bwhat did i (?:put|enter|answer|select|choose|say)\b"
+    r"|\b(?:my )?pronouns\b"
+    r"|\b(?:phone number|contact (?:info|details|preference))\b[^?]{0,24}"
+    r"\b(?:on file|do you have|is (?:on )?(?:my )?record)\b"
+    r"|\bwho (?:can|is allowed to) (?:see|access|talk about)\b[^?]{0,24}\b(?:my )?record\b"
+    r"|\bfamily (?:permissions?|access)\b"
+    r"|\bdid i sign\b|\bmy signature\b",
+    re.IGNORECASE,
+)
+
+# The student's own support conversations, not the routing question.
+_SUPPORT_REQUESTS = re.compile(
+    r"\b(?:my|the) (?:help|support) (?:request|ticket|case|question)s?\b"
+    r"|\bdid (?:anyone|anybody|someone|they) (?:answer|reply|respond|get back)\b"
+    r"|\bany (?:reply|response|answer) (?:to|on) my\b"
+    r"|\bheard back\b|\bfollow(?:ed)? up on my\b"
+    r"|\bstatus of my (?:question|request|ticket|inquiry)\b",
+    re.IGNORECASE,
+)
+
+# The deposit as a payment record: paid or not, when, how much.
+_DEPOSIT_STATUS = re.compile(
+    r"\bdeposit\b[^?]{0,40}\b(?:paid|posted|received|processed|went through|cleared|"
+    r"show(?:ing|n|s)? up|on file|recorded|status)\b"
+    r"|\b(?:paid|posted|processed|received|cleared)\b[^?]{0,24}\b(?:my |the )?deposit\b"
+    r"|\bdid (?:my|the) deposit\b|\bis (?:my|the) deposit\b|\bhas (?:my|the) deposit\b"
+    r"|\bdeposit (?:confirmation|receipt)\b",
+    re.IGNORECASE,
+)
+
+# Where the student stands: admission decision, program placement, progress.
+_ENROLLMENT_STATE = re.compile(
+    r"\benrollment status\b|\badmission status\b|\bapplication status\b"
+    r"|\bam i (?:admitted|accepted|enrolled|officially (?:in|enrolled))\b"
+    r"|\bwhat (?:program|major|degree) am i\b|\bwhich (?:program|campus|term)\b"
+    r"|\bwhat (?:term|semester) (?:am i|do i) (?:start|starting|begin)\b"
+    r"|\bwhen do i start\b|\bmy (?:starting )?term\b|\bwhat campus\b"
+    r"|\bclass of\b|\bclass year\b"
+    r"|\bhow far along\b|\bwhere do i stand\b|\bam i all set\b"
+    r"|\bmy offer\b|\boffer status\b",
+    re.IGNORECASE,
+)
+
+# "What's changed?" / "what does that mean?" are consequence questions: they
+# span whatever the named event unblocked, so a single-record read under-answers.
+_CONSEQUENCE_QUESTION = re.compile(
+    r"\bwhat(?:'s| is|s| has| does)?\b[^?]{0,24}\b(?:changed|change|mean|next|now|unlock)"
+    r"|\bwhat does that mean\b|\bwhat happens now\b|\bwhere does that leave me\b",
+    re.IGNORECASE,
+)
+
+# A pronoun with no antecedent anywhere: no history, no noun in the question.
+_UNANCHORED_REFERENCE = re.compile(
+    r"^(?:so |ok |okay |and )?(?:did|has|is|was|does)\s+(?:it|that|this|they)\s+"
+    r"(?:work|go through|come through|process|post|arrive|land|count|register|"
+    r"show up|get (?:there|through)|happen|complete)\w*\s*(?:yet)?\s*[?!.]*$",
+    re.IGNORECASE,
+)
+
 _AID_ENTITY = re.compile(
     r"\bfinancial[- ]?aid\b|\bfafsa\b|\baid\b|\bgrants?\b|\bscholarships?\b|\bloans?\b"
     r"|\bwork[- ]study\b|\bverification worksheet\b|\bdisburse|\baward",
@@ -194,6 +281,12 @@ def classify(request: NormalizedRequest) -> Classification | None:
             return Classification("capability_overview", 0.99)
         if _OPEN_ENDED_HELP.search(text):
             return Classification("general_help", 0.98)
+
+    # With conversation behind it the pronoun has an antecedent and the
+    # follow-up path resolves it; with nothing behind it, any yes/no is a
+    # guess about which action the student means.
+    if not request.history and _UNANCHORED_REFERENCE.search(text.strip()):
+        return Classification("general_question", 0.9)
 
     if request.requests_other_person_contact:
         return Classification(
@@ -311,6 +404,10 @@ def classify(request: NormalizedRequest) -> Classification | None:
             return Classification(
                 "housing_eligibility", 1, additional_request_types=("holds_and_blockers",)
             )
+        if re.search(r"\bregist", text):
+            return Classification(
+                "housing_eligibility", 1, additional_request_types=("registration_status",)
+            )
         return Classification("housing_status", 1)
 
     if aid_entity:
@@ -412,6 +509,22 @@ def classify(request: NormalizedRequest) -> Classification | None:
             return Classification("deadlines", 0.95)
         return Classification("aid_status", 0.95)
 
+    # Academic standing is its own record (satisfactory academic progress and
+    # earned credits), not the course plan. "What's my GPA?" answered from the
+    # plan read has no GPA in evidence and invites the composer to invent one.
+    if _ACADEMIC_STANDING.search(text):
+        return Classification("academic_standing", 1)
+    if re.search(r"\bcredits?\b", text) and re.search(
+        r"\b(?:signed up|taking|enrolled|registered)\b", text
+    ):
+        return Classification("academic_plan", 1)
+
+    # What the student told the university about themselves. Narrow on
+    # purpose: "residency documents" is a document question, while "what
+    # residency status did I put down" is a read of the onboarding answers.
+    if _PERSONAL_INFORMATION.search(text):
+        return Classification("personal_information", 1)
+
     # A question about a specific course or prerequisite needs the academic
     # plan, whatever else it mentions — registration gates cannot say whether
     # CS 201's prerequisite is met.
@@ -489,6 +602,24 @@ def classify(request: NormalizedRequest) -> Classification | None:
     if re.search(r"deadline|due date|\bdue\b|overdue|by when|how long do i have", text):
         return Classification("deadlines", 1)
 
+    # "Is my deposit paid?" is a payment-record question. The generic account
+    # branch below answers with a balance, which is not what was asked and
+    # leaves the posted-payment fact out of evidence entirely.
+    if _DEPOSIT_STATUS.search(text):
+        if not _CONSEQUENCE_QUESTION.search(text):
+            return Classification("deposit_status", 1)
+        # "Now that the deposit posted, what changed?" is about what the
+        # payment released, not about the payment. Housing is the step this
+        # platform gates on earlier checklist items, so its eligibility is
+        # what actually moved; the checklist and holds carry the rest.
+        return Classification(
+            "next_action",
+            1,
+            # The holds read already carries the deposit projection, so the
+            # account read would add cost without adding a fact.
+            additional_request_types=("housing_eligibility",),
+        )
+
     if re.search(
         r"balance|owe|owing|bill|billing|charges|tuition cost|payment plan|installment"
         r"|deposit|\bpay(?:ing|ment)?\b|\bmoney\b",
@@ -500,6 +631,11 @@ def classify(request: NormalizedRequest) -> Classification | None:
         r"appointment|advisor|advising|meet with|talk to (?:someone|a person|a human)", text
     ):
         return Classification("appointments", 0.95)
+
+    # The student's own open conversations, before the generic "how do I get
+    # help" route: "did anyone answer me?" is a read, not a routing question.
+    if _SUPPORT_REQUESTS.search(text):
+        return Classification("support_requests", 1)
 
     if re.search(
         r"(?:who|where|how).{0,24}(?:contact|help|support)|support office|help desk", text
@@ -523,7 +659,9 @@ def classify(request: NormalizedRequest) -> Classification | None:
         text,
     ):
         return Classification("remaining_steps", 1)
-    if re.search(r"onboarding|enrollment status|where am i in", text):
+    if _ENROLLMENT_STATE.search(text):
+        return Classification("enrollment_state", 1)
+    if re.search(r"onboarding|where am i in", text):
         return Classification("onboarding_status", 0.95)
 
     return None

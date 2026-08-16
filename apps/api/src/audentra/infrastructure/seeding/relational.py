@@ -270,6 +270,81 @@ _ONBOARDING_STEPS = (
     "deposit",
 )
 
+
+def _onboarding_payload(
+    *,
+    first_name: str,
+    last_name: str,
+    completed: bool,
+    housing_preference: str,
+    skipped_steps: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Build answers consistent with the wizard status written by the seed."""
+
+    payload: dict[str, object] = {
+        "housingPreference": housing_preference,
+        "skippedSteps": list(skipped_steps),
+    }
+    if not completed:
+        return payload
+    slug = f"{first_name}.{last_name}".lower()
+    guardian = f"Robin {last_name}"
+    guardian_email = f"robin.{last_name.lower()}@example.com"
+    payload.update(
+        {
+            "firstName": first_name,
+            "lastName": last_name,
+            "preferredName": first_name,
+            "personalEmail": f"{slug}@example.com",
+            "mobilePhone": "+1 555 010 4471",
+            "communicationPreference": "email",
+            "citizenshipStatus": "us_citizen",
+            "residencyStatus": "domestic",
+            "residencyVerificationPath": "home_address_review",
+            "streetAddress": "418 Larkspur Lane",
+            "city": "Cambridge",
+            "stateOrProvince": "MA",
+            "postalCode": "02139",
+            "country": "United States",
+            "housingResidenceOption": "residence_hall",
+            "housingRoomType": "double",
+            "bathroomPreference": "shared_suite",
+            "roommateMatching": "match_me",
+            "sleepSchedule": "early_riser",
+            "studyHabits": "quiet_room",
+            "cleanliness": "tidy",
+            "guestPreference": "occasional_guests",
+            "substanceFreeHousing": True,
+            "accommodationInterest": "not_now",
+            "insuranceInterest": "learn_more",
+            "campusInterests": ["undergraduate_research", "intramural_sports"],
+            "socialComfort": "small_groups",
+            "firstMonthGoals": ["meet_my_advisor", "join_one_club"],
+            "emergencyContacts": [
+                {
+                    "name": guardian,
+                    "relationship": "parent",
+                    "phone": "+1 555 010 8823",
+                    "email": guardian_email,
+                    "isPrimary": True,
+                }
+            ],
+            "familyPermissions": [
+                {
+                    "name": guardian,
+                    "relationship": "parent",
+                    "email": guardian_email,
+                    "scopes": ["billing", "enrollment_progress"],
+                }
+            ],
+            "signatureFullName": f"{first_name} {last_name}",
+            "signatureMethod": "typed",
+            "signatureConsent": True,
+        }
+    )
+    return payload
+
+
 _PRIMARY_REQUIREMENT_STATES: Mapping[str, tuple[str, int]] = {
     "financial_aid_verification": ("in_progress", 35),
     "housing_preference": ("in_progress", 50),
@@ -312,7 +387,12 @@ _EXTRA_STUDENTS = (
         onboarding_status="in_progress",
         current_step="housing",
         completed_steps=("offer", "about_you"),
-        onboarding_payload={"housingPreference": "undecided", "skippedSteps": []},
+        onboarding_payload=_onboarding_payload(
+            first_name="Maya",
+            last_name="Chen",
+            completed=False,
+            housing_preference="undecided",
+        ),
         accepted_at=datetime(2026, 7, 20, 14, 0, tzinfo=UTC),
         requirement_states=_EARLY_REQUIREMENT_STATES,
     ),
@@ -330,7 +410,12 @@ _EXTRA_STUDENTS = (
         onboarding_status="completed",
         current_step="deposit",
         completed_steps=_ONBOARDING_STEPS,
-        onboarding_payload={"housingPreference": "on_campus", "skippedSteps": []},
+        onboarding_payload=_onboarding_payload(
+            first_name="Jordan",
+            last_name="Ellis",
+            completed=True,
+            housing_preference="on_campus",
+        ),
         accepted_at=datetime(2026, 7, 18, 16, 30, tzinfo=UTC),
         requirement_states=_ADVANCED_REQUIREMENT_STATES,
     ),
@@ -348,7 +433,12 @@ _EXTRA_STUDENTS = (
         onboarding_status="in_progress",
         current_step="housing",
         completed_steps=("offer", "about_you"),
-        onboarding_payload={"housingPreference": "undecided", "skippedSteps": []},
+        onboarding_payload=_onboarding_payload(
+            first_name="Maya",
+            last_name="Chen",
+            completed=False,
+            housing_preference="undecided",
+        ),
         accepted_at=datetime(2026, 7, 20, 14, 0, tzinfo=UTC),
         requirement_states=_EARLY_REQUIREMENT_STATES,
     ),
@@ -366,7 +456,12 @@ _EXTRA_STUDENTS = (
         onboarding_status="completed",
         current_step="deposit",
         completed_steps=_ONBOARDING_STEPS,
-        onboarding_payload={"housingPreference": "on_campus", "skippedSteps": []},
+        onboarding_payload=_onboarding_payload(
+            first_name="Jordan",
+            last_name="Ellis",
+            completed=True,
+            housing_preference="on_campus",
+        ),
         accepted_at=datetime(2026, 7, 18, 16, 30, tzinfo=UTC),
         requirement_states=_ADVANCED_REQUIREMENT_STATES,
     ),
@@ -1030,10 +1125,13 @@ async def _ensure_harvard_demo_student(
         onboarding_status="completed" if completed_onboarding else "in_progress",
         current_step="deposit" if completed_onboarding else "offer",
         completed_steps=_ONBOARDING_STEPS if completed_onboarding else (),
-        onboarding_payload={
-            "housingPreference": "on_campus" if completed_onboarding else "undecided",
-            "skippedSteps": ["deposit"] if completed_onboarding else [],
-        },
+        onboarding_payload=_onboarding_payload(
+            first_name="Alex",
+            last_name="Morgan",
+            completed=completed_onboarding,
+            housing_preference="on_campus" if completed_onboarding else "undecided",
+            skipped_steps=("deposit",) if completed_onboarding else (),
+        ),
         accepted_at=accepted_at,
         requirement_states=_PRIMARY_REQUIREMENT_STATES,
     )
@@ -1293,7 +1391,15 @@ async def _complete_primary_demo_student(
         ),
         {
             "completed_steps": list(_ONBOARDING_STEPS),
-            "payload": json.dumps({"housingPreference": "on_campus", "skippedSteps": ["deposit"]}),
+            "payload": json.dumps(
+                _onboarding_payload(
+                    first_name="Alex",
+                    last_name="Morgan",
+                    completed=True,
+                    housing_preference="on_campus",
+                    skipped_steps=("deposit",),
+                )
+            ),
             "accepted_at": accepted_at,
             "tenant_id": UUID(tenant_id),
             "student_id": UUID(student_id),
