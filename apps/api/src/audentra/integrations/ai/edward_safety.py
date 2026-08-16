@@ -57,6 +57,16 @@ _CROSS_STUDENT_ACCESS = re.compile(
     r"(?:another|other|different|all).{0,24}students?.{0,48}(?:record|profile|document|payment|grade|email|phone|data)|(?:record|profile|document|payment|grade|email|phone|data).{0,48}(?:another|other|different|all).{0,24}students?",
     re.I,
 )
+# A named third person's record (for example, "What is Maria Alvarez's
+# student ID?"). This is deliberately case-sensitive: the capitalized full
+# name is the signal that prevents answering from the signed-in student's
+# record while narrating it as someone else's.
+_NAMED_PERSON_RECORD = re.compile(
+    r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+(?:'|’)s\s+"  # noqa: RUF001
+    r"(?i:student\s*id|holds?|records?|balance|grades?|aid|transcript|documents?)"
+    r"|(?i:student\s*id|holds?|records?|balance|grades?|aid|transcripts?)\s+(?i:of|for)\s+"
+    r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+"
+)
 _SENSITIVE_OPERATION_VERB = re.compile(
     r"\b(?:get|read|show|print|dump|steal|send|post|copy|expose|reveal|access|extract)\b",
     re.I,
@@ -140,7 +150,7 @@ def guarded_response(message: object) -> dict[str, Any] | None:
         and _SENSITIVE_OPERATION_VERB.search(message)
     )
     reason: str | None = None
-    if _CROSS_STUDENT_ACCESS.search(message):
+    if _CROSS_STUDENT_ACCESS.search(message) or _NAMED_PERSON_RECORD.search(message):
         reason = (
             "I can only use the signed-in student\u2019s permission-scoped institution record. "
             "I can\u2019t access or reveal another student\u2019s information."

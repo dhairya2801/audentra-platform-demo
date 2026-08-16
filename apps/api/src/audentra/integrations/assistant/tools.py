@@ -16,6 +16,7 @@ one derivation.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -32,7 +33,9 @@ _REQUIREMENT_GATE_CODES: Mapping[str, str] = {
     "final_transcript": "final_transcript",
     "transcript": "final_transcript",
     "immunization": "immunization_cleared",
+    "immunization_record": "immunization_cleared",
     "immunization_records": "immunization_cleared",
+    "official_transcript": "final_transcript",
     "advising": "advising_complete",
     "orientation": "orientation_complete",
     "housing_preference": "housing_preference_selected",
@@ -78,33 +81,41 @@ async def execute_tool_reads(
     *,
     timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     now: datetime | None = None,
+    receipt_offset: int = 0,
 ) -> ToolExecution:
     execution = ToolExecution()
     moment = now or datetime.now(UTC)
 
     async def run(tool: str) -> tuple[str, JsonDict]:
+        started = time.perf_counter()
+
+        def timed(result: JsonDict) -> tuple[str, JsonDict]:
+            result["durationMs"] = round((time.perf_counter() - started) * 1_000)
+            return tool, result
+
         try:
             data = await asyncio.wait_for(
                 _TOOL_IMPLEMENTATIONS[tool](host, moment), timeout=timeout_seconds
             )
         except TimeoutError:
-            return tool, {"status": "timeout", "reason": "timeout", "retryable": True}
+            return timed({"status": "timeout", "reason": "timeout", "retryable": True})
         except _UnsupportedRead:
-            return tool, {"status": "unavailable", "reason": "not_supported", "retryable": False}
+            return timed({"status": "unavailable", "reason": "not_supported", "retryable": False})
         except Exception:
-            return tool, {"status": "unavailable", "reason": "read_error", "retryable": True}
-        return tool, {"status": "available", "data": data}
+            return timed({"status": "unavailable", "reason": "read_error", "retryable": True})
+        return timed({"status": "available", "data": data})
 
     results = await asyncio.gather(
         *(run(tool) for tool in selected_tools if tool in _TOOL_IMPLEMENTATIONS)
     )
     for index, (tool, result) in enumerate(results):
         receipt = {
-            "id": f"receipt-{index + 1}",
+            "id": f"receipt-{receipt_offset + index + 1}",
             "source": RECEIPT_SOURCES.get(tool, "dashboard"),
             "tool": tool,
             "recordCount": _record_count(result.get("data")),
             "status": result["status"],
+            "durationMs": result.get("durationMs", 0),
         }
         execution.reads[tool] = {**result, "receipt": receipt}
         execution.receipts.append(receipt)
@@ -203,16 +214,23 @@ async def _tool_holds(host: AssistantToolHost, now: datetime) -> JsonDict:
                 "blocksRegistration": True,
             }
         )
+    seen_codes = {str(blocker["code"]) for blocker in blockers}
     for item in _items(requirements):
         status = str(item.get("status") or "")
         if not item.get("blocking") or status in _DONE_REQUIREMENT_STATUSES:
             continue
+        gate_code = _REQUIREMENT_GATE_CODES.get(
+            str(item.get("code") or "").lower(), str(item.get("code") or "requirement")
+        )
+        # One blocker per gate: the offer-level deposit blocker and the
+        # deposit requirement share a code and must not appear twice.
+        if gate_code in seen_codes:
+            continue
+        seen_codes.add(gate_code)
         submitted = status in {"submitted", "under_review"}
         blockers.append(
             {
-                "code": _REQUIREMENT_GATE_CODES.get(
-                    str(item.get("code") or "").lower(), str(item.get("code") or "requirement")
-                ),
+                "code": gate_code,
                 "title": str(item.get("title") or "Enrollment requirement"),
                 "owner": "university" if submitted else "student",
                 "clearingAction": (
@@ -298,11 +316,18 @@ async def _tool_aid_status(host: AssistantToolHost, _now: datetime) -> JsonDict:
         }
         for entry in (_mapping(item) for item in _sequence(financials.get("requiredDocuments")))
     ]
+    # Amounts ride along with award identity. The old status/summary split
+    # (identity here, amounts only in the summary read) forced a routing
+    # knife-edge: any "how much…" question that landed here had no amounts in
+    # evidence, and the composer invented $0. An award's amount is part of
+    # what the award *is*.
     awards = [
         {
             "name": entry.get("name"),
             "type": entry.get("type"),
             "status": entry.get("status"),
+            "offeredAmountCents": entry.get("offeredAmountCents"),
+            "acceptedAmountCents": entry.get("acceptedAmountCents"),
             "requiresAction": bool(entry.get("requiresAction")),
         }
         for entry in (_mapping(item) for item in _sequence(financials.get("awards")))
@@ -390,6 +415,102 @@ async def _tool_housing_options(host: AssistantToolHost, _now: datetime) -> Json
     return {"residences": residences, "total": len(residences)}
 
 
+async def _tool_housing_eligibility(host: AssistantToolHost, now: datetime) -> JsonDict:
+    """Whether the student can act on housing right now, from canonical state.
+
+    No synthetic application window and no invented housing rules: eligibility
+    is the requirement engine's own status for the housing step, and the gates
+    are the open blocking items already on the record when that step is
+    blocked. Where the platform has no data (application windows, room
+    assignment), the field says so instead of guessing.
+    """
+
+    requirements = await _primitive(host, "requirements")
+    requirement = next(
+        (
+            item
+            for item in _items(requirements)
+            if str(item.get("code") or "").lower() == "housing_preference"
+        ),
+        None,
+    )
+    status = str(requirement.get("status") or "") if requirement else None
+    if requirement is None:
+        eligibility = "no_housing_step"
+    elif status in _DONE_REQUIREMENT_STATUSES:
+        eligibility = "already_completed"
+    elif status == "blocked":
+        eligibility = "blocked"
+    else:
+        eligibility = "eligible_now"
+    gates: list[JsonDict] = []
+    if eligibility == "blocked":
+        holds = await _tool_holds(host, now)
+        gates = [
+            {
+                "code": blocker["code"],
+                "title": blocker["title"],
+                "satisfied": False,
+                "owner": blocker["owner"],
+                "clearingAction": blocker["clearingAction"],
+                "href": blocker.get("href"),
+            }
+            for blocker in holds["derivedBlockers"]
+            if blocker["code"] != "housing_preference_selected"
+        ]
+    return {
+        "eligibility": eligibility,
+        "eligibleNow": eligibility == "eligible_now",
+        "housingStep": (
+            {
+                "title": requirement.get("title"),
+                "status": status,
+                "dueAt": requirement.get("dueAt"),
+                "href": f"/enrollment/requirements/{requirement.get('slug')}",
+            }
+            if requirement
+            else None
+        ),
+        "gates": gates,
+        # The platform models no housing application window or assignment.
+        "applicationWindow": {"published": False},
+        "asOf": now.isoformat(),
+    }
+
+
+async def _tool_aid_support(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Approved financial-aid support routes.
+
+    Canonical portal destinations plus the same tenant support contact and
+    help articles the Help page reads — never a synthetic office fact.
+    """
+
+    help_data = await _primitive(host, "help")
+    articles = [
+        {
+            "question": entry.get("question"),
+            "answer": entry.get("answer"),
+            "category": entry.get("category"),
+        }
+        for entry in (_mapping(item) for item in _sequence(help_data.get("articles")))
+        if "aid" in str(entry.get("category") or "").lower()
+        or "financial" in f"{entry.get('question') or ''} {entry.get('category') or ''}".lower()
+    ][:6]
+    return {
+        "options": [
+            {
+                "kind": "appointment",
+                "label": "Book a financial-aid appointment",
+                "href": "/appointments",
+            },
+            {"kind": "page", "label": "Open Financials", "href": "/financials"},
+            {"kind": "page", "label": "Open Documents", "href": "/documents"},
+        ],
+        "support": dict(_mapping(help_data.get("support"))),
+        "articles": articles,
+    }
+
+
 async def _tool_registration(host: AssistantToolHost, now: datetime) -> JsonDict:
     """Course-registration gates derived from enrollment state.
 
@@ -423,6 +544,19 @@ async def _tool_account(host: AssistantToolHost, _now: datetime) -> JsonDict:
     financials = await _primitive(host, "financials")
     dashboard = await _primitive(host, "dashboard")
     offer = _mapping(dashboard.get("offer"))
+    # A payment that exists but has not posted is a state of its own: "you
+    # have not paid" would be wrong, and "it is paid" would be wrong too.
+    pending_deposit = False
+    if host.supports("payments"):
+        try:
+            payments = await host.read("payments")
+        except Exception:
+            payments = {}
+        pending_deposit = any(
+            str(_mapping(item).get("type") or "") == "enrollment_deposit"
+            and str(_mapping(item).get("status") or "") == "pending"
+            for item in _sequence(_mapping(payments).get("items"))
+        )
     return {
         "remainingBalanceCents": financials.get("remainingBalanceCents"),
         "paymentsCents": financials.get("paymentsCents"),
@@ -430,6 +564,7 @@ async def _tool_account(host: AssistantToolHost, _now: datetime) -> JsonDict:
         "costOfAttendanceCents": financials.get("costOfAttendanceCents"),
         "depositAmountCents": offer.get("depositAmountCents"),
         "depositPaid": _deposit_paid(dashboard),
+        "depositPaymentPending": pending_deposit,
         "paymentSchedule": [
             dict(_mapping(item)) for item in _sequence(financials.get("paymentSchedule"))
         ],
@@ -525,7 +660,9 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getFinancialAidStatus": _tool_aid_status,
     "getFinancialAidSummary": _tool_aid_summary,
     "getAidDisbursements": _tool_aid_disbursements,
+    "getFinancialAidSupportOptions": _tool_aid_support,
     "getStudentHousingStatus": _tool_housing_status,
+    "getStudentHousingEligibility": _tool_housing_eligibility,
     "getHousingOptions": _tool_housing_options,
     "getRegistrationStatus": _tool_registration,
     "getStudentAccountSummary": _tool_account,

@@ -153,7 +153,12 @@ def test_planner_emits_bounded_schema_and_parses_plan() -> None:
             available_tools=TOOL_DESCRIPTIONS,
         )
     )
-    assert result == plan
+    # The plan fields come through untouched; usage/provider/model ride along
+    # for the turn trace and eval spend accounting.
+    assert result is not None
+    assert {key: result[key] for key in plan} == plan
+    assert result["provider"] == "openai"
+    assert "usage" in result and "model" in result
     body = captured["body"]
     assert body["temperature"] == 0.0
     assert body["messages"][0]["content"] == ASSISTANT_TOOL_PLANNING_SYSTEM_PROMPT
@@ -299,7 +304,7 @@ def test_model_plan_filters_out_of_allowlist_reads() -> None:
     host = RecordingHost(_minimal_primitives())
     pipeline = AssistantPipeline(host, model_planner=model.planner)
     # A message the deterministic classifier cannot place, so the planner runs.
-    result = asyncio.run(pipeline.execute(message="Walk me through where the money side stands"))
+    result = asyncio.run(pipeline.execute(message="Walk me through the aid side and my dorm plans"))
     assert len(model.planner_calls) == 1
     assert result.classification is not None
     assert result.classification.source == "model_plan"

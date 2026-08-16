@@ -148,6 +148,9 @@ class InMemoryPlatformStore:
         ]
         self.payments: list[dict[str, Any]] = []
         self.help_requests: list[dict[str, Any]] = []
+        # Evaluation fixtures may overlay financial-aid state without changing
+        # the normal demo fixture used by the application tests.
+        self.financial_overrides: dict[str, Any] = {}
         self.assistant_conversations: dict[str, dict[str, Any]] = {}
         self.assistant_messages: list[dict[str, Any]] = []
         self.profile: dict[str, Any] = {
@@ -345,7 +348,7 @@ class InMemoryPlatformStore:
 
     def get_financials(self, auth: AuthContext) -> dict[str, Any]:
         self.authorize(auth)
-        return {
+        base = {
             "academicYear": "2027-2028",
             "costOfAttendanceCents": 3_240_000,
             "acceptedAidCents": 1_539_500,
@@ -378,6 +381,7 @@ class InMemoryPlatformStore:
             },
             "generatedAt": INITIAL_TIME,
         }
+        return {**base, **_clone(self.financial_overrides)}
 
     def get_campus_life(self, auth: AuthContext) -> dict[str, Any]:
         self.authorize(auth)
@@ -1504,6 +1508,22 @@ class InMemoryPlatformStore:
             "contextReceipts": _clone(assistant_message.get("contextReceipts") or []),
             "widgets": _clone(assistant_message.get("widgets") or []),
         }
+
+    def get_recent_assistant_history(
+        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
+    ) -> list[dict[str, str]]:
+        """Return bounded durable conversation history, oldest first."""
+
+        self.authorize(auth)
+        if conversation_id not in self.assistant_conversations:
+            return []
+        turns = [
+            {"role": str(item["role"]), "content": str(item["content"])}
+            for item in self.assistant_messages
+            if item["conversationId"] == conversation_id
+        ]
+        bounded = max(1, min(int(limit), 40))
+        return turns[-bounded:]
 
     def append_assistant_exchange(
         self,

@@ -7482,6 +7482,31 @@ class PostgresPortalRepository:
             "messages": [_map_assistant_message(row) for row in rows],
         }
 
+    async def get_recent_assistant_history(
+        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
+    ) -> list[dict[str, str]]:
+        """Return bounded durable history for an owned conversation, oldest first."""
+
+        self._require_student(auth)
+        rows = await self._all(
+            """
+            SELECT role, content FROM assistant_message
+            WHERE tenant_id=:tenant_id AND student_id=:student_id
+              AND conversation_id=:conversation_id
+            ORDER BY created_at DESC, CASE role WHEN 'user' THEN 1 ELSE 0 END, id DESC
+            LIMIT :limit
+            """,
+            {
+                "tenant_id": auth.tenant_id,
+                "student_id": auth.student_id,
+                "conversation_id": conversation_id,
+                "limit": max(1, min(int(limit), 40)),
+            },
+        )
+        return [
+            {"role": str(row["role"]), "content": str(row["content"])} for row in reversed(rows)
+        ]
+
     async def find_assistant_exchange_by_client_id(
         self, auth: AuthContext, client_message_id: str
     ) -> JsonDict | None:

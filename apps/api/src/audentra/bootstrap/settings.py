@@ -70,6 +70,7 @@ class RuntimeSettings:
     worker: WorkerSettings
     voice: VoiceSettings | None
     onboarding_template_dir: Path
+    assistant_trace_debug_enabled: bool = False
 
     @classmethod
     def from_environment(
@@ -141,6 +142,12 @@ class RuntimeSettings:
         )
         if app_environment == "production" and e2e_malicious_provider_enabled:
             raise ValueError("EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED is prohibited in production")
+        assistant_trace_debug_enabled = _boolean(
+            values.get("ASSISTANT_TRACE_DEBUG_ENABLED"),
+            app_environment in {"development", "test"},
+        )
+        if app_environment == "production" and assistant_trace_debug_enabled:
+            raise ValueError("ASSISTANT_TRACE_DEBUG_ENABLED is prohibited in production")
         api_internal_url = values.get("API_INTERNAL_URL", f"http://localhost:{port}").strip()
         _http_url(api_internal_url, "API_INTERNAL_URL")
         api_internal_audience = values.get("API_INTERNAL_AUDIENCE", "").strip() or None
@@ -275,12 +282,14 @@ class RuntimeSettings:
             ),
             voice=voice,
             onboarding_template_dir=template_dir,
+            assistant_trace_debug_enabled=assistant_trace_debug_enabled,
         )
 
     def http_settings(self) -> HttpSettings:
         return HttpSettings(
             environment=self.environment,
             browser_auth_required=self.browser_auth_required,
+            assistant_trace_debug_enabled=self.assistant_trace_debug_enabled,
             web_origins=self.web_origins,
             session_cookie_samesite=self.session_cookie_samesite,
             document_worker_token=self.document_worker_token,

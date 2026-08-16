@@ -51,6 +51,10 @@ from audentra.integrations.assistant.classify import REQUEST_TYPES
 from audentra.integrations.assistant.pipeline import AssistantPipeline, ModelComposer, ModelPlanner
 from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
 from audentra.integrations.assistant.tools import AssistantToolHost
+from audentra.integrations.assistant.trace import (
+    AssistantTurnTrace,
+    get_assistant_trace_recorder,
+)
 
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .platform_repository import PostgresPlatformRepository
@@ -265,18 +269,6 @@ class ObjectStorage(Protocol):
 
 
 class StudentAI(Protocol):
-    async def ask_edward(
-        self,
-        *,
-        message: str,
-        page_context: str,
-        history: Sequence[Mapping[str, Any]],
-        student_context: Mapping[str, Any],
-        tenant_id: str | None = None,
-        student_id: str | None = None,
-        request_id: str | None = None,
-    ) -> JsonDict: ...
-
     async def extract_document(
         self,
         *,
@@ -1489,19 +1481,42 @@ class PostgresPlatformService:
         conversation_id = payload.get("conversationId")
         client_message_id = payload.get("clientMessageId")
         persist = conversation_id is not None or client_message_id is not None
+        trace = AssistantTurnTrace(
+            trace_id=request_id,
+            tenant_id=auth.tenant_id,
+            student_id=auth.student_id,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            input_mode=str(payload.get("inputMode") or "text"),
+            user_message=message,
+        )
 
         if isinstance(client_message_id, str) and client_message_id:
             replay = await self.repository.portal.find_assistant_exchange_by_client_id(
                 auth, client_message_id
             )
             if replay is not None:
+                trace.path = "idempotent_replay"
+                trace.final_message = str(replay.get("message") or "")
+                get_assistant_trace_recorder().record(trace)
                 return replay
 
         guarded = guarded_response(message)
         if guarded is not None:
             response = dict(guarded)
+            trace.path = "pre_pipeline_safety_gate"
+            trace.response_source = "deterministic"
+            trace.provider = str(response.get("provider") or "guided")
         else:
-            history = payload.get("history", [])
+            history: Sequence[Mapping[str, Any]]
+            if conversation_id is not None:
+                history = await self.repository.portal.get_recent_assistant_history(
+                    auth, str(conversation_id)
+                )
+                trace.history_source = "server"
+            else:
+                client_history = payload.get("history", [])
+                history = client_history if isinstance(client_history, list) else []
+                trace.history_source = "client_fallback" if history else "none"
             pipeline = AssistantPipeline(
                 self._assistant_host(auth),
                 model_composer=self._assistant_composer(auth, request_id),
@@ -1509,9 +1524,10 @@ class PostgresPlatformService:
             )
             result = await pipeline.execute(
                 message=message,
-                history=history if isinstance(history, list) else [],
+                history=history,
                 page_path=page_path,
                 page_label=page_label,
+                trace=trace,
             )
             response = {
                 "message": result.message,
@@ -1556,7 +1572,12 @@ class PostgresPlatformService:
                 request_id=request_id,
             )
             response.update(stored)
-            response["requestId"] = request_id
+            trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id
+            trace.user_message_id = str(stored.get("userMessageId") or "") or None
+            trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
+        response["requestId"] = request_id
+        trace.final_message = trace.final_message or str(response.get("message") or "")
+        get_assistant_trace_recorder().record(trace)
         return response
 
     async def _edward_action_authority(
@@ -1655,6 +1676,7 @@ class PostgresPlatformService:
                     tenant_id=auth.tenant_id,
                     student_id=auth.student_id,
                     request_id=request_id,
+                    attempt=2 if feedback else 1,
                 ),
             )
 

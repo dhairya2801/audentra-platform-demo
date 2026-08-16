@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
 from audentra.core.auth import AuthContext
-from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
+from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
 from audentra.domain.documents import (
     can_retry_extraction,
@@ -20,10 +20,14 @@ from audentra.domain.documents import (
     validate_document_upload,
 )
 from audentra.infrastructure.memory.adapters import FakeDocumentStorage, FakeStudentAI
-from audentra.infrastructure.memory.store import InMemoryPlatformStore
+from audentra.infrastructure.memory.store import DEMO_IDS, InMemoryPlatformStore
 from audentra.integrations.ai.edward_safety import guarded_response, normalize_response
 from audentra.integrations.assistant.pipeline import AssistantPipeline
 from audentra.integrations.assistant.tools import AssistantToolHost
+from audentra.integrations.assistant.trace import (
+    AssistantTurnTrace,
+    get_assistant_trace_recorder,
+)
 
 ACTIVITY_PROPERTY_ALLOWLISTS: dict[str, frozenset[str]] = {
     "ui.portal_session_started.v1": frozenset({"entry_point"}),
@@ -83,7 +87,10 @@ class InMemoryPlatformService:
         self,
         store: InMemoryPlatformStore | None = None,
         storage: FakeDocumentStorage | None = None,
-        ai: FakeStudentAI | None = None,
+        # Any object satisfying the StudentAI surface. A real StudentAIGateway
+        # may be injected (the eval host does) so the in-memory composition
+        # exercises the same model planner/composer path as production.
+        ai: Any | None = None,
         *,
         worker_token: str = "test-document-worker-token",  # noqa: S107
     ) -> None:
@@ -98,6 +105,18 @@ class InMemoryPlatformService:
             return {"status": "ok", "service": "vv-api"}
         if operation == "health.readiness":
             return {"status": "ready", "service": "vv-api"}
+        if operation == "public.get_tenant_bootstrap":
+            requested_id = str(call.path_params.get("tenantId") or "")
+            requested_slug = str(call.path_params.get("slug") or "")
+            if requested_id and requested_id != DEMO_IDS["tenant_id"]:
+                raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
+            if requested_slug and requested_slug != "audentra-lab":
+                raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
+            return {
+                "tenantId": DEMO_IDS["tenant_id"],
+                "slug": "audentra-lab",
+                "displayName": "Audentra Lab",
+            }
 
         auth = self._auth(call)
         payload = dict(call.payload)
@@ -495,13 +514,29 @@ class InMemoryPlatformService:
         conversation_id = payload.get("conversationId")
         client_message_id = payload.get("clientMessageId")
         persist = conversation_id is not None or client_message_id is not None
+        trace = AssistantTurnTrace(
+            trace_id=request_id,
+            tenant_id=auth.tenant_id,
+            student_id=auth.student_id,
+            conversation_id=str(conversation_id) if conversation_id else None,
+            input_mode=str(payload.get("inputMode") or "text"),
+            user_message=message,
+        )
         if isinstance(client_message_id, str) and client_message_id:
             replay = self.store.find_assistant_exchange_by_client_id(auth, client_message_id)
             if replay is not None:
+                trace.path = "idempotent_replay"
+                trace.final_message = str(replay.get("message") or "")
+                get_assistant_trace_recorder().record(trace)
                 return replay
 
         guarded = guarded_response(message)
         if guarded is not None:
+            trace.path = "pre_pipeline_safety_gate"
+            trace.response_source = "deterministic"
+            trace.provider = str(guarded.get("provider") or "guided")
+            trace.final_message = str(guarded.get("message") or "")
+            get_assistant_trace_recorder().record(trace)
             return dict(guarded)
 
         page_context = payload.get("pageContext")
@@ -535,13 +570,27 @@ class InMemoryPlatformService:
                 "messages": sync_read(self.store.get_messages),
             }
         )
-        history = payload.get("history", [])
-        pipeline = AssistantPipeline(host)
+        # Server-side durable history for both text and voice; client-supplied
+        # history is only a fallback for the first, conversation-less turn.
+        history: Sequence[Mapping[str, Any]]
+        if conversation_id is not None:
+            history = self.store.get_recent_assistant_history(auth, str(conversation_id))
+            trace.history_source = "server"
+        else:
+            client_history = payload.get("history", [])
+            history = client_history if isinstance(client_history, list) else []
+            trace.history_source = "client_fallback" if history else "none"
+        pipeline = AssistantPipeline(
+            host,
+            model_composer=self._assistant_composer(auth, request_id),
+            model_planner=self._assistant_planner(auth, request_id),
+        )
         result = await pipeline.execute(
             message=message,
-            history=history if isinstance(history, list) else [],
+            history=history,
             page_path=page_path,
             page_label=page_label,
+            trace=trace,
         )
         response: dict[str, Any] = normalize_response(
             {
@@ -571,8 +620,67 @@ class InMemoryPlatformService:
                 request_id=request_id,
             )
             response.update(stored)
-            response["requestId"] = request_id
+            trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id
+            trace.user_message_id = str(stored.get("userMessageId") or "") or None
+            trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
+        # Every turn is traceable by the request id, persisted or not.
+        response["requestId"] = request_id
+        get_assistant_trace_recorder().record(trace)
         return response
+
+    def _assistant_planner(self, auth: AuthContext, request_id: str) -> Any:
+        """Mirror of the Postgres host wiring: present only when the injected
+        AI object exposes the planner (a real gateway does, the fake doesn't)."""
+
+        planner = getattr(self.ai, "plan_assistant_tool_reads", None)
+        if planner is None:
+            return None
+        from audentra.integrations.assistant.classify import REQUEST_TYPES
+        from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
+
+        async def plan(
+            *,
+            message: str,
+            page_label: str | None = None,
+            page_path: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return await planner(  # type: ignore[no-any-return]
+                message=message,
+                page_label=page_label,
+                page_path=page_path,
+                allowed_request_types=REQUEST_TYPES,
+                available_tools=TOOL_DESCRIPTIONS,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                request_id=request_id,
+            )
+
+        return plan
+
+    def _assistant_composer(self, auth: AuthContext, request_id: str) -> Any:
+        writer = getattr(self.ai, "write_grounded_answer", None)
+        if writer is None:
+            return None
+
+        async def compose(
+            *,
+            question: str,
+            evidence_texts: list[str],
+            draft_answer: str,
+            feedback: str | None = None,
+        ) -> Mapping[str, Any] | None:
+            return await writer(  # type: ignore[no-any-return]
+                question=question,
+                evidence_texts=evidence_texts,
+                draft_answer=draft_answer,
+                feedback=feedback,
+                tenant_id=auth.tenant_id,
+                student_id=auth.student_id,
+                request_id=request_id,
+                attempt=2 if feedback else 1,
+            )
+
+        return compose
 
     async def _ensure_signed_documents(
         self, auth: AuthContext, onboarding: Mapping[str, Any]

@@ -23,6 +23,8 @@ class HttpSettings:
     demo_actor_id: str = "00000000-0000-7000-8000-000000000100"
     demo_staff_actor_id: str = "00000000-0000-7000-8000-000000000901"
     demo_session_token: str = "demo-session-v2"  # noqa: S105
+    # Developer-only trace inspection; production composition rejects it.
+    assistant_trace_debug_enabled: bool = False
 
     @property
     def secure_cookies(self) -> bool:
@@ -43,6 +45,10 @@ class HttpSettings:
         return cls(
             environment=environment,  # type: ignore[arg-type]
             browser_auth_required=_boolean_environment(os.getenv("BROWSER_AUTH_REQUIRED"), False),
+            assistant_trace_debug_enabled=_boolean_environment(
+                os.getenv("ASSISTANT_TRACE_DEBUG_ENABLED"),
+                environment in {"development", "test"},
+            ),
             web_origins=origins or ("http://localhost:3000",),
             session_cookie_samesite=parse_session_cookie_samesite(
                 os.getenv("SESSION_COOKIE_SAMESITE"),
@@ -86,4 +92,4 @@ def _boolean_environment(value: str | None, fallback: bool) -> bool:
         return True
     if normalized in {"0", "false", "no", "off"}:
         return False
-    raise ValueError("BROWSER_AUTH_REQUIRED must be true or false")
+    raise ValueError("Boolean environment values must be true or false")

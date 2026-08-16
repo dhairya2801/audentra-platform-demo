@@ -25,12 +25,49 @@ from audentra.integrations.assistant.derive import DerivedState
 JsonDict = dict[str, Any]
 
 _CAPABILITY_MESSAGE = (
-    "I can check your enrollment checklist, documents, deadlines, holds, "
-    "financial aid, housing, registration, account balance, and appointments — "
-    "always from your live university record. I can explain what something "
-    "means and what to do next, but I never change a record for you. "
-    "Ask me one specific question to start."
+    "I'm Edward, your enrollment assistant. I can check your enrollment "
+    "checklist, documents, deadlines, holds, financial aid, housing, "
+    "registration, account balance, and appointments — always from your live "
+    "university record. I can explain what something means and what to do "
+    "next, but I never change a record for you. Ask me one specific question "
+    "to start."
 )
+
+# Where each family of write actually happens; refusals point there so a
+# blocked request still ends with a useful door.
+_WRITE_DESTINATIONS = {
+    "housing_write_unavailable": (
+        "the housing step on your enrollment checklist",
+        "/enrollment",
+    ),
+    "financial_aid_write_unavailable": ("the Financials page", "/financials"),
+    "document_write_unavailable": ("the Documents page", "/documents"),
+    "payment_write_unavailable": ("the Payments page", "/payments"),
+    "appointment_write_unavailable": ("the Appointments page", "/appointments"),
+    "write_unavailable": ("the matching portal page", "/enrollment"),
+}
+
+# Student-facing names for each read, used for honest unavailability language
+# in both the evidence bundle and deterministic answers.
+_SOURCE_LABELS = {
+    "getFinancialAidStatus": "your financial aid requirements",
+    "getFinancialAidSummary": "your financial aid amounts",
+    "getAidDisbursements": "aid disbursements",
+    "getFinancialAidSupportOptions": "financial-aid support options",
+    "getStudentHousingStatus": "your housing plan",
+    "getStudentHousingEligibility": "housing eligibility",
+    "getHousingOptions": "housing options",
+    "getRegistrationStatus": "registration status",
+    "getStudentAccountSummary": "your account balance",
+    "getOnboardingChecklist": "your enrollment checklist",
+    "getDocumentStatuses": "your documents",
+    "getEnrollmentHolds": "holds and blockers",
+    "getStudentDeadlines": "deadlines",
+    "getStudentAppointments": "your appointments",
+    "getAcademicPlan": "your academic plan",
+    "getCampusLife": "campus events and clubs",
+    "getStudentMessages": "your messages",
+}
 
 
 @dataclass
@@ -70,7 +107,15 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
 
     lines: list[str] = []
     for step in state.remaining_steps:
-        lines.append(f"Open checklist step: {step.get('title')} (status {step.get('status')})")
+        note = (
+            " — a payment for this is already submitted and pending; the "
+            "student must NOT be told to pay again"
+            if step.get("processingPending")
+            else ""
+        )
+        lines.append(
+            f"Open checklist step: {step.get('title')} (status {step.get('status')}){note}"
+        )
     for step in state.completed_steps:
         lines.append(f"Completed checklist step: {step.get('title')}")
     for document in state.document_states:
@@ -79,6 +124,20 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
         )
     for deadline in state.deadlines:
         lines.append(f"Deadline: {deadline.get('title')} due {deadline.get('dueAt')}")
+    # Hold vocabulary is part of the truth: the platform operates no registrar
+    # hold system, so "you have a hold" is never a correct sentence unless an
+    # official hold is actually on record.
+    if "getEnrollmentHolds" in state.available_reads:
+        if state.official_holds:
+            for hold in state.official_holds:
+                lines.append(f"Official hold on record: {hold.get('title')}")
+        else:
+            lines.append(
+                "Official registrar holds: none. The university operates no "
+                "registrar hold system, so nothing on this record is a 'hold' — "
+                "open items are enrollment blockers, and calling them holds "
+                "would be wrong."
+            )
     for blocker in state.derived_blockers:
         lines.append(
             f"Blocker: {blocker.get('title')} — cleared by: {blocker.get('clearingAction')}"
@@ -88,15 +147,42 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
     aid = state.financial_aid
     if aid:
         for award in aid.get("awards", []):
+            offered = award.get("offeredAmountCents")
+            accepted = award.get("acceptedAmountCents")
+            amounts = (
+                f", offered {_usd(offered)}, accepted {_usd(accepted)}"
+                if offered is not None or accepted is not None
+                else " (award amounts were not included in this read — do not state one)"
+            )
             lines.append(
                 f"Aid award {award.get('name')} ({award.get('type')}): status "
-                f"{award.get('status')}, offered {_usd(award.get('offeredAmountCents'))}, "
-                f"accepted {_usd(award.get('acceptedAmountCents'))}"
+                f"{award.get('status')}{amounts}"
             )
         for requirement in aid.get("requiredDocuments", []):
             lines.append(
                 f"Aid requirement {requirement.get('title')}: status {requirement.get('status')}"
                 + (f", due {requirement['dueAt']}" if requirement.get("dueAt") else "")
+            )
+        disbursements = aid.get("disbursements")
+        if disbursements:
+            open_gates = [
+                gate for gate in disbursements.get("gates", []) if not gate.get("satisfied")
+            ]
+            if open_gates:
+                lines.append(
+                    "Aid disbursement is held open by: "
+                    + "; ".join(str(gate.get("title")) for gate in open_gates)
+                    + ". Nothing else gates disbursement."
+                )
+            else:
+                lines.append(
+                    "Every aid condition for disbursement is satisfied — no aid "
+                    "requirement holds it, and enrollment checklist items do "
+                    "not gate disbursement."
+                )
+            lines.append(
+                "No disbursement schedule or payout date is tracked in the "
+                "record; only the financial aid office can confirm dates."
             )
         for key, label in (
             ("acceptedAidCents", "Accepted aid total"),
@@ -115,12 +201,63 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
         ):
             if account.get(key) is not None:
                 lines.append(f"{label}: {_usd(account[key])}")
-        lines.append(f"Deposit paid: {'yes' if account.get('depositPaid') else 'no'}")
+        balance = account.get("remainingBalanceCents")
+        if isinstance(balance, int) and balance < 0:
+            lines.append(
+                "The remaining balance is NEGATIVE: the account is in credit — "
+                "aid and payments exceed charges, which normally means money "
+                "back to the student. No refund schedule or date exists in the "
+                "record."
+            )
+        if account.get("depositPaymentPending"):
+            lines.append(
+                "Deposit payment: submitted and pending — it has not posted yet, "
+                "so the deposit does not count as paid until it clears."
+            )
+        else:
+            lines.append(f"Deposit paid: {'yes' if account.get('depositPaid') else 'no'}")
     if state.housing:
+        housing_status = str(state.housing.get("requirementStatus") or "unknown")
+        blocked_note = (
+            " — blocked means earlier checklist items gate it; the missing "
+            "preference itself is NOT the cause"
+            if housing_status == "blocked"
+            else ""
+        )
         lines.append(
             f"Housing preference: {state.housing.get('preference') or 'not selected'}; "
-            f"requirement status: {state.housing.get('requirementStatus') or 'unknown'}"
+            f"requirement status: {housing_status}{blocked_note}"
         )
+    eligibility = state.housing_eligibility
+    if eligibility:
+        label = {
+            "eligible_now": "The housing step is open for you now.",
+            "already_completed": "The housing step is already complete.",
+            "blocked": "The housing step is blocked by earlier checklist items.",
+            "no_housing_step": "No housing step is on your checklist.",
+        }.get(str(eligibility.get("eligibility")), "Housing step state unknown.")
+        lines.append(f"Housing eligibility: {label}")
+        open_gates = [gate for gate in eligibility.get("gates", []) if not gate.get("satisfied")]
+        for gate in open_gates:
+            lines.append(
+                f"Housing gate (open): {gate.get('title')} — cleared by: "
+                f"{gate.get('clearingAction')}"
+            )
+        if str(eligibility.get("eligibility")) == "blocked" and open_gates:
+            lines.append(
+                "These are the only items on the record blocking the housing step; "
+                "this list is complete."
+            )
+    if state.aid_support:
+        for option in state.aid_support.get("options", []):
+            lines.append(f"Financial-aid support route: {option.get('label')}")
+        support = state.aid_support.get("support") or {}
+        if support.get("email"):
+            lines.append(f"Support email: {support['email']}")
+        if support.get("phone"):
+            lines.append(f"Support phone: {support['phone']}")
+        if support.get("hours"):
+            lines.append(f"Support hours: {support['hours']}")
     if state.housing_options:
         for residence in state.housing_options.get("residences", []):
             lines.append(f"Housing option: {residence.get('name')}")
@@ -153,7 +290,13 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
                 f"on {event.get('startsAt')}"
             )
         for club in state.campus_life.get("clubs", []):
-            lines.append(f"Campus club: {club.get('name')} ({club.get('category')})")
+            description = str(club.get("description") or "").strip()
+            activity = str(club.get("nextActivity") or "").strip()
+            lines.append(
+                f"Campus club: {club.get('name')} ({club.get('category')})"
+                + (f" — {description[:160]}" if description else "")
+                + (f"; next: {activity[:80]}" if activity else "")
+            )
     if state.messages:
         lines.append(f"Unread messages: {state.messages.get('unreadCount')}")
         for entry in state.messages.get("latest", []):
@@ -164,6 +307,17 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
                 )
     if state.priority:
         lines.append(f"Priority action: {state.priority['title']} — {state.priority['reason']}")
+    # Failed reads are evidence, not silence: the composer must know which
+    # domains it cannot speak for this turn. (A failed read is different from
+    # an empty one — an empty read appears above with its zero records.)
+    for item in state.unavailable_data:
+        label = _SOURCE_LABELS.get(str(item.get("source")), str(item.get("source")))
+        lines.append(
+            f"UNAVAILABLE THIS TURN: {label} could not be read "
+            f"({str(item.get('reason') or 'read error').replace('_', ' ')}). "
+            f"Do not state {label} as verified — say it couldn't be checked "
+            "right now."
+        )
     return lines
 
 
@@ -175,6 +329,29 @@ def _compose_greeting(
         f"Hi{name}! I'm Edward, your enrollment assistant. "
         "Ask me about your checklist, documents, deadlines, financial aid, "
         "housing, or anything else about getting enrolled."
+    )
+    return ComposedAnswer(message=message, blocks=[text_block(message)])
+
+
+def _compose_ack(
+    _classification: Classification, _state: DerivedState, preferred_name: str | None
+) -> ComposedAnswer:
+    """Gratitude/acknowledgement/closing: a short social reply, no reads, no
+    status report, no next-steps lecture."""
+
+    message = "Any time! I'm here whenever you have another enrollment question."
+    return ComposedAnswer(message=message, blocks=[text_block(message)])
+
+
+def _compose_identity(
+    _classification: Classification, _state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    """Honest, deterministic identity: never role-play a human."""
+
+    message = (
+        "No — I'm Edward, Audentra's AI enrollment assistant, not a person. "
+        "I answer from your live university record, and when something needs "
+        "a human, I'll point you to the right office."
     )
     return ComposedAnswer(message=message, blocks=[text_block(message)])
 
@@ -219,13 +396,18 @@ def _compose_checklist(
     classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getOnboardingChecklist"):
+        return _unavailable_answer(state, "getOnboardingChecklist")
     if classification.request_type == "completed_steps":
         if not state.completed_steps:
             message = "You haven't completed any checklist steps yet."
             return ComposedAnswer(
                 message=message, blocks=[text_block(message)], evidence_texts=evidence
             )
-        message = f"You've completed {len(state.completed_steps)} checklist step(s)."
+        message = (
+            f"You've completed {len(state.completed_steps)} checklist step(s): "
+            f"{_join_titles(state.completed_steps)}."
+        )
         block = bullet_list_block(
             [{"text": str(step.get("title"))} for step in state.completed_steps],
             title="Completed",
@@ -238,10 +420,25 @@ def _compose_checklist(
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    message = f"{len(state.remaining_steps)} checklist step(s) still need attention."
+
+    def step_label(step: JsonDict) -> str:
+        title = str(step.get("title"))
+        if step.get("processingPending"):
+            return f"{title} (a payment is already pending — no action needed)"
+        return title
+
+    message = (
+        f"{len(state.remaining_steps)} checklist step(s) still need attention: "
+        + ", ".join(step_label(step) for step in state.remaining_steps[:4])
+        + ("." if len(state.remaining_steps) <= 4 else ", and more.")
+    )
     block = next_steps_block(
         [
-            {"text": str(step.get("title")), "href": step.get("href"), "owner": "student"}
+            {
+                "text": step_label(step),
+                "href": step.get("href"),
+                "owner": "university" if step.get("processingPending") else "student",
+            }
             for step in state.remaining_steps[:6]
         ],
         title="Still to do",
@@ -255,6 +452,26 @@ def _compose_documents(
     classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getDocumentStatuses"):
+        # The upload record is the half that failed; the checklist may still
+        # be readable, so name the open requirements without claiming
+        # anything about what has or hasn't been uploaded.
+        open_documents = [step for step in state.remaining_steps if step.get("documentCategory")]
+        message = (
+            "I couldn't verify your document uploads right now, so I can't "
+            "confirm what has or hasn't been received this moment."
+        )
+        if open_documents:
+            message += (
+                " Your checklist still lists these document requirements as "
+                f"open: {_join_titles(open_documents)} — but whether files "
+                "are already in review couldn't be checked. Try again shortly."
+            )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    if _read_failed(state, "getOnboardingChecklist"):
+        return _unavailable_answer(state, "getOnboardingChecklist")
     states = state.document_states
     if not states:
         message = "No document requirements are on your checklist right now."
@@ -267,7 +484,10 @@ def _compose_documents(
             return ComposedAnswer(
                 message=message, blocks=[text_block(message)], evidence_texts=evidence
             )
-        message = f"{len(state.missing_documents)} document(s) still need to be uploaded."
+        message = (
+            f"{len(state.missing_documents)} document(s) still need to be uploaded: "
+            f"{_join_titles(state.missing_documents)}."
+        )
         block = next_steps_block(
             [
                 {
@@ -349,17 +569,32 @@ def _compose_holds(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getEnrollmentHolds"):
+        return _unavailable_answer(state, "getEnrollmentHolds")
     if not state.official_holds and not state.derived_blockers:
-        message = "You have no holds, and nothing on your record is blocking you right now."
+        message = (
+            "There's no official hold on your record — the university doesn't "
+            "operate a registrar hold system — and nothing is blocking you "
+            "right now."
+        )
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
     parts = []
     if state.official_holds:
-        parts.append(f"{len(state.official_holds)} hold(s)")
+        parts.append(f"{len(state.official_holds)} hold(s): {_join_titles(state.official_holds)}")
     if state.derived_blockers:
-        parts.append(f"{len(state.derived_blockers)} item(s) blocking progress")
-    message = f"You have {' and '.join(parts)}. Each one lists what clears it."
+        parts.append(
+            f"{len(state.derived_blockers)} item(s) blocking progress: "
+            f"{_join_titles(state.derived_blockers)}"
+        )
+    message = f"You have {' and '.join(parts)}. Each one below shows what clears it."
+    if not state.official_holds:
+        message = (
+            "No official hold exists — the university operates no registrar "
+            f"hold system. What you do have is {parts[0] if parts else 'nothing blocking'}. "
+            "Each item below shows what clears it."
+        )
     block = next_steps_block(
         [
             {
@@ -380,6 +615,8 @@ def _compose_deadlines(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getStudentDeadlines"):
+        return _unavailable_answer(state, "getStudentDeadlines")
     if not state.deadlines:
         message = "Nothing on your record has an upcoming deadline."
         return ComposedAnswer(
@@ -534,8 +771,16 @@ def _compose_financial_aid(
                     {
                         "award": str(award.get("name", "")),
                         "status": str(award.get("status", "")).replace("_", " "),
-                        "offered": _usd(award.get("offeredAmountCents")),
-                        "accepted": _usd(award.get("acceptedAmountCents")),
+                        "offered": (
+                            _usd(award["offeredAmountCents"])
+                            if award.get("offeredAmountCents") is not None
+                            else "—"
+                        ),
+                        "accepted": (
+                            _usd(award["acceptedAmountCents"])
+                            if award.get("acceptedAmountCents") is not None
+                            else "—"
+                        ),
                     }
                     for award in awards
                 ],
@@ -582,6 +827,41 @@ def _compose_housing(
     housing = state.housing or {}
     preference = housing.get("preference")
     requirement_status = housing.get("requirementStatus")
+    if str(requirement_status or "") == "blocked":
+        gates = [
+            gate
+            for gate in (state.housing_eligibility or {}).get("gates", [])
+            if not gate.get("satisfied")
+        ]
+        if gates:
+            message = (
+                "Housing is locked right now because of earlier checklist "
+                f"items — {_join_titles(gates)} — not because of anything on "
+                "the housing side itself. Clear those and the housing step "
+                "opens for you to pick a preference."
+            )
+            block = next_steps_block(
+                [
+                    {
+                        "text": f"{gate['title']} — {gate.get('clearingAction', '')}".strip(" —"),
+                        "href": gate.get("href"),
+                        "owner": gate.get("owner", "student"),
+                    }
+                    for gate in gates
+                ],
+                title="Clears housing",
+            )
+            return ComposedAnswer(
+                message=message, blocks=[text_block(message), block], evidence_texts=evidence
+            )
+        message = (
+            "The housing step is currently blocked by earlier items on your "
+            "enrollment checklist — not by anything housing-specific. Your "
+            "checklist shows what to clear first."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
     if preference:
         message = f"Your housing preference is {str(preference).replace('_', ' ')}."
         if requirement_status and str(requirement_status) not in {"completed", "waived"}:
@@ -612,10 +892,139 @@ def _compose_housing(
     return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
 
 
+def _compose_housing_eligibility(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    eligibility = state.housing_eligibility or {}
+    kind = str(eligibility.get("eligibility") or "")
+    if kind == "eligible_now":
+        step = eligibility.get("housingStep") or {}
+        message = (
+            "Nothing is blocking the housing step — you can complete it now "
+            "from your enrollment checklist."
+        )
+        blocks = [text_block(message)]
+        if step.get("href"):
+            blocks.append(
+                next_steps_block(
+                    [
+                        {
+                            "text": f"Complete {step.get('title') or 'the housing step'}",
+                            "href": str(step["href"]),
+                            "owner": "student",
+                        }
+                    ]
+                )
+            )
+        return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+    if kind == "already_completed":
+        message = "Your housing step is already complete — nothing more is needed there."
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    if kind == "blocked":
+        gates = [gate for gate in eligibility.get("gates", []) if not gate.get("satisfied")]
+        if gates:
+            message = (
+                f"You can't act on housing yet: {len(gates)} earlier item(s) on your "
+                f"checklist come first — {_join_titles(gates)}. These are the only "
+                "items holding it back."
+            )
+            block = next_steps_block(
+                [
+                    {
+                        "text": f"{gate['title']} — {gate.get('clearingAction', '')}".strip(" —"),
+                        "href": gate.get("href"),
+                        "owner": gate.get("owner", "student"),
+                    }
+                    for gate in gates
+                ],
+                title="Complete these first",
+            )
+            return ComposedAnswer(
+                message=message, blocks=[text_block(message), block], evidence_texts=evidence
+            )
+        message = (
+            "The housing step on your checklist is blocked by earlier steps. "
+            "Your enrollment checklist shows the order to work through."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    message = (
+        "No housing step is on your enrollment checklist right now, so there's "
+        "nothing housing-related waiting on you. Housing assignments and "
+        "application windows come from the housing office."
+    )
+    return ComposedAnswer(message=message, blocks=[text_block(message)], evidence_texts=evidence)
+
+
+def _compose_aid_support(
+    _classification: Classification, state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    evidence = build_evidence_bundle(state)
+    support = state.aid_support or {}
+    options = support.get("options", [])
+    message = (
+        "The financial aid team can help directly — the fastest route is "
+        "booking a financial-aid appointment."
+    )
+    blocks: list[JsonDict] = [text_block(message)]
+    if options:
+        blocks.append(
+            next_steps_block(
+                [
+                    {"text": str(option.get("label")), "href": option.get("href")}
+                    for option in options
+                ],
+                title="Financial aid help",
+            )
+        )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_policy_lookup(
+    _classification: Classification, _state: DerivedState, _name: str | None
+) -> ComposedAnswer:
+    # No reviewed institutional policy or calendar source is wired into Edward
+    # yet, and inventing a rule or a date is the one failure a student acts
+    # on. Say so plainly and route to the people who can answer.
+    message = (
+        "That's institutional information — policy or calendar dates — and I "
+        "can only answer from approved sources, which I don't have access to "
+        "yet. The enrollment support team can give you the official answer: "
+        "open the Help page or book an appointment."
+    )
+    return ComposedAnswer(
+        message=message,
+        blocks=[
+            text_block(message),
+            next_steps_block(
+                [
+                    {"text": "Ask enrollment support", "href": "/help"},
+                    {"text": "Book an appointment", "href": "/appointments"},
+                ],
+                title="Get the official answer",
+            ),
+        ],
+    )
+
+
 def _compose_registration(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getRegistrationStatus", "getEnrollmentHolds", "getOnboardingChecklist"):
+        message = (
+            "I couldn't fully check registration eligibility right now — part "
+            "of your record didn't load, so I can't say whether anything is "
+            "blocking you this moment. Try again shortly rather than relying "
+            "on a partial answer."
+        )
+        return ComposedAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
     gates = state.registration_gates
     if not gates:
         message = (
@@ -652,6 +1061,12 @@ def _compose_account(
     account = state.account
     if not account:
         message = "I couldn't read your account balance just now. Open Payments to check directly."
+        if _read_failed(state, "getStudentAccountSummary"):
+            message = (
+                "I couldn't read your account right now, so I can't verify "
+                "your balance or payment status this moment. Open Payments to "
+                "check directly, or try again shortly."
+            )
         return ComposedAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
@@ -661,7 +1076,12 @@ def _compose_account(
         if remaining is not None
         else "Your account has no computed balance yet."
     )
-    if not account.get("depositPaid") and account.get("depositAmountCents"):
+    if account.get("depositPaymentPending"):
+        message += (
+            " Your enrollment deposit payment has been submitted and is pending — "
+            "it has not posted yet."
+        )
+    elif not account.get("depositPaid") and account.get("depositAmountCents"):
         message += (
             f" Your {_usd(account['depositAmountCents'])} enrollment deposit has not been paid yet."
         )
@@ -672,6 +1092,8 @@ def _compose_appointments(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getStudentAppointments"):
+        return _unavailable_answer(state, "getStudentAppointments")
     appointments = (state.appointments or {}).get("items", [])
     if not appointments:
         message = (
@@ -721,16 +1143,28 @@ def _compose_unsupported(
             "own record, or point you to the right office."
         )
     elif reference and reference.endswith("write_unavailable"):
+        destination, href = _WRITE_DESTINATIONS.get(
+            reference, ("the matching portal page", "/enrollment")
+        )
         message = (
-            "I can't make changes for you — I'm read-only. I can tell you exactly "
-            "where to do it yourself: every change happens from the portal pages, "
-            "and I can point you to the right one."
+            "I can't make that change myself — I'm read-only. You can do it "
+            f"yourself in {destination}."
+        )
+        return ComposedAnswer(
+            message=message,
+            blocks=[
+                text_block(message),
+                next_steps_block(
+                    [{"text": f"Open {destination}", "href": href, "owner": "student"}],
+                ),
+            ],
         )
     else:
         message = (
-            "That's outside what I can check. I can answer questions about your "
-            "enrollment, documents, deadlines, financial aid, housing, "
-            "registration, account, and appointments."
+            "I can't check that — it isn't part of your university record that "
+            "I can see. I can answer questions about your enrollment, "
+            "documents, deadlines, financial aid, housing, registration, "
+            "account, and appointments."
         )
     return ComposedAnswer(message=message, blocks=[text_block(message)])
 
@@ -739,6 +1173,8 @@ def _compose_academics(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getAcademicPlan"):
+        return _unavailable_answer(state, "getAcademicPlan")
     academics = state.academics or {}
     plan = academics.get("plan", [])
     program = academics.get("selectedProgram") or ""
@@ -788,6 +1224,8 @@ def _compose_campus_life(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getCampusLife"):
+        return _unavailable_answer(state, "getCampusLife")
     campus = state.campus_life or {}
     events = campus.get("upcomingEvents", [])
     clubs = campus.get("clubs", [])
@@ -806,7 +1244,15 @@ def _compose_campus_life(
     if clubs:
         blocks.append(
             bullet_list_block(
-                [{"text": f"{club.get('name')} — {club.get('category')}"} for club in clubs],
+                [
+                    {
+                        "text": (
+                            f"{club.get('name')} — "
+                            f"{str(club.get('description') or club.get('category') or '')[:120]}"
+                        )
+                    }
+                    for club in clubs
+                ],
                 title="Clubs you can join",
             )
         )
@@ -830,6 +1276,8 @@ def _compose_messages(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
     evidence = build_evidence_bundle(state)
+    if _read_failed(state, "getStudentMessages"):
+        return _unavailable_answer(state, "getStudentMessages")
     messages = state.messages or {}
     unread = messages.get("unreadCount")
     if not isinstance(unread, int):
@@ -887,17 +1335,22 @@ _COMPOSERS = {
     "aid_disbursement": _compose_financial_aid,
     "aid_coverage": _compose_financial_aid,
     "aid_next_action": _compose_financial_aid,
+    "aid_support": _compose_aid_support,
     "housing_status": _compose_housing,
     "housing_options": _compose_housing,
     "housing_remaining_steps": _compose_housing,
     "housing_next_action": _compose_housing,
     "housing_support": _compose_housing,
+    "housing_eligibility": _compose_housing_eligibility,
     "registration_status": _compose_registration,
+    "policy_lookup": _compose_policy_lookup,
     "student_account": _compose_account,
     "appointments": _compose_appointments,
     "academic_plan": _compose_academics,
     "campus_life": _compose_campus_life,
     "messages_unread": _compose_messages,
+    "conversational_ack": _compose_ack,
+    "assistant_identity": _compose_identity,
     "unsupported_or_out_of_scope": _compose_unsupported,
     "general_question": _compose_general,
 }
@@ -906,26 +1359,38 @@ _COMPOSERS = {
 def _unavailable_notes(state: DerivedState) -> list[str]:
     """An honest sentence per source Edward could not check this turn."""
 
-    labels = {
-        "getFinancialAidStatus": "your financial aid requirements",
-        "getFinancialAidSummary": "your financial aid amounts",
-        "getAidDisbursements": "aid disbursements",
-        "getStudentHousingStatus": "your housing plan",
-        "getHousingOptions": "housing options",
-        "getRegistrationStatus": "registration status",
-        "getStudentAccountSummary": "your account balance",
-        "getOnboardingChecklist": "your enrollment checklist",
-        "getDocumentStatuses": "your documents",
-        "getEnrollmentHolds": "holds",
-        "getStudentDeadlines": "deadlines",
-        "getStudentAppointments": "your appointments",
-    }
     notes = []
     for item in state.unavailable_data:
-        label = labels.get(str(item.get("source")))
+        label = _SOURCE_LABELS.get(str(item.get("source")))
         if label:
             notes.append(f"I couldn't check {label} just now, so I've left it out.")
     return notes[:2]
+
+
+def _read_failed(state: DerivedState, *tools: str) -> bool:
+    """Whether any of the named reads failed this turn (timeout/error)."""
+
+    failed = {str(item.get("source")) for item in state.unavailable_data}
+    return any(tool in failed for tool in tools)
+
+
+def _unavailable_answer(state: DerivedState, *tools: str) -> ComposedAnswer:
+    """The honest reply when the read a question depends on did not go
+    through: what couldn't be checked, and where to look or retry — never a
+    guess about the state itself."""
+
+    labels = [_SOURCE_LABELS.get(tool, tool) for tool in tools if _read_failed(state, tool)]
+    subject = labels[0] if labels else "that part of your record"
+    message = (
+        f"I couldn't check {subject} right now, so I can't verify it this "
+        "moment. Try asking again shortly, or check the portal page directly — "
+        "I'd rather say so than guess."
+    )
+    return ComposedAnswer(
+        message=message,
+        blocks=[text_block(message)],
+        evidence_texts=build_evidence_bundle(state),
+    )
 
 
 def _join_titles(items: Sequence[dict[str, Any]]) -> str:
@@ -936,9 +1401,13 @@ def _join_titles(items: Sequence[dict[str, Any]]) -> str:
 
 
 def _usd(cents: Any) -> str:
+    """Render cents as USD. An absent amount must never become a number —
+    the "$0" this used to fabricate went straight into evidence and from
+    there into confidently wrong answers."""
+
     try:
         value = int(cents)
     except (TypeError, ValueError):
-        return "$0"
+        return "not recorded"
     dollars = value / 100
     return f"${dollars:,.2f}".removesuffix(".00")

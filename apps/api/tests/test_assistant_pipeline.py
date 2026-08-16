@@ -540,7 +540,9 @@ def test_selected_classifications() -> None:
         # the composer answers it with the same remaining-balance figure.
         "How much do I still owe?": "student_account",
         "How much do I owe after my aid?": "aid_coverage",
-        "Can I apply for housing?": "housing_status",
+        # Eligibility questions route to the dedicated derived capability so
+        # the answer can name what actually gates the housing step.
+        "Can I apply for housing?": "housing_eligibility",
         "What housing options are there?": "housing_options",
     }
     for message, expected in cases.items():

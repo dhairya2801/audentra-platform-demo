@@ -39,17 +39,22 @@ REQUEST_TYPES = (
     "aid_disbursement",
     "aid_coverage",
     "aid_next_action",
+    "aid_support",
     "housing_status",
     "housing_options",
     "housing_remaining_steps",
     "housing_next_action",
     "housing_support",
+    "housing_eligibility",
     "registration_status",
+    "policy_lookup",
     "student_account",
     "appointments",
     "academic_plan",
     "campus_life",
     "messages_unread",
+    "conversational_ack",
+    "assistant_identity",
     "general_question",
     "unsupported_or_out_of_scope",
 )
@@ -71,13 +76,53 @@ _GREETING_ONLY = re.compile(
 )
 _CAPABILITY_QUESTION = re.compile(
     r"^(?:so |ok |okay )?(?:what (?:can|do) you (?:do|help(?: me)? with)|how can you help"
-    r"|what are you(?: able to do)?|who are you|what is this|help)\s*[?!.]*$",
+    r"|what (?:can|could|should) i ask(?: you)?|what are you(?: able to do)?"
+    r"|who are you|what is this)\s*[?!.]*$",
     re.IGNORECASE,
 )
+# Social turns that carry no information need: gratitude, acknowledgement,
+# closing. Must contain no question and stay short — "thanks, but why…" is a
+# question, not an ack.
+_GRATITUDE_OR_CLOSING = re.compile(
+    r"^(?:thanks|thank you|thankyou|thx|ty|much appreciated|appreciate (?:it|that)"
+    r"|perfect|great|awesome|amazing|cool|nice|got it|okay|ok|sounds good|will do"
+    r"|understood|makes sense|no thanks|nothing else|that'?s (?:all|it|everything)"
+    r"|bye|goodbye|see (?:you|ya)|talk (?:later|soon)|later|take care|good night)\b"
+    r"[^?]{0,60}$",
+    re.IGNORECASE,
+)
+_IDENTITY_QUESTION = re.compile(
+    r"are you (?:a |an )?(?:actual(?:ly)? |real(?:ly)? |truly )?"
+    r"(?:real person|real|human|person|bot|ai|robot)"
+    r"|am i (?:talking|chatting|speaking) (?:to|with) a (?:human|person|bot|robot|machine)"
+    r"|is this a (?:real person|human|bot)",
+    re.IGNORECASE,
+)
+
 _OPEN_ENDED_HELP = re.compile(
-    r"(?:i (?:don'?t|do not) know where to (?:start|begin)|where (?:do|should) i (?:start|begin)"
-    r"|i'?m (?:lost|overwhelmed|confused|not sure what to do)|help me get started"
-    r"|what should i be doing)",
+    r"(?:^help[!. ]*$|i (?:don'?t|do not) know where to (?:start|begin)"
+    r"|where (?:do|should) i (?:start|begin)"
+    r"|i'?m (?:lost|overwhelmed|confused"
+    r"|not sure (?:what to do|where to (?:start|begin)))"
+    r"|help me get started|what should i be doing"
+    r"|how (?:bad|screwed|behind) am i|how bad is (?:my situation|it))",
+    re.IGNORECASE,
+)
+
+# A question about a rule for a *category* of students, or about what the
+# institution does in a hypothetical, is institutional policy — not a read of
+# this student's record. Deliberately narrow: "can I apply for housing?" is a
+# question about this student and stays in the housing branch.
+_POLICY_QUESTION = re.compile(
+    r"\b(?:can|are|do|does|must|is|will|should)\s+"
+    r"(?:freshmen|freshman|first[- ]?years?(?:\s+students)?|sophomores|transfer students|"
+    r"international students|all students|new students|every student|students)\b"
+    r"|\bwhat(?:'s| is) the (?:polic\w+|rules?)\b|\bpolic(?:y|ies) (?:on|for|about)\b"
+    r"|\brules? (?:about|for|on)\b"
+    r"|\bwhat happens (?:if|when)\b"
+    r"|\bis it (?:allowed|permitted|possible|mandatory|required)\b"
+    r"|\bguaranteed?\b"
+    r"|\b(?:am i|are we) (?:allowed|permitted|required) to\b",
     re.IGNORECASE,
 )
 
@@ -92,8 +137,55 @@ _HOUSING_ENTITY = re.compile(
 )
 
 
+# Domain vocabulary for multi-domain detection, in answer-priority order.
+_DOMAIN_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("deadlines", re.compile(r"deadline|overdue|due date|by when", re.IGNORECASE)),
+    ("documents", re.compile(r"document|paperwork|transcript|immuni[sz]|identity", re.IGNORECASE)),
+    ("aid", _AID_ENTITY),
+    (
+        "account",
+        re.compile(
+            r"\bbalance\b|\bdeposit\b|\bowe\b|\bpayments?\b|\bmoney\b|\bbill\b", re.IGNORECASE
+        ),
+    ),
+    ("housing", _HOUSING_ENTITY),
+    ("registration", re.compile(r"\bregist", re.IGNORECASE)),
+    ("academics", re.compile(r"\bcourses?\b|academic plan|prerequisite", re.IGNORECASE)),
+    ("campus", re.compile(r"\bclubs?\b|campus life|\bevents?\b", re.IGNORECASE)),
+    (
+        "checklist",
+        re.compile(r"checklist|enrollment steps|onboarding|\benrollment\b", re.IGNORECASE),
+    ),
+)
+
+_DOMAIN_PRIMARY_TYPE: dict[str, str] = {
+    "deadlines": "deadlines",
+    "documents": "document_status",
+    "aid": "aid_status",
+    "account": "student_account",
+    "housing": "housing_status",
+    "registration": "registration_status",
+    "academics": "academic_plan",
+    "campus": "campus_life",
+    "checklist": "onboarding_status",
+}
+
+# Aggregation language that marks a question as spanning its named domains.
+_MULTI_DOMAIN_OPERATOR = re.compile(
+    r"\bsummar|overview|everything|across|full picture|big picture|whole picture"
+    r"|all of (?:it|my|them)|\bboth\b|as well as|including|situation\b"
+    r"|where do i stand|status of each",
+    re.IGNORECASE,
+)
+
+
 def classify(request: NormalizedRequest) -> Classification | None:
     text = request.comparable_text
+
+    if _IDENTITY_QUESTION.search(text):
+        return Classification("assistant_identity", 1)
+    if _GRATITUDE_OR_CLOSING.search(text.strip()):
+        return Classification("conversational_ack", 1)
 
     if not request.is_follow_up:
         if _GREETING_ONLY.search(text):
@@ -109,23 +201,85 @@ def classify(request: NormalizedRequest) -> Classification | None:
         )
     aid_entity = bool(_AID_ENTITY.search(text))
     if request.is_mutation_request:
+        if _HOUSING_ENTITY.search(text):
+            write_reference = "housing_write_unavailable"
+        elif aid_entity:
+            write_reference = "financial_aid_write_unavailable"
+        elif re.search(r"document|transcript|immuni[sz]|identity|upload", text):
+            write_reference = "document_write_unavailable"
+        elif re.search(r"\bpay|deposit|tuition|bill|charge", text):
+            write_reference = "payment_write_unavailable"
+        elif re.search(r"appointment|advis|book|schedule|reschedule|meeting", text):
+            write_reference = "appointment_write_unavailable"
+        else:
+            write_reference = "write_unavailable"
         return Classification(
-            "unsupported_or_out_of_scope",
-            1,
-            requirement_reference=(
-                "housing_write_unavailable"
-                if _HOUSING_ENTITY.search(text)
-                else "financial_aid_write_unavailable"
-                if aid_entity
-                else "write_unavailable"
-            ),
+            "unsupported_or_out_of_scope", 1, requirement_reference=write_reference
         )
     if request.contains_sensitive_financial_data:
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="sensitive_financial_data"
         )
 
+    # Institutional policy questions are settled before the domain branches so
+    # "can freshmen live off campus?" is answered as policy, not as this
+    # student's own housing record. A "what happens if" hypothetical about the
+    # student's *own* pending item (a worksheet, a document) stays with its
+    # domain branch, which answers the consequence from the record.
+    if (
+        _POLICY_QUESTION.search(text)
+        and not re.search(
+            r"\b(?:my|me|i)\b.{0,24}\b(?:status|balance|record|checklist|left|remaining)\b",
+            text,
+        )
+        and not re.search(r"\b[a-z]{2,4} ?\d{3}\b|\bdata structures\b|\bprerequisites?\b", text)
+        and not (
+            re.search(r"what happens (?:if|when)", text)
+            and (aid_entity or re.search(r"document|transcript|immuni[sz]|deposit|worksheet", text))
+        )
+    ):
+        return Classification("policy_lookup", 0.9)
+
+    # Institutional calendar dates have no canonical source yet; a specific
+    # date here would be invented, so these route to the honest institutional
+    # answer instead of a deadline read that tempts a wrong connection.
+    if re.search(
+        r"\bwhen (?:does|do|will) (?:the )?(?:term|semester|classes)\b"
+        r"|\bwhen is (?:orientation|move[- ]?in)\b",
+        text,
+    ):
+        return Classification("policy_lookup", 0.85)
+
+    # An enumerated multi-domain ask ("summarize my documents, money, and
+    # housing") must not collapse to the first matching single intent — the
+    # answer owes the student every named domain. Detected deterministically:
+    # two-plus domains named plus an aggregation operator.
+    domain_hits = [name for name, pattern in _DOMAIN_HINTS if pattern.search(text)]
+    # Money+aid and money+housing pairs belong to their expert branches, whose
+    # selection rules already cross into the account read where needed.
+    if set(domain_hits) in ({"aid", "account"}, {"housing", "account"}):
+        domain_hits = []
+    if len(domain_hits) >= 2 and _MULTI_DOMAIN_OPERATOR.search(text):
+        if "deadlines" in domain_hits:
+            primary = "deadlines"
+            extras = [name for name in domain_hits if name != "deadlines"][:2]
+        else:
+            primary = domain_hits[0]
+            extras = domain_hits[1:3]
+        return Classification(
+            _DOMAIN_PRIMARY_TYPE[primary],
+            0.9,
+            additional_request_types=tuple(_DOMAIN_PRIMARY_TYPE[name] for name in extras),
+        )
+
     housing = bool(_HOUSING_ENTITY.search(text))
+    if housing and aid_entity:
+        # Housing and financial aid in one question is a genuine multi-domain
+        # request. Returning None hands it to the model planner, which can
+        # select reads across both domains; without a model the safe fallback
+        # reads the checklist, holds, and deadlines and the dependency round
+        # fetches whatever an open gate then names.
+        return None
     if housing and not aid_entity:
         if re.search(
             r"(?:what|which|show|list).{0,28}(?:housing|residence|dorm).{0,20}(?:option|choice)"
@@ -143,23 +297,56 @@ def classify(request: NormalizedRequest) -> Classification | None:
             return Classification("housing_next_action", 1)
         if re.search(r"(?:left|remain|remaining|outstanding|still (?:have|need)|steps?)", text):
             return Classification("housing_remaining_steps", 1)
-        if re.search(r"(?:can|could) i (?:apply|sign up)|why can'?t i apply|eligib", text):
+        if re.search(
+            r"(?:can|could) i (?:apply|register|sign up|pick|choose|select)"
+            r"|am i able|able to (?:pick|choose|select|apply)"
+            r"|why can'?t i"
+            r"|why isn'?t housing|housing.{0,16}isn'?t (?:open|available)"
+            r"|(?:housing|section|it).{0,24}(?:blocked|locked|closed|stuck|"
+            r"not letting|won'?t let|letting me)"
+            r"|why (?:is|does).{0,24}housing"
+            r"|stopping|prevent|eligib",
+            text,
+        ):
             return Classification(
-                "housing_status", 1, additional_request_types=("holds_and_blockers",)
+                "housing_eligibility", 1, additional_request_types=("holds_and_blockers",)
             )
         return Classification("housing_status", 1)
 
     if aid_entity:
+        # "Can I register even though my aid isn't complete?" is a question
+        # about registration whose answer needs the registration gates, not
+        # just the aid file. Reading only aid invited the composer to invent
+        # a registration blocker the gate list contradicts.
+        if re.search(
+            r"\bregist(?:er|ering|ration)\b"
+            r"|cleared for class|take classes|start(?:ing)? classes",
+            text,
+        ):
+            return Classification(
+                "registration_status", 1, additional_request_types=("aid_status",)
+            )
+        if re.search(
+            r"(?:who|where|how).{0,32}(?:contact|help|talk to)"
+            r"|(?:aid|financial aid).{0,16}(?:office|support|advisor|counselor)"
+            r"|(?:speak|talk|meet).{0,24}(?:aid|financial)",
+            text,
+        ):
+            return Classification("aid_support", 1)
         if re.search(
             r"disburse|paid out|pay out"
-            r"|when.{0,32}(?:money|funds|aid).{0,24}(?:arrive|come|available|applied)"
+            r"|when.{0,32}(?:money|funds|aid).{0,24}(?:arrive|come|available|applied|"
+            r"show up|land|hit)"
             r"|(?:money|funds|aid).{0,32}(?:hasn'?t|has not|not).{0,24}"
             r"(?:arrive|come|been (?:paid|applied|disbursed))|refund check",
             text,
         ):
             return Classification("aid_disbursement", 1)
         if re.search(
-            r"(?:cover|covers|enough to (?:cover|pay))\b"
+            r"(?:aid|award)s?\b[^.?]{0,32}(?:more than|exceeds?|higher than|greater than)"
+            r"[^.?]{0,24}(?:cost|charge|bill|tuition)"
+            r"|(?:more than|exceeds?)[^.?]{0,16}my costs?"
+            r"|(?:cover|covers|enough to (?:cover|pay))\b"
             r".{0,32}(?:tuition|cost|bill|charges|balance)"
             r"|(?:tuition|cost of attendance|bill|balance).{0,32}(?:covered|after (?:aid|my aid))"
             r"|how much.{0,24}(?:will i|do i|would i).{0,16}(?:still )?(?:owe|pay)"
@@ -168,6 +355,16 @@ def classify(request: NormalizedRequest) -> Classification | None:
             text,
         ):
             return Classification("aid_coverage", 1)
+        # Amount-bearing questions need amount evidence. "How much is my Pell
+        # Grant?" answered from a read without amounts produced fabricated
+        # figures; the summary read carries every award with its dollars.
+        if re.search(
+            r"how much (?:is|was|will)\b.{0,48}\b(?:grant|loan|scholarship|work[- ]study|aid|award)"
+            r"|\b(?:amount|value|size) of my\b.{0,32}\b(?:grant|loan|scholarship|aid|award)"
+            r"|\bmy\b.{0,24}\b(?:grant|loan|scholarship|award)\b.{0,16}(?:amount|worth|how much)",
+            text,
+        ):
+            return Classification("aid_summary", 1)
         if re.search(
             r"\bfafsa\b|(?:application|isir).{0,32}(?:received|status|processed|submitted)"
             r"|(?:received|got).{0,24}my.{0,16}(?:fafsa|application)|selected for verification",
@@ -215,6 +412,19 @@ def classify(request: NormalizedRequest) -> Classification | None:
             return Classification("deadlines", 0.95)
         return Classification("aid_status", 0.95)
 
+    # A question about a specific course or prerequisite needs the academic
+    # plan, whatever else it mentions — registration gates cannot say whether
+    # CS 201's prerequisite is met.
+    if re.search(r"\b[a-z]{2,4} ?\d{3}\b|\bdata structures\b|\bprerequisites?\b", text) or (
+        re.search(r"\bcourses?\b", text)
+        and re.search(r"\b(?:take|taking|swap|switch|drop|add|start|first term|which|what)\b", text)
+    ):
+        if re.search(r"\bregist(?:er|ering|ration)\b", text):
+            return Classification(
+                "registration_status", 1, additional_request_types=("academic_plan",)
+            )
+        return Classification("academic_plan", 1)
+
     if re.search(r"\bhold(s)?\b|\bblock(?:ed|ing|er)?s?\b|\bstopping me\b|\bprevent", text):
         if re.search(r"\bregist", text):
             return Classification(
@@ -261,7 +471,12 @@ def classify(request: NormalizedRequest) -> Classification | None:
     if re.search(
         r"\bclubs?\b|\bcampus (?:life|events?|activit\w+)\b|\bstudent organi[sz]ations?\b"
         r"|\bintramurals?\b|\bevents? (?:on campus|this (?:week|month|semester))"
-        r"|\bactivities (?:can i|to) join\b|\bwhat.{0,24}(?:events|activities)\b",
+        r"|\bactivities (?:can i|to) join\b|\bwhat.{0,24}(?:events|activities)\b"
+        r"|\bwhat (?:should|can|could) i join\b|\bjoin\b.{0,24}(?:on campus|at (?:the )?"
+        r"universit|school)"
+        r"|\bget(?:ting)? involved\b|\bmake friends\b|\bmaking friends\b|\bmeet people\b"
+        r"|\banything fun\b|\bfun (?:things|stuff|events)\b"
+        r"|\bthings (?:happening|to do) (?:on|around) campus\b|\baudition\b",
         text,
     ):
         return Classification("campus_life", 1)
@@ -275,7 +490,8 @@ def classify(request: NormalizedRequest) -> Classification | None:
         return Classification("deadlines", 1)
 
     if re.search(
-        r"balance|owe|owing|bill|billing|charges|tuition cost|payment plan|installment|deposit",
+        r"balance|owe|owing|bill|billing|charges|tuition cost|payment plan|installment"
+        r"|deposit|\bpay(?:ing|ment)?\b|\bmoney\b",
         text,
     ):
         return Classification("student_account", 0.95)

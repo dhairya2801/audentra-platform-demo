@@ -24,7 +24,9 @@ TOOL_NAMES = (
     "getFinancialAidStatus",
     "getFinancialAidSummary",
     "getAidDisbursements",
+    "getFinancialAidSupportOptions",
     "getStudentHousingStatus",
+    "getStudentHousingEligibility",
     "getHousingOptions",
     "getRegistrationStatus",
     "getStudentAccountSummary",
@@ -32,6 +34,47 @@ TOOL_NAMES = (
     "getAcademicPlan",
     "getCampusLife",
     "getStudentMessages",
+)
+
+# Source-of-truth classification for every tool. "student_state" must come
+# from canonical per-student records; "institution_knowledge" from approved
+# tenant-wide data. Conversation history is linguistic context only and is
+# never a source of either. Keep this in sync when adding tools — it is the
+# boundary that keeps demo constants out of production answers.
+TOOL_INFORMATION_CLASS: Mapping[str, str] = {
+    "getStudentProfile": "student_state",
+    "getOnboardingChecklist": "student_state",
+    "getDocumentStatuses": "student_state",
+    "getEnrollmentHolds": "student_state",
+    "getStudentDeadlines": "student_state",
+    "getSupportOptions": "institution_knowledge",
+    "getFinancialAidStatus": "student_state",
+    "getFinancialAidSummary": "student_state",
+    "getAidDisbursements": "student_state",
+    "getFinancialAidSupportOptions": "institution_knowledge",
+    "getStudentHousingStatus": "student_state",
+    "getStudentHousingEligibility": "student_state",
+    "getHousingOptions": "institution_knowledge",
+    "getRegistrationStatus": "student_state",
+    "getStudentAccountSummary": "student_state",
+    "getStudentAppointments": "student_state",
+    "getAcademicPlan": "student_state",
+    "getCampusLife": "institution_knowledge",
+    "getStudentMessages": "student_state",
+}
+
+# Reads any in-scope intent may draw on for context. Explaining *why*
+# something is blocked nearly always needs the checklist, holds, and deadlines
+# even when the question names a single domain — "why can't I apply for
+# housing?" is answerable only if the housing intent can also see the deposit
+# and any blocker. All four are read-only and scoped to the authenticated
+# student, so widening them changes what Edward can reason over without
+# widening what it can reach.
+UNIVERSAL_CONTEXT_TOOLS = (
+    "getStudentProfile",
+    "getOnboardingChecklist",
+    "getEnrollmentHolds",
+    "getStudentDeadlines",
 )
 
 # The catalog a model planner sees. Descriptions are ported from
@@ -58,7 +101,12 @@ TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "scheduled and when, and the exhaustive list of reasons a disbursement "
         "is being held."
     ),
+    "getFinancialAidSupportOptions": "Read approved financial-aid support routes.",
     "getStudentHousingStatus": "Read the housing plan and housing requirement state.",
+    "getStudentHousingEligibility": (
+        "Read whether the student can act on housing right now: the housing "
+        "step's own state and each open item blocking it."
+    ),
     "getHousingOptions": "Read tenant-listed housing preference options.",
     "getRegistrationStatus": (
         "Read course-registration eligibility for the current term: each gate "
@@ -90,7 +138,9 @@ RECEIPT_SOURCES: Mapping[str, str] = {
     "getFinancialAidStatus": "financial_aid",
     "getFinancialAidSummary": "financial_aid",
     "getAidDisbursements": "financial_aid",
+    "getFinancialAidSupportOptions": "financial_aid",
     "getStudentHousingStatus": "housing",
+    "getStudentHousingEligibility": "housing",
     "getHousingOptions": "housing",
     "getRegistrationStatus": "registration",
     "getStudentAccountSummary": "account",
@@ -129,11 +179,21 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     # is unanswerable from the aid record alone.
     "aid_coverage": ("getFinancialAidSummary", "getStudentAccountSummary"),
     "aid_next_action": ("getFinancialAidStatus",),
+    "aid_support": ("getFinancialAidStatus", "getFinancialAidSupportOptions"),
     "housing_status": ("getStudentHousingStatus",),
     "housing_options": ("getHousingOptions",),
     "housing_remaining_steps": ("getStudentHousingStatus",),
     "housing_next_action": ("getStudentHousingStatus", "getStudentDeadlines"),
     "housing_support": ("getStudentHousingStatus", "getSupportOptions"),
+    "housing_eligibility": (
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+    ),
+    # Institutional policy retrieval has no reviewed source yet; the composer
+    # answers honestly and routes to support instead of reading student state.
+    "policy_lookup": (),
     "registration_status": (
         "getRegistrationStatus",
         "getEnrollmentHolds",
@@ -145,6 +205,10 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "campus_life": ("getCampusLife",),
     "messages_unread": ("getStudentMessages",),
     "general_question": ("getOnboardingChecklist", "getEnrollmentHolds", "getStudentDeadlines"),
+    # Social turns read nothing: gratitude answered with a checklist would be
+    # a status report nobody asked for, and both are answered deterministically.
+    "conversational_ack": (),
+    "assistant_identity": (),
     "unsupported_or_out_of_scope": (),
 }
 
@@ -159,10 +223,74 @@ _REQUIRED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "aid_coverage": ("getFinancialAidSummary", "getStudentAccountSummary"),
     "aid_disbursement": ("getAidDisbursements", "getFinancialAidSummary"),
     "registration_status": ("getRegistrationStatus",),
+    "housing_eligibility": ("getStudentHousingEligibility",),
+    "aid_support": ("getFinancialAidSupportOptions",),
     "academic_plan": ("getAcademicPlan",),
     "campus_life": ("getCampusLife",),
     "messages_unread": ("getStudentMessages",),
 }
+
+
+# The verifying read for each gate/blocker code the first round can surface.
+# When a gate names a domain that was not read, exactly one deterministic
+# follow-up round fetches the evidence needed to *explain* the gate — never a
+# second model-planned expansion.
+_GATE_DEPENDENCY_TOOLS: Mapping[str, tuple[str, ...]] = {
+    "enrollment_deposit_posted": ("getStudentAccountSummary",),
+    "enrollment_confirmed": ("getStudentAccountSummary",),
+    "account_balance": ("getStudentAccountSummary",),
+    "housing_preference_selected": ("getStudentHousingStatus",),
+    "final_transcript": ("getDocumentStatuses", "getOnboardingChecklist"),
+    "immunization_cleared": ("getDocumentStatuses", "getOnboardingChecklist"),
+    "advising_complete": ("getStudentAppointments",),
+    "orientation_complete": ("getStudentAppointments",),
+    "fafsa_received": ("getFinancialAidStatus",),
+    "verification_complete": ("getFinancialAidStatus",),
+    "financial_aid_verification": ("getFinancialAidStatus",),
+    # A housing step that reads "blocked" without gate evidence cannot be
+    # explained — the eligibility read carries the actual blockers.
+    "housing_step_blocked": ("getStudentHousingEligibility", "getEnrollmentHolds"),
+}
+
+# Open blocking checklist items surface these gate codes even when the holds
+# read did not run, so a checklist-only turn can still fetch the verifying
+# read (e.g. the payments state behind an open deposit requirement).
+REQUIREMENT_GATE_CODES: Mapping[str, str] = {
+    "enrollment_deposit": "enrollment_deposit_posted",
+    "official_transcript": "final_transcript",
+    "transcript": "final_transcript",
+    "immunization_record": "immunization_cleared",
+    "immunization": "immunization_cleared",
+    "housing_preference": "housing_preference_selected",
+    "advising": "advising_complete",
+    "orientation": "orientation_complete",
+}
+
+MAX_DEPENDENCY_TOOLS = 3
+
+
+def resolve_dependency_reads(
+    executed_tools: Sequence[str],
+    open_gate_codes: Sequence[str],
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Deterministic second-round plan: verify gates whose domain wasn't read.
+
+    Returns the bounded tool list plus one reason record per selection so the
+    trace can say exactly why each dependency read ran.
+    """
+
+    already = set(executed_tools)
+    tools: list[str] = []
+    reasons: list[dict[str, str]] = []
+    for code in open_gate_codes:
+        for tool in _GATE_DEPENDENCY_TOOLS.get(str(code), ()):
+            if tool in already or tool in tools:
+                continue
+            if len(tools) >= MAX_DEPENDENCY_TOOLS:
+                return tools, reasons
+            tools.append(tool)
+            reasons.append({"gate": str(code), "tool": tool})
+    return tools, reasons
 
 
 def select_tool_reads(classification: Classification) -> list[str]:
@@ -211,7 +339,12 @@ def validate_model_tool_plan(value: Any) -> tuple[Classification, list[str]] | N
         return None
 
     intents = [str(request_type), *[str(item) for item in additional]]
+    # Universal context reads are legitimate for any in-scope intent: a plan
+    # that adds the checklist or holds to a housing question is a better plan,
+    # not an allowlist violation. An out-of-scope refusal still admits nothing.
     allowed = {tool for intent in intents for tool in _SELECTION_RULES.get(intent, ())}
+    if request_type != "unsupported_or_out_of_scope":
+        allowed.update(UNIVERSAL_CONTEXT_TOOLS)
     filtered = [str(name) for name in dict.fromkeys(tool_names) if name in allowed]
     # Every intent still needs at least one of its own reads, otherwise the
     # plan carries no evidence for something it claims to answer.

@@ -52,7 +52,7 @@ _PROSE_DATE = re.compile(
 _NUMBER = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]{2,}(?:\.\d+)?\b|\b\d+(?:\.\d+)?%")
 _CAUSAL_CONNECTIVE = re.compile(
     r"\b(?:because|since|due to|owing to|as a result of|caused by|is blocking|"
-    r"are blocking|blocks|prevents?|preventing)\b"
+    r"are blocking|blocks|prevents?|preventing|until|unless|once)\b"
 )
 
 _CAUSAL_TOPICS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -71,18 +71,33 @@ _CAUSAL_TOPICS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("identity", re.compile(r"\bidentity document\w*\b")),
     ("orientation", re.compile(r"\borientation\b")),
     ("hold", re.compile(r"\bhold\b")),
+    (
+        "checklist",
+        re.compile(r"\bchecklist\b|\brequired steps\b|\benrollment (?:steps|items|requirements)\b"),
+    ),
 )
 
 _TOPIC_BY_GATE_CODE: Mapping[str, str] = {
     "account_balance": "balance",
     "enrollment_deposit_posted": "deposit",
     "enrollment_confirmed": "deposit",
+    "enrollment_deposit": "deposit",
     "immunization_cleared": "immunisation",
+    "immunization_record": "immunisation",
     "advising_complete": "advising",
     "final_transcript": "transcript",
+    "official_transcript": "transcript",
     "housing_preference_selected": "housing",
+    "housing_preference": "housing",
     "fafsa_received": "fafsa",
+    "fafsa": "fafsa",
     "verification_complete": "verification",
+    "verification_worksheet": "verification",
+    "financial_aid_verification": "verification",
+    "award_acceptance": "financial_aid",
+    "identity_document": "identity",
+    "orientation_registration": "orientation",
+    "orientation_complete": "orientation",
     "award_decisions": "financial_aid",
 }
 
@@ -91,6 +106,25 @@ _REGISTRATION_OUTCOME = re.compile(
     r"|\bregistration (?:is|remains|stays) (?:currently )?"
     r"(?:blocked|closed|unavailable|not (?:open|available|possible))\b"
     r"|\byou (?:are|'re) (?:currently )?(?:blocked|prevented) from registering\b"
+)
+
+_HOUSING_OUTCOME = re.compile(
+    r"(?:can(?:no|')?t|cannot|can not|unable to|not able to)\s+(?:currently\s+)?"
+    r"(?:apply for|act on|complete|select) (?:your )?housing\b"
+    r"|\bhousing (?:step|application)? ?(?:is|remains) (?:currently )?"
+    r"(?:blocked|closed|unavailable|not (?:open|available|possible))\b"
+)
+
+_DISBURSEMENT_OUTCOME = re.compile(
+    r"\b(?:aid|funds|money)\b[^.!?]{0,48}\b(?:will not|won'?t|cannot|can'?t|has(?:n'?t| not))"
+    r"[^.!?]{0,24}\bdisburs"
+    r"|\bdisbursement (?:is|remains) (?:currently )?(?:held|on hold|blocked|waiting)\b"
+    r"|\bnot (?:be )?disbursed (?:until|unless|before)\b"
+    # A positive conditional ("your aid will be disbursed once you…") asserts
+    # the same dependency and must face the same gate evidence.
+    r"|\b(?:aid|funds|money)\b[^.!?]{0,48}\b(?:will|can) (?:be )?"
+    r"(?:disbursed?|paid out|released)\b[^.!?]{0,32}\b(?:once|when|after|as soon as)\b"
+    r"|\bdisburs\w+[^.!?]{0,32}\b(?:once|after|when) you\b"
 )
 
 
@@ -110,6 +144,8 @@ class GuardResult:
 def build_causal_guards(
     *,
     registration_gates: Sequence[Mapping[str, object]] | None = None,
+    housing_gates: Sequence[Mapping[str, object]] | None = None,
+    disbursement_gates: Sequence[Mapping[str, object]] | None = None,
 ) -> list[CausalGuard]:
     """Build guards from whatever gated capabilities the reads returned.
 
@@ -117,15 +153,54 @@ def build_causal_guards(
     on evidence Edward did not have.
     """
 
+    def open_topics(gates: Sequence[Mapping[str, object]]) -> frozenset[str]:
+        topics = {
+            _TOPIC_BY_GATE_CODE[str(gate.get("code"))]
+            for gate in gates
+            if not gate.get("satisfied") and str(gate.get("code")) in _TOPIC_BY_GATE_CODE
+        }
+        # Any open gate legitimises "your checklist" as a stated cause; a
+        # capability with every gate satisfied legitimises none.
+        if any(not gate.get("satisfied") for gate in gates):
+            topics.add("checklist")
+        return frozenset(topics)
+
     guards: list[CausalGuard] = []
     if registration_gates is not None:
-        open_topics = frozenset(
-            _TOPIC_BY_GATE_CODE[str(gate.get("code"))]
-            for gate in registration_gates
-            if not gate.get("satisfied") and str(gate.get("code")) in _TOPIC_BY_GATE_CODE
+        guards.append(
+            CausalGuard(outcome=_REGISTRATION_OUTCOME, open_topics=open_topics(registration_gates))
         )
-        guards.append(CausalGuard(outcome=_REGISTRATION_OUTCOME, open_topics=open_topics))
+    if housing_gates is not None:
+        guards.append(CausalGuard(outcome=_HOUSING_OUTCOME, open_topics=open_topics(housing_gates)))
+    if disbursement_gates is not None:
+        guards.append(
+            CausalGuard(outcome=_DISBURSEMENT_OUTCOME, open_topics=open_topics(disbursement_gates))
+        )
     return guards
+
+
+_HOLD_AFFIRMATION = re.compile(
+    r"\b(?:you (?:do )?(?:have|currently have)|there(?:'s| is| is currently))\b"
+    r"[^.!?]{0,40}\bholds?\b"
+    r"|\bhold (?:has been|was) placed\b"
+    r"|\byour (?:record|account) (?:has|shows)[^.!?]{0,24}\bholds?\b",
+    re.IGNORECASE,
+)
+_HOLD_NEGATION = re.compile(
+    r"\b(?:no|not|isn'?t|aren'?t|don'?t|do not|doesn'?t|does not|without|never|"
+    r"rather than|instead of|nothing)\b"
+    r"|\bno (?:official|registrar)\b",
+    re.IGNORECASE,
+)
+
+# Language that acknowledges something could not be checked this turn.
+_UNAVAILABILITY_ACK = re.compile(
+    r"couldn'?t|could not|can'?t (?:check|verify|confirm|read|see)|"
+    r"cannot (?:check|verify|confirm|read|see)|unable to|not available|"
+    r"unavailable|didn'?t load|did not load|wasn'?t able|was not able|"
+    r"right now|this moment|try (?:again|asking again)|temporarily",
+    re.IGNORECASE,
+)
 
 
 def guard_grounded_answer(
@@ -134,6 +209,9 @@ def guard_grounded_answer(
     evidence_texts: Sequence[str],
     causal_guards: Sequence[CausalGuard] = (),
     document_states: Sequence[Mapping[str, str]] = (),
+    no_official_holds: bool = False,
+    unavailable_sources: Sequence[str] = (),
+    deposit_payment_pending: bool = False,
 ) -> GuardResult:
     normalized = re.sub(r"\s+", " ", answer).strip()
 
@@ -168,7 +246,48 @@ def guard_grounded_answer(
         return reject("invented_causation")
     if _detect_contradicted_document_state(lowered, document_states):
         return reject("contradicted_document_state")
+    # The holds read said no official hold exists (the platform operates no
+    # hold system) — affirming one is an invented record, full stop.
+    if no_official_holds and _detect_invented_hold(lowered):
+        return reject("invented_hold")
+    # The student's deposit payment is submitted and pending. Telling them to
+    # pay (again) contradicts the processing state on record.
+    if deposit_payment_pending and _detect_pay_again_instruction(lowered):
+        return reject("contradicted_processing_state")
+    # A read this turn depended on failed. The reply must carry the honesty
+    # marker; a confident answer with no acknowledgment reads a dead domain
+    # as fact, so it falls back to the deterministic draft (which carries the
+    # unavailability note by construction).
+    if unavailable_sources and not _UNAVAILABILITY_ACK.search(lowered):
+        return reject("missing_unavailability_note")
     return GuardResult(accepted=True, reason_code=None, answer=normalized)
+
+
+_PAY_INSTRUCTION = re.compile(
+    r"\b(?:need to|needs to|should|must|have to|start by|next step is to|"
+    r"go ahead and|can) pay(?:ing)?\b[^.!?]{0,32}\bdeposit"
+    r"|\bpay the (?:enrollment )?deposit\b",
+    re.IGNORECASE,
+)
+_PENDING_QUALIFIER = re.compile(
+    r"pending|processing|posted|posts|clears?|already (?:paid|submitted)|"
+    r"again if|if it fails|no (?:new|further) payment",
+    re.IGNORECASE,
+)
+
+
+def _detect_pay_again_instruction(lowered: str) -> bool:
+    for sentence in re.split(r"[.!?]", lowered):
+        if _PAY_INSTRUCTION.search(sentence) and not _PENDING_QUALIFIER.search(sentence):
+            return True
+    return False
+
+
+def _detect_invented_hold(lowered: str) -> bool:
+    for sentence in re.split(r"[.!?]", lowered):
+        if _HOLD_AFFIRMATION.search(sentence) and not _HOLD_NEGATION.search(sentence):
+            return True
+    return False
 
 
 def _mask_dates_and_contacts(text: str) -> str:
@@ -227,6 +346,15 @@ def _collect_contacts(text: str) -> set[str]:
     return {match.group(0).rstrip(".,;)") for match in _CONTACT.finditer(text)}
 
 
+# Public aliases: the staff assistant guard shares these grounding-token
+# helpers instead of maintaining a third copy of the date/number/contact
+# canonicalization rules.
+collect_dates = _collect_dates
+collect_numbers = _collect_numbers
+collect_contacts = _collect_contacts
+mask_dates_and_contacts = _mask_dates_and_contacts
+
+
 def _detect_invented_causation(lowered: str, causal_guards: Sequence[CausalGuard]) -> bool:
     """Any claim of the form "X is blocked because Y" is checked against
     whether Y is actually an open gate of X."""
@@ -237,9 +365,13 @@ def _detect_invented_causation(lowered: str, causal_guards: Sequence[CausalGuard
         for sentence in re.split(r"[.!?]", lowered):
             if not guard.outcome.search(sentence) or not _CAUSAL_CONNECTIVE.search(sentence):
                 continue
-            for topic, pattern in _CAUSAL_TOPICS:
-                if pattern.search(sentence) and topic not in guard.open_topics:
-                    return True
+            matched = {topic for topic, pattern in _CAUSAL_TOPICS if pattern.search(sentence)}
+            # Topic vocabularies overlap ("financial aid verification" matches
+            # both financial_aid and verification). The sentence names an
+            # invented cause only when *none* of its topics is an open gate —
+            # a sentence citing at least one true open gate is a true cause.
+            if matched and matched.isdisjoint(guard.open_topics):
+                return True
     return False
 
 

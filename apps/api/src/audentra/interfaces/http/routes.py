@@ -63,6 +63,7 @@ from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError
 from audentra.core.ports import BinaryPayload, FileUpload, PlatformService, ServiceCall
+from audentra.integrations.assistant.trace import get_assistant_trace_recorder
 
 from .dependencies import (
     AuthDependency,
@@ -1097,6 +1098,120 @@ async def ask_edward(
         auth=auth,
         payload=body.public_payload(),
     )
+
+
+def _require_assistant_trace_debug(request: Request) -> None:
+    if not request.app.state.http_settings.assistant_trace_debug_enabled:
+        raise ApiError(404, "NOT_FOUND", "Not found")
+
+
+@router.get(
+    "/internal/assistant/traces",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def list_assistant_traces(
+    request: Request,
+    _worker_token: WorkerTokenDependency,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> object:
+    _require_assistant_trace_debug(request)
+    return {"traces": get_assistant_trace_recorder().list(limit)}
+
+
+@router.get(
+    "/internal/assistant/traces/{traceId}",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def get_assistant_trace(
+    trace_id: Annotated[str, Path(alias="traceId", max_length=128)],
+    request: Request,
+    _worker_token: WorkerTokenDependency,
+) -> object:
+    _require_assistant_trace_debug(request)
+    trace = get_assistant_trace_recorder().get(trace_id)
+    if trace is None:
+        raise ApiError(
+            404,
+            "ASSISTANT_TRACE_NOT_FOUND",
+            "No assistant trace with that ID is held in this process buffer",
+        )
+    return trace
+
+
+@router.get(
+    "/internal/assistant/dev/personas",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def list_assistant_dev_personas(
+    request: Request,
+    service: ServiceDependency,
+    _worker_token: WorkerTokenDependency,
+) -> object:
+    _require_assistant_trace_debug(request)
+    from audentra.infrastructure.memory.eval_personas import PERSONA_LABELS, PERSONAS
+
+    store = getattr(service, "store", None)
+    supported = store is not None and hasattr(store, "assistant_messages")
+    profile = getattr(store, "profile", {}) if supported else {}
+    return {
+        "supported": bool(supported),
+        "active": getattr(service, "active_eval_persona", None),
+        "student": {
+            "preferredName": profile.get("preferredName"),
+            "studentId": profile.get("studentId"),
+        }
+        if supported
+        else None,
+        "personas": [{"name": name, "label": PERSONA_LABELS.get(name, name)} for name in PERSONAS],
+    }
+
+
+@router.post(
+    "/internal/assistant/dev/personas/{name}",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def activate_assistant_dev_persona(
+    name: Annotated[str, Path(max_length=64)],
+    request: Request,
+    service: ServiceDependency,
+    _worker_token: WorkerTokenDependency,
+) -> object:
+    _require_assistant_trace_debug(request)
+    from audentra.infrastructure.memory.eval_personas import (
+        PERSONA_LABELS,
+        PERSONAS,
+        apply_persona,
+    )
+    from audentra.infrastructure.memory.store import InMemoryPlatformStore
+
+    if not hasattr(service, "store"):
+        raise ApiError(
+            409,
+            "PERSONA_SWITCH_UNSUPPORTED",
+            "Persona switching is only available on the in-memory development host",
+        )
+    if name not in PERSONAS:
+        raise ApiError(404, "PERSONA_NOT_FOUND", "Unknown evaluation persona")
+    store = InMemoryPlatformStore()
+    apply_persona(store, name)
+    service.store = store
+    service.active_eval_persona = name  # type: ignore[attr-defined]
+    return {
+        "active": name,
+        "label": PERSONA_LABELS.get(name, name),
+        "student": {
+            "preferredName": store.profile.get("preferredName"),
+            "studentId": store.profile.get("studentId"),
+        },
+    }
 
 
 @router.post("/v1/student/assistant/conversations", status_code=201, response_model=None)

@@ -18,23 +18,52 @@ DEFAULT_HISTORY_LIMIT = 6
 
 _REFERENTIAL_TAIL = re.compile(
     r"\b(?:that|this|those|these|it|them|the first one|the other one)\b\s*[?.!]?$"
-    r"|^(?:how|what|why|when|who)\b[^?]{0,48}\b(?:that|this|those|these|it|them)\b",
+    r"|^(?:how|what|why|when|who)\b[^?]{0,48}\b(?:that|this|those|these|it|them)\b"
+    r"|^(?:why|how|what|when|where|who|really|and)[?!. ]*$",
     re.IGNORECASE,
 )
 _FOLLOW_UP_OPENER = re.compile(
-    r"^(?:and |also |so |then |what about|how about|those|them|it\b)", re.IGNORECASE
+    # A leading interjection ("Great — so…", "Okay, then…") does not stop a
+    # turn from being a follow-up; skip it before testing the opener.
+    r"^(?:(?:great|nice|cool|perfect|awesome|ok(?:ay)?|right|fine|well|hmm|alright|"
+    r"thanks|got it)[,!.\s\u2014\u2013-]+)*"
+    r"(?:and |also |so |then |what about|how about|those|them|it\b)",
+    re.IGNORECASE,
 )
 
 _MUTATION_REQUEST = re.compile(
     r"\b(?:submit|upload|pay|update|change|edit|cancel|remove|delete|register me|"
-    r"enroll me|sign me up|apply for me|book|schedule|waive|approve|mark)\b"
+    r"enroll me|sign me up|apply for me|book|schedule|reschedule|move|redo|"
+    r"waive|approve|mark)\b"
     r"[^.?]{0,48}\b(?:for me|my|it|this|that|the)\b"
-    r"|^(?:please\s+)?(?:submit|upload|pay|update|change|cancel|remove|delete|waive|approve)\b",
+    r"|^(?:please\s+)?(?:submit|upload|pay|update|change|cancel|remove|delete|"
+    r"reschedule|move|redo|waive|approve)\b",
+    re.IGNORECASE,
+)
+# Asking Edward to act, explicitly: "can you pay it", "pay it for me".
+_DELEGATED_ACTION = re.compile(
+    r"\b(?:can|could|will|would) you\b[^.?]{0,48}"
+    r"\b(?:submit|upload|pay|update|change|cancel|remove|delete|book|schedule|"
+    r"reschedule|move|redo|waive|approve|mark|register|enroll|apply)\b"
+    r"|\b(?:submit|upload|pay|update|change|cancel|remove|delete|book|schedule|"
+    r"reschedule|move|redo|waive|approve|mark)\b[^.?]{0,40}\bfor me\b"
+    r"|\bon my behalf\b",
+    re.IGNORECASE,
+)
+# Asking HOW/WHERE/WHETHER an action can be done is a question about the
+# world, not a request to perform the action. "Where do I upload it?" and
+# "Can I still pay?" must never hit the write refusal.
+_INFORMATIONAL_FRAME = re.compile(
+    r"^(?:so |and |but |ok(?:ay)? |hey |hi |please |um |well )*"
+    r"(?:where|how|when|what|why|who|which|whether"
+    r"|can i|could i|should i|may i|do i|does|is it|are there|am i|will i|would i"
+    r"|if i|if my|what if|when i|suppose|say i|assuming)\b",
     re.IGNORECASE,
 )
 _COMPLETED_ACTION_REPORT = re.compile(
-    r"\bi(?:'ve| have| just| already)\s+(?:submitted|uploaded|paid|sent|completed|signed|"
-    r"finished|accepted|applied|registered)\b",
+    r"\bi(?:'ve| have| just| already| did)\s+(?:submit(?:ted)?|upload(?:ed)?|paid|pay|"
+    r"sent|send|complet(?:ed)?|signed|sign|finish(?:ed)?|accept(?:ed)?|"
+    r"appl(?:y|ied)|register(?:ed)?)\b",
     re.IGNORECASE,
 )
 _SENSITIVE_FINANCIAL_DATA = re.compile(
@@ -154,8 +183,26 @@ def _resolve_referent(text: str, history: Sequence[Mapping[str, str]], is_follow
 
 
 def _detects_mutation_request(text: str) -> bool:
-    """A write request, as opposed to a report that the student already acted."""
+    """A request for Edward to perform a write — never a question about one.
+
+    Three frames, in precedence order: a report that the student already
+    acted is not a request; asking Edward directly ("can you pay it",
+    "for me") always is; an interrogative frame ("where do I upload…",
+    "can I still pay…") is information-seeking even though it names an
+    action verb. Only then does the imperative pattern decide.
+    """
 
     if _COMPLETED_ACTION_REPORT.search(text):
         return False
-    return bool(_MUTATION_REQUEST.search(text))
+    if _DELEGATED_ACTION.search(text):
+        return True
+    # Frames are judged per sentence: "My deadline passed. Can I still pay
+    # it?" carries its action verb inside an interrogative sentence.
+    for sentence in re.split(r"(?<=[.!?])\s+|\s+\u2014\s+|\s+\u2013\s+", text):
+        stripped = sentence.strip()
+        if not stripped or not _MUTATION_REQUEST.search(stripped):
+            continue
+        if _INFORMATIONAL_FRAME.match(stripped):
+            continue
+        return True
+    return False

@@ -31,8 +31,10 @@ class DerivedState:
     derived_blockers: list[JsonDict] = field(default_factory=list)
     registration_gates: list[JsonDict] = field(default_factory=list)
     financial_aid: JsonDict | None = None
+    aid_support: JsonDict | None = None
     account: JsonDict | None = None
     housing: JsonDict | None = None
+    housing_eligibility: JsonDict | None = None
     housing_options: JsonDict | None = None
     appointments: JsonDict | None = None
     academics: JsonDict | None = None
@@ -43,6 +45,9 @@ class DerivedState:
     priority: JsonDict | None = None
     suggested_actions: list[JsonDict] = field(default_factory=list)
     unavailable_data: list[JsonDict] = field(default_factory=list)
+    # Which reads succeeded this turn. "Read and empty" and "never read /
+    # failed" are different truths; composers and guards need to know which.
+    available_reads: list[str] = field(default_factory=list)
 
 
 def derive_student_state(execution: ToolExecution) -> DerivedState:
@@ -52,6 +57,7 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
         data = read.get("data")
         if read.get("status") == "available" and isinstance(data, Mapping):
             reads[name] = data
+    state.available_reads = list(reads)
 
     checklist = reads.get("getOnboardingChecklist")
     if checklist:
@@ -96,8 +102,18 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.account = (
         dict(reads["getStudentAccountSummary"]) if "getStudentAccountSummary" in reads else None
     )
+    state.aid_support = (
+        dict(reads["getFinancialAidSupportOptions"])
+        if "getFinancialAidSupportOptions" in reads
+        else None
+    )
     state.housing = (
         dict(reads["getStudentHousingStatus"]) if "getStudentHousingStatus" in reads else None
+    )
+    state.housing_eligibility = (
+        dict(reads["getStudentHousingEligibility"])
+        if "getStudentHousingEligibility" in reads
+        else None
     )
     state.housing_options = (
         dict(reads["getHousingOptions"]) if "getHousingOptions" in reads else None
@@ -110,6 +126,13 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.messages = dict(reads["getStudentMessages"]) if "getStudentMessages" in reads else None
     state.support = dict(reads["getSupportOptions"]) if "getSupportOptions" in reads else None
     state.profile = dict(reads["getStudentProfile"]) if "getStudentProfile" in reads else None
+
+    # A submitted-but-unposted deposit payment changes what the open deposit
+    # requirement MEANS: the student already acted; the system is processing.
+    if (state.account or {}).get("depositPaymentPending"):
+        for step in state.remaining_steps:
+            if str(step.get("code") or "").lower() == "enrollment_deposit":
+                step["processingPending"] = True
 
     state.priority = _derive_priority(state)
     state.suggested_actions = _derive_suggested_actions(state)
@@ -241,6 +264,15 @@ def _derive_priority(state: DerivedState) -> JsonDict | None:
         None,
     )
     if deposit:
+        if (state.account or {}).get("depositPaymentPending"):
+            return {
+                "kind": "deposit_pending",
+                "title": "Your deposit payment is processing",
+                "href": "/payments",
+                "reason": (
+                    "It's submitted and waiting to post — no new payment is needed unless it fails."
+                ),
+            }
         return {
             "kind": "deposit",
             "title": "Pay the enrollment deposit",
