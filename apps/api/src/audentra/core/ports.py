@@ -4,6 +4,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol, runtime_checkable
 
+from .assistant_execution import (
+    DEFAULT_ASSISTANT_EXECUTION,
+    ResolvedAssistantExecutionMode,
+)
 from .auth import AuthContext
 
 
@@ -63,6 +67,11 @@ class ServiceCall:
     query_params: Mapping[str, str] = field(default_factory=dict)
     upload: FileUpload | None = None
     idempotency_key: str | None = None
+    # Development/evaluation only, and only for the assistant operations: the
+    # HTTP boundary resolves this from the Lab's mode header and leaves it at
+    # the default everywhere else, so an ordinary request takes exactly the
+    # existing production path.
+    assistant_execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION
 
 
 @runtime_checkable

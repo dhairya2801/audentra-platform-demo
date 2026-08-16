@@ -61,6 +61,13 @@ from audentra.contracts.requests import (
     UpdateTenantPortalConfigurationRequest,
 )
 from audentra.contracts.responses import ApiErrorEnvelope
+from audentra.core.assistant_execution import (
+    ASSISTANT_EXECUTION_MODE_HEADER,
+    DEFAULT_ASSISTANT_EXECUTION,
+    ResolvedAssistantExecutionMode,
+    lab_execution_controls_enabled,
+    resolve_assistant_execution_mode,
+)
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError
 from audentra.core.ports import BinaryPayload, FileUpload, PlatformService, ServiceCall
@@ -121,6 +128,7 @@ async def _dispatch(
     query_params: Mapping[str, str] | None = None,
     upload: FileUpload | None = None,
     idempotency_key: str | None = None,
+    assistant_execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
 ) -> object:
     return await service.dispatch(
         ServiceCall(
@@ -132,7 +140,26 @@ async def _dispatch(
             query_params=query_params or {},
             upload=upload,
             idempotency_key=idempotency_key,
+            assistant_execution=assistant_execution,
         )
+    )
+
+
+def _assistant_execution_mode(request: Request) -> ResolvedAssistantExecutionMode:
+    """Resolve the Lab's execution-mode header for one assistant turn.
+
+    Honoured only where assistant trace debugging is enabled and the
+    deployment is not production; elsewhere the header is ignored and the turn
+    takes the ordinary path.
+    """
+
+    settings = request.app.state.http_settings
+    return resolve_assistant_execution_mode(
+        request.headers.get(ASSISTANT_EXECUTION_MODE_HEADER),
+        lab_controls_enabled=lab_execution_controls_enabled(
+            environment=settings.environment,
+            assistant_trace_debug_enabled=settings.assistant_trace_debug_enabled,
+        ),
     )
 
 
@@ -1098,6 +1125,7 @@ async def ask_edward(
         operation="student.ask_edward",
         auth=auth,
         payload=body.public_payload(),
+        assistant_execution=_assistant_execution_mode(request),
     )
 
 
@@ -2135,6 +2163,7 @@ async def ask_staff_edward(
         operation="staff.ask_edward",
         auth=auth,
         payload=body.public_payload(),
+        assistant_execution=_assistant_execution_mode(request),
     )
 
 

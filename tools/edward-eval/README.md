@@ -13,11 +13,32 @@ npm run eval:edward -- --id xd-001 --verbose                         # run + ins
 npm run eval:edward:inspect -- --batch my-run --id xd-001            # inspect from a stored batch, free
 npm run eval:edward:compare -- --baseline python-edward-baseline-4 --candidate my-run
 npm run eval:edward:coverage                                         # regenerate COVERAGE.md
+npm run eval:edward:compare-modes -- --batch modes-v1                # normal vs forced zero-LLM
 ```
 
 Artifacts land in `artifacts/runs/<batch>/`: `transcript.json` (every graded
 turn with its full `AssistantTurnTrace`), `summary.json`, and
 `snapshots.json` (the canonical persona state the run graded against).
+
+## Normal vs forced zero-LLM (`compare-modes.mjs`)
+
+`compare-modes.mjs` asks one question twice against the same host: once exactly
+as production runs it, once with `X-Edward-Mode: deterministic`, the platform's
+development/evaluation control that builds the pipeline with **no** model
+planner and **no** prose composer. Both turns are conversation-less, so nothing
+persists between them and the second turn reads precisely the state the first
+one did; follow-up experiments replay their prior turns as client history so
+both sides get identical context.
+
+The experiment set lives in `src/mode-experiments.mjs`, one entry per
+(category, persona, question). Nothing is judged: the harness reports what the
+two `AssistantTurnTrace`s recorded — route, tool reads, evidence, model calls,
+tokens, cost, latency, and whether the final messages differ — and exits
+non-zero if any deterministic run was not confirmed zero-LLM by its own trace.
+Artifacts land in `artifacts/mode-comparisons/<batch>/`.
+
+Without `OPENAI_API_KEY`/`OPENROUTER_API_KEY` the normal side has no model to
+call and the comparison degenerates; the harness says so rather than pretending.
 
 ## The suite
 

@@ -118,10 +118,10 @@ export async function startEdward({ persona, faults = null, ledger }) {
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForReady(baseUrl, child);
 
-  const post = async (path, body) => {
+  const post = async (path, body, headers = {}) => {
     const response = await fetch(`${baseUrl}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
     });
     return { status: response.status, payload: await response.json() };
@@ -185,8 +185,14 @@ export async function startEdward({ persona, faults = null, ledger }) {
      * One turn. With `conversationId`, durable server history carries the
      * conversation; with `history`, the client-fallback path carries it;
      * with neither, a fresh conversation isolates the turn.
+     *
+     * `executionMode: "deterministic"` asks the platform for its Lab zero-LLM
+     * path for this turn only; omitting it is ordinary Edward.
      */
-    async ask(message, { history = [], conversationId = null } = {}) {
+    async ask(
+      message,
+      { history = [], conversationId = null, executionMode = null } = {},
+    ) {
       ledger?.assertMaySpend();
       const stateless = history.length > 0;
       let conversation = conversationId;
@@ -194,15 +200,21 @@ export async function startEdward({ persona, faults = null, ledger }) {
         conversation = await this.createConversation();
       }
       const started = performance.now();
-      const result = await post("/v1/student/assistant/messages", {
-        ...(conversation
-          ? { conversationId: conversation, clientMessageId: randomUUID() }
-          : {}),
-        message,
-        inputMode: "text",
-        pageContext: { path: "/enrollment", label: "Enrollment" },
-        ...(stateless ? { history } : {}),
-      });
+      const result = await post(
+        "/v1/student/assistant/messages",
+        {
+          ...(conversation
+            ? { conversationId: conversation, clientMessageId: randomUUID() }
+            : {}),
+          message,
+          inputMode: "text",
+          pageContext: { path: "/enrollment", label: "Enrollment" },
+          ...(stateless ? { history } : {}),
+        },
+        // The Lab execution-mode control; absent by default, so an ordinary
+        // eval turn takes exactly the path production takes.
+        executionMode ? { "x-edward-mode": executionMode } : {},
+      );
       const latencyMs = Math.round(performance.now() - started);
       const trace = await fetchTrace(result.payload?.requestId);
       meterFromTrace(trace, result.payload);

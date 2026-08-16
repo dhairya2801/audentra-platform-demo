@@ -7,6 +7,11 @@ from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
+from audentra.core.assistant_execution import (
+    DEFAULT_ASSISTANT_EXECUTION,
+    ResolvedAssistantExecutionMode,
+    model_hook,
+)
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
@@ -212,7 +217,9 @@ class InMemoryPlatformService:
                 auth, self._path(call, "id", "document_id", "documentId")
             )
         if operation == "student.ask_edward":
-            return await self._ask_edward(auth, payload, call.request_id)
+            return await self._ask_edward(
+                auth, payload, call.request_id, execution=call.assistant_execution
+            )
         if operation == "student.create_assistant_conversation":
             self.store.authorize(auth)
             return self.store.create_assistant_conversation(auth, payload.get("pageContext"))
@@ -244,7 +251,9 @@ class InMemoryPlatformService:
                 auth, self._without_idempotency(payload), self._idempotency_key(payload)
             )
         if operation == "staff.ask_edward":
-            return await self._ask_staff_edward(auth, payload, call.request_id)
+            return await self._ask_staff_edward(
+                auth, payload, call.request_id, execution=call.assistant_execution
+            )
         if operation == "staff.create_assistant_conversation":
             return self.store.create_staff_assistant_conversation(auth)
         if operation == "staff.get_assistant_conversation_messages":
@@ -515,7 +524,12 @@ class InMemoryPlatformService:
         return self.store.get_document(auth, document_id)
 
     async def _ask_edward(
-        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+        *,
+        execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
     ) -> dict[str, Any]:
         self.store.authorize(auth)
         message = str(payload.get("message", ""))
@@ -529,6 +543,8 @@ class InMemoryPlatformService:
             conversation_id=str(conversation_id) if conversation_id else None,
             input_mode=str(payload.get("inputMode") or "text"),
             user_message=message,
+            execution_mode=execution.mode.value,
+            ignored_execution_mode_request=execution.ignored_request,
         )
         if isinstance(client_message_id, str) and client_message_id:
             replay = self.store.find_assistant_exchange_by_client_id(auth, client_message_id)
@@ -591,8 +607,8 @@ class InMemoryPlatformService:
             trace.history_source = "client_fallback" if history else "none"
         pipeline = AssistantPipeline(
             host,
-            model_composer=self._assistant_composer(auth, request_id),
-            model_planner=self._assistant_planner(auth, request_id),
+            model_composer=model_hook(execution.mode, self._assistant_composer(auth, request_id)),
+            model_planner=model_hook(execution.mode, self._assistant_planner(auth, request_id)),
         )
         result = await pipeline.execute(
             message=message,
@@ -638,7 +654,12 @@ class InMemoryPlatformService:
         return response
 
     async def _ask_staff_edward(
-        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+        *,
+        execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
     ) -> dict[str, Any]:
         """In-memory twin of the Postgres staff assistant host.
 
@@ -664,6 +685,8 @@ class InMemoryPlatformService:
             staff_member_id=auth.actor_id,
             conversation_id=str(conversation_id) if conversation_id else None,
             user_message=message,
+            execution_mode=execution.mode.value,
+            ignored_execution_mode_request=execution.ignored_request,
         )
         if isinstance(client_message_id, str) and client_message_id:
             replay = self.store.find_staff_assistant_exchange_by_client_id(auth, client_message_id)
@@ -763,8 +786,12 @@ class InMemoryPlatformService:
                 trace.history_source = "server"
             pipeline = StaffAssistantPipeline(
                 host,
-                model_composer=self._staff_assistant_composer(auth, request_id),
-                model_planner=self._staff_assistant_planner(auth, request_id),
+                model_composer=model_hook(
+                    execution.mode, self._staff_assistant_composer(auth, request_id)
+                ),
+                model_planner=model_hook(
+                    execution.mode, self._staff_assistant_planner(auth, request_id)
+                ),
             )
             result = await pipeline.execute(
                 message=message,

@@ -7,6 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from starlette.types import Lifespan
 
+from audentra.core.assistant_execution import (
+    ASSISTANT_EXECUTION_MODE_HEADER,
+    lab_execution_controls_enabled,
+)
 from audentra.core.ports import (
     BrowserAuthService,
     PlatformService,
@@ -62,12 +66,20 @@ def create_app(
     app.include_router(auth_router)
     app.include_router(router)
     install_error_handlers(app)
+    # The Lab's execution-mode header is only ever accepted where the control
+    # itself is honoured, so a deployed API never advertises it in preflight.
+    allowed_headers = list(ALLOWED_HEADERS)
+    if lab_execution_controls_enabled(
+        environment=app.state.http_settings.environment,
+        assistant_trace_debug_enabled=app.state.http_settings.assistant_trace_debug_enabled,
+    ):
+        allowed_headers.append(ASSISTANT_EXECUTION_MODE_HEADER)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(app.state.http_settings.web_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
-        allow_headers=ALLOWED_HEADERS,
+        allow_headers=allowed_headers,
         expose_headers=["X-Request-Id", "X-Correlation-Id", "X-Trace-Id"],
         max_age=600,
     )

@@ -38,6 +38,7 @@
     "eval:edward:full": "node tools/edward-eval/run.mjs --tier full --batch full",
     "eval:edward:staff": "node tools/edward-eval/run-staff.mjs",
     "eval:edward:compare": "node tools/edward-eval/compare.mjs",
+    "eval:edward:compare-modes": "node tools/edward-eval/compare-modes.mjs",
     "eval:edward:inspect": "node tools/edward-eval/inspect.mjs",
     "eval:edward:coverage": "node tools/edward-eval/coverage.mjs",
     "eval:edward:calibrate": "node tools/edward-eval/calibrate.mjs",

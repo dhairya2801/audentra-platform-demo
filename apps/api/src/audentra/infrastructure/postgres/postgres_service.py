@@ -22,6 +22,11 @@ from audentra.application.staff_workspace import (
     preview_edward,
     simulate_outreach,
 )
+from audentra.core.assistant_execution import (
+    DEFAULT_ASSISTANT_EXECUTION,
+    ResolvedAssistantExecutionMode,
+    model_hook,
+)
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
@@ -684,7 +689,9 @@ class PostgresPlatformService:
                 auth, self._path(call, "documentId", "id", "document_id"), call.request_id
             )
         if operation == "student.ask_edward":
-            return await self._ask_edward(auth, payload, call.request_id)
+            return await self._ask_edward(
+                auth, payload, call.request_id, execution=call.assistant_execution
+            )
         if operation == "student.create_assistant_conversation":
             page = _assistant_page_context(payload.get("pageContext"))
             return await portal.create_assistant_conversation(
@@ -924,7 +931,9 @@ class PostgresPlatformService:
                 call.request_id,
             )
         if operation == "staff.ask_edward":
-            return await self._ask_staff_edward(auth, payload, call.request_id)
+            return await self._ask_staff_edward(
+                auth, payload, call.request_id, execution=call.assistant_execution
+            )
         if operation == "staff.create_assistant_conversation":
             return await self._staff_assistant_repo().create_conversation(auth)
         if operation == "staff.get_assistant_conversation_messages":
@@ -1499,7 +1508,12 @@ class PostgresPlatformService:
         )
 
     async def _ask_edward(
-        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+        *,
+        execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
     ) -> JsonDict:
         message = str(payload.get("message", ""))
         page_path, page_label = _assistant_page_context(payload.get("pageContext"))
@@ -1513,6 +1527,8 @@ class PostgresPlatformService:
             conversation_id=str(conversation_id) if conversation_id else None,
             input_mode=str(payload.get("inputMode") or "text"),
             user_message=message,
+            execution_mode=execution.mode.value,
+            ignored_execution_mode_request=execution.ignored_request,
         )
 
         if isinstance(client_message_id, str) and client_message_id:
@@ -1544,8 +1560,10 @@ class PostgresPlatformService:
                 trace.history_source = "client_fallback" if history else "none"
             pipeline = AssistantPipeline(
                 self._assistant_host(auth),
-                model_composer=self._assistant_composer(auth, request_id),
-                model_planner=self._assistant_planner(auth, request_id),
+                model_composer=model_hook(
+                    execution.mode, self._assistant_composer(auth, request_id)
+                ),
+                model_planner=model_hook(execution.mode, self._assistant_planner(auth, request_id)),
             )
             result = await pipeline.execute(
                 message=message,
@@ -1813,7 +1831,12 @@ class PostgresPlatformService:
         )
 
     async def _ask_staff_edward(
-        self, auth: AuthContext, payload: Mapping[str, Any], request_id: str
+        self,
+        auth: AuthContext,
+        payload: Mapping[str, Any],
+        request_id: str,
+        *,
+        execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
     ) -> JsonDict:
         if auth.actor_type != "staff":
             raise UnauthorizedError("Staff authentication is required")
@@ -1830,6 +1853,8 @@ class PostgresPlatformService:
             staff_member_id=auth.actor_id,
             conversation_id=str(conversation_id) if conversation_id else None,
             user_message=message,
+            execution_mode=execution.mode.value,
+            ignored_execution_mode_request=execution.ignored_request,
         )
 
         if isinstance(client_message_id, str) and client_message_id:
@@ -1860,8 +1885,12 @@ class PostgresPlatformService:
                 trace.history_source = "server"
             pipeline = StaffAssistantPipeline(
                 self._staff_assistant_host(auth),
-                model_composer=self._staff_assistant_composer(auth, request_id),
-                model_planner=self._staff_assistant_planner(auth, request_id),
+                model_composer=model_hook(
+                    execution.mode, self._staff_assistant_composer(auth, request_id)
+                ),
+                model_planner=model_hook(
+                    execution.mode, self._staff_assistant_planner(auth, request_id)
+                ),
             )
             result = await pipeline.execute(
                 message=message,
