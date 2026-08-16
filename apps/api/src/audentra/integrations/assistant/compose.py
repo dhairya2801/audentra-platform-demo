@@ -634,10 +634,15 @@ def _compose_checklist(
     # The list itself renders once, below; the prose answers the question and
     # surfaces what changes how the student should read that list.
     pending = [step for step in state.remaining_steps if step.get("processingPending")]
+    # A returned submission is the student's move again — the one step that
+    # must be called out by name, because "still open" undersells it.
+    returned = [step for step in state.remaining_steps if str(step.get("status")) == "rejected"]
     if len(state.remaining_steps) == 1:
         message = (
             f"One checklist step still needs attention: {step_label(state.remaining_steps[0])}."
         )
+        if returned:
+            message += " Your earlier submission was returned, so it needs a new upload."
     else:
         message = f"{_count(len(state.remaining_steps), 'checklist step')} still need attention"
         if pending:
@@ -646,7 +651,12 @@ def _compose_checklist(
                 f"{'has' if len(pending) == 1 else 'have'} a payment processing, "
                 "so no action is needed there"
             )
-        message += ". Here's the list, in order:"
+        message += "."
+        if returned:
+            message += (
+                f" Note: {_join_titles(returned)} was returned and needs your attention again."
+            )
+        message += " Here's the list, in order:"
     block = next_steps_block(
         [
             {

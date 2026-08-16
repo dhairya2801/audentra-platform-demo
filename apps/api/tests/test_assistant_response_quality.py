@@ -171,6 +171,23 @@ def test_multiple_checklist_items_count_in_prose_list_in_block() -> None:
     assert len(steps["items"]) == 3
 
 
+def test_returned_checklist_step_is_the_named_exception() -> None:
+    checklist = {
+        "items": [
+            dict(item, **({"status": "rejected"} if index == 0 else {}))
+            for index, item in enumerate(_CHECKLIST["items"])
+        ]
+    }
+    state = _student_state(
+        {"requirements": checklist, "documents": {"items": []}},
+        ["getOnboardingChecklist"],
+    )
+    answer = compose_deterministic(_classify("What's left on my checklist?"), state)
+
+    assert "Submit your official transcript was returned" in answer.message
+    assert "needs your attention again" in answer.message
+
+
 def test_multiple_documents_prose_plus_table_without_row_duplication() -> None:
     state = _student_state(
         {"requirements": _CHECKLIST, "documents": {"items": []}},
@@ -589,6 +606,40 @@ def test_staff_cohort_aggregate_buckets_render_as_a_table() -> None:
     assert "Computer Science" not in answer.message
     table = next(block for block in answer.blocks if block["type"] == "table")
     assert len(table["rows"]) == 2
+
+
+def test_guard_catches_stops_you_from_housing_phrasing() -> None:
+    from audentra.integrations.assistant.guard import (
+        build_causal_guards,
+        guard_grounded_answer,
+    )
+
+    guards = build_causal_guards(
+        housing_gates=[
+            {"code": "enrollment_deposit_posted", "satisfied": False},
+            {"code": "official_transcript", "satisfied": False},
+        ]
+    )
+    evidence = ["Housing eligibility: blocked by earlier checklist items."]
+    invented = guard_grounded_answer(
+        answer=(
+            "Your unfinished aid verification does stop you from applying for housing right now."
+        ),
+        evidence_texts=evidence,
+        causal_guards=guards,
+    )
+    assert not invented.accepted
+    assert invented.reason_code == "invented_causation"
+    # The truthful negation of the same claim must stay acceptable.
+    negated = guard_grounded_answer(
+        answer=(
+            "Your aid verification does not stop you from applying for "
+            "housing; the deposit and transcript on your checklist come first."
+        ),
+        evidence_texts=evidence,
+        causal_guards=guards,
+    )
+    assert negated.accepted
 
 
 def test_rewrite_cannot_drop_the_hold_system_caveat() -> None:

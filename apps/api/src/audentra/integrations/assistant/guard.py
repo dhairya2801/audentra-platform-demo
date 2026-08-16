@@ -53,6 +53,11 @@ _NUMBER = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]{2,}(?:\.\d+)?\b|\b\d+(?
 _CAUSAL_CONNECTIVE = re.compile(
     r"\b(?:because|since|due to|owing to|as a result of|caused by|is blocking|"
     r"are blocking|blocks|prevents?|preventing|until|unless|once)\b"
+    # "X stops/keeps you from doing Y" asserts the same causation with the
+    # claimed cause as the sentence's subject. Only positively-inflected
+    # forms: "does not stop" must never read as a causal claim.
+    r"|\b(?:stops|stopping|keeps|keeping|(?:does|will|would|can|could) "
+    r"(?:stop|keep|prevent))\b[^.!?]{0,16}\bfrom\b"
 )
 
 _CAUSAL_TOPICS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -106,6 +111,9 @@ _REGISTRATION_OUTCOME = re.compile(
     r"|\bregistration (?:is|remains|stays) (?:currently )?"
     r"(?:blocked|closed|unavailable|not (?:open|available|possible))\b"
     r"|\byou (?:are|'re) (?:currently )?(?:blocked|prevented) from registering\b"
+    r"|\b(?:stops|stopping|prevents|preventing|keeps|keeping|"
+    r"(?:does|will|would|can|could) (?:stop|prevent|keep))\b"
+    r"[^.!?]{0,32}\bfrom\b[^.!?]{0,24}\bregister"
 )
 
 _HOUSING_OUTCOME = re.compile(
@@ -113,6 +121,12 @@ _HOUSING_OUTCOME = re.compile(
     r"(?:apply for|act on|complete|select) (?:your )?housing\b"
     r"|\bhousing (?:step|application)? ?(?:is|remains) (?:currently )?"
     r"(?:blocked|closed|unavailable|not (?:open|available|possible))\b"
+    # "…stops/keeps you from applying for housing" is the same blocked
+    # outcome with the invented cause as subject. Positive inflections only,
+    # so "does not stop you from applying" never matches.
+    r"|\b(?:stops|stopping|prevents|preventing|keeps|keeping|"
+    r"(?:does|will|would|can|could) (?:stop|prevent|keep))\b"
+    r"[^.!?]{0,32}\bfrom\b[^.!?]{0,32}\bhousing\b"
 )
 
 _DISBURSEMENT_OUTCOME = re.compile(

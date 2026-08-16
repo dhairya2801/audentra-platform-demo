@@ -403,12 +403,33 @@ class AssistantPipeline:
                     dict(usage) if isinstance(usage, Mapping) else None,
                 )
             failure_codes.append(f"written_answer_rejected:{verdict.reason_code}")
-            if verdict.reason_code != "invented_causation":
+            # Two rejection families earn the single retry, because a small
+            # rewrite usually saves an otherwise-good answer: an invented
+            # cause, and an amount/date/contact the evidence doesn't carry
+            # (a rejection here falls back to a draft that may not address
+            # the question the student actually asked).
+            feedback = {
+                "invented_causation": (
+                    "Your previous answer asserted a cause the record does not "
+                    "support. State only causes present in the evidence list."
+                ),
+                "ungrounded_number": (
+                    "Your previous answer contained an amount or number that is "
+                    "not in the verified facts. Use only numbers that appear "
+                    "there, or leave the number out."
+                ),
+                "ungrounded_date": (
+                    "Your previous answer contained a date that is not in the "
+                    "verified facts. Use only dates that appear there, or "
+                    "leave the date out."
+                ),
+                "ungrounded_contact": (
+                    "Your previous answer contained contact details that are "
+                    "not in the verified facts. Leave them out."
+                ),
+            }.get(verdict.reason_code or "")
+            if feedback is None:
                 break
-            feedback = (
-                "Your previous answer asserted a cause the record does not "
-                "support. State only causes present in the evidence list."
-            )
         return deterministic
 
 
