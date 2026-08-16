@@ -1,0 +1,83 @@
+schema_version: 1
+tenant: aster-demo
+configuration: academics
+catalog_version: 2027-2028.demo.v1
+courses:
+  - id: cs-101
+    code: CS 101
+    title: Programming Fundamentals
+    description: Problem solving, algorithms, program design, and introductory software development.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Dr. Maya Patel]
+    meeting_pattern: Mon/Wed 10:00 AM
+    availability_label: Fall and Spring
+    related_videos:
+      - id: mit-6-100l-introduction
+        title: Introduction to Computer Science and Programming Using Python
+        description: An open introductory programming lecture from MIT OpenCourseWare.
+        url: https://www.youtube.com/watch?v=xAcTmDO6NTI
+        source_label: MIT OpenCourseWare
+  - id: cs-201
+    code: CS 201
+    title: Data Structures
+    description: Abstract data types, algorithm analysis, trees, graphs, and hashing.
+    credits: 4
+    level: 200
+    prerequisites:
+      - course_code: CS 101
+        minimum_grade: C
+    instructor_names: [Prof. Jordan Kim]
+    meeting_pattern: Tue/Thu 1:30 PM
+    availability_label: Fall and Spring
+  - id: cs-230
+    code: CS 230
+    title: Computer Systems
+    description: Machine organization, operating systems, networks, and systems programming.
+    credits: 4
+    level: 200
+    prerequisites:
+      - course_code: CS 201
+        minimum_grade: C
+    instructor_names: [Dr. Elena Ramirez]
+    meeting_pattern: Mon/Wed 2:00 PM
+    availability_label: Fall
+  - id: math-151
+    code: MATH 151
+    title: Calculus I
+    description: Limits, derivatives, applications of differentiation, and an introduction to integration.
+    credits: 4
+    level: 100
+    prerequisites: []
+    instructor_names: [Prof. Owen Brooks]
+    meeting_pattern: Mon/Wed/Fri 9:00 AM
+    availability_label: Fall and Spring
+    related_videos:
+      - id: mit-18-01-calculus
+        title: Single Variable Calculus
+        description: An open single-variable calculus lecture from MIT OpenCourseWare.
+        url: https://www.youtube.com/watch?v=7K1sB05pE0A
+        source_label: MIT OpenCourseWare
+  - id: math-152
+    code: MATH 152
+    title: Calculus II
+    description: Integration, sequences, series, and parametric curves.
+    credits: 4
+    level: 100
+    prerequisites:
+      - course_code: MATH 151
+        minimum_grade: C
+    instructor_names: [Prof. Leila Hassan]
+    meeting_pattern: Tue/Thu 11:00 AM
+    availability_label: Fall and Spring
+  - id: writ-101
+    code: WRIT 101
+    title: Academic Writing Seminar
+    description: Evidence-based writing, revision, research literacy, and academic argument.
+    credits: 3
+    level: 100
+    prerequisites: []
+    instructor_names: [Dr. Nina Alvarez]
+    meeting_pattern: Fri 1:00 PM
+    availability_label: Fall and Spring

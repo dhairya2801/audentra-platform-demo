@@ -8,7 +8,7 @@ import base64
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -26,7 +26,20 @@ from audentra.infrastructure.postgres.managed_configuration_repository import (
 )
 
 from .fixture import FixtureTable, SeedFixtureError, load_demo_fixture
+from .profile import SeedProfile, seed_profile
 from .safety import assert_seed_environment
+from .synthetic_university import (
+    SYNTHETIC_CAMPUS_ID,
+    SYNTHETIC_NAMESPACE,
+    SYNTHETIC_TENANT_ID,
+    SYNTHETIC_TENANT_NAME,
+    SYNTHETIC_TENANT_SLUG,
+    RequirementDefinition,
+    SyntheticUniverseError,
+    SyntheticUniverseReport,
+    import_synthetic_university,
+    verify_synthetic_invariants,
+)
 
 _IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]*$")
 _SEED_LOCK_NAME = "audentra.demo-seed.v1"
@@ -871,17 +884,28 @@ class ColumnSpec:
 class RelationalSeedReport:
     tables: int
     rows: int
+    profile: SeedProfile = "compact"
+    synthetic: SyntheticUniverseReport | None = None
 
 
 async def seed_relational_data(
     engine: AsyncEngine,
     *,
     environment: str,
+    profile: SeedProfile | None = None,
 ) -> RelationalSeedReport:
-    """Converge deterministic demo rows inside one locked transaction."""
+    """Converge deterministic demo rows inside one locked transaction.
+
+    The compact fixture always converges. `profile="synthetic_university"`
+    additionally imports the three-thousand-student demo population into its
+    own tenant; it never replaces the compact fixture, because the fast test
+    suite reseeds that on every run.
+    """
 
     assert_seed_environment(environment)
+    resolved_profile = seed_profile(os.environ) if profile is None else profile
     fixture = load_demo_fixture()
+    synthetic: SyntheticUniverseReport | None = None
     async with engine.begin() as connection:
         await connection.execute(
             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_name, 0))"),
@@ -896,11 +920,51 @@ async def seed_relational_data(
                 primary_keys[table.name],
             )
         await _ensure_demo_seed_supplements(connection, completed_onboarding=False)
-    await provision_demo_managed_configurations(engine)
+        if resolved_profile == "synthetic_university":
+            synthetic = await _ensure_synthetic_university(connection)
+    await provision_demo_managed_configurations(
+        engine,
+        tenant_slugs=_managed_configuration_tenants(resolved_profile),
+    )
+    if synthetic is not None:
+        await _reverify_synthetic_university(engine, synthetic)
     return RelationalSeedReport(
         tables=len(fixture),
         rows=sum(len(table.rows) for table in fixture),
+        profile=resolved_profile,
+        synthetic=synthetic,
     )
+
+
+def _managed_configuration_tenants(profile: SeedProfile) -> tuple[str, ...]:
+    if profile == "synthetic_university":
+        return ("aster", "harvard", SYNTHETIC_TENANT_SLUG)
+    return ("aster", "harvard")
+
+
+async def _reverify_synthetic_university(
+    engine: AsyncEngine,
+    report: SyntheticUniverseReport,
+) -> None:
+    """Re-check the population after the managed journey has been published.
+
+    Publishing `journeys.yaml` runs `reconcile_journey_routes`, which rewrites
+    every `blocked`/`ready` requirement from the declared dependency graph. A
+    state the importer invented and the graph does not support is silently
+    corrected there, so the invariants are asserted again on the settled rows
+    rather than only on the ones the importer wrote.
+    """
+
+    async with engine.connect() as connection:
+        report.violations = await verify_synthetic_invariants(
+            connection,
+            tenant_id=SYNTHETIC_TENANT_ID,
+        )
+    if report.violations:
+        raise SyntheticUniverseError(
+            "The synthetic university violates domain invariants after journey "
+            "publication: " + "; ".join(report.violations)
+        )
 
 
 async def reset_relational_data(
@@ -909,16 +973,23 @@ async def reset_relational_data(
     environment: str,
     completed_onboarding: bool = False,
     preserve_managed_configurations: bool = True,
+    profile: SeedProfile | None = None,
 ) -> RelationalSeedReport:
     """Atomically restore the complete deterministic browser fixture.
 
     This intentionally destructive operation is guarded by the same strict
     development/test environment check as the CLI seeder and is only exposed
     through the explicitly named guided-demo endpoint.
+
+    The reset truncates, so under the synthetic profile it also re-imports the
+    demo university: a reset that silently emptied the demo tenant would be
+    worse than one that takes a few seconds longer.
     """
 
     assert_seed_environment(environment)
+    resolved_profile = seed_profile(os.environ) if profile is None else profile
     fixture = load_demo_fixture()
+    synthetic: SyntheticUniverseReport | None = None
     preserved_configurations: list[dict[str, object]] = []
     async with engine.begin() as connection:
         await connection.execute(
@@ -975,16 +1046,18 @@ async def reset_relational_data(
             connection,
             completed_onboarding=completed_onboarding,
         )
+        if resolved_profile == "synthetic_university":
+            synthetic = await _ensure_synthetic_university(connection)
+    if synthetic is not None:
+        await _reverify_synthetic_university(engine, synthetic)
     repository = PostgresManagedConfigurationRepository(engine)
     for configuration in preserved_configurations:
         tenant_id = str(configuration["tenant_id"])
-        tenant_slug = "harvard" if tenant_id == HARVARD_TENANT_ID else "aster"
+        tenant_slug = _DEMO_TENANT_SLUGS.get(tenant_id, "aster")
         await repository.rematerialize_active(
             AuthContext(
                 tenant_id=tenant_id,
-                student_id=(
-                    HARVARD_STUDENT_ID if tenant_id == HARVARD_TENANT_ID else ASTER_STUDENT_ID
-                ),
+                student_id=_demo_configuration_student(tenant_id),
                 actor_id=str(configuration["created_by"]),
                 actor_type="staff",
                 tenant_slug=tenant_slug,
@@ -994,6 +1067,8 @@ async def reset_relational_data(
     return RelationalSeedReport(
         tables=len(fixture),
         rows=sum(len(table.rows) for table in fixture),
+        profile=resolved_profile,
+        synthetic=synthetic,
     )
 
 
@@ -1037,12 +1112,13 @@ async def provision_demo_managed_configurations(
     identities = {
         "aster": (ASTER_TENANT_ID, "00000000-0000-7000-8000-000000000901"),
         "harvard": (HARVARD_TENANT_ID, HARVARD_STAFF_ID),
+        SYNTHETIC_TENANT_SLUG: (SYNTHETIC_TENANT_ID, SYNTHETIC_STAFF_ID),
     }
     for tenant_slug in tenant_slugs:
         tenant_id, staff_id = identities[tenant_slug]
         auth = AuthContext(
             tenant_id=tenant_id,
-            student_id=(ASTER_STUDENT_ID if tenant_slug == "aster" else HARVARD_STUDENT_ID),
+            student_id=_demo_configuration_student(tenant_id),
             actor_id=staff_id,
             actor_type="staff",
             tenant_slug=tenant_slug,
@@ -1070,6 +1146,327 @@ async def provision_demo_managed_configurations(
 
 def _demo_uuid(namespace: str, suffix: str) -> str:
     return f"{namespace}-0000-7000-8000-{suffix}"
+
+
+_DEMO_TENANT_SLUGS: Mapping[str, str] = {
+    ASTER_TENANT_ID: "aster",
+    HARVARD_TENANT_ID: "harvard",
+    SYNTHETIC_TENANT_ID: SYNTHETIC_TENANT_SLUG,
+}
+
+
+def _demo_configuration_student(tenant_id: str) -> str:
+    """A real student in the tenant, for the staff auth context configuration
+    publication runs under."""
+
+    if tenant_id == HARVARD_TENANT_ID:
+        return HARVARD_STUDENT_ID
+    if tenant_id == SYNTHETIC_TENANT_ID:
+        return SYNTHETIC_REFERENCE_STUDENT_ID
+    return ASTER_STUDENT_ID
+
+
+# ---------------------------------------------------------------------------
+# The synthetic demo campus
+# ---------------------------------------------------------------------------
+
+#: Office staff for the demo campus. The twenty-five academic advisers arrive
+#: with the population; these three are the enrollment offices the work board
+#: and the managed-configuration publisher act as.
+_SYNTHETIC_STAFF = (
+    DemoStaffSeed(
+        SYNTHETIC_TENANT_ID,
+        _demo_uuid(SYNTHETIC_NAMESPACE, "000000000901"),
+        "Priya Shah",
+        "priya.shah@aster-demo.example.edu",
+        "Admissions",
+    ),
+    DemoStaffSeed(
+        SYNTHETIC_TENANT_ID,
+        _demo_uuid(SYNTHETIC_NAMESPACE, "000000000902"),
+        "Marcus Lee",
+        "marcus.lee@aster-demo.example.edu",
+        "Registrar",
+    ),
+    DemoStaffSeed(
+        SYNTHETIC_TENANT_ID,
+        _demo_uuid(SYNTHETIC_NAMESPACE, "000000000903"),
+        "Elena Torres",
+        "elena.torres@aster-demo.example.edu",
+        "Student Life",
+    ),
+)
+
+SYNTHETIC_STAFF_ID = _SYNTHETIC_STAFF[0].staff_id
+
+#: The demo campus closes room selection until the deposit clears. The
+#: generator already behaves that way, and declaring it here is what makes the
+#: resulting `blocked` status survive journey reconciliation.
+_SYNTHETIC_REQUIREMENT_DEPENDENCIES: Mapping[str, tuple[str, ...]] = {
+    "housing_preference": ("enrollment_deposit",),
+}
+
+#: The generator's first persona, "Wren Halloway" (SYN-000000). Referenced by
+#: id rather than by "first student in the tenant" so the staff auth context
+#: used for configuration publication is stable across reseeds.
+SYNTHETIC_REFERENCE_STUDENT_ID = "ac2fa509-b4e3-402d-900b-ffb8440fc430"
+
+
+async def _ensure_synthetic_university(
+    connection: AsyncConnection,
+) -> SyntheticUniverseReport:
+    """Provision the demo campus and import the synthetic population into it."""
+
+    await _ensure_synthetic_tenant(connection)
+    # Bootstrap the journey only for a tenant that has none. Publishing
+    # `journeys.yaml` replaces the requirement graph with staff-managed
+    # versions under the same codes, so re-running the bootstrap afterwards
+    # would collide on (tenant, code, version) — and would overwrite the
+    # published graph if it did not.
+    if not await _has_active_journey_definition(connection, SYNTHETIC_TENANT_ID):
+        await _ensure_tenant_workflow(
+            connection,
+            tenant_id=SYNTHETIC_TENANT_ID,
+            namespace=SYNTHETIC_NAMESPACE,
+            dependency_overrides=_SYNTHETIC_REQUIREMENT_DEPENDENCIES,
+        )
+    await _clone_ai_runtime(
+        connection,
+        target_tenant_id=SYNTHETIC_TENANT_ID,
+        prompt_prefix="30000000-",
+        context_prefix="31000000-",
+        schema_prefix="32000000-",
+    )
+    await _ensure_demo_staff_and_work(
+        connection,
+        tenant_id=SYNTHETIC_TENANT_ID,
+        staff_seeds=_SYNTHETIC_STAFF,
+        work_item_seeds=(),
+    )
+    journey_definition_id, definitions = await _active_journey_requirements(
+        connection,
+        SYNTHETIC_TENANT_ID,
+    )
+    report = await import_synthetic_university(
+        connection,
+        tenant_id=SYNTHETIC_TENANT_ID,
+        journey_definition_id=journey_definition_id,
+        requirement_definitions=definitions,
+    )
+    await _ensure_default_action_rules(connection, (SYNTHETIC_TENANT_ID,))
+    return report
+
+
+async def _has_active_journey_definition(connection: AsyncConnection, tenant_id: str) -> bool:
+    result = await connection.execute(
+        text(
+            """
+            SELECT 1 FROM journey_definition_version
+            WHERE tenant_id=:tenant_id AND active=1 LIMIT 1
+            """
+        ),
+        {"tenant_id": UUID(tenant_id)},
+    )
+    return result.first() is not None
+
+
+async def _active_journey_requirements(
+    connection: AsyncConnection,
+    tenant_id: str,
+) -> tuple[UUID, dict[str, RequirementDefinition]]:
+    """The tenant's live enrollment graph, read rather than assumed.
+
+    Whichever journey definition is active owns the requirement rows students
+    are attached to — the seeder's bootstrap on a fresh tenant, the published
+    `journeys.yaml` afterwards. Reading it here is what lets the import be run
+    twice without stranding students on a superseded definition.
+    """
+
+    journey = (
+        await connection.execute(
+            text(
+                """
+                SELECT id FROM journey_definition_version
+                WHERE tenant_id=:tenant_id AND active=1
+                ORDER BY version DESC, id LIMIT 1
+                """
+            ),
+            {"tenant_id": UUID(tenant_id)},
+        )
+    ).first()
+    if journey is None:
+        raise SeedFixtureError(f"Demo tenant {tenant_id} has no active enrollment journey")
+    journey_definition_id = UUID(str(journey[0]))
+    rows = await connection.execute(
+        text(
+            """
+            SELECT definition.id, definition.code, definition.due_offset_days
+            FROM journey_requirement_definition link
+            JOIN requirement_definition_version definition
+              ON definition.id=link.requirement_definition_version_id
+             AND definition.tenant_id=:tenant_id
+            WHERE link.journey_definition_version_id=:journey_id
+            """
+        ),
+        {"tenant_id": UUID(tenant_id), "journey_id": journey_definition_id},
+    )
+    definitions = {
+        str(row["code"]): RequirementDefinition(
+            definition_id=UUID(str(row["id"])),
+            due_offset_days=(
+                None if row["due_offset_days"] is None else int(row["due_offset_days"])
+            ),
+        )
+        for row in rows.mappings().all()
+    }
+    return journey_definition_id, definitions
+
+
+async def _ensure_synthetic_tenant(connection: AsyncConnection) -> None:
+    """The demo campus tenant, its branding, campus, and housing catalogue.
+
+    Created by the seeder rather than by a migration on purpose: a migration
+    runs in production, and this tenant must not exist there.
+    """
+
+    await connection.execute(
+        text(
+            """
+            INSERT INTO tenant (id, name, slug, demo_auth_enabled, status)
+            VALUES (:id, :name, :slug, true, 'active')
+            ON CONFLICT (id) DO UPDATE SET
+              name=EXCLUDED.name,
+              demo_auth_enabled=true,
+              status='active'
+            """
+        ),
+        {
+            "id": UUID(SYNTHETIC_TENANT_ID),
+            "name": SYNTHETIC_TENANT_NAME,
+            "slug": SYNTHETIC_TENANT_SLUG,
+        },
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO tenant_portal_configuration (
+              tenant_id, display_name, legal_name, short_name,
+              logo_url, logo_alt, favicon_url,
+              primary_color, secondary_color, accent_color,
+              locale, time_zone, currency_code, country_code,
+              academic_year_label, current_term_label, default_campus_name,
+              contacts, capabilities, public_links
+            ) VALUES (
+              :tenant_id, :name, :name, 'Aster',
+              '/icon.png', :name, '/icon.png',
+              '#171717', '#F5F5F4', '#C79A3B',
+              'en-US', 'America/New_York', 'USD', 'US',
+              '2026-2027', 'Fall 2026', 'Aster Main Campus',
+              CAST(:contacts AS jsonb), CAST(:capabilities AS jsonb),
+              CAST(:public_links AS jsonb)
+            )
+            ON CONFLICT (tenant_id) DO NOTHING
+            """
+        ),
+        {
+            "tenant_id": UUID(SYNTHETIC_TENANT_ID),
+            "name": SYNTHETIC_TENANT_NAME,
+            "contacts": json.dumps(
+                {
+                    "support": {
+                        "label": "Student support",
+                        "email": "enrollment@synthetic.aster.example",
+                        "phone": None,
+                        "hours": None,
+                        "url": None,
+                    },
+                    "admissions": {
+                        "label": "Admissions",
+                        "email": "admissions@synthetic.aster.example",
+                        "phone": None,
+                        "hours": None,
+                        "url": None,
+                    },
+                    "financialAid": {
+                        "label": "Financial aid",
+                        "email": "financialaid@synthetic.aster.example",
+                        "phone": None,
+                        "hours": None,
+                        "url": None,
+                    },
+                }
+            ),
+            "capabilities": json.dumps(
+                {
+                    "studentPortal": True,
+                    "staffPortal": True,
+                    "assistant": True,
+                    "campusLife": True,
+                }
+            ),
+            "public_links": json.dumps(
+                {"institution": "/", "privacy": "/privacy", "accessibility": "/accessibility"}
+            ),
+        },
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO campus (id, tenant_id, name)
+            VALUES (:campus_id, :tenant_id, 'Aster Main Campus')
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        {"campus_id": UUID(SYNTHETIC_CAMPUS_ID), "tenant_id": UUID(SYNTHETIC_TENANT_ID)},
+    )
+    # The onboarding housing step renders the tenant's residence catalogue, and
+    # the packaged imagery is already seeded for Aster. Copying the rows keeps
+    # the step usable without a second set of media uploads.
+    await connection.execute(
+        text(
+            """
+            INSERT INTO media_asset (
+              id, tenant_id, purpose, storage_provider, storage_key, public_path,
+              mime_type, sha256, alt_text, attribution, source_url, license_name, active
+            )
+            SELECT CAST(md5(:tenant_key || CAST(source.id AS text)) AS uuid), :tenant_id,
+                   source.purpose, source.storage_provider, source.storage_key,
+                   source.public_path, source.mime_type, source.sha256,
+                   source.alt_text, source.attribution, source.source_url,
+                   source.license_name, source.active
+            FROM media_asset AS source
+            WHERE source.tenant_id = :source_tenant_id
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        {
+            "tenant_id": UUID(SYNTHETIC_TENANT_ID),
+            "tenant_key": SYNTHETIC_TENANT_ID,
+            "source_tenant_id": UUID(ASTER_TENANT_ID),
+        },
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO housing_residence_option (
+              id, tenant_id, code, name, description, amenities, media_asset_id,
+              display_order, active
+            )
+            SELECT CAST(md5(:tenant_key || CAST(source.id AS text)) AS uuid), :tenant_id,
+                   source.code, source.name, source.description, source.amenities,
+                   CAST(md5(:tenant_key || CAST(source.media_asset_id AS text)) AS uuid),
+                   source.display_order, source.active
+            FROM housing_residence_option AS source
+            WHERE source.tenant_id = :source_tenant_id
+            ON CONFLICT (id) DO NOTHING
+            """
+        ),
+        {
+            "tenant_id": UUID(SYNTHETIC_TENANT_ID),
+            "tenant_key": SYNTHETIC_TENANT_ID,
+            "source_tenant_id": UUID(ASTER_TENANT_ID),
+        },
+    )
 
 
 def _seed_interaction_type(submission_type: str) -> str:
@@ -1168,9 +1565,36 @@ async def _ensure_default_action_rules(
 async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
     """Clone the published demo AI runtime into the isolated Harvard tenant."""
 
+    await _clone_ai_runtime(
+        connection,
+        target_tenant_id=HARVARD_TENANT_ID,
+        prompt_prefix="80000000-",
+        context_prefix="81000000-",
+        schema_prefix="82000000-",
+    )
+
+
+async def _clone_ai_runtime(
+    connection: AsyncConnection,
+    *,
+    target_tenant_id: str,
+    prompt_prefix: str,
+    context_prefix: str,
+    schema_prefix: str,
+) -> None:
+    """Copy Aster's published AI runtime into another demo tenant.
+
+    Identifiers are rewritten by prefix rather than regenerated so the clone is
+    idempotent: reseeding converges on the same rows instead of stacking a new
+    prompt version on every run.
+    """
+
     tenant_parameters = {
         "source_tenant_id": UUID(ASTER_TENANT_ID),
-        "target_tenant_id": UUID(HARVARD_TENANT_ID),
+        "target_tenant_id": UUID(target_tenant_id),
+        "prompt_prefix": prompt_prefix,
+        "context_prefix": context_prefix,
+        "schema_prefix": schema_prefix,
     }
     await connection.execute(
         text(
@@ -1181,7 +1605,7 @@ async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
               published_at, created_at
             )
             SELECT
-              replace(id::text, '60000000-', '80000000-')::uuid,
+              replace(id::text, '60000000-', :prompt_prefix)::uuid,
               :target_tenant_id, operation, version, name, system_prompt,
               user_prompt_template, template_variables, status, NULL,
               published_at, created_at
@@ -1206,7 +1630,7 @@ async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
               created_by, published_at, created_at
             )
             SELECT
-              replace(id::text, '61000000-', '81000000-')::uuid,
+              replace(id::text, '61000000-', :context_prefix)::uuid,
               :target_tenant_id, operation, version, name, context_policy, status,
               NULL, published_at, created_at
             FROM ai_context_policy_version
@@ -1228,7 +1652,7 @@ async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
               created_by, published_at, created_at
             )
             SELECT
-              replace(id::text, '62000000-', '82000000-')::uuid,
+              replace(id::text, '62000000-', :schema_prefix)::uuid,
               :target_tenant_id, operation, version, name, output_schema, status,
               NULL, published_at, created_at
             FROM ai_output_schema_version
@@ -1254,14 +1678,14 @@ async def _ensure_harvard_ai_runtime(connection: AsyncConnection) -> None:
             SELECT
               :target_tenant_id,
               operation,
-              replace(prompt_template_version_id::text, '60000000-', '80000000-')::uuid,
-              replace(context_policy_version_id::text, '61000000-', '81000000-')::uuid,
+              replace(prompt_template_version_id::text, '60000000-', :prompt_prefix)::uuid,
+              replace(context_policy_version_id::text, '61000000-', :context_prefix)::uuid,
               CASE
                 WHEN output_schema_version_id IS NULL THEN NULL
                 ELSE replace(
                   output_schema_version_id::text,
                   '62000000-',
-                  '82000000-'
+                  :schema_prefix
                 )::uuid
               END,
               provider,
@@ -1316,7 +1740,17 @@ async def _ensure_tenant_workflow(
     *,
     tenant_id: str,
     namespace: str,
+    dependency_overrides: Mapping[str, tuple[str, ...]] = {},
 ) -> None:
+    """Publish the tenant's journey definition and its requirement graph.
+
+    `dependency_overrides` lets one tenant declare a prerequisite the others do
+    not. Declaring it matters: `reconcile_journey_routes` recomputes every
+    `blocked`/`ready` requirement from `depends_on_codes` alone, so a
+    prerequisite that lives only in a seeder's head is silently reverted the
+    first time the journey is reconciled.
+    """
+
     journey_definition_id = _demo_uuid(namespace, "000000000301")
     await connection.execute(
         text(
@@ -1350,7 +1784,8 @@ async def _ensure_tenant_workflow(
                 ON CONFLICT (id) DO UPDATE SET
                   flow_kind=EXCLUDED.flow_kind,
                   interaction_type=EXCLUDED.interaction_type,
-                  input_config=EXCLUDED.input_config
+                  input_config=EXCLUDED.input_config,
+                  depends_on_codes=EXCLUDED.depends_on_codes
                 """
             ),
             {
@@ -1361,7 +1796,9 @@ async def _ensure_tenant_workflow(
                 "description": definition.description,
                 "blocking": int(definition.blocking),
                 "display_order": definition.display_order,
-                "depends_on_codes": list(definition.depends_on_codes),
+                "depends_on_codes": list(
+                    dependency_overrides.get(definition.code, definition.depends_on_codes)
+                ),
                 "due_offset_days": definition.due_offset_days,
                 "submission_type": definition.submission_type,
                 "interaction_type": _seed_interaction_type(definition.submission_type),
@@ -2019,8 +2456,10 @@ async def _ensure_demo_staff_and_work(
     connection: AsyncConnection,
     *,
     tenant_id: str | None = None,
+    staff_seeds: Sequence[DemoStaffSeed] = _DEMO_STAFF,
+    work_item_seeds: Sequence[DemoWorkItemSeed] = _DEMO_WORK_ITEMS,
 ) -> None:
-    for staff in _DEMO_STAFF:
+    for staff in staff_seeds:
         if tenant_id is not None and staff.tenant_id != tenant_id:
             continue
         await connection.execute(
@@ -2042,7 +2481,7 @@ async def _ensure_demo_staff_and_work(
                 "component": staff.component,
             },
         )
-    for item in _DEMO_WORK_ITEMS:
+    for item in work_item_seeds:
         if tenant_id is not None and item.tenant_id != tenant_id:
             continue
         await connection.execute(
