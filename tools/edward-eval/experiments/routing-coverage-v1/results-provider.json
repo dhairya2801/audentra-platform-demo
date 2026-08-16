@@ -1,0 +1,2227 @@
+{
+  "summary": {
+    "augment": {
+      "cases": 16,
+      "gradedCases": 14,
+      "fullIntentCoverage": 13,
+      "experiencedCoverage": 14,
+      "missedAsks": 1,
+      "gateFired": 8,
+      "modelCalls": 2,
+      "modelTokens": 2084,
+      "meanWallMs": 62.7,
+      "p95WallMs": 5.0
+    },
+    "default": {
+      "cases": 16,
+      "gradedCases": 14,
+      "fullIntentCoverage": 6,
+      "experiencedCoverage": 8,
+      "missedAsks": 11,
+      "gateFired": 0,
+      "modelCalls": 2,
+      "modelTokens": 2084,
+      "meanWallMs": 69.0,
+      "p95WallMs": 3.9
+    },
+    "planner": {
+      "cases": 16,
+      "gradedCases": 14,
+      "fullIntentCoverage": 13,
+      "experiencedCoverage": 13,
+      "missedAsks": 1,
+      "gateFired": 7,
+      "modelCalls": 9,
+      "modelTokens": 10469,
+      "meanWallMs": 325.8,
+      "p95WallMs": 1082.1
+    }
+  },
+  "records": [
+    {
+      "id": "ss-1",
+      "category": "single-simple",
+      "mode": "default",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 3.3,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "sc-1",
+      "category": "single-complex",
+      "mode": "default",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers"
+      ],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 3.5,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mdo-1",
+      "category": "multi-explicit-operator",
+      "mode": "default",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [
+        "aid_status"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": null,
+      "modelCalls": 1,
+      "modelTokens": 2084,
+      "wallMs": 1074.9,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference. Your aid file lists 4 award(s), and 2 requirement(s) still need attention: Verification worksheet and Award acceptance.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "aid": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-1",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers"
+      ],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.9,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": false,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": true,
+      "missedAsks": [
+        "documents"
+      ]
+    },
+    {
+      "id": "mno-2",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "campus_life",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getCampusLife"
+      ],
+      "executedTools": [
+        "getCampusLife"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.8,
+      "message": "Campus life currently lists 8 club(s) and 3 upcoming event(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "account"
+      ]
+    },
+    {
+      "id": "mno-3",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.3,
+      "message": "Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": false,
+          "executed": true,
+          "answered": false
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "account"
+      ]
+    },
+    {
+      "id": "nc-1",
+      "category": "natural-compound",
+      "mode": "default",
+      "requestType": "general_question",
+      "additionalRequestTypes": [],
+      "classificationSource": "safe_fallback",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentDeadlines"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentDeadlines",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": null,
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 3.9,
+      "message": "Your next step: Pay the enrollment deposit. It unlocks the rest of enrollment.",
+      "failureCodes": [
+        "planner_model_failure",
+        "classification_fallback"
+      ],
+      "perAsk": {
+        "aid": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        },
+        "housing": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        },
+        "documents": {
+          "planned": false,
+          "executed": true,
+          "answered": false
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "aid",
+        "housing",
+        "documents"
+      ]
+    },
+    {
+      "id": "um-1",
+      "category": "unrelated-multi-intent",
+      "mode": "default",
+      "requestType": "holds_and_blockers",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.4,
+      "message": "No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "holds": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "campus"
+      ]
+    },
+    {
+      "id": "id-1",
+      "category": "implicit-dependency",
+      "mode": "default",
+      "requestType": "registration_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.4,
+      "message": "3 item(s) on your record are blocking registration: Upload an identity document, Submit your official transcript and Submit your immunization record. Clearing them is what opens registration.",
+      "failureCodes": [],
+      "perAsk": {
+        "registration": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "fu-1",
+      "category": "follow-up",
+      "mode": "default",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.1,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "am-1",
+      "category": "ambiguous",
+      "mode": "default",
+      "requestType": "enrollment_state",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.6,
+      "message": "You have accepted your admission offer for Computer Science starting Fall 2027 at Main Campus. Your enrollment checklist is 10% complete. Onboarding is in progress at the \u201coffer\u201d step. Your enrollment deposit has not been paid yet. 6 checklist item(s) are still open: Pay the enrollment deposit, Upload an identity document, Submit your official transcript and Submit your immunization record.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": []
+    },
+    {
+      "id": "ds-1",
+      "category": "direct-status",
+      "mode": "default",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.2,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "un-1",
+      "category": "unsupported",
+      "mode": "default",
+      "requestType": "unsupported_or_out_of_scope",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [],
+      "executedTools": [],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 0.2,
+      "message": "I can't share another person's contact details. I can help with your own record, or point you to the right office.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": [],
+      "refusedAsExpected": true
+    },
+    {
+      "id": "tr-1",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.4,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": false,
+          "executed": true,
+          "answered": false
+        },
+        "campus": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "account",
+        "campus"
+      ]
+    },
+    {
+      "id": "hd-1",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers"
+      ],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.9,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": false,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": true,
+      "missedAsks": [
+        "documents"
+      ]
+    },
+    {
+      "id": "dd-1",
+      "category": "multi-no-operator",
+      "mode": "default",
+      "requestType": "missing_documents",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": null,
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.9,
+      "message": "3 document(s) still need to be uploaded: Upload an identity document, Submit your official transcript and Submit your immunization record.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "deadlines": {
+          "planned": false,
+          "executed": false,
+          "answered": false
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "deadlines"
+      ]
+    },
+    {
+      "id": "ss-1",
+      "category": "single-simple",
+      "mode": "augment",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.8,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "sc-1",
+      "category": "single-complex",
+      "mode": "augment",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers"
+      ],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "housing"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.6,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mdo-1",
+      "category": "multi-explicit-operator",
+      "mode": "augment",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [
+        "aid_status"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": null,
+      "modelCalls": 1,
+      "modelTokens": 2084,
+      "wallMs": 973.2,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference. Your aid file lists 4 award(s), and 2 requirement(s) still need attention: Verification worksheet and Award acceptance.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "aid": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-1",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers",
+        "missing_documents"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "housing",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "documents"
+        ],
+        "supplements": [
+          "missing_documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.3,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-2",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "campus_life",
+      "additionalRequestTypes": [
+        "student_account"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getCampusLife",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getCampusLife",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "account",
+          "campus"
+        ],
+        "uncoveredDomains": [
+          "account"
+        ],
+        "supplements": [
+          "student_account"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.8,
+      "message": "Campus life currently lists 8 club(s) and 3 upcoming event(s). Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-3",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "document_status",
+      "additionalRequestTypes": [
+        "student_account"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "account",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "account"
+        ],
+        "supplements": [
+          "student_account"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.5,
+      "message": "Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet. Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "nc-1",
+      "category": "natural-compound",
+      "mode": "augment",
+      "requestType": "general_question",
+      "additionalRequestTypes": [
+        "aid_status",
+        "housing_status"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentDeadlines",
+        "getFinancialAidStatus",
+        "getStudentHousingStatus"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentDeadlines",
+        "getFinancialAidStatus",
+        "getStudentHousingStatus",
+        "getStudentAccountSummary",
+        "getDocumentStatuses",
+        "getStudentHousingEligibility"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 1,
+        "action": "fallback_augmented",
+        "askDomains": [
+          "aid",
+          "housing",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "aid",
+          "housing",
+          "documents"
+        ],
+        "supplements": [
+          "aid_status",
+          "housing_status"
+        ],
+        "droppedDomains": [
+          "documents"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 5.0,
+      "message": "Your next step: Pay the enrollment deposit. It unlocks the rest of enrollment. Your aid file lists 4 award(s), and 2 requirement(s) still need attention: Verification worksheet and Award acceptance. Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference.",
+      "failureCodes": [
+        "planner_model_failure",
+        "classification_fallback"
+      ],
+      "perAsk": {
+        "aid": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": false,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": true,
+      "missedAsks": [
+        "documents"
+      ]
+    },
+    {
+      "id": "um-1",
+      "category": "unrelated-multi-intent",
+      "mode": "augment",
+      "requestType": "holds_and_blockers",
+      "additionalRequestTypes": [
+        "campus_life"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getEnrollmentHolds",
+        "getCampusLife"
+      ],
+      "executedTools": [
+        "getEnrollmentHolds",
+        "getCampusLife",
+        "getStudentAccountSummary",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "campus"
+        ],
+        "uncoveredDomains": [
+          "campus"
+        ],
+        "supplements": [
+          "campus_life"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.9,
+      "message": "No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Campus life currently lists 8 club(s) and 3 upcoming event(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "holds": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "id-1",
+      "category": "implicit-dependency",
+      "mode": "augment",
+      "requestType": "registration_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "registration"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.6,
+      "message": "3 item(s) on your record are blocking registration: Upload an identity document, Submit your official transcript and Submit your immunization record. Clearing them is what opens registration.",
+      "failureCodes": [],
+      "perAsk": {
+        "registration": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "fu-1",
+      "category": "follow-up",
+      "mode": "augment",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "housing"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.4,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "am-1",
+      "category": "ambiguous",
+      "mode": "augment",
+      "requestType": "enrollment_state",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered"
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.4,
+      "message": "You have accepted your admission offer for Computer Science starting Fall 2027 at Main Campus. Your enrollment checklist is 10% complete. Onboarding is in progress at the \u201coffer\u201d step. Your enrollment deposit has not been paid yet. 6 checklist item(s) are still open: Pay the enrollment deposit, Upload an identity document, Submit your official transcript and Submit your immunization record.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": []
+    },
+    {
+      "id": "ds-1",
+      "category": "direct-status",
+      "mode": "augment",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.3,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "un-1",
+      "category": "unsupported",
+      "mode": "augment",
+      "requestType": "unsupported_or_out_of_scope",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [],
+      "executedTools": [],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered"
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 0.2,
+      "message": "I can't share another person's contact details. I can help with your own record, or point you to the right office.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": [],
+      "refusedAsExpected": true
+    },
+    {
+      "id": "tr-1",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "document_status",
+      "additionalRequestTypes": [
+        "student_account",
+        "campus_life"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds",
+        "getCampusLife"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds",
+        "getCampusLife"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "account",
+          "campus",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "account",
+          "campus"
+        ],
+        "supplements": [
+          "student_account",
+          "campus_life"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.2,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet. Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet. Campus life currently lists 8 club(s) and 3 upcoming event(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "hd-1",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers",
+        "missing_documents"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "housing",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "documents"
+        ],
+        "supplements": [
+          "missing_documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 2.9,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "dd-1",
+      "category": "multi-no-operator",
+      "mode": "augment",
+      "requestType": "missing_documents",
+      "additionalRequestTypes": [
+        "deadlines"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentDeadlines"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentDeadlines",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "augmented",
+        "askDomains": [
+          "documents",
+          "deadlines"
+        ],
+        "uncoveredDomains": [
+          "deadlines"
+        ],
+        "supplements": [
+          "deadlines"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.7,
+      "message": "3 document(s) still need to be uploaded: Upload an identity document, Submit your official transcript and Submit your immunization record. You have 9 upcoming deadline(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "deadlines": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "ss-1",
+      "category": "single-simple",
+      "mode": "planner",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.2,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "sc-1",
+      "category": "single-complex",
+      "mode": "planner",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers"
+      ],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentAccountSummary",
+        "getDocumentStatuses"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "housing"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.8,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mdo-1",
+      "category": "multi-explicit-operator",
+      "mode": "planner",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [
+        "aid_status"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getFinancialAidStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": null,
+      "modelCalls": 1,
+      "modelTokens": 2084,
+      "wallMs": 927.2,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference. Your aid file lists 4 award(s), and 2 requirement(s) still need attention: Verification worksheet and Award acceptance.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "aid": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-1",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers",
+        "missing_documents"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 2,
+        "action": "augmented",
+        "askDomains": [
+          "housing",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "documents"
+        ],
+        "supplements": [
+          "missing_documents"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 3.7,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [
+        "planner_model_failure"
+      ],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-2",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "student_account",
+      "additionalRequestTypes": [
+        "campus_life"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getStudentAccountSummary",
+        "getCampusLife"
+      ],
+      "executedTools": [
+        "getStudentAccountSummary",
+        "getCampusLife"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 1081,
+        "action": "planner_plan_accepted",
+        "askDomains": [
+          "account",
+          "campus"
+        ],
+        "uncoveredDomains": [
+          "account"
+        ],
+        "supplements": [
+          "student_account"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 2088,
+      "wallMs": 1082.1,
+      "message": "Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet. Campus life currently lists 8 club(s) and 3 upcoming event(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "mno-3",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "document_status",
+      "additionalRequestTypes": [
+        "student_account"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary",
+        "getEnrollmentHolds"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 2,
+        "action": "augmented",
+        "askDomains": [
+          "account",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "account"
+        ],
+        "supplements": [
+          "student_account"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 4.1,
+      "message": "Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet. Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet.",
+      "failureCodes": [
+        "planner_model_failure"
+      ],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "nc-1",
+      "category": "natural-compound",
+      "mode": "planner",
+      "requestType": "enrollment_state",
+      "additionalRequestTypes": [
+        "aid_status",
+        "housing_status"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getEnrollmentState",
+        "getFinancialAidStatus",
+        "getStudentHousingStatus"
+      ],
+      "executedTools": [
+        "getEnrollmentState",
+        "getFinancialAidStatus",
+        "getStudentHousingStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": null,
+      "modelCalls": 1,
+      "modelTokens": 2106,
+      "wallMs": 1001.9,
+      "message": "You have accepted your admission offer for Computer Science starting Fall 2027 at Main Campus. Your enrollment checklist is 10% complete. Onboarding is in progress at the \u201coffer\u201d step. Your enrollment deposit has not been paid yet. Your aid file lists 4 award(s), and 2 requirement(s) still need attention: Verification worksheet and Award acceptance. Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference.",
+      "failureCodes": [],
+      "perAsk": {
+        "aid": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": false,
+          "executed": false,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": false,
+      "experiencedCoverage": false,
+      "missedAsks": [
+        "documents"
+      ]
+    },
+    {
+      "id": "um-1",
+      "category": "unrelated-multi-intent",
+      "mode": "planner",
+      "requestType": "holds_and_blockers",
+      "additionalRequestTypes": [
+        "campus_life"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getEnrollmentHolds",
+        "getCampusLife"
+      ],
+      "executedTools": [
+        "getEnrollmentHolds",
+        "getCampusLife",
+        "getStudentAccountSummary",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 2,
+        "action": "augmented",
+        "askDomains": [
+          "campus"
+        ],
+        "uncoveredDomains": [
+          "campus"
+        ],
+        "supplements": [
+          "campus_life"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 2.9,
+      "message": "No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Campus life currently lists 8 club(s) and 3 upcoming event(s).",
+      "failureCodes": [
+        "planner_model_failure"
+      ],
+      "perAsk": {
+        "holds": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "id-1",
+      "category": "implicit-dependency",
+      "mode": "planner",
+      "requestType": "registration_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getRegistrationStatus",
+        "getEnrollmentHolds",
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "registration"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.1,
+      "message": "3 item(s) on your record are blocking registration: Upload an identity document, Submit your official transcript and Submit your immunization record. Clearing them is what opens registration.",
+      "failureCodes": [],
+      "perAsk": {
+        "registration": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "fu-1",
+      "category": "follow-up",
+      "mode": "planner",
+      "requestType": "housing_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getStudentHousingStatus"
+      ],
+      "executedTools": [
+        "getStudentHousingStatus",
+        "getStudentHousingEligibility",
+        "getEnrollmentHolds"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "housing"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 0.8,
+      "message": "Housing is locked right now because of earlier checklist items \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record \u2014 not because of anything on the housing side itself. Clear those and the housing step opens for you to pick a preference.",
+      "failureCodes": [],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "am-1",
+      "category": "ambiguous",
+      "mode": "planner",
+      "requestType": "enrollment_state",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getEnrollmentState",
+        "getOnboardingChecklist",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered"
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 1.0,
+      "message": "You have accepted your admission offer for Computer Science starting Fall 2027 at Main Campus. Your enrollment checklist is 10% complete. Onboarding is in progress at the \u201coffer\u201d step. Your enrollment deposit has not been paid yet. 6 checklist item(s) are still open: Pay the enrollment deposit, Upload an identity document, Submit your official transcript and Submit your immunization record.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": []
+    },
+    {
+      "id": "ds-1",
+      "category": "direct-status",
+      "mode": "planner",
+      "requestType": "document_status",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered",
+        "askDomains": [
+          "documents"
+        ]
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 0.9,
+      "message": "Your transcript document has not been submitted yet (checklist item: Submit your official transcript). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "un-1",
+      "category": "unsupported",
+      "mode": "planner",
+      "requestType": "unsupported_or_out_of_scope",
+      "additionalRequestTypes": [],
+      "classificationSource": "deterministic",
+      "selectedTools": [],
+      "executedTools": [],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 0,
+        "action": "fully_covered"
+      },
+      "modelCalls": 0,
+      "modelTokens": 0,
+      "wallMs": 0.1,
+      "message": "I can't share another person's contact details. I can help with your own record, or point you to the right office.",
+      "failureCodes": [],
+      "perAsk": {},
+      "fullIntentCoverage": null,
+      "experiencedCoverage": null,
+      "missedAsks": [],
+      "refusedAsExpected": true
+    },
+    {
+      "id": "tr-1",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "student_account",
+      "additionalRequestTypes": [
+        "campus_life",
+        "document_status"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getStudentAccountSummary",
+        "getCampusLife",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "executedTools": [
+        "getStudentAccountSummary",
+        "getCampusLife",
+        "getDocumentStatuses",
+        "getOnboardingChecklist"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 1154,
+        "action": "planner_plan_accepted",
+        "askDomains": [
+          "account",
+          "campus",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "account",
+          "campus"
+        ],
+        "supplements": [
+          "student_account",
+          "campus_life"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 2100,
+      "wallMs": 1155.5,
+      "message": "Your remaining balance is $17,005. Your $500 enrollment deposit has not been paid yet. Campus life currently lists 8 club(s) and 3 upcoming event(s). Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [],
+      "perAsk": {
+        "account": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "campus": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "hd-1",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "housing_eligibility",
+      "additionalRequestTypes": [
+        "holds_and_blockers",
+        "missing_documents"
+      ],
+      "classificationSource": "coverage_gate",
+      "selectedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses"
+      ],
+      "executedTools": [
+        "getStudentHousingEligibility",
+        "getStudentHousingStatus",
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getDocumentStatuses",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 2,
+        "action": "augmented",
+        "askDomains": [
+          "housing",
+          "documents"
+        ],
+        "uncoveredDomains": [
+          "documents"
+        ],
+        "supplements": [
+          "missing_documents"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 0,
+      "wallMs": 3.5,
+      "message": "You can't act on housing yet: 4 earlier item(s) on your checklist come first \u2014 Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. These are the only items holding it back. No official hold exists \u2014 the university operates no registrar hold system. What you do have is 4 item(s) blocking progress: Enrollment deposit not posted, Upload an identity document, Submit your official transcript and Submit your immunization record. Each item below shows what clears it. Here's where your documents stand: Upload an identity document, Submit your official transcript and Submit your immunization record not submitted yet.",
+      "failureCodes": [
+        "planner_model_failure"
+      ],
+      "perAsk": {
+        "housing": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    },
+    {
+      "id": "dd-1",
+      "category": "multi-no-operator",
+      "mode": "planner",
+      "requestType": "missing_documents",
+      "additionalRequestTypes": [
+        "deadlines"
+      ],
+      "classificationSource": "model_plan",
+      "selectedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentDeadlines"
+      ],
+      "executedTools": [
+        "getOnboardingChecklist",
+        "getDocumentStatuses",
+        "getStudentDeadlines",
+        "getStudentAccountSummary"
+      ],
+      "gate": {
+        "stage": "coverage_gate",
+        "durationMs": 1020,
+        "action": "planner_plan_accepted",
+        "askDomains": [
+          "documents",
+          "deadlines"
+        ],
+        "uncoveredDomains": [
+          "deadlines"
+        ],
+        "supplements": [
+          "deadlines"
+        ]
+      },
+      "modelCalls": 1,
+      "modelTokens": 2091,
+      "wallMs": 1025.0,
+      "message": "3 document(s) still need to be uploaded: Upload an identity document, Submit your official transcript and Submit your immunization record. You have 9 upcoming deadline(s).",
+      "failureCodes": [],
+      "perAsk": {
+        "documents": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        },
+        "deadlines": {
+          "planned": true,
+          "executed": true,
+          "answered": true
+        }
+      },
+      "fullIntentCoverage": true,
+      "experiencedCoverage": true,
+      "missedAsks": []
+    }
+  ]
+}

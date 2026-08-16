@@ -20,6 +20,12 @@ from typing import Any
 from audentra.integrations.assistant.blocks import render_blocks_as_text
 from audentra.integrations.assistant.classify import Classification, classify
 from audentra.integrations.assistant.compose import ComposedAnswer, compose_deterministic
+from audentra.integrations.assistant.coverage import (
+    assess_request_coverage,
+    augment_classification,
+    plan_covers_domains,
+    resolve_coverage_gate_mode,
+)
 from audentra.integrations.assistant.derive import DerivedState, derive_student_state
 from audentra.integrations.assistant.guard import build_causal_guards, guard_grounded_answer
 from audentra.integrations.assistant.planner import (
@@ -64,12 +70,18 @@ class AssistantPipeline:
         model_planner: ModelPlanner | None = None,
         tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
         now: Callable[[], datetime] | None = None,
+        coverage_gate: str | None = None,
     ) -> None:
         self._host = host
         self._model_composer = model_composer
         self._model_planner = model_planner
         self._tool_timeout_seconds = tool_timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
+        # EXPERIMENTAL, off by default: the full-request coverage gate. None
+        # defers to the AUDENTRA_EXPERIMENTAL_COVERAGE_GATE env flag so the
+        # eval host can A/B it; production wiring passes nothing and sets
+        # nothing, so production routing is unchanged.
+        self._coverage_gate = resolve_coverage_gate_mode(coverage_gate)
 
     async def execute(
         self,
@@ -105,57 +117,81 @@ class AssistantPipeline:
         classification = classify(request)
         tool_selection_source = "deterministic" if classification is not None else None
         planned_tools: list[str] | None = None
+        # EXPERIMENTAL coverage gate (off in production): a confident
+        # deterministic classification may still cover only part of a
+        # compound question. When the request asks about domains the selected
+        # reads will not answer, widen the route — deterministically, or via
+        # the model planner when that mode is on and a planner exists.
+        if classification is not None and self._coverage_gate != "off":
+            gate_started = time.perf_counter()
+            assessment = assess_request_coverage(request, classification)
+            gate_action: str | None = "fully_covered"
+            if assessment.uncovered_domains:
+                gate_action = None
+                if (
+                    self._coverage_gate == "planner"
+                    and self._model_planner is not None
+                    and not request.is_mutation_request
+                ):
+                    validated = await self._invoke_model_planner(
+                        request, failure_codes, trace, detail="coverage_gate"
+                    )
+                    if validated is not None and plan_covers_domains(
+                        validated[1], assessment.uncovered_domains
+                    ):
+                        classification, planned_tools = validated
+                        tool_selection_source = "model_plan"
+                        gate_action = "planner_plan_accepted"
+                if gate_action is None:
+                    classification = augment_classification(classification, assessment)
+                    tool_selection_source = "coverage_gate"
+                    gate_action = "augmented"
+            if trace is not None:
+                trace.add_stage(
+                    "coverage_gate",
+                    (time.perf_counter() - gate_started) * 1_000,
+                    action=gate_action,
+                    askDomains=list(assessment.ask_domains) or None,
+                    uncoveredDomains=list(assessment.uncovered_domains) or None,
+                    supplements=list(assessment.supplements) or None,
+                    droppedDomains=list(assessment.dropped_domains) or None,
+                )
         if (
             classification is None
             and self._model_planner is not None
             and not request.is_mutation_request
         ):
-            planner_started = time.perf_counter()
-            planner_outcome = "invalid_plan"
-            try:
-                candidate = await self._model_planner(
-                    message=request.resolved_text,
-                    page_label=request.page_label,
-                    page_path=request.page_path,
-                )
-            except Exception:
-                candidate = None
-                planner_outcome = "model_error"
-                failure_codes.append("planner_model_failure")
-            validated = validate_model_tool_plan(candidate) if candidate is not None else None
-            # A planner may misread a bare follow-up ("Why?") as out of scope;
-            # with in-scope conversation behind it, the safe fallback's broad
-            # reads answer better than a refusal ever can.
-            if (
-                validated is not None
-                and validated[0].request_type == "unsupported_or_out_of_scope"
-                and request.is_follow_up
-            ):
-                validated = None
-                planner_outcome = "unsupported_on_follow_up"
+            validated = await self._invoke_model_planner(request, failure_codes, trace)
             if validated is not None:
                 classification, planned_tools = validated
                 tool_selection_source = "model_plan"
-                planner_outcome = "accepted"
-            if trace is not None:
-                planner_usage = candidate.get("usage") if isinstance(candidate, Mapping) else None
-                planner_model = candidate.get("model") if isinstance(candidate, Mapping) else None
-                planner_provider = (
-                    candidate.get("provider") if isinstance(candidate, Mapping) else None
-                )
-                trace.add_model_call(
-                    operation="assistant_planner",
-                    attempt=1,
-                    duration_ms=(time.perf_counter() - planner_started) * 1_000,
-                    outcome=planner_outcome,
-                    provider=str(planner_provider) if planner_provider else None,
-                    model=planner_model if isinstance(planner_model, str) else None,
-                    usage=planner_usage if isinstance(planner_usage, Mapping) else None,
-                )
         if classification is None:
             classification = Classification("general_question", 0.5, source="safe_fallback")
             tool_selection_source = tool_selection_source or "safe_fallback"
             failure_codes.append("classification_fallback")
+            # EXPERIMENTAL: the safe fallback's broad checklist read is the
+            # weakest route of all for a compound question — with the gate on,
+            # widen it with the domains the request actually named ("show my
+            # housing and aid status" gets its housing and aid reads even with
+            # no model planner available).
+            if self._coverage_gate != "off":
+                gate_started = time.perf_counter()
+                assessment = assess_request_coverage(
+                    request, classification, allow_exempt_primary=True
+                )
+                if assessment.supplements:
+                    classification = augment_classification(classification, assessment)
+                    tool_selection_source = "coverage_gate"
+                if trace is not None:
+                    trace.add_stage(
+                        "coverage_gate",
+                        (time.perf_counter() - gate_started) * 1_000,
+                        action="fallback_augmented" if assessment.supplements else "fallback_bare",
+                        askDomains=list(assessment.ask_domains) or None,
+                        uncoveredDomains=list(assessment.uncovered_domains) or None,
+                        supplements=list(assessment.supplements) or None,
+                        droppedDomains=list(assessment.dropped_domains) or None,
+                    )
 
         selected = planned_tools if planned_tools is not None else select_tool_reads(classification)
         if trace is not None:
@@ -281,6 +317,57 @@ class AssistantPipeline:
             derived=state,
             failure_codes=failure_codes,
         )
+
+    async def _invoke_model_planner(
+        self,
+        request: Any,
+        failure_codes: list[str],
+        trace: AssistantTurnTrace | None,
+        detail: str | None = None,
+    ) -> tuple[Classification, list[str]] | None:
+        """One traced planner call, validated; shared by the classification
+        fallback and the experimental coverage gate so both record identically."""
+
+        planner_started = time.perf_counter()
+        planner_outcome = "invalid_plan"
+        try:
+            candidate = await self._model_planner(  # type: ignore[misc]
+                message=request.resolved_text,
+                page_label=request.page_label,
+                page_path=request.page_path,
+            )
+        except Exception:
+            candidate = None
+            planner_outcome = "model_error"
+            failure_codes.append("planner_model_failure")
+        validated = validate_model_tool_plan(candidate) if candidate is not None else None
+        # A planner may misread a bare follow-up ("Why?") as out of scope;
+        # with in-scope conversation behind it, the safe fallback's broad
+        # reads answer better than a refusal ever can.
+        if (
+            validated is not None
+            and validated[0].request_type == "unsupported_or_out_of_scope"
+            and request.is_follow_up
+        ):
+            validated = None
+            planner_outcome = "unsupported_on_follow_up"
+        if validated is not None:
+            planner_outcome = "accepted"
+        if trace is not None:
+            planner_usage = candidate.get("usage") if isinstance(candidate, Mapping) else None
+            planner_model = candidate.get("model") if isinstance(candidate, Mapping) else None
+            planner_provider = candidate.get("provider") if isinstance(candidate, Mapping) else None
+            trace.add_model_call(
+                operation="assistant_planner",
+                attempt=1,
+                duration_ms=(time.perf_counter() - planner_started) * 1_000,
+                outcome=planner_outcome,
+                provider=str(planner_provider) if planner_provider else None,
+                model=planner_model if isinstance(planner_model, str) else None,
+                usage=planner_usage if isinstance(planner_usage, Mapping) else None,
+                detail=detail,
+            )
+        return validated
 
     async def _maybe_rewrite(
         self,
