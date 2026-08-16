@@ -1979,6 +1979,12 @@ export type AssistantResponseBlock =
       caption?: string;
       columns: AssistantBlockTableColumn[];
       rows: Record<string, string>[];
+      /**
+       * Read-only portal route per row, aligned by index with `rows` (null
+       * for rows without a destination); renderers link the row's first cell.
+       * Never an action or an external link.
+       */
+      rowHrefs?: (string | null)[];
     }
   | {
       type: "next_steps";

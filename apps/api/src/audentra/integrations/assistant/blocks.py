@@ -65,6 +65,7 @@ def table_block(
     rows: Sequence[Mapping[str, str]],
     *,
     caption: str | None = None,
+    row_hrefs: Sequence[str | None] | None = None,
 ) -> JsonDict:
     cleaned_columns = [
         {
@@ -96,7 +97,55 @@ def table_block(
     }
     if caption:
         block["caption"] = caption
+    if row_hrefs is not None:
+        # Same rule as list-item hrefs: an internal portal route or nothing.
+        cleaned_hrefs: list[str | None] = [
+            href if isinstance(href, str) and href.startswith("/") else None
+            for href in row_hrefs[: len(cleaned_rows)]
+        ]
+        cleaned_hrefs.extend([None] * (len(cleaned_rows) - len(cleaned_hrefs)))
+        if any(cleaned_hrefs):
+            block["rowHrefs"] = cleaned_hrefs
     return block
+
+
+def describe_blocks_for_prompt(blocks: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per non-text block, for the rewrite model's context.
+
+    The rewrite model writes the prose that renders *above* these blocks, so
+    it needs to know a table or list is already carrying the collection —
+    shape and size only, never the row contents, which would invite
+    re-listing them.
+    """
+
+    lines: list[str] = []
+    for block in blocks:
+        kind = str(block.get("type") or "")
+        if kind in {"", "text"}:
+            continue
+        if kind == "table":
+            rows = block.get("rows") or []
+            columns = ", ".join(str(column.get("label", "")) for column in block.get("columns", []))
+            name = str(block.get("caption") or "").strip()
+            lines.append(
+                f"A table{f' “{name}”' if name else ''} with {len(rows)} row(s)"
+                + (f" (columns: {columns})" if columns else "")
+                + "."
+            )
+        elif kind in {"bullet_list", "numbered_list", "next_steps"}:
+            items = block.get("items") or []
+            noun = "a next-steps list" if kind == "next_steps" else "a list"
+            name = str(block.get("title") or "").strip()
+            lines.append(
+                f"{noun[0].upper()}{noun[1:]}{f' “{name}”' if name else ''} "
+                f"with {len(items)} item(s)."
+            )
+        elif kind == "draft":
+            channel = str(block.get("channel") or "message")
+            lines.append(f"A reviewable {channel} draft panel.")
+        else:
+            lines.append(f"A {kind} block.")
+    return lines
 
 
 def render_blocks_as_text(blocks: Sequence[Mapping[str, Any]]) -> str:
