@@ -70,6 +70,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getStudentBlockers",
         "getStudentDeadlines",
     ),
+    # Cohort work is not student-scoped: these must never wait on a referent.
+    "cohort_search": ("findStudents",),
+    "cohort_aggregate": ("summarizeStudents",),
     "student_missing_items": ("getStudentRequirements", "getStudentDocuments"),
     "student_blockers": (
         "getStudentBlockers",
@@ -109,6 +112,11 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
 # are conspicuously absent — the pipeline binds those.
 _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "searchStudents": ("query", "program", "limit"),
+    # Cohort selection is not identity: the filter is validated against the
+    # domain vocabulary and the tenant stays server-bound, so a model may
+    # propose one.
+    "findStudents": ("filter", "limit"),
+    "summarizeStudents": ("filter", "groupBy", "limit"),
     "getStudentCommunicationHistory": ("channel",),
     "getStudentTimeline": ("limit",),
     "getStudentsNeedingAttention": ("limit",),

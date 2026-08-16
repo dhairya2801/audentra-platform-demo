@@ -235,7 +235,7 @@ class StaffAssistantPipeline:
 
         if planned_calls is None:
             planned_calls = [
-                PlannedToolCall(tool=tool)
+                PlannedToolCall(tool=tool, arguments=_cohort_arguments(tool, classification))
                 for tool in select_staff_tools(classification, student_resolved=student_resolved)
             ]
         planned_calls = await self._bind_identity_arguments(
@@ -679,3 +679,21 @@ def _receipt_sources(receipts: Sequence[Mapping[str, Any]]) -> list[JsonDict]:
             seen.add(source)
             unique.append({"source": source})
     return unique
+
+
+def _cohort_arguments(tool: str, classification: StaffClassification) -> JsonDict:
+    """Carry a recognised cohort selection onto its tool call.
+
+    Only the cohort tools take these, and only from the classification — the
+    filter is derived from the staff member's own words, never from a model
+    guess about who they meant.
+    """
+
+    if tool == "findStudents":
+        return {"filter": dict(classification.cohort_filter or {})}
+    if tool == "summarizeStudents":
+        return {
+            "filter": dict(classification.cohort_filter or {}),
+            "groupBy": classification.cohort_group_by or "offer_status",
+        }
+    return {}

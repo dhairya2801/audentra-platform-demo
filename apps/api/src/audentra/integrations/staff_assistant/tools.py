@@ -22,6 +22,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from audentra.domain.student_cohort import (
+    DEFAULT_COHORT_PAGE_SIZE,
+    build_cohort_filter,
+)
+from audentra.domain.student_state import AID_DOCUMENT_SATISFIED_STATUSES
 from audentra.integrations.staff_assistant.catalog import (
     STAFF_RECEIPT_SOURCES,
     ToolArgumentError,
@@ -259,6 +264,40 @@ async def _tool_search_students(
     )
 
 
+async def _tool_find_students(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    """A cohort, with the true total behind the returned page.
+
+    The page is bounded, so the answer must never present `items` as the whole
+    population: `total` and `truncated` are what a staff user needs to know
+    they are looking at a sample.
+    """
+
+    result = await _primitive(
+        host,
+        "find_students",
+        cohort=arguments["filter"],
+        limit=int(arguments.get("limit") or DEFAULT_COHORT_PAGE_SIZE),
+    )
+    return dict(result)
+
+
+async def _tool_summarize_students(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    cohort = arguments.get("filter") or build_cohort_filter({})
+    return dict(
+        await _primitive(
+            host,
+            "summarize_students",
+            cohort=cohort,
+            group_by=str(arguments["groupBy"]),
+            limit=int(arguments.get("limit") or 20),
+        )
+    )
+
+
 async def _tool_student_summary(
     host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
 ) -> JsonDict:
@@ -373,7 +412,9 @@ async def _tool_student_deadlines(
             financials = {}
         for raw in _sequence(_mapping(financials).get("requiredDocuments")):
             entry = _mapping(raw)
-            if entry.get("dueAt") and str(entry.get("status")) not in {"received", "waived"}:
+            if entry.get("dueAt") and str(entry.get("status")) not in (
+                AID_DOCUMENT_SATISFIED_STATUSES
+            ):
                 deadlines.append(
                     {
                         "title": str(entry.get("title") or "Financial aid document"),
@@ -683,6 +724,8 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     str, Callable[[StaffAssistantToolHost, JsonDict, datetime], Awaitable[JsonDict]]
 ] = {
     "searchStudents": _tool_search_students,
+    "findStudents": _tool_find_students,
+    "summarizeStudents": _tool_summarize_students,
     "getStudentStaffSummary": _tool_student_summary,
     "getStudentRequirements": _tool_student_requirements,
     "getStudentDocuments": _tool_student_documents,

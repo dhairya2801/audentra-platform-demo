@@ -40,6 +40,9 @@ class StaffDerivedState:
     timeline: list[JsonDict] = field(default_factory=list)
     ownership: JsonDict | None = None
     open_work: list[JsonDict] = field(default_factory=list)
+    # Cohort reads.
+    cohort: JsonDict | None = None
+    cohort_summary: JsonDict | None = None
     # Operational reads.
     attention: JsonDict | None = None
     queue: JsonDict | None = None
@@ -136,6 +139,14 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     ownership = reads.get("getStudentOwnership")
     if ownership:
         state.ownership = dict(ownership)
+
+    cohort = reads.get("findStudents")
+    if cohort:
+        state.cohort = dict(cohort)
+
+    cohort_summary = reads.get("summarizeStudents")
+    if cohort_summary:
+        state.cohort_summary = dict(cohort_summary)
 
     attention = reads.get("getStudentsNeedingAttention")
     if attention:

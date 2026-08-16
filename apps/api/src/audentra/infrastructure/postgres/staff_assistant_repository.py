@@ -34,6 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError
+from audentra.domain.student_cohort import (
+    DEFAULT_COHORT_PAGE_SIZE,
+    CohortFilter,
+    CohortResult,
+    bounded_page_size,
+    validate_group_by,
+)
 
 JsonDict = dict[str, Any]
 
@@ -295,6 +302,493 @@ class PostgresStaffAssistantRepository:
             WHERE journey.tenant_id = student.tenant_id
               AND journey.student_id = student.id
         """
+
+    # ------------------------------------------------------------------
+    # Cohort queries (list / count / group), one selection definition
+    # ------------------------------------------------------------------
+
+    def _cohort_predicates(self, cohort: CohortFilter) -> tuple[list[str], JsonDict]:
+        """Translate a validated filter into SQL predicates over canonical rows.
+
+        Every branch here reads the same tables the portal renders from. The
+        list, the count, and every grouping share this one function, so a staff
+        user can never be told "42 students" by one call and shown 39 by the
+        next.
+        """
+
+        onboarding = self._table("student_onboarding")
+        offer = self._table("admission_offer")
+        program = self._table("program")
+        journey = self._table("enrollment_journey")
+        requirement = self._table("student_requirement")
+        definition = self._table("requirement_definition_version")
+        document = self._table("document_record")
+        aid_document = self._table("financial_document_requirement")
+        work_item = self._table("staff_work_item")
+        credential = self._table("credential_account")
+        done = ", ".join(f"'{status}'" for status in _DONE_REQUIREMENT_STATUSES)
+
+        clauses: list[str] = []
+        params: JsonDict = {}
+
+        if cohort.query:
+            tokens = [token for token in re.split(r"\s+", cohort.query.strip()) if token][:5]
+            for index, token in enumerate(tokens):
+                key = f"cohort_token_{index}"
+                params[key] = f"%{_escape_like(token)}%"
+                clauses.append(
+                    f"(person.first_name ILIKE :{key} ESCAPE '\\'"
+                    f" OR person.last_name ILIKE :{key} ESCAPE '\\'"
+                    f" OR COALESCE(profile.preferred_name, person.preferred_name, '')"
+                    f" ILIKE :{key} ESCAPE '\\'"
+                    f" OR EXISTS (SELECT 1 FROM {credential} AS account"
+                    f"   WHERE account.tenant_id = student.tenant_id"
+                    f"     AND account.student_id = student.id"
+                    f"     AND account.email_normalized ILIKE :{key} ESCAPE '\\'))"
+                )
+
+        if cohort.class_year is not None:
+            params["cohort_class_year"] = cohort.class_year
+            clauses.append("student.class_year = :cohort_class_year")
+
+        if cohort.program:
+            params["cohort_program"] = f"%{_escape_like(cohort.program)}%"
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM {offer} AS o JOIN {program} AS p"
+                f"   ON p.id = o.program_id AND p.tenant_id = o.tenant_id"
+                f" WHERE o.tenant_id = student.tenant_id AND o.student_id = student.id"
+                f"   AND p.name ILIKE :cohort_program ESCAPE '\\')"
+            )
+
+        if cohort.offer_status:
+            params["cohort_offer_status"] = cohort.offer_status
+            # The *current* offer is the newest one; an older superseded offer
+            # must not make a student match a status they have moved past.
+            clauses.append(
+                f"(SELECT o.status FROM {offer} AS o"
+                f" WHERE o.tenant_id = student.tenant_id AND o.student_id = student.id"
+                f" ORDER BY o.created_at DESC, o.id DESC LIMIT 1) = :cohort_offer_status"
+            )
+
+        if cohort.deposit_state:
+            params["cohort_deposit_state"] = cohort.deposit_state
+            clauses.append(f"{self._deposit_bucket_sql()} = :cohort_deposit_state")
+
+        if cohort.onboarding_status:
+            params["cohort_onboarding_status"] = cohort.onboarding_status
+            clauses.append(
+                f"COALESCE((SELECT ob.status FROM {onboarding} AS ob"
+                f" WHERE ob.tenant_id = student.tenant_id AND ob.student_id = student.id),"
+                f" 'not_started') = :cohort_onboarding_status"
+            )
+
+        if cohort.requirement_code or cohort.requirement_state:
+            state = cohort.requirement_state or "open"
+            requirement_clauses = [
+                "req.tenant_id = student.tenant_id",
+                "jr.student_id = student.id",
+                "req.retired_at IS NULL",
+            ]
+            if cohort.requirement_code:
+                params["cohort_requirement_code"] = cohort.requirement_code.lower()
+                requirement_clauses.append("LOWER(rdv.code) = :cohort_requirement_code")
+            if state == "open":
+                requirement_clauses.append(f"req.status NOT IN ({done})")
+            elif state == "blocked":
+                requirement_clauses.append("req.status = 'blocked'")
+            elif state == "in_review":
+                requirement_clauses.append("req.status IN ('submitted', 'under_review')")
+            elif state == "complete":
+                requirement_clauses.append(f"req.status IN ({done})")
+            elif state == "overdue":
+                requirement_clauses.append(
+                    f"req.status NOT IN ({done}) AND req.due_at IS NOT NULL AND req.due_at < NOW()"
+                )
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM {journey} AS jr"
+                f" JOIN {requirement} AS req ON req.journey_id = jr.id"
+                f"   AND req.tenant_id = jr.tenant_id"
+                f" JOIN {definition} AS rdv ON rdv.id = req.requirement_definition_version_id"
+                f"   AND rdv.tenant_id = req.tenant_id"
+                f" WHERE jr.tenant_id = student.tenant_id"
+                f"   AND {' AND '.join(requirement_clauses)})"
+            )
+
+        if cohort.document_category or cohort.document_state:
+            state = cohort.document_state or "missing"
+            document_clauses = [
+                "doc.tenant_id = student.tenant_id",
+                "doc.student_id = student.id",
+            ]
+            if cohort.document_category:
+                params["cohort_document_category"] = cohort.document_category.lower()
+                document_clauses.append("LOWER(doc.category) = :cohort_document_category")
+            if state == "missing":
+                # A rejected upload leaves the requirement unmet, so a student
+                # whose only file was rejected still counts as missing it.
+                document_clauses.append("doc.status NOT IN ('placeholder', 'rejected')")
+                clauses.append(
+                    f"NOT EXISTS (SELECT 1 FROM {document} AS doc"
+                    f" WHERE {' AND '.join(document_clauses)})"
+                )
+            else:
+                document_statuses = {
+                    "submitted": ("uploaded", "processing"),
+                    "under_review": ("needs_review", "under_review"),
+                    "accepted": ("accepted",),
+                    "rejected": ("rejected",),
+                }[state]
+                values = ", ".join(f"'{status}'" for status in document_statuses)
+                document_clauses.append(f"doc.status IN ({values})")
+                clauses.append(
+                    f"EXISTS (SELECT 1 FROM {document} AS doc"
+                    f" WHERE {' AND '.join(document_clauses)})"
+                )
+
+        if cohort.aid_document_state:
+            state = cohort.aid_document_state
+            if state == "outstanding":
+                predicate = "aid.status <> 'verified'"
+            elif state == "in_review":
+                predicate = "aid.status IN ('submitted', 'under_review')"
+            else:
+                params["cohort_aid_state"] = state
+                predicate = "aid.status = :cohort_aid_state"
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM {aid_document} AS aid"
+                f" WHERE aid.tenant_id = student.tenant_id AND aid.student_id = student.id"
+                f"   AND {predicate})"
+            )
+
+        if cohort.housing_state:
+            params["cohort_housing_state"] = cohort.housing_state
+            clauses.append(f"{self._housing_bucket_sql()} = :cohort_housing_state")
+
+        if cohort.assigned_staff_id:
+            params["cohort_assignee"] = _uuid(cohort.assigned_staff_id)
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM {work_item} AS wi"
+                f" WHERE wi.tenant_id = student.tenant_id AND wi.student_id = student.id"
+                f"   AND wi.assignee_id = :cohort_assignee"
+                f"   AND wi.status IN :open_statuses)"
+            )
+
+        if cohort.has_open_work_item is not None:
+            exists = (
+                f"EXISTS (SELECT 1 FROM {work_item} AS wi"
+                f" WHERE wi.tenant_id = student.tenant_id AND wi.student_id = student.id"
+                f"   AND wi.status IN :open_statuses)"
+            )
+            clauses.append(exists if cohort.has_open_work_item else f"NOT {exists}")
+
+        if cohort.has_overdue_requirement is not None:
+            exists = (
+                f"EXISTS (SELECT 1 FROM {journey} AS jr"
+                f" JOIN {requirement} AS req ON req.journey_id = jr.id"
+                f"   AND req.tenant_id = jr.tenant_id AND req.retired_at IS NULL"
+                f" WHERE jr.tenant_id = student.tenant_id AND jr.student_id = student.id"
+                f"   AND req.status NOT IN ({done})"
+                f"   AND req.due_at IS NOT NULL AND req.due_at < NOW())"
+            )
+            clauses.append(exists if cohort.has_overdue_requirement else f"NOT {exists}")
+
+        for field_name, column in (
+            ("residency_status", "residencyStatus"),
+            ("citizenship_status", "citizenshipStatus"),
+        ):
+            value = getattr(cohort, field_name)
+            if not value:
+                continue
+            key = f"cohort_{field_name}"
+            params[key] = value.lower()
+            # Onboarding answers are the canonical home for these; the portal
+            # renders them from the same jsonb payload.
+            clauses.append(
+                f"LOWER(COALESCE((SELECT ob.payload ->> '{column}' FROM {onboarding} AS ob"
+                f" WHERE ob.tenant_id = student.tenant_id AND ob.student_id = student.id), ''))"
+                f" = :{key}"
+            )
+
+        return clauses, params
+
+    def _deposit_bucket_sql(self) -> str:
+        """Canonical deposit state over the payment ledger.
+
+        The current PostgreSQL constraint has no in-flight statuses, but the
+        shared vocabulary keeps the pending bucket explicit for the provider
+        contract that introduces them. Paid always wins over an older pending
+        attempt.
+        """
+
+        payment = self._table("payment_transaction")
+        base = (
+            "pay.tenant_id = student.tenant_id AND pay.student_id = student.id"
+            " AND pay.type = 'enrollment_deposit'"
+        )
+        return (
+            f"CASE WHEN EXISTS (SELECT 1 FROM {payment} AS pay"
+            f" WHERE {base} AND pay.status = 'succeeded') THEN 'paid'"
+            f" WHEN EXISTS (SELECT 1 FROM {payment} AS pay"
+            f" WHERE {base} AND pay.status IN ('pending', 'processing', 'submitted'))"
+            f" THEN 'pending' ELSE 'unpaid' END"
+        )
+
+    def _housing_bucket_sql(self) -> str:
+        """The housing step bucketed into the `HOUSING_STATES` vocabulary.
+
+        One definition serves both the filter and the grouping. When these were
+        written separately, `housingState=blocked` selected nothing while the
+        grouping happily reported raw statuses like `in_progress` — two answers
+        to the same question.
+        """
+
+        done = ", ".join(f"'{status}'" for status in _DONE_REQUIREMENT_STATUSES)
+        status = (
+            f"(SELECT req.status FROM {self._table('enrollment_journey')} AS jr"
+            f" JOIN {self._table('student_requirement')} AS req"
+            f"   ON req.journey_id = jr.id AND req.tenant_id = jr.tenant_id"
+            f"  AND req.retired_at IS NULL"
+            f" JOIN {self._table('requirement_definition_version')} AS rdv"
+            f"   ON rdv.id = req.requirement_definition_version_id"
+            f"  AND rdv.tenant_id = req.tenant_id"
+            f" WHERE jr.tenant_id = student.tenant_id AND jr.student_id = student.id"
+            f"   AND rdv.code = 'housing_preference' LIMIT 1)"
+        )
+        return (
+            f"CASE WHEN {status} IS NULL THEN 'no_step'"
+            f" WHEN {status} = 'blocked' THEN 'blocked'"
+            f" WHEN {status} IN ({done}) THEN 'selected'"
+            f" ELSE 'actionable' END"
+        )
+
+    def _cohort_from_sql(self) -> str:
+        return f"""
+            FROM {self._table("student")} AS student
+            JOIN {self._table("person")} AS person
+              ON person.id = student.person_id AND person.tenant_id = student.tenant_id
+            LEFT JOIN {self._table("student_profile")} AS profile
+              ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+        """
+
+    def _cohort_statement(self, sql: str, params: JsonDict) -> Any:
+        statement = text(sql)
+        if ":open_statuses" in sql:
+            statement = statement.bindparams(
+                text_bind_expanding("open_statuses", _OPEN_WORK_STATUSES)
+            )
+        return statement
+
+    async def find_students(
+        self,
+        auth: AuthContext,
+        cohort: CohortFilter,
+        *,
+        limit: int = DEFAULT_COHORT_PAGE_SIZE,
+    ) -> CohortResult:
+        """The cohort itself, plus the true total behind the returned page."""
+
+        _require_staff(auth)
+        bounded = bounded_page_size(limit)
+        clauses, params = self._cohort_predicates(cohort)
+        params["tenant_id"] = _uuid(auth.tenant_id)
+        params["limit"] = bounded
+        where = "WHERE student.tenant_id = :tenant_id" + "".join(
+            f" AND {clause}" for clause in clauses
+        )
+        from_sql = self._cohort_from_sql()
+        list_sql = f"""
+            SELECT student.id, person.first_name, person.last_name,
+              COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
+                AS preferred_name,
+              student.class_year,
+              COALESCE(offer_detail.program_name, 'Program not assigned') AS program_name,
+              offer_detail.status AS offer_status,
+              offer_detail.response_deadline,
+              {self._deposit_bucket_sql()} AS deposit_state,
+              COALESCE(deposit.paid, false) AS deposit_paid,
+              COALESCE(requirement_progress.total_count, 0) AS requirement_total,
+              COALESCE(requirement_progress.completed_count, 0) AS requirement_completed,
+              COALESCE(requirement_progress.open_blocking_count, 0) AS open_blocking_count,
+              requirement_progress.next_due_at
+            {from_sql}
+            LEFT JOIN LATERAL (
+              SELECT program.name AS program_name, offer.status, offer.response_deadline
+              FROM {self._table("admission_offer")} AS offer
+              JOIN {self._table("program")} AS program
+                ON program.id = offer.program_id AND program.tenant_id = offer.tenant_id
+              WHERE offer.tenant_id = student.tenant_id AND offer.student_id = student.id
+              ORDER BY offer.created_at DESC LIMIT 1
+            ) AS offer_detail ON true
+            LEFT JOIN LATERAL (
+              SELECT EXISTS (
+                SELECT 1 FROM {self._table("payment_transaction")} AS payment
+                WHERE payment.tenant_id = student.tenant_id
+                  AND payment.student_id = student.id
+                  AND payment.type = 'enrollment_deposit'
+                  AND payment.status = 'succeeded'
+              ) AS paid
+            ) AS deposit ON true
+            LEFT JOIN LATERAL ({self._requirement_progress_sql()}) AS requirement_progress ON true
+            {where}
+            ORDER BY person.last_name, person.first_name, student.id
+            LIMIT :limit
+        """
+        count_sql = f"SELECT COUNT(*)::integer AS total {from_sql} {where}"
+        async with self._engine.connect() as connection:
+            rows = (
+                (await connection.execute(self._cohort_statement(list_sql, params), params))
+                .mappings()
+                .all()
+            )
+            total_row = (
+                (await connection.execute(self._cohort_statement(count_sql, params), params))
+                .mappings()
+                .first()
+            )
+        total = int(total_row["total"]) if total_row else 0
+        items = [
+            {
+                "id": str(row["id"]),
+                "name": f"{row['first_name']} {row['last_name']}",
+                "preferredName": str(row["preferred_name"]),
+                "programName": str(row["program_name"]),
+                "classYear": int(row["class_year"]),
+                "offerStatus": _optional_text(row["offer_status"]),
+                "offerResponseDeadline": _optional_iso(row["response_deadline"]),
+                "depositState": str(row["deposit_state"]),
+                "depositPaid": bool(row["deposit_paid"]),
+                "requirements": {
+                    "total": int(row["requirement_total"]),
+                    "completed": int(row["requirement_completed"]),
+                    "openBlocking": int(row["open_blocking_count"]),
+                    "nextDueAt": _optional_iso(row["next_due_at"]),
+                },
+            }
+            for row in rows
+        ]
+        return CohortResult(
+            items=items,
+            total=total,
+            filter_clauses=cohort.describe(),
+            truncated=total > len(items),
+        )
+
+    async def summarize_students(
+        self,
+        auth: AuthContext,
+        cohort: CohortFilter,
+        *,
+        group_by: str,
+        limit: int = 20,
+    ) -> JsonDict:
+        """Counts over the same selection `find_students` would return.
+
+        `blocking_requirement` counts *requirement rows*, so one student with
+        three open blockers contributes to three buckets; the response says so
+        rather than letting the reader assume the buckets sum to a headcount.
+        """
+
+        _require_staff(auth)
+        group_by = validate_group_by(group_by)
+        clauses, params = self._cohort_predicates(cohort)
+        params["tenant_id"] = _uuid(auth.tenant_id)
+        params["group_limit"] = max(1, min(int(limit or 20), 50))
+        where = "WHERE student.tenant_id = :tenant_id" + "".join(
+            f" AND {clause}" for clause in clauses
+        )
+        from_sql = self._cohort_from_sql()
+        done = ", ".join(f"'{status}'" for status in _DONE_REQUIREMENT_STATUSES)
+        counts_students = True
+
+        if group_by == "blocking_requirement":
+            counts_students = False
+            group_sql = f"""
+                SELECT rdv.code AS bucket, COUNT(*)::integer AS count,
+                       COUNT(DISTINCT student.id)::integer AS students
+                {from_sql}
+                JOIN {self._table("enrollment_journey")} AS jr
+                  ON jr.tenant_id = student.tenant_id AND jr.student_id = student.id
+                JOIN {self._table("student_requirement")} AS req
+                  ON req.tenant_id = jr.tenant_id AND req.journey_id = jr.id
+                 AND req.retired_at IS NULL
+                JOIN {self._table("requirement_definition_version")} AS rdv
+                  ON rdv.id = req.requirement_definition_version_id
+                 AND rdv.tenant_id = req.tenant_id
+                {where} AND rdv.blocking = 1 AND req.status NOT IN ({done})
+                GROUP BY rdv.code
+                ORDER BY count DESC, bucket
+                LIMIT :group_limit
+            """
+        else:
+            expressions = {
+                "offer_status": (
+                    f"COALESCE((SELECT o.status FROM {self._table('admission_offer')} AS o"
+                    f" WHERE o.tenant_id = student.tenant_id AND o.student_id = student.id"
+                    f" ORDER BY o.created_at DESC, o.id DESC LIMIT 1), 'no_offer')"
+                ),
+                "deposit_state": self._deposit_bucket_sql(),
+                "onboarding_status": (
+                    f"COALESCE((SELECT ob.status FROM"
+                    f" {self._table('student_onboarding')} AS ob"
+                    f" WHERE ob.tenant_id = student.tenant_id AND ob.student_id = student.id),"
+                    f" 'not_started')"
+                ),
+                "program": (
+                    f"COALESCE((SELECT p.name FROM {self._table('admission_offer')} AS o"
+                    f" JOIN {self._table('program')} AS p"
+                    f"   ON p.id = o.program_id AND p.tenant_id = o.tenant_id"
+                    f" WHERE o.tenant_id = student.tenant_id AND o.student_id = student.id"
+                    f" ORDER BY o.created_at DESC, o.id DESC LIMIT 1), 'Program not assigned')"
+                ),
+                "class_year": "student.class_year::text",
+                "assigned_staff": (
+                    f"COALESCE((SELECT member.display_name FROM"
+                    f" {self._table('staff_work_item')} AS wi"
+                    f" JOIN {self._table('staff_member')} AS member"
+                    f"   ON member.id = wi.assignee_id AND member.tenant_id = wi.tenant_id"
+                    f" WHERE wi.tenant_id = student.tenant_id AND wi.student_id = student.id"
+                    f"   AND wi.status IN :open_statuses"
+                    f" ORDER BY wi.updated_at DESC LIMIT 1), 'Unassigned')"
+                ),
+                "housing_state": f"{self._housing_bucket_sql()}",
+            }
+            expression = expressions[group_by]
+            group_sql = f"""
+                SELECT {expression} AS bucket, COUNT(*)::integer AS count,
+                       COUNT(*)::integer AS students
+                {from_sql}
+                {where}
+                GROUP BY 1
+                ORDER BY count DESC, bucket
+                LIMIT :group_limit
+            """
+
+        count_sql = f"SELECT COUNT(*)::integer AS total {from_sql} {where}"
+        async with self._engine.connect() as connection:
+            rows = (
+                (await connection.execute(self._cohort_statement(group_sql, params), params))
+                .mappings()
+                .all()
+            )
+            total_row = (
+                (await connection.execute(self._cohort_statement(count_sql, params), params))
+                .mappings()
+                .first()
+            )
+        return {
+            "groupBy": group_by,
+            "matchingStudents": int(total_row["total"]) if total_row else 0,
+            "countsRepresent": "students" if counts_students else "open blocking requirements",
+            "buckets": [
+                {
+                    "value": _optional_text(row["bucket"]) or str(row["bucket"] or "unknown"),
+                    "count": int(row["count"]),
+                    "students": int(row["students"]),
+                }
+                for row in rows
+            ],
+            "filter": cohort.describe(),
+        }
 
     # ------------------------------------------------------------------
     # Attention / engagement (first read path for the scheduler's output)

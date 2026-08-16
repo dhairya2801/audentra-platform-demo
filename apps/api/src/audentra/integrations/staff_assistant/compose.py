@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from audentra.domain.student_state import AID_DOCUMENT_SATISFIED_STATUSES
 from audentra.integrations.assistant.blocks import (
     bullet_list_block,
     next_steps_block,
@@ -184,6 +185,58 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
     """Every fact the composer may use, rendered once as plain text."""
 
     lines: list[str] = []
+    cohort = state.cohort
+    if cohort is not None:
+        clauses = "; ".join(str(item) for item in cohort.get("filter") or []) or "no filter"
+        total = cohort.get("total")
+        returned = cohort.get("returned")
+        lines.append(
+            f"Cohort query ({clauses}): {total} student(s) match in total; {returned} listed below."
+        )
+        if cohort.get("truncated"):
+            lines.append(
+                f"The list is a page of {returned} out of {total}. Say the total and that "
+                "the names shown are a sample — never present them as the whole cohort."
+            )
+        for entry in cohort.get("items") or []:
+            item = _m(entry)
+            requirements = _m(item.get("requirements"))
+            lines.append(
+                f"Cohort member: {item.get('name')} — {item.get('programName')}, "
+                f"class of {item.get('classYear')}, offer "
+                f"{item.get('offerStatus') or 'none'}, deposit "
+                f"{item.get('depositState') or ('paid' if item.get('depositPaid') else 'unpaid')}, "
+                f"{requirements.get('completed')}/{requirements.get('total')} requirements "
+                f"complete, {requirements.get('openBlocking')} open blocking"
+            )
+        if total == 0:
+            lines.append(
+                "No student matches this filter. That is a real, correct answer: do not "
+                "widen the filter silently or name students who do not match."
+            )
+    summary = state.cohort_summary
+    if summary is not None:
+        clauses = "; ".join(str(item) for item in summary.get("filter") or []) or "no filter"
+        lines.append(
+            f"Cohort count ({clauses}): {summary.get('matchingStudents')} student(s) match, "
+            f"grouped by {summary.get('groupBy')}."
+        )
+        represents = str(summary.get("countsRepresent") or "students")
+        if represents != "students":
+            lines.append(
+                f"These bucket counts are {represents}, not headcounts — one student can "
+                "appear in several buckets, so the buckets do not sum to the student total."
+            )
+        for entry in summary.get("buckets") or []:
+            bucket = _m(entry)
+            lines.append(
+                f"Group {bucket.get('value')}: {bucket.get('count')} {represents}"
+                + (
+                    f" across {bucket.get('students')} student(s)"
+                    if represents != "students"
+                    else ""
+                )
+            )
     student = state.student
     name = _student_name(state)
     if student:
@@ -869,7 +922,7 @@ def _compose_financials(
     open_documents = [
         item
         for item in aid.get("requiredDocuments", [])
-        if str(_m(item).get("status")) not in {"received", "waived"}
+        if str(_m(item).get("status")) not in AID_DOCUMENT_SATISFIED_STATUSES
     ]
     deposit = _m(aid.get("deposit"))
     parts = [f"{name}'s aid file lists {len(awards)} award(s)."]
@@ -1875,6 +1928,81 @@ def _compose_general(
     return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
 
 
+def _compose_cohort_search(
+    _classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    """List a cohort, always with the total behind the page."""
+
+    evidence = build_staff_evidence_bundle(state)
+    cohort = state.cohort
+    if cohort is None:
+        message = (
+            "I couldn't run that cohort query just now. The staff roster has the same filters."
+        )
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    clauses = [str(clause) for clause in cohort.get("filter") or []]
+    described = "; ".join(clauses) if clauses else "no filter applied"
+    total = int(cohort.get("total") or 0)
+    items = [_m(item) for item in cohort.get("items") or []]
+    if total == 0:
+        message = f"No students match that ({described})."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    message = f"{total} student(s) match ({described})."
+    if cohort.get("truncated"):
+        message += f" Showing the first {len(items)}."
+    block = bullet_list_block(
+        [
+            {
+                "text": f"{item.get('name')} — {item.get('programName')}, deposit "
+                f"{item.get('depositState') or ('paid' if item.get('depositPaid') else 'unpaid')}, "
+                f"{_m(item.get('requirements')).get('openBlocking')} open blocking"
+            }
+            for item in items
+        ],
+        title="Matching students",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_cohort_aggregate(
+    _classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    summary = state.cohort_summary
+    if summary is None:
+        message = "I couldn't run that count just now. The staff roster has the same filters."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    clauses = [str(clause) for clause in summary.get("filter") or []]
+    described = "; ".join(clauses) if clauses else "no filter applied"
+    matching = int(summary.get("matchingStudents") or 0)
+    represents = str(summary.get("countsRepresent") or "students")
+    buckets = [_m(bucket) for bucket in summary.get("buckets") or []]
+    message = f"{matching} student(s) match ({described})."
+    if buckets:
+        message += f" Broken down by {summary.get('groupBy')}."
+        if represents != "students":
+            message += (
+                f" These counts are {represents}, so one student can appear in more than one row."
+            )
+    blocks = [text_block(message)]
+    if buckets:
+        blocks.append(
+            bullet_list_block(
+                [{"text": f"{bucket.get('value')}: {bucket.get('count')}"} for bucket in buckets],
+                title=f"By {summary.get('groupBy')}",
+            )
+        )
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
 _COMPOSERS = {
     "greeting": _compose_greeting,
     "capability_overview": _compose_capabilities,
@@ -1895,6 +2023,8 @@ _COMPOSERS = {
     "student_engagement": _compose_engagement,
     "student_timeline": _compose_timeline,
     "student_ownership": _compose_ownership,
+    "cohort_search": _compose_cohort_search,
+    "cohort_aggregate": _compose_cohort_aggregate,
     "attention_ranking": _compose_attention,
     "recommendation": _compose_recommendation,
     "work_queue": _compose_work_queue,
@@ -1910,6 +2040,8 @@ _COMPOSERS = {
 def _unavailable_notes(state: StaffDerivedState) -> list[str]:
     labels = {
         "searchStudents": "the student roster",
+        "findStudents": "the student cohort query",
+        "summarizeStudents": "the cohort counts",
         "getStudentStaffSummary": "the student's overview",
         "getStudentRequirements": "their requirements",
         "getStudentDocuments": "their documents",

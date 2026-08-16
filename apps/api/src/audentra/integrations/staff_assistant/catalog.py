@@ -16,10 +16,18 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
+from audentra.domain.student_cohort import (
+    COHORT_GROUP_BY,
+    CohortFilterError,
+    build_cohort_filter,
+)
+
 JsonDict = dict[str, Any]
 
 STAFF_TOOL_NAMES = (
     "searchStudents",
+    "findStudents",
+    "summarizeStudents",
     "getStudentStaffSummary",
     "getStudentRequirements",
     "getStudentDocuments",
@@ -48,6 +56,8 @@ STAFF_TOOL_NAMES = (
 # or any synthetic risk field.
 STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "searchStudents": "student_state",
+    "findStudents": "student_state",
+    "summarizeStudents": "student_state",
     "getStudentStaffSummary": "student_state",
     "getStudentRequirements": "student_state",
     "getStudentDocuments": "student_state",
@@ -73,6 +83,22 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "searchStudents": (
         "Search the canonical student roster by name and/or program. Returns "
         "concise summaries with requirement progress."
+    ),
+    "findStudents": (
+        "Find the students matching a cohort filter and report how many match "
+        "in total. Filters combine conjunctively and cover admission offer "
+        "status, deposit state, onboarding status, a named requirement's "
+        "state, a document category's state, financial-aid document state, "
+        "housing state, program, class year, residency and citizenship, "
+        "assigned staff, open Action Center work, and overdue requirements. "
+        "Use this for questions of the form 'which students ...'."
+    ),
+    "summarizeStudents": (
+        "Count the students matching a cohort filter, grouped by one "
+        "dimension: offer status, deposit state, onboarding status, program, "
+        "class year, assigned staff, housing state, or blocking requirement. "
+        "Use this for 'how many ...' and 'what are the most common ...' "
+        "questions instead of listing every student."
     ),
     "getStudentStaffSummary": (
         "Read one student's staff-facing overview: identity, program, offer "
@@ -154,6 +180,8 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
 
 STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "searchStudents": "student_roster",
+    "findStudents": "student_cohort",
+    "summarizeStudents": "student_cohort",
     "getStudentStaffSummary": "student_record",
     "getStudentRequirements": "requirements",
     "getStudentDocuments": "documents",
@@ -208,6 +236,15 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
         "query": {"kind": "text", "max_length": 120},
         "program": {"kind": "text", "max_length": 120, "optional": True},
         "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
+    "findStudents": {
+        "filter": {"kind": "cohort_filter"},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 50, "optional": True},
+    },
+    "summarizeStudents": {
+        "filter": {"kind": "cohort_filter", "optional": True},
+        "groupBy": {"kind": "enum", "values": COHORT_GROUP_BY},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 50, "optional": True},
     },
     "getStudentStaffSummary": {"studentId": {"kind": "uuid"}},
     "getStudentRequirements": {"studentId": {"kind": "uuid"}},
@@ -314,4 +351,15 @@ def _validate_value(tool: str, name: str, value: Any, spec: Mapping[str, Any]) -
                 f"{tool}.{name} must be one of {', '.join(values)}",
             )
         return candidate
+    if kind == "cohort_filter":
+        # The cohort vocabulary is owned by the domain module, so the catalog
+        # delegates rather than keeping a second copy of the allowed values.
+        if not isinstance(value, Mapping):
+            raise ToolArgumentError(
+                "invalid_cohort_filter", f"{tool}.{name} must be an object of filters"
+            )
+        try:
+            return build_cohort_filter(value)
+        except CohortFilterError as error:
+            raise ToolArgumentError("invalid_cohort_filter", error.detail) from error
     raise ToolArgumentError("invalid_schema", f"{tool}.{name} has an unknown kind")

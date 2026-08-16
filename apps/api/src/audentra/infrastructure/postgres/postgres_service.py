@@ -1737,6 +1737,10 @@ class PostgresPlatformService:
             # remain server-bound.
             return replace(auth, student_id=student_id, actor_type="student")
 
+        async def cohort_result(cohort: Any, limit: int) -> Mapping[str, Any]:
+            result = await assistant.find_students(auth, cohort, limit=limit)
+            return result.as_json()
+
         async def student_overview(student_id: str) -> Mapping[str, Any]:
             overview = await assistant.get_student_overview(auth, student_id)
             return overview or {}
@@ -1748,6 +1752,15 @@ class PostgresPlatformService:
         return StaffAssistantToolHost(
             {
                 "search_students": lambda **kwargs: assistant.search_students(auth, **kwargs),
+                # The domain has already validated the cohort vocabulary;
+                # tenant and staff identities remain bound to `auth` here.
+                "find_students": lambda cohort, limit: cohort_result(cohort, limit),
+                "summarize_students": lambda cohort, group_by, limit: assistant.summarize_students(
+                    auth,
+                    cohort,
+                    group_by=group_by,
+                    limit=limit,
+                ),
                 "student_overview": lambda student_id: student_overview(student_id),
                 "student_requirements": lambda student_id: portal.get_student_requirements(
                     student_auth(student_id)

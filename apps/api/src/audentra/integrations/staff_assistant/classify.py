@@ -11,7 +11,9 @@ to ``general_question``.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from audentra.integrations.staff_assistant.normalize import NormalizedStaffRequest
 
@@ -35,6 +37,8 @@ STAFF_REQUEST_TYPES = (
     "student_engagement",
     "student_timeline",
     "student_ownership",
+    "cohort_search",
+    "cohort_aggregate",
     "attention_ranking",
     "recommendation",
     "work_queue",
@@ -78,6 +82,212 @@ class StaffClassification:
     # requested, which document was named.
     reference: str | None = None
     additional_request_types: tuple[str, ...] = field(default_factory=tuple)
+    # A cohort question carries its own selection: the deterministic path must
+    # be able to answer "which admitted students haven't paid?" with no model
+    # in the loop, and the filter is part of the classification, not a
+    # separate guess made later.
+    cohort_filter: Mapping[str, Any] | None = None
+    cohort_group_by: str | None = None
+
+
+# --- cohort recognition -----------------------------------------------------
+#
+# Staff cohort questions are highly patterned ("which/how many <adjective>
+# students <predicate>"). Recognising them deterministically keeps the
+# capability working with no model in the loop, and gives the model planner a
+# correct baseline to improve on rather than invent from.
+
+_COHORT_SUBJECT = re.compile(
+    r"\b(?:students?|applicants?|admits?|admitted|cohort|class|population|people)\b",
+    re.IGNORECASE,
+)
+_COHORT_LIST_INTENT = re.compile(
+    r"^\s*(?:which|who|show|list|find|give me|pull|get me)\b|\bwhich students\b"
+    r"|\blist (?:the |all )?students\b|\bshow me\b",
+    re.IGNORECASE,
+)
+_COHORT_COUNT_INTENT = re.compile(
+    r"\bhow many\b|\bwhat (?:is|'s) the (?:number|count|breakdown|split)\b"
+    r"|\bcount of\b|\bmost common\b|\bbreakdown\b|\bdistribution\b"
+    r"|\bwhat percentage\b|\bwhat share\b",
+    re.IGNORECASE,
+)
+
+# Each predicate maps a phrase to canonical filter fields. Order matters only
+# in that every match contributes; the filter is conjunctive by construction.
+_COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
+    (
+        re.compile(r"\badmitted\b|\baccepted (?:their )?(?:offer|admission)\b", re.I),
+        {"offerStatus": "accepted"},
+    ),
+    (
+        re.compile(
+            r"\bstill (?:only )?offered\b|\bhaven'?t (?:accepted|responded)\b"
+            r"|\bno response to (?:their )?offer\b",
+            re.I,
+        ),
+        {"offerStatus": "offered"},
+    ),
+    (re.compile(r"\bdeclined\b", re.I), {"offerStatus": "declined"}),
+    (
+        re.compile(
+            r"(?:haven'?t|have not|not|no|without|missing|outstanding|unpaid|owe)"
+            r"[^.?]{0,28}\bdeposit\b"
+            r"|\bdeposit\b[^.?]{0,20}(?:unpaid|outstanding|not paid|missing)",
+            re.I,
+        ),
+        {"depositState": "unpaid"},
+    ),
+    (
+        re.compile(
+            r"\b(?:paid|posted|settled)\b[^.?]{0,20}\bdeposit\b"
+            r"|\bdeposit(?:ed)?\b[^.?]{0,16}\b(?:paid|posted)\b"
+            r"|\bdeposited students\b",
+            re.I,
+        ),
+        {"depositState": "paid"},
+    ),
+    (
+        re.compile(
+            r"\b(?:missing|no|without|haven'?t (?:sent|submitted|uploaded))"
+            r"[^.?]{0,28}\btranscripts?\b"
+            r"|\btranscripts?\b[^.?]{0,20}\b(?:missing|outstanding)\b",
+            re.I,
+        ),
+        {"documentCategory": "transcript", "documentState": "missing"},
+    ),
+    (
+        re.compile(r"\b(?:missing|no|without)[^.?]{0,24}\bidentity document\b", re.I),
+        {"documentCategory": "identity", "documentState": "missing"},
+    ),
+    (
+        re.compile(
+            r"\bimmuni[sz]ation\b[^.?]{0,28}(?:missing|outstanding|incomplete|not)"
+            r"|(?:missing|without|no)[^.?]{0,20}\bimmuni[sz]ation\b",
+            re.I,
+        ),
+        {"requirementCode": "immunization_record", "requirementState": "open"},
+    ),
+    (
+        re.compile(
+            r"\b(?:incomplete|outstanding|unverified|missing|pending)[^.?]{0,32}"
+            r"\b(?:financial aid|aid)\b[^.?]{0,20}\bverification\b"
+            r"|\bverification\b[^.?]{0,24}\b(?:incomplete|outstanding|not (?:done|complete))\b"
+            r"|\b(?:incomplete|outstanding)[^.?]{0,16}\bfinancial aid\b",
+            re.I,
+        ),
+        {"aidDocumentState": "outstanding"},
+    ),
+    (
+        re.compile(
+            r"\bhousing\b[^.?]{0,24}\b(?:blocked|blocker|can'?t apply|cannot apply|locked)\b"
+            r"|\b(?:blocked|blocker)\b[^.?]{0,20}\bhousing\b"
+            # "cannot apply for housing" puts the obstacle before the domain.
+            r"|\b(?:can'?t|cannot|unable to|not able to)\b[^.?]{0,20}"
+            r"\b(?:apply|select|choose|pick|sign up)\b[^.?]{0,16}\bhousing\b",
+            re.I,
+        ),
+        {"housingState": "blocked"},
+    ),
+    (re.compile(r"\binternational\b", re.I), {"residencyStatus": "international"}),
+    (re.compile(r"\bdomestic\b|\bin[- ]state\b", re.I), {"residencyStatus": "domestic"}),
+    (
+        re.compile(r"\boverdue\b|\bpast due\b|\bmissed (?:a )?deadline\b", re.I),
+        {"hasOverdueRequirement": True},
+    ),
+    (
+        re.compile(
+            r"\bonboarding (?:is )?(?:in ?complete|not (?:done|complete)|unfinished)\b"
+            r"|\b(?:haven'?t|have not|hasn'?t|has not|not)\b[^.?]{0,20}"
+            r"\b(?:finished|completed|done)\b[^.?]{0,12}\bonboarding\b"
+            r"|\bstill (?:in )?onboarding\b",
+            re.I,
+        ),
+        {"onboardingStatus": "in_progress"},
+    ),
+    (
+        re.compile(r"\bfinished onboarding\b|\bonboarding complete\b", re.I),
+        {"onboardingStatus": "completed"},
+    ),
+    (
+        re.compile(
+            r"\bopen (?:action center |action )?(?:item|task|work)\b"
+            r"|\bassigned work\b",
+            re.I,
+        ),
+        {"hasOpenWorkItem": True},
+    ),
+)
+
+_COHORT_GROUP_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\bmost common\b[^.?]{0,24}\b(?:blockers?|blocking|obstacles?|issues?)\b"
+            r"|\bblockers?\b[^.?]{0,20}\b(?:breakdown|distribution|common)\b"
+            r"|\bwhat(?:'s| is)? blocking\b",
+            re.I,
+        ),
+        "blocking_requirement",
+    ),
+    (re.compile(r"\bby program\b|\bper program\b|\bacross programs\b", re.I), "program"),
+    (re.compile(r"\bby (?:class )?year\b|\bper class year\b", re.I), "class_year"),
+    (
+        re.compile(
+            r"\bby (?:counselor|counsellor|advisor|staff|owner)\b"
+            r"|\bper (?:counselor|advisor|staff)\b",
+            re.I,
+        ),
+        "assigned_staff",
+    ),
+    (re.compile(r"\bby (?:offer|admission) status\b", re.I), "offer_status"),
+    (re.compile(r"\bby deposit\b|\bdeposit (?:breakdown|split)\b", re.I), "deposit_state"),
+    (re.compile(r"\bby onboarding\b", re.I), "onboarding_status"),
+    (re.compile(r"\bby housing\b", re.I), "housing_state"),
+)
+
+
+def _cohort_predicates(text: str) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    for pattern, fields in _COHORT_PREDICATES:
+        if pattern.search(text):
+            for key, value in fields.items():
+                filters.setdefault(key, value)
+    return filters
+
+
+def classify_cohort_question(text: str) -> StaffClassification | None:
+    """Recognise a cohort list/count question and build its filter.
+
+    Returns `None` unless the question is about a *group* of students: a
+    question naming one student stays with the student-referent branches, and
+    a cohort question with no recognisable predicate still classifies (the
+    unfiltered cohort is a legitimate answer to "how many students are there").
+    """
+
+    if not _COHORT_SUBJECT.search(text):
+        return None
+    counting = bool(_COHORT_COUNT_INTENT.search(text))
+    listing = bool(_COHORT_LIST_INTENT.search(text))
+    if not counting and not listing:
+        return None
+    filters = _cohort_predicates(text)
+    group_by = next(
+        (dimension for pattern, dimension in _COHORT_GROUP_PHRASES if pattern.search(text)),
+        None,
+    )
+    if counting:
+        return StaffClassification(
+            "cohort_aggregate",
+            0.95,
+            cohort_filter=filters,
+            # Counting without a named dimension is still a grouped count; the
+            # offer status split is the least surprising default and the
+            # answer reports the total alongside it.
+            cohort_group_by=group_by or "offer_status",
+        )
+    if not filters and not group_by:
+        return None
+    return StaffClassification("cohort_search", 0.95, cohort_filter=filters)
 
 
 _GREETING_ONLY = re.compile(
@@ -247,6 +457,13 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     # Ranking / attention questions (never phrased as scores by us).
     if ranking_language:
         return StaffClassification("attention_ranking", 1)
+
+    # Cohort questions are settled before the student-referent branches: a
+    # question about a *group* must not be answered by resolving one student
+    # who happens to match a word in it.
+    cohort = classify_cohort_question(text)
+    if cohort is not None:
+        return cohort
 
     if re.search(
         r"\bwhat should i (?:work on|do) (?:first|today|next)\b(?!\s*(?:for|about|with)\b)"
