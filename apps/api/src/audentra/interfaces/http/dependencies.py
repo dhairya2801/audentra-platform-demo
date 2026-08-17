@@ -14,6 +14,7 @@ from audentra.core.ports import BrowserAuthService, PlatformService, ServiceCall
 from audentra.infrastructure.voice import VoiceSessionServiceProtocol
 
 from .config import HttpSettings
+from .demo_identity import DEMO_STUDENT_COOKIE, read_demo_student_cookie
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 TENANT_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -152,6 +153,21 @@ async def get_auth_context(request: Request) -> AuthContext:
         if demo_token is not None:
             if not secrets.compare_digest(demo_token, settings.demo_session_token):
                 raise UnauthorizedError("The student session is invalid or has expired")
+            if settings.environment != "production":
+                chosen_student = read_demo_student_cookie(
+                    settings.demo_session_token,
+                    tenant_id,
+                    request.cookies.get(DEMO_STUDENT_COOKIE),
+                )
+                if chosen_student is not None:
+                    # Resolved through the repository, not trusted from the
+                    # cookie: the signature says which student was chosen, the
+                    # query says whether that student is this tenant's to open.
+                    return (
+                        await auth_service.demo_student_by_reference(
+                            tenant_id, tenant_slug, chosen_student
+                        )
+                    ).context
             return (await auth_service.demo_student(tenant_id, tenant_slug)).context
         if settings.browser_auth_required:
             raise UnauthorizedError("Student authentication is required")

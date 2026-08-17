@@ -25,12 +25,14 @@ from audentra.infrastructure.seeding.media import (
     PortalMediaChecksumError,
     seed_portal_media,
 )
+from audentra.infrastructure.seeding.profile import seed_profile
 from audentra.infrastructure.seeding.relational import (
     _CANONICAL_REQUIREMENTS,
     _DEMO_STAFF,
     _DEMO_WORK_ITEMS,
     _EXTRA_STUDENTS,
     _ONBOARDING_STEPS,
+    _SYNTHETIC_STAFF,
     ASTER_TENANT_ID,
     HARVARD_TENANT_ID,
     ColumnSpec,
@@ -38,11 +40,16 @@ from audentra.infrastructure.seeding.relational import (
     _ensure_student_journey_for_accepted_offer,
     _foreign_key_order,
     _managed_configuration_root,
+    _managed_configuration_tenants,
     _upsert_statement,
     provision_demo_managed_configurations,
     seed_relational_data,
 )
 from audentra.infrastructure.seeding.safety import SeedEnvironmentError, seed_environment
+from audentra.infrastructure.seeding.synthetic_university import (
+    SYNTHETIC_TENANT_ID,
+    SYNTHETIC_TENANT_SLUG,
+)
 from audentra.infrastructure.storage.s3 import ObjectNotFoundError, S3ObjectMetadata
 
 
@@ -172,6 +179,61 @@ def test_packaged_tenant_configurations_match_seeded_workflow_inventory() -> Non
         assert len(campus_events(campus_life)) == len(campus_life["events"])
 
 
+def test_the_demo_campus_configuration_declares_the_housing_prerequisite() -> None:
+    """The demo campus is Aster's document set plus one deliberate difference.
+
+    Room selection waits on the deposit there, and `reconcile_journey_routes`
+    recomputes every blocked step from `depends_on` alone — so the prerequisite
+    has to be in the published YAML, not only in the seeder that wrote the
+    first `blocked` status.
+    """
+
+    root = Path(__file__).resolve().parents[1] / "assets" / "config" / "tenants"
+    demo = yaml.safe_load((root / "aster-demo" / "journeys.yaml").read_text(encoding="utf-8"))
+    aster = yaml.safe_load((root / "aster" / "journeys.yaml").read_text(encoding="utf-8"))
+
+    assert demo["tenant"] == "aster-demo"
+    demo_tasks = {
+        task["id"]: task
+        for flow in demo["flows"]
+        if flow["kind"] == "enrollment"
+        for task in flow["tasks"]
+    }
+    aster_tasks = {
+        task["id"]: task
+        for flow in aster["flows"]
+        if flow["kind"] == "enrollment"
+        for task in flow["tasks"]
+    }
+    assert set(demo_tasks) == set(aster_tasks) == {item.code for item in _CANONICAL_REQUIREMENTS}
+    assert demo_tasks["housing_preference"]["depends_on"] == ["enrollment_deposit"]
+    assert "depends_on" not in aster_tasks["housing_preference"]
+
+    # Everything else is the same graph, so the demo campus is not quietly a
+    # different product.
+    for code, task in demo_tasks.items():
+        if code == "housing_preference":
+            continue
+        assert task == aster_tasks[code]
+
+
+def test_the_synthetic_seed_profile_only_adds_the_demo_campus() -> None:
+    """`compact` is the default, and the larger profile is strictly additive."""
+
+    assert seed_profile({}) == "compact"
+    assert _managed_configuration_tenants("compact") == ("aster", "harvard")
+    assert _managed_configuration_tenants("synthetic_university") == (
+        "aster",
+        "harvard",
+        SYNTHETIC_TENANT_SLUG,
+    )
+    # The demo campus staff are its own; nothing here can land in a preview
+    # tenant, and nothing from a preview tenant can land in it.
+    assert {staff.tenant_id for staff in _SYNTHETIC_STAFF} == {SYNTHETIC_TENANT_ID}
+    assert SYNTHETIC_TENANT_ID not in {staff.tenant_id for staff in _DEMO_STAFF}
+    assert SYNTHETIC_TENANT_ID not in {item.tenant_id for item in _DEMO_WORK_ITEMS}
+
+
 def test_seed_environment_is_explicit_and_production_fails_closed() -> None:
     assert seed_environment({"AUDENTRA_ENV": "development"}) == "development"
     assert seed_environment({"AUDENTRA_ENV": "preview"}) == "preview"
@@ -222,7 +284,7 @@ def test_normal_seed_replays_existing_managed_documents_without_new_publication(
     source = inspect.getsource(seed_relational_data)
     provision_source = inspect.getsource(provision_demo_managed_configurations)
 
-    assert "provision_demo_managed_configurations(engine)" in source
+    assert "provision_demo_managed_configurations(" in source
     assert "rematerialize_existing=True" in provision_source
 
 

@@ -6,7 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from audentra.core.auth import AuthContext
-from audentra.core.errors import NotFoundError, UnauthorizedError
+from audentra.core.errors import ApiError, NotFoundError, UnauthorizedError
 from audentra.core.ports import (
     CredentialStudentSession,
     DemoStudentSession,
@@ -59,6 +59,7 @@ class FakeBrowserAuthService:
         self.student_revoked = False
         self.staff_revoked = False
         self.staff_sign_up_input: dict[str, str | None] | None = None
+        self.demo_reference: str | None = None
 
     def student_context(self, method: str = "credentials") -> AuthContext:
         return AuthContext(
@@ -74,6 +75,20 @@ class FakeBrowserAuthService:
         assert tenant_id == TENANT_ID
         assert tenant_slug in {None, "aster"}
         return DemoStudentSession(self.student_context("demo"), "Alex")
+
+    async def demo_student_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> DemoStudentSession:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug in {None, "aster"}
+        self.demo_reference = reference
+        if reference not in {"SYN-000000", STUDENT_ID}:
+            raise ApiError(
+                404,
+                "DEMO_STUDENT_NOT_FOUND",
+                "No demo student matches that identifier at this university",
+            )
+        return DemoStudentSession(self.student_context("demo"), "Alex", "SYN-000000")
 
     async def resolve_student(
         self, token: str, tenant_id: str, tenant_slug: str | None
@@ -253,6 +268,105 @@ async def test_demo_cookie_gates_protected_routes_and_sign_out_invalidates_it(
     assert accepted_call.auth.authentication_method == "demo"
     assert signed_out.json() == {"authenticated": False, "mode": "demo"}
     assert denied_again.status_code == 401
+
+
+async def test_demo_sign_in_as_resolves_a_named_student_and_signs_the_cookie(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    """The demo campus has thousands of students; the point is to open one."""
+
+    response = await client.post("/v1/auth/demo/sign-in-as", json={"studentRef": "  SYN-000000  "})
+
+    assert response.status_code == 200
+    assert response.json()["student"]["externalRef"] == "SYN-000000"
+    # Trimmed at the contract boundary, so the repository never sees padding.
+    assert auth_service.demo_reference == "SYN-000000"
+
+    accepted = await client.get("/v1/student/bootstrap")
+    # Later requests resolve by id from the signed cookie, not by the typed
+    # reference, so a renamed reference cannot silently repoint a live session.
+    assert auth_service.demo_reference == STUDENT_ID
+
+    cookies = response.headers.get_list("set-cookie")
+    chosen = next(value for value in cookies if value.startswith("vv_demo_student="))
+    assert "HttpOnly" in chosen and "SameSite=lax" in chosen
+    # The value carries the student and a signature over it, never a bare id.
+    assert chosen.split("=", 1)[1].split(";")[0].startswith(f"{STUDENT_ID}.")
+
+    assert accepted.status_code == 200
+    resolved = next(
+        call for call in platform_service.calls if call.operation == "student.get_bootstrap"
+    )
+    assert resolved.auth is not None
+    assert resolved.auth.student_id == STUDENT_ID
+
+
+async def test_demo_sign_in_as_reports_an_unresolvable_student(client: AsyncClient) -> None:
+    response = await client.post("/v1/auth/demo/sign-in-as", json={"studentRef": "SYN-999999"})
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "DEMO_STUDENT_NOT_FOUND"
+    assert "vv_demo_student" not in response.headers.get("set-cookie", "")
+
+
+async def test_a_forged_demo_student_cookie_falls_back_to_the_tenant_identity(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+) -> None:
+    """The cookie says which student; the signature says whether to believe it.
+
+    A tampered value is not an error — it is simply not a choice — so the
+    browser degrades to the tenant's default demo identity rather than being
+    locked out.
+    """
+
+    await client.post("/v1/auth/demo/sign-in", json={})
+    client.cookies.set("vv_demo_student", f"{ACTOR_ID}.0000000000000000000000000000000")
+    accepted = await client.get("/v1/student/bootstrap")
+
+    assert accepted.status_code == 200
+    resolved = next(
+        call for call in platform_service.calls if call.operation == "student.get_bootstrap"
+    )
+    assert resolved.auth is not None
+    assert resolved.auth.student_id == STUDENT_ID
+
+
+async def test_plain_demo_sign_in_clears_an_earlier_student_choice(
+    client: AsyncClient,
+) -> None:
+    await client.post("/v1/auth/demo/sign-in-as", json={"studentRef": "SYN-000000"})
+    response = await client.post("/v1/auth/demo/sign-in", json={})
+
+    cleared = next(
+        value
+        for value in response.headers.get_list("set-cookie")
+        if value.startswith("vv_demo_student=")
+    )
+    assert "vv_demo_student=signed-out" in cleared
+
+
+async def test_demo_sign_in_as_is_unavailable_in_production(
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    app = create_app(
+        service=platform_service,
+        auth_service=auth_service,
+        settings=HttpSettings(environment="production", browser_auth_required=True),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://testserver",
+    ) as production_client:
+        response = await production_client.post(
+            "/v1/auth/demo/sign-in-as", json={"studentRef": "SYN-000000"}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "DEVELOPMENT_AUTH_DISABLED"
 
 
 async def test_general_student_sign_out_invalidates_a_demo_session(

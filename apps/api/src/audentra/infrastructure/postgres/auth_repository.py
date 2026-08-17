@@ -53,7 +53,7 @@ class PostgresDevelopmentAuth:
             result = await connection.execute(
                 text(
                     """
-                    SELECT s.id AS student_id, s.person_id,
+                    SELECT s.id AS student_id, s.person_id, s.external_ref,
                            COALESCE(sp.preferred_name, p.preferred_name, p.first_name)
                              AS preferred_name
                     FROM student s
@@ -77,17 +77,74 @@ class PostgresDevelopmentAuth:
                 "DEMO_IDENTITY_NOT_CONFIGURED",
                 "The development student identity is not configured for this university",
             )
-        return DemoStudentSession(
-            context=AuthContext(
-                tenant_id=tenant_id,
-                student_id=str(row["student_id"]),
-                actor_id=str(row["person_id"]),
-                actor_type="student",
-                authentication_method="demo",
-                tenant_slug=tenant_slug,
-            ),
-            preferred_name=str(row["preferred_name"]),
+        return _demo_session(row, tenant_id=tenant_id, tenant_slug=tenant_slug)
+
+    async def demo_student_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> DemoStudentSession:
+        """Resolve one named student inside a demo-enabled tenant.
+
+        The tenant predicate is part of the query rather than a check on the
+        result, so a well-formed identifier belonging to another university
+        returns "not found" and never a session. The `demo_auth_enabled` flag
+        is required for the same reason it is required for `demo_student`: a
+        tenant that has not opted into demo identities has none.
+        """
+
+        candidate = reference.strip()
+        if not candidate or len(candidate) > 64:
+            raise ApiError(
+                404,
+                "DEMO_STUDENT_NOT_FOUND",
+                "No demo student matches that identifier at this university",
+            )
+        # Two predicates rather than one `OR`, because the two callers differ.
+        # A typed reference arrives once, at sign-in. A UUID arrives on every
+        # subsequent request, from the session cookie — and an `OR` across the
+        # primary key and a case-folded column plans as a sequential scan of
+        # the tenant's students on all of them.
+        try:
+            student_uuid: UUID | None = UUID(candidate)
+        except ValueError:
+            student_uuid = None
+        predicate = (
+            "s.id = :student_id"
+            if student_uuid is not None
+            else "upper(s.external_ref) = upper(CAST(:reference AS varchar))"
         )
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT s.id AS student_id, s.person_id, s.external_ref,
+                           COALESCE(sp.preferred_name, p.preferred_name, p.first_name)
+                             AS preferred_name
+                    FROM student s
+                    JOIN tenant t ON t.id=s.tenant_id
+                    JOIN person p ON p.id=s.person_id AND p.tenant_id=s.tenant_id
+                    LEFT JOIN student_profile sp
+                      ON sp.student_id=s.id AND sp.tenant_id=s.tenant_id
+                    WHERE s.tenant_id=:tenant_id
+                      AND t.status='active'
+                      AND t.demo_auth_enabled=true
+                      AND {predicate}
+                    LIMIT 1
+                    """  # noqa: S608 -- `predicate` is one of two literals above
+                ),
+                {
+                    "tenant_id": UUID(tenant_id),
+                    "student_id": student_uuid,
+                    "reference": candidate,
+                },
+            )
+            row = result.mappings().first()
+        if row is None:
+            raise ApiError(
+                404,
+                "DEMO_STUDENT_NOT_FOUND",
+                "No demo student matches that identifier at this university",
+            )
+        return _demo_session(row, tenant_id=tenant_id, tenant_slug=tenant_slug)
 
     async def resolve_student(
         self, token: str, tenant_id: str, tenant_slug: str | None
@@ -871,6 +928,27 @@ def _credential_session(
 
 def _normalize_email(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().lower()
+
+
+def _demo_session(
+    row: Any,
+    *,
+    tenant_id: str,
+    tenant_slug: str | None,
+) -> DemoStudentSession:
+    external_ref = row.get("external_ref")
+    return DemoStudentSession(
+        context=AuthContext(
+            tenant_id=tenant_id,
+            student_id=str(row["student_id"]),
+            actor_id=str(row["person_id"]),
+            actor_type="student",
+            authentication_method="demo",
+            tenant_slug=tenant_slug,
+        ),
+        preferred_name=str(row["preferred_name"]),
+        external_ref=None if external_ref is None else str(external_ref),
+    )
 
 
 def _session_token_hash(token: str | None) -> str | None:

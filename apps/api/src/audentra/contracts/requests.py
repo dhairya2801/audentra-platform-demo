@@ -239,6 +239,20 @@ class StartGuidedOnboardingRequest(StrictRequest):
     completed_onboarding: StrictBool = False
 
 
+class DemoStudentSignInRequest(StrictRequest):
+    """Sign in as a named demo student. Development and preview only.
+
+    The reference is either the student's UUID or the institution-issued
+    external reference. Which one it is, and whether it resolves inside the
+    caller's tenant, is decided server-side.
+    """
+
+    student_ref: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=64),
+    ]
+
+
 class StudentSignUpRequest(StrictRequest):
     email: StrictStr
     phone: PhoneE164

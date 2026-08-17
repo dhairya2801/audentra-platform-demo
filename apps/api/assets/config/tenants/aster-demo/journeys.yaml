@@ -1,0 +1,160 @@
+schema_version: 1
+tenant: aster-demo
+configuration: journeys
+flows:
+  - id: offer_onboarding
+    title: Aster new-student onboarding
+    kind: onboarding
+    status: published
+    tasks:
+      - id: review_offer
+        student_step: offer
+        title: Review your offer
+        description: Confirm your program, Fall 2027 term, and Aster campus.
+        task_type: approval
+        owner: Admissions
+        required: true
+        points: 20
+      - id: about_you
+        student_step: about_you
+        title: Tell us about you
+        description: Confirm identity, contact information, pronouns, and communication preferences.
+        task_type: form
+        owner: Enrollment Services
+        required: true
+        points: 25
+      - id: housing_selection
+        student_step: housing
+        title: Build your housing plan
+        description: Choose a living plan and tell Residence Life about roommate preferences.
+        task_type: selection_flow
+        owner: Housing & Residence Life
+        required: true
+        points: 35
+        flow:
+          - id: living_plan
+            title: Choose where you plan to live
+            field_type: single_select
+            required: true
+            options: [on_campus, off_campus, commuting, family, undecided]
+          - id: roommate_preference
+            title: Choose a roommate preference
+            field_type: single_select
+            required: false
+            options: [already_selected, matching_service, no_preference, single_room]
+      - id: campus_life
+        student_step: campus_life
+        title: Personalize campus life
+        description: Select clubs, communities, and activities for tailored recommendations.
+        task_type: multiple_select
+        owner: Student Life
+        required: false
+        points: 15
+      - id: emergency_contacts
+        student_step: emergency_contacts
+        title: Add emergency contacts
+        description: Provide at least one contact the university may reach in an emergency.
+        task_type: form
+        owner: Student Services
+        required: true
+        points: 20
+      - id: family_permissions
+        student_step: family_permissions
+        title: Choose family permissions
+        description: Decide whether designated supporters may receive enrollment information.
+        task_type: form
+        owner: Registrar
+        required: false
+        points: 15
+      - id: review_and_sign
+        student_step: review_and_sign
+        title: Review and sign
+        description: Review your answers and sign the enrollment and privacy acknowledgements.
+        task_type: signature
+        owner: Registrar
+        required: true
+        points: 40
+      - id: deposit
+        student_step: deposit
+        title: Review your deposit
+        description: Confirm the enrollment-deposit amount and continue to the enrollment checklist.
+        task_type: payment
+        owner: Student Accounts
+        required: true
+        points: 50
+  - id: enrollment_checklist
+    title: Aster enrollment checklist
+    kind: enrollment
+    status: published
+    tasks:
+      - id: profile_verification
+        title: Verify your profile
+        description: Confirm your personal and contact information before continuing.
+        task_type: form
+        owner: Enrollment Services
+        required: true
+        points: 30
+        due_days_after_acceptance: 7
+      - id: identity_document
+        title: Provide identity documentation
+        description: Upload an accepted identity document for institutional review.
+        task_type: upload_file
+        owner: Registrar
+        required: true
+        points: 40
+        due_days_after_acceptance: 14
+        depends_on: [profile_verification]
+      - id: official_transcript
+        title: Submit your official transcript
+        description: Upload your transcript for review and potential course-credit matching.
+        task_type: upload_file
+        owner: Registrar
+        required: true
+        points: 80
+        due_days_after_acceptance: 14
+        depends_on: [profile_verification]
+      - id: financial_aid_verification
+        title: Complete financial-aid verification
+        description: Submit the requested verification worksheet and review your aid package.
+        task_type: upload_file
+        owner: Financial Aid
+        required: true
+        points: 50
+        due_days_after_acceptance: 10
+      - id: immunization_record
+        title: Provide immunization records
+        description: Upload required health-clearance documentation before arrival.
+        task_type: upload_file
+        owner: Student Health
+        required: true
+        points: 60
+        due_days_after_acceptance: 30
+        depends_on: [profile_verification]
+      - id: housing_preference
+        title: Confirm housing plans
+        description: Tell Aster whether you plan to live on campus or elsewhere.
+        task_type: form
+        owner: Housing & Residence Life
+        required: false
+        points: 25
+        due_days_after_acceptance: 18
+        # The demo campus holds room selection until the deposit clears, so the
+        # prerequisite is declared rather than left for a student to discover.
+        depends_on: [enrollment_deposit]
+      - id: enrollment_deposit
+        title: Pay your enrollment deposit
+        description: Complete the enrollment deposit through the approved payment flow.
+        task_type: payment
+        owner: Student Accounts
+        required: true
+        points: 50
+        due_days_after_acceptance: 21
+      - id: orientation_registration
+        title: Register for orientation
+        description: Choose an orientation session after core records and deposit are complete.
+        task_type: form
+        owner: New Student Programs
+        required: true
+        points: 40
+        due_days_after_acceptance: 35
+        depends_on: [enrollment_deposit, identity_document]
