@@ -1749,6 +1749,256 @@ export interface StaffOperationsWorkspace {
   generatedAt: string;
 }
 
+/* ------------------------------------------------------------ morning brew */
+
+/**
+ * Morning Brew is the staff briefing surface. Every number in it is a count of
+ * canonical PostgreSQL rows read at one instant, and every population is a
+ * `CohortFilter` the staff assistant can re-run — so any headline can be
+ * expanded into the students behind it.
+ *
+ * There are deliberately no targets, benchmarks, projections, or probabilities
+ * in this contract. The platform holds no plan figures and no validated
+ * predictive model, so a field for them would only invite invention.
+ */
+export type StaffBrewTopic =
+  | "admissions"
+  | "financial_aid"
+  | "housing"
+  | "registrar"
+  | "student_success";
+
+export type StaffBrewSeverity = "high" | "medium" | "positive";
+export type StaffBrewTone = "positive" | "watch" | "neutral";
+export type StaffBrewWindowId = "now" | "day";
+
+export type StaffBrewDestination =
+  | "overview"
+  | "outreach"
+  | "tasks"
+  | "students"
+  | "messages"
+  | "campus_life"
+  | "academics"
+  | "journeys"
+  | "knowledge"
+  | "edward";
+
+/** The canonical selection behind a number, plus how to re-ask for it. */
+export interface StaffBrewCohortRef {
+  key: string;
+  /** Reads as a noun phrase: "deposited students with an overdue requirement". */
+  label: string;
+  /** Arguments accepted verbatim by the assistant's `findStudents` filter. */
+  filter: Record<string, string | number | boolean>;
+  /** The same filter in words, from the canonical filter description. */
+  clauses: string[];
+  /** A question that reproduces this cohort through Staff Edward. */
+  question: string;
+}
+
+export interface StaffBrewChangeValue {
+  value: number;
+  label: string;
+  direction: "up" | "down" | "flat";
+  favorable: boolean;
+  comparison: string;
+  /** The exact column the change was counted from. */
+  basis: string;
+}
+
+export interface StaffBrewMetricFrame {
+  windowId: StaffBrewWindowId;
+  value: number;
+  /** What the value describes in this window. */
+  window: string;
+  /** The denominator this value is a share of, when one exists. */
+  basisLabel: string | null;
+  basisValue: number | null;
+  basisPercent: number | null;
+  note: string;
+  /** True when the window cannot be reconstructed for this metric. */
+  unavailable: boolean;
+  change: StaffBrewChangeValue | null;
+}
+
+export interface StaffBrewMetric {
+  id: string;
+  topic: StaffBrewTopic;
+  label: string;
+  icon: string;
+  format: "int";
+  definition: string;
+  source: "canonical_postgres";
+  cohort: StaffBrewCohortRef;
+  frames: StaffBrewMetricFrame[];
+  segments: {
+    key: string;
+    label: string;
+    value: number;
+    percent: number | null;
+  }[];
+}
+
+export interface StaffBrewChange {
+  id: string;
+  topic: StaffBrewTopic;
+  title: string;
+  count: number;
+  metric: string;
+  detail: string;
+  tone: StaffBrewTone;
+  /** The most recent event of this kind inside the window, if any. */
+  occurredAt: string | null;
+  destination: StaffBrewDestination;
+  basis: string;
+  basisNote: string;
+  /** False where the timestamp records the last write rather than the event. */
+  exact: boolean;
+}
+
+export interface StaffBrewAttentionItem {
+  id: string;
+  topic: StaffBrewTopic;
+  /** The office that owns the follow-up. */
+  label: string;
+  title: string;
+  severity: StaffBrewSeverity;
+  summary: string;
+  scope: string;
+  impactLabel: string;
+  impact: { label: string; tone: "negative" | "positive" | "neutral" }[];
+  recommendedAction: string;
+  priorityLevel: "High" | "Medium" | "Low";
+  destination: StaffBrewDestination;
+  cohort: StaffBrewCohortRef;
+  detail: {
+    narrative: string[];
+    drivers: { label: string; value: string; note: string }[];
+    breakdown: {
+      code: string;
+      title: string;
+      students: number;
+      requirements: number;
+      overdue: number;
+    }[];
+    breakdownNote: string | null;
+    actions: { title: string; detail: string; owner: string; due: string }[];
+    students: { id: string; name: string; program: string; note: string }[];
+    studentsNote: string | null;
+    evidence: string[];
+  };
+}
+
+export interface StaffBrewPriority {
+  id: string;
+  topic: StaffBrewTopic;
+  title: string;
+  count: number;
+  level: "High" | "Medium" | "Low";
+  icon: string;
+  detail: string;
+  linkLabel: string;
+  destination: StaffBrewDestination;
+  window: string;
+  breakdown: { label: string; value: string }[];
+  steps: string[];
+}
+
+export interface StaffBrewDeadline {
+  id: string;
+  kind: "requirement" | "offer_response";
+  code: string;
+  title: string;
+  /** Earliest due date in this bucket; `latestDueAt` when they are staggered. */
+  dueAt: string;
+  latestDueAt: string;
+  bucket: "overdue" | "today" | "this_week" | "this_month";
+  relativeLabel: string;
+  students: number;
+  priority: "high" | "medium" | "low";
+  detail: string;
+  destination: StaffBrewDestination;
+}
+
+export interface StaffBrewRequest {
+  id: string;
+  subject: string;
+  summary: string;
+  status: "new" | "open" | "waiting_on_student" | "resolved";
+  priority: "urgent" | "high" | "medium" | "low";
+  topicCode: string;
+  studentName: string;
+  programName: string;
+  assigneeName: string | null;
+  createdAt: string;
+  lastMessageAt: string;
+  waitingHours: number;
+  waitingLabel: string;
+  destination: "messages";
+}
+
+export interface StaffBrewSynthesis {
+  headline: string;
+  bullets: string[];
+  /** `deterministic` means the prose was templated from counted values. */
+  source: "deterministic";
+  basis: string;
+}
+
+export interface StaffMorningBrew {
+  generatedAt: string;
+  window: {
+    id: "day";
+    hours: number;
+    label: string;
+    since: string;
+    basis: string;
+  };
+  windows: {
+    id: StaffBrewWindowId;
+    label: string;
+    short: string;
+    description: string;
+  }[];
+  population: {
+    students: number;
+    cohorts: Record<string, number>;
+  };
+  synthesis: StaffBrewSynthesis;
+  metrics: StaffBrewMetric[];
+  changes: StaffBrewChange[];
+  attention: StaffBrewAttentionItem[];
+  priorities: StaffBrewPriority[];
+  deadlines: StaffBrewDeadline[];
+  requests: {
+    items: StaffBrewRequest[];
+    total: number;
+    awaitingFirstReply: number;
+    unassigned: number;
+  };
+  staffWork: {
+    openItems: number;
+    urgent: number;
+    escalated: number;
+    overdue: number;
+    unassigned: number;
+    assignedToMe: number;
+  };
+  /** Freshness of the deterministic engagement scan behind attention flags. */
+  engagementScan: {
+    available: boolean;
+    snapshots: number;
+    lastProjectedAt: string | null;
+  };
+  coverage: {
+    source: "canonical_postgres";
+    notes: string[];
+    /** Named on purpose: what this briefing cannot honestly report, and why. */
+    unsupported: { metric: string; reason: string }[];
+  };
+}
+
 export interface UpdateStaffKnowledgeCardInput {
   expectedVersion: number;
   title: string;

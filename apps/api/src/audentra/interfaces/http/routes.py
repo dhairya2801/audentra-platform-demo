@@ -1458,6 +1458,15 @@ async def get_staff_workspace(
     )
 
 
+@router.get("/v1/staff/morning-brew", status_code=200, response_model=None)
+async def get_staff_morning_brew(
+    request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service, request=request, operation="staff.get_morning_brew", auth=auth
+    )
+
+
 @router.get("/v1/staff/tenant-configuration", status_code=200, response_model=None)
 async def get_staff_tenant_configuration(
     request: Request, service: ServiceDependency, auth: AuthDependency
