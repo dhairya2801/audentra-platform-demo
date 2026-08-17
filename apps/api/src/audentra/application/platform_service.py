@@ -71,6 +71,61 @@ PROHIBITED_ACTIVITY_TERMS = (
     "ssn",
 )
 
+# The public tenant bootstrap this development composition serves.
+#
+# Shaped exactly like the canonical `TenantBootstrap` the Postgres tenant
+# repository returns, because the portal renders directly from it: a partial
+# payload crashes the portal's tenant provider before any page mounts, which
+# is what a bare {tenantId, slug, displayName} stub used to do. Values are
+# deliberately generic — this is a development fixture, not a real institution.
+DEMO_TENANT_BOOTSTRAP: dict[str, Any] = {
+    "tenantId": DEMO_IDS["tenant_id"],
+    "slug": "audentra-lab",
+    "version": 1,
+    "names": {
+        "displayName": "Audentra Lab",
+        "legalName": "Audentra Lab",
+        "shortName": "Audentra Lab",
+    },
+    "branding": {
+        "logoUrl": "",
+        "logoAlt": "Audentra Lab",
+        "logoDarkUrl": None,
+        "logoDarkAlt": None,
+        "faviconUrl": None,
+        "heroImageUrl": None,
+        "heroImageAlt": None,
+        "primaryColor": "#1f3b5b",
+        "secondaryColor": "#eff4f8",
+        "accentColor": "#c78a2c",
+    },
+    "localization": {
+        "locale": "en-US",
+        "timeZone": "America/New_York",
+        "currencyCode": "USD",
+        "countryCode": "US",
+    },
+    "academicContext": {
+        "academicYearLabel": "2026-2027",
+        "currentTermLabel": "Fall 2027",
+        "defaultCampusName": "Main Campus",
+    },
+    "contacts": {
+        "support": {
+            "label": "Student support",
+            "email": None,
+            "phone": None,
+            "hours": None,
+            "url": None,
+        },
+        "admissions": None,
+        "financialAid": None,
+    },
+    "capabilities": {},
+    "publicLinks": {},
+    "updatedAt": None,
+}
+
 SIGNED_TEMPLATES = (
     {
         "code": "ferpa_release",
@@ -117,11 +172,7 @@ class InMemoryPlatformService:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
             if requested_slug and requested_slug != "audentra-lab":
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-            return {
-                "tenantId": DEMO_IDS["tenant_id"],
-                "slug": "audentra-lab",
-                "displayName": "Audentra Lab",
-            }
+            return dict(DEMO_TENANT_BOOTSTRAP)
 
         auth = self._auth(call)
         payload = dict(call.payload)
