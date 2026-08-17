@@ -120,6 +120,14 @@ class AssistantTurnTrace:
     # refusal before the pipeline ran; "idempotent_replay" returned a stored
     # exchange without executing anything.
     path: str = "pipeline"
+    # How this turn was allowed to execute. "default" is production. The Lab's
+    # "deterministic" mode removes the model planner and the prose composer for
+    # one turn, so `modelCalls` must be empty whenever it appears here.
+    execution_mode: str = "default"
+    # A mode a caller asked for that this environment refused to honour. Set
+    # only where the Lab control is disabled, and it never changes execution —
+    # its purpose is to make an ignored control visible instead of silent.
+    ignored_execution_mode_request: str | None = None
     stages: list[JsonDict] = field(default_factory=list)
     classification: JsonDict | None = None
     tool_selection_source: str | None = None
@@ -232,6 +240,8 @@ class AssistantTurnTrace:
             "staffMemberId": self.staff_member_id,
             "inputMode": self.input_mode,
             "path": self.path,
+            "executionMode": self.execution_mode,
+            "ignoredExecutionModeRequest": self.ignored_execution_mode_request,
             "userMessage": sanitize_trace_value(self.user_message),
             "pagePath": self.page_path,
             "pageLabel": self.page_label,
@@ -306,6 +316,7 @@ class AssistantTraceRecorder:
                 "traceId": payload.get("traceId"),
                 "startedAt": payload.get("startedAt"),
                 "path": payload.get("path"),
+                "executionMode": payload.get("executionMode", "default"),
                 "assistantKind": payload.get("assistantKind", "student"),
                 "inputMode": payload.get("inputMode"),
                 "conversationId": payload.get("conversationId"),
