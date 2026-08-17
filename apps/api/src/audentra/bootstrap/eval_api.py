@@ -15,6 +15,12 @@ endpoints are always enabled so the harness can attach the
 
 Usage:
     uv run --directory apps/api audentra-eval-api --port 45601 --persona new_admit
+
+Set `WEB_ORIGIN` when driving this host from a browser (the Edward Lab), so
+the portal dev server's actual origin is allowed:
+
+    WEB_ORIGIN=http://localhost:3001 uv run --directory apps/api \\
+        audentra-eval-api --port 45601 --persona new_admit
 """
 
 from __future__ import annotations
@@ -98,6 +104,23 @@ def _apply_faults(store: InMemoryPlatformStore, faults: dict[str, str]) -> None:
         setattr(store, attribute, faulty)
 
 
+def _web_origins() -> tuple[str, ...]:
+    """Browser origins this host serves, from `WEB_ORIGIN`.
+
+    The Edward Lab drives this host from a portal dev server, and that server
+    lands on whichever port is free — so a hard-coded single origin makes the
+    Lab unusable whenever the default port is taken by another checkout.
+    Same parsing as `HttpSettings.from_environment`, same default.
+    """
+
+    configured = tuple(
+        origin.strip()
+        for origin in os.getenv("WEB_ORIGIN", "http://localhost:3000").split(",")
+        if origin.strip()
+    )
+    return configured or ("http://localhost:3000",)
+
+
 def build_eval_app(persona: str, faults: dict[str, str] | None = None) -> tuple[FastAPI, str]:
     """The FastAPI app plus a description of the model configuration."""
 
@@ -129,7 +152,10 @@ def build_eval_app(persona: str, faults: dict[str, str] | None = None) -> tuple[
     )
     app = create_app(
         service=service,
-        settings=HttpSettings(assistant_trace_debug_enabled=True),
+        settings=HttpSettings(
+            assistant_trace_debug_enabled=True,
+            web_origins=_web_origins(),
+        ),
     )
     return app, model_description
 
