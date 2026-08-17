@@ -37,6 +37,7 @@ import { MULTI_TURN_CASES } from "./cases/multi-turn.mjs";
 import { MULTI_TURN_2_CASES } from "./cases/multi-turn-2.mjs";
 import { REGRESSION_V2_CASES } from "./cases/regressions-v2.mjs";
 import { READ_PARITY_CASES } from "./cases/read-parity.mjs";
+import { COMPOUND_REQUEST_CASES } from "./cases/compound-requests.mjs";
 
 const RAW = [
   ...LEGACY_CASES,
@@ -57,6 +58,7 @@ const RAW = [
   ...MULTI_TURN_2_CASES,
   ...REGRESSION_V2_CASES,
   ...READ_PARITY_CASES,
+  ...COMPOUND_REQUEST_CASES,
 ];
 
 export const QUESTIONS = RAW.map((raw) => {

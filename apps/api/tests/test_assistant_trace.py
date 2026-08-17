@@ -72,14 +72,22 @@ def test_pipeline_records_stages_tools_and_deterministic_response() -> None:
     assert tool_call["status"] == "available"
     assert tool_call["recordCount"] == 1
     assert isinstance(tool_call["durationMs"], int)
+    # The coverage gate runs on every classified turn and records what it saw,
+    # so "the route already answered everything" is observable rather than
+    # inferred from the absence of a stage. It changed nothing here:
+    # `toolSelectionSource` is still deterministic and the reads are unchanged.
     assert [stage["stage"] for stage in payload["stages"]] == [
         "normalize",
+        "coverage_gate",
         "classify_and_plan",
         "execute_tool_reads",
         "derive_student_state",
         "compose_deterministic",
         "model_rewrite",
     ]
+    gate_stage = next(s for s in payload["stages"] if s["stage"] == "coverage_gate")
+    assert gate_stage.get("supplements") is None
+    assert gate_stage.get("droppedDomains") is None
     assert payload["responseSource"] == "deterministic"
     assert payload["modelIterations"] == 0
     assert payload["finalMessage"] == result.message

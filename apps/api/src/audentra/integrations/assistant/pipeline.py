@@ -80,10 +80,11 @@ class AssistantPipeline:
         self._model_planner = model_planner
         self._tool_timeout_seconds = tool_timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
-        # EXPERIMENTAL, off by default: the full-request coverage gate. None
-        # defers to the AUDENTRA_EXPERIMENTAL_COVERAGE_GATE env flag so the
-        # eval host can A/B it; production wiring passes nothing and sets
-        # nothing, so production routing is unchanged.
+        # The full-request coverage gate, `augment` by default: a confident
+        # first-match classification is checked for asks it does not answer,
+        # and each gap is closed deterministically. None defers to
+        # AUDENTRA_ASSISTANT_COVERAGE_GATE, which a deployment or the eval
+        # host can set to "off" to get plain first-match routing back.
         self._coverage_gate = resolve_coverage_gate_mode(coverage_gate)
 
     async def execute(

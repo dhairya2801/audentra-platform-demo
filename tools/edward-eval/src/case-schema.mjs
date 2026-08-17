@@ -106,6 +106,9 @@ export const KNOWN_TAGS = new Set([
   "adversarial",
   "follow_up",
   "smoke",
+  // More than one material ask in a single message — the family the
+  // deterministic coverage gate exists to keep whole.
+  "compound",
 ]);
 
 const CHECK_KINDS = new Set([

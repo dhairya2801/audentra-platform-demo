@@ -1,4 +1,4 @@
-"""EXPERIMENTAL full-request coverage gate — not part of production routing.
+"""Full-request coverage gate — part of production routing.
 
 The deterministic classifier answers "which single intent fits best?"; it has
 no notion of "did I account for everything the student asked?". A confident
@@ -18,10 +18,20 @@ deterministic classifier on the uncovered segment alone, so "what documents
 am I missing?" supplements as `missing_documents`, not a generic document
 read.
 
-Activation is opt-in only: the `AssistantPipeline(coverage_gate=...)`
-argument, or the non-production environment flag
-`AUDENTRA_EXPERIMENTAL_COVERAGE_GATE` (`augment` | `planner`). Unset means
-off, and production wiring passes nothing.
+`augment` — deterministic supplementation, zero model calls — is the default.
+It was promoted on a full-tier A/B over 376 cases / 446 turns: no
+deterministic regression, three cases newly passing (one of them a critical
+grounding invariant), tool-selection accuracy 98.3% -> 98.7%, hallucination
+rate unchanged at 0%, and an identical 69 planner calls on both sides. The
+gate itself never calls a model; the only delta was two extra composer
+rewrites, on turns that previously had no evidence worth rewriting.
+
+`planner` — escalating a gap to the model planner — remains implemented and
+is not wired anywhere: measured against `augment` it bought no coverage, made
+one case worse, and cost 4.5x the model calls.
+
+Routing can be returned to plain first-match without a code change by
+`AssistantPipeline(coverage_gate="off")` or `AUDENTRA_ASSISTANT_COVERAGE_GATE=off`.
 """
 
 from __future__ import annotations
@@ -43,7 +53,11 @@ from audentra.integrations.assistant.normalize import NormalizedRequest, normali
 from audentra.integrations.assistant.planner import select_tool_reads
 
 COVERAGE_GATE_MODES = ("off", "augment", "planner")
-COVERAGE_GATE_ENV_FLAG = "AUDENTRA_EXPERIMENTAL_COVERAGE_GATE"
+COVERAGE_GATE_ENV_FLAG = "AUDENTRA_ASSISTANT_COVERAGE_GATE"
+#: Production routing. `planner` stays reachable for evaluation only; it was
+#: measured against `augment` and lost — same coverage, one worse case, 4.5x
+#: the model calls — so nothing wires it by default.
+DEFAULT_COVERAGE_GATE_MODE = "augment"
 
 # The classifier's hint vocabulary is tuned for the operator path; the gate
 # extends it locally (never touching production detection) where an ask has no
@@ -142,12 +156,19 @@ _EMPTY_ASSESSMENT = CoverageAssessment((), (), (), (), ())
 
 
 def resolve_coverage_gate_mode(explicit: str | None) -> str:
-    """Explicit argument first; otherwise the experimental env flag; else off."""
+    """Explicit argument first; then the deployment override; else the default.
+
+    `augment` is the production default. The override exists so a deployment
+    can fall back to first-match routing without a code change, and so the
+    eval harness can A/B the two; it accepts `off` for exactly that reason.
+    An unrecognised value is not honoured — a typo must not silently change
+    routing — so it falls through to the default.
+    """
 
     if explicit is not None:
-        return explicit if explicit in COVERAGE_GATE_MODES else "off"
+        return explicit if explicit in COVERAGE_GATE_MODES else DEFAULT_COVERAGE_GATE_MODE
     value = os.getenv(COVERAGE_GATE_ENV_FLAG, "").strip().lower()
-    return value if value in ("augment", "planner") else "off"
+    return value if value in COVERAGE_GATE_MODES else DEFAULT_COVERAGE_GATE_MODE
 
 
 def _ask_segments(text: str) -> list[str]:

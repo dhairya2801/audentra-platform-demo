@@ -53,11 +53,16 @@ def _assess(message: str, history: list[dict[str, str]] | None = None) -> Covera
     return assess_request_coverage(request, classification)
 
 
-# --- The failure mode, pinned exactly as it ships today -----------------------
+# --- The failure mode the gate exists to close --------------------------------
+#
+# These pin plain first-match routing, which is what `coverage_gate="off"`
+# still selects. They are the "before" half of the promotion evidence, and the
+# regression pin for the escape hatch: if turning the gate off stopped
+# reproducing this, the hatch would no longer be doing what it claims.
 
 
-def test_default_routing_drops_the_documents_ask_from_a_compound_question() -> None:
-    result, trace = _run(COMPOUND_HOUSING_DOCS)
+def test_first_match_routing_drops_the_documents_ask_from_a_compound_question() -> None:
+    result, trace = _run(COMPOUND_HOUSING_DOCS, coverage_gate="off")
 
     assert result.classification is not None
     assert result.classification.request_type == "housing_eligibility"
@@ -68,8 +73,8 @@ def test_default_routing_drops_the_documents_ask_from_a_compound_question() -> N
     assert "getDocumentStatuses" not in trace.selected_tools
 
 
-def test_default_routing_drops_the_balance_ask_entirely() -> None:
-    result, _trace = _run(COMPOUND_BALANCE_CLUBS)
+def test_first_match_routing_drops_the_balance_ask_entirely() -> None:
+    result, _trace = _run(COMPOUND_BALANCE_CLUBS, coverage_gate="off")
 
     assert result.classification is not None
     assert result.classification.request_type == "campus_life"
@@ -135,11 +140,27 @@ def test_gate_is_silent_on_covered_and_conversational_requests() -> None:
         ("Hi Edward!", []),
     ]
     for message, history in cases:
-        default_result, default_trace = _run(message, history=history)
+        # Explicitly "off" on the left: now that augment is the default, an
+        # unqualified _run() would compare augment against itself and prove
+        # nothing about the fast path.
+        default_result, default_trace = _run(message, coverage_gate="off", history=history)
         gated_result, gated_trace = _run(message, coverage_gate="augment", history=history)
         assert gated_trace.selected_tools == default_trace.selected_tools, message
         assert gated_result.classification == default_result.classification, message
         assert gated_result.message == default_result.message, message
+        # The gate is observable but inert here: it may record that it looked,
+        # and must never record a supplement or a drop.
+        for stage in gated_trace.stages:
+            if stage["stage"] != "coverage_gate":
+                continue
+            assert stage.get("supplements") is None, message
+            assert stage.get("droppedDomains") is None, message
+            assert stage.get("action") in (
+                None,
+                "fully_covered",
+                "exempt",
+                "fallback_bare",
+            ), message
 
 
 def test_gate_never_widens_a_write_refusal() -> None:
@@ -254,28 +275,46 @@ def test_planner_mode_without_a_planner_still_augments() -> None:
     assert "missing_documents" in result.classification.additional_request_types
 
 
-# --- Activation is opt-in only ------------------------------------------------
+# --- Augment is the production default, and is cleanly disablable -------------
 
 
-def test_gate_is_off_by_default_and_env_flag_enables_it(monkeypatch: Any) -> None:
+def test_gate_augments_by_default_and_the_override_can_turn_it_off(
+    monkeypatch: Any,
+) -> None:
     monkeypatch.delenv(COVERAGE_GATE_ENV_FLAG, raising=False)
-    assert resolve_coverage_gate_mode(None) == "off"
-    assert resolve_coverage_gate_mode("augment") == "augment"
-    assert resolve_coverage_gate_mode("nonsense") == "off"
-
-    monkeypatch.setenv(COVERAGE_GATE_ENV_FLAG, "augment")
     assert resolve_coverage_gate_mode(None) == "augment"
-    # An explicit argument always beats the environment.
+    assert resolve_coverage_gate_mode("augment") == "augment"
     assert resolve_coverage_gate_mode("off") == "off"
+    # A typo must not silently change routing: it falls back to the default,
+    # never to a mode nobody asked for.
+    assert resolve_coverage_gate_mode("nonsense") == "augment"
 
-    result, _ = _run(COMPOUND_BALANCE_CLUBS)  # env flag set by monkeypatch
-    assert result.classification is not None
-    assert "student_account" in result.classification.additional_request_types
+    monkeypatch.setenv(COVERAGE_GATE_ENV_FLAG, "off")
+    assert resolve_coverage_gate_mode(None) == "off"
+    # An explicit argument always beats the environment.
+    assert resolve_coverage_gate_mode("augment") == "augment"
+
+    monkeypatch.setenv(COVERAGE_GATE_ENV_FLAG, "nonsense")
+    assert resolve_coverage_gate_mode(None) == "augment"
 
 
-def test_default_pipeline_ignores_the_gate_entirely(monkeypatch: Any) -> None:
+def test_default_pipeline_covers_the_whole_request(monkeypatch: Any) -> None:
+    """No flag, no argument: the second ask is routed and the trace says so."""
+
     monkeypatch.delenv(COVERAGE_GATE_ENV_FLAG, raising=False)
     result, trace = _run(COMPOUND_BALANCE_CLUBS)
+    assert result.classification is not None
+    assert "student_account" in result.classification.additional_request_types
+    assert any(stage["stage"] == "coverage_gate" for stage in trace.stages)
+
+
+def test_the_gate_can_be_turned_off_back_to_first_match_routing(
+    monkeypatch: Any,
+) -> None:
+    """The documented escape hatch, asserted rather than assumed."""
+
+    monkeypatch.delenv(COVERAGE_GATE_ENV_FLAG, raising=False)
+    result, trace = _run(COMPOUND_BALANCE_CLUBS, coverage_gate="off")
     assert result.classification is not None
     assert result.classification.additional_request_types == ()
     assert all(stage["stage"] != "coverage_gate" for stage in trace.stages)

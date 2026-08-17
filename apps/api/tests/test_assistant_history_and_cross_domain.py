@@ -301,24 +301,34 @@ def test_housing_plus_aid_question_defers_to_the_planner() -> None:
 
 
 def test_cross_domain_question_reads_and_verifies_deterministically() -> None:
-    """Without a model, the fallback + dependency round still gather evidence."""
+    """Without a model, the widened fallback + dependency round gather evidence."""
 
+    message = "I paid my deposit and submitted my FAFSA. Why can't I register for housing?"
     trace = AssistantTurnTrace(trace_id="cross-1")
     pipeline = AssistantPipeline(_host(_primitives()))
-    result = asyncio.run(
-        pipeline.execute(
-            message=("I paid my deposit and submitted my FAFSA. Why can't I register for housing?"),
-            trace=trace,
-        )
-    )
+    result = asyncio.run(pipeline.execute(message=message, trace=trace))
 
     payload = trace.to_dict()
-    assert payload["classification"]["source"] == "safe_fallback"
+    # `classify()` declines this one, and with no model planner configured the
+    # safe fallback is all that is left. The coverage gate widens that fallback
+    # with the domains the student actually named, so the source is the gate
+    # rather than a bare `safe_fallback`.
+    assert payload["classification"]["source"] == "coverage_gate"
     executed = [call["tool"] for call in payload["toolCalls"]]
     # The open deposit blocker pulled in the verifying account read.
     assert "getStudentAccountSummary" in executed
     assert payload["secondRead"] is not None
     assert result.message
+
+    # With the gate off, the same turn is the bare fallback it used to be —
+    # and reads strictly less, which is why the widening was promoted.
+    bare_trace = AssistantTurnTrace(trace_id="cross-1-off")
+    bare_pipeline = AssistantPipeline(_host(_primitives()), coverage_gate="off")
+    asyncio.run(bare_pipeline.execute(message=message, trace=bare_trace))
+    bare_payload = bare_trace.to_dict()
+    assert bare_payload["classification"]["source"] == "safe_fallback"
+    bare_executed = {call["tool"] for call in bare_payload["toolCalls"]}
+    assert bare_executed <= set(executed)
 
 
 # --- Bounded dependency second read ---------------------------------------
