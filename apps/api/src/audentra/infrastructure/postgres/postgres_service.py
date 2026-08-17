@@ -1715,6 +1715,7 @@ class PostgresPlatformService:
             question: str,
             evidence_texts: list[str],
             draft_answer: str,
+            presented_blocks: list[str] | None = None,
             feedback: str | None = None,
         ) -> Mapping[str, Any] | None:
             return cast(
@@ -1723,6 +1724,7 @@ class PostgresPlatformService:
                     question=question,
                     evidence_texts=evidence_texts,
                     draft_answer=draft_answer,
+                    presented_blocks=presented_blocks,
                     feedback=feedback,
                     tenant_id=auth.tenant_id,
                     student_id=auth.student_id,
@@ -1992,6 +1994,7 @@ class PostgresPlatformService:
             question: str,
             evidence_texts: list[str],
             draft_answer: str,
+            presented_blocks: list[str] | None = None,
             feedback: str | None = None,
         ) -> Mapping[str, Any] | None:
             return cast(
@@ -2000,6 +2003,7 @@ class PostgresPlatformService:
                     question=question,
                     evidence_texts=evidence_texts,
                     draft_answer=draft_answer,
+                    presented_blocks=presented_blocks,
                     feedback=feedback,
                     tenant_id=auth.tenant_id,
                     staff_member_id=auth.actor_id,

@@ -1072,7 +1072,7 @@ async def _tool_campus_life(host: AssistantToolHost, now: datetime) -> JsonDict:
         if starts_at is None or starts_at >= now:
             events.append(entry)
     clubs = [
-        {key: item.get(key) for key in ("name", "category", "description", "nextActivity")}
+        {key: item.get(key) for key in ("id", "name", "category", "description", "nextActivity")}
         for raw in _sequence(campus.get("clubs"))[:16]
         if (item := _mapping(raw))
     ]

@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from audentra.integrations.assistant.blocks import render_blocks_as_text
+from audentra.integrations.assistant.blocks import (
+    describe_blocks_for_prompt,
+    render_blocks_as_text,
+)
 from audentra.integrations.assistant.classify import Classification, classify
 from audentra.integrations.assistant.compose import ComposedAnswer, compose_deterministic
 from audentra.integrations.assistant.derive import DerivedState, derive_student_state
@@ -319,6 +322,10 @@ class AssistantPipeline:
             ),
             disbursement_gates=(disbursements or {}).get("gates") if disbursements else None,
         )
+        # The prose the model writes renders above the draft's structured
+        # blocks, so the model must know what those blocks already show —
+        # otherwise it restates every row a table carries.
+        presented_blocks = describe_blocks_for_prompt(draft.blocks)
         attempts = 0
         feedback: str | None = None
         while attempts < 2:
@@ -355,6 +362,7 @@ class AssistantPipeline:
                     question=question,
                     evidence_texts=draft.evidence_texts,
                     draft_answer=draft.message,
+                    presented_blocks=presented_blocks or None,
                     feedback=feedback,
                 )
             except Exception:
@@ -395,12 +403,33 @@ class AssistantPipeline:
                     dict(usage) if isinstance(usage, Mapping) else None,
                 )
             failure_codes.append(f"written_answer_rejected:{verdict.reason_code}")
-            if verdict.reason_code != "invented_causation":
+            # Two rejection families earn the single retry, because a small
+            # rewrite usually saves an otherwise-good answer: an invented
+            # cause, and an amount/date/contact the evidence doesn't carry
+            # (a rejection here falls back to a draft that may not address
+            # the question the student actually asked).
+            feedback = {
+                "invented_causation": (
+                    "Your previous answer asserted a cause the record does not "
+                    "support. State only causes present in the evidence list."
+                ),
+                "ungrounded_number": (
+                    "Your previous answer contained an amount or number that is "
+                    "not in the verified facts. Use only numbers that appear "
+                    "there, or leave the number out."
+                ),
+                "ungrounded_date": (
+                    "Your previous answer contained a date that is not in the "
+                    "verified facts. Use only dates that appear there, or "
+                    "leave the date out."
+                ),
+                "ungrounded_contact": (
+                    "Your previous answer contained contact details that are "
+                    "not in the verified facts. Leave them out."
+                ),
+            }.get(verdict.reason_code or "")
+            if feedback is None:
                 break
-            feedback = (
-                "Your previous answer asserted a cause the record does not "
-                "support. State only causes present in the evidence list."
-            )
         return deterministic
 
 

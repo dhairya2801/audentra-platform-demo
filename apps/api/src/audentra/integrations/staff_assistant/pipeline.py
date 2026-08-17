@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from audentra.integrations.assistant.blocks import text_block
+from audentra.integrations.assistant.blocks import describe_blocks_for_prompt, text_block
 from audentra.integrations.assistant.trace import AssistantTurnTrace
 from audentra.integrations.staff_assistant.classify import (
     STUDENT_REQUIRED_REQUEST_TYPES,
@@ -524,11 +524,15 @@ class StaffAssistantPipeline:
         ):
             return deterministic
         attempt_started = time.perf_counter()
+        # The model prose renders above the draft's structured blocks; telling
+        # it what those blocks already show is what stops row-by-row restating.
+        presented_blocks = describe_blocks_for_prompt(draft.blocks)
         try:
             result = await self._model_composer(
                 question=question,
                 evidence_texts=draft.evidence_texts,
                 draft_answer=draft.message,
+                presented_blocks=presented_blocks or None,
             )
         except Exception:
             failure_codes.append("composition_model_failure")
@@ -579,6 +583,7 @@ class StaffAssistantPipeline:
                     f"{answer_text} (This is my recommendation from the record, "
                     "not institutional policy.)"
                 )
+            answer_text = _restore_dropped_caveats(answer_text, draft.message)
             blocks = [
                 {"type": "text", "fallbackText": answer_text, "text": answer_text},
                 *[block for block in draft.blocks if block.get("type") != "text"],
@@ -593,6 +598,37 @@ class StaffAssistantPipeline:
             )
         failure_codes.append(f"written_answer_rejected:{verdict.reason_code}")
         return deterministic
+
+
+# Honesty caveats the deterministic draft states that a rewrite must not
+# soften away: (marker in the draft, marker that must survive in the answer,
+# sentence restored when it did not). Deterministic, because prompting alone
+# demonstrably lets a paraphrase drop them.
+_PRESERVED_CAVEATS: tuple[tuple[str, str, str], ...] = (
+    (
+        "registrar hold system",
+        "hold system",
+        "(No registrar hold system exists — these derived blockers are the complete list.)",
+    ),
+    (
+        "engagement scan",
+        "engagement scan",
+        "(This view comes from the rule-based engagement scan, not a risk model.)",
+    ),
+)
+
+
+def _restore_dropped_caveats(answer_text: str, draft_message: str) -> str:
+    """Re-append any honesty caveat the deterministic draft carried and the
+    accepted rewrite lost."""
+
+    draft_lowered = draft_message.lower()
+    answer_lowered = answer_text.lower()
+    for draft_marker, answer_marker, sentence in _PRESERVED_CAVEATS:
+        if draft_marker in draft_lowered and answer_marker not in answer_lowered:
+            answer_text = f"{answer_text} {sentence}"
+            answer_lowered = answer_text.lower()
+    return answer_text
 
 
 def _classification_dict(
