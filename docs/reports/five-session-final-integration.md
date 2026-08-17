@@ -18,8 +18,11 @@ population was found and fixed. No functionality was dropped from any session.
 | Local `main` at session start | `13babd284f997cbcb87dadde5d2d388c8c9927bc` | `c2c75e53cd099c97423914ca62ddf60b3cfa6d71` |
 | `origin/main` at session start | `9f6b8f2c0136a28c47cdca9da18e5080858e2feb` | `7604ae846104710339e7dd85c3bab82f90022341` |
 | Integration baseline | `a062592f93ab2a290d2603e4614006aa9b5ba7ab` (`feat/edward-parity-integration-v2`) | `9c2126533ca6a338d97e23d16b12f8a7200b2053` (`chore/sync-staff-edward-contracts`) |
-| **Final `main`** | **`002f43bf67c9b4871f5189449437bfbf5f2d396e`** | **`ada75756c7acf2dd5c9b421be3a2c0036aa7394d`** |
-| **Final `origin/main`** | **`002f43bf67c9b4871f5189449437bfbf5f2d396e`** | **`ada75756c7acf2dd5c9b421be3a2c0036aa7394d`** |
+| Final code tip (last commit before this report) | `002f43bf67c9b4871f5189449437bfbf5f2d396e` | `ada75756c7acf2dd5c9b421be3a2c0036aa7394d` |
+| **Final `main` = `origin/main`** | **`2286de849e64ef28c1edb18b5cc0bc153ce70e19`** | **`ada75756c7acf2dd5c9b421be3a2c0036aa7394d`** |
+
+The Platform tip advances by one over the code tip because this report is itself
+a commit on `main`; Portals has no report commit, so its two rows coincide.
 
 ## Phase 0 — what inspection found
 
@@ -499,11 +502,18 @@ generated applicants rejected as denied/waitlisted, unchanged from S5), alongsid
 **Final git status**
 
 ```
-Audentra-platform:  On branch main / nothing to commit, working tree clean
-                    main == origin/main == 002f43bf67c9b4871f5189449437bfbf5f2d396e
-Audentra-portals:   On branch main / nothing to commit, working tree clean
+Audentra-platform:  On branch main
+                    Your branch is ahead of 'deploy/main' by 89 commits.
+                    nothing to commit, working tree clean
+                    main == origin/main == 2286de849e64ef28c1edb18b5cc0bc153ce70e19*
+
+Audentra-portals:   On branch main
+                    Your branch is ahead of 'deploy/main' by 13 commits.
+                    nothing to commit, working tree clean
                     main == origin/main == ada75756c7acf2dd5c9b421be3a2c0036aa7394d
 ```
+
+\* plus the one-line amendment to this report's own SHA table, pushed with it.
 
 Both branches also track `deploy/main`, which was deliberately not pushed —
 `origin` was the only push target.
