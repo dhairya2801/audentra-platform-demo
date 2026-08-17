@@ -92,7 +92,17 @@ class PostgresMorningBrewRepository:
             {self._cohort_sql.from_clause()}
             WHERE student.tenant_id = :tenant_id
         """
-        async with self._engine.connect() as connection:
+        async with self._engine.connect() as connection, connection.begin():
+            # One statement carrying every cohort filter is wide by design (see
+            # the module docstring), and its planner cost scales with the number
+            # of cohorts, not the roster. Past PostgreSQL's `jit_above_cost`
+            # thresholds that estimate triggers JIT inlining and optimization of
+            # several hundred expression functions — on a 2,576-student tenant,
+            # 1.8s of compilation for a 0.4s scan. The counts are identical
+            # either way, so the compiler is pure overhead here. `SET LOCAL`
+            # keeps this to the statement's own transaction; every other query
+            # on the pooled connection keeps the server default.
+            await connection.exec_driver_sql("SET LOCAL jit = off")
             row = (
                 (await connection.execute(self._cohort_sql.statement(sql), params))
                 .mappings()
