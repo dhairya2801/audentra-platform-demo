@@ -662,6 +662,8 @@ def _compose_student_overview(
     if offer.get("status"):
         deposit = "deposit paid" if offer.get("depositPaid") else "deposit not paid"
         parts.append(f"Offer {offer['status']}, {deposit}.")
+    if student.get("onboardingStatus"):
+        parts.append(f"Onboarding {str(student['onboardingStatus']).replace('_', ' ')}.")
     parts.append(
         f"{req.get('completed', 0)} of {req.get('total', 0)} requirements complete; "
         f"{req.get('openBlocking', 0)} open blocking item(s)."
@@ -739,8 +741,10 @@ def _compose_missing_items(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
     blocking = [item for item in open_items if item.get("blocking")]
+    completed = len(state.requirements) - len(open_items)
     message = (
-        f"{name} still has {len(open_items)} open requirement(s)"
+        f"{name} has completed {completed} of {len(state.requirements)} requirements and "
+        f"still has {len(open_items)} open requirement(s)"
         + (f", {len(blocking)} of them blocking" if blocking else "")
         + "."
     )
@@ -1684,8 +1688,13 @@ def _compose_work_queue(
         )
     open_items = open_work_items(state)
     counts = _m(queue.get("counts"))
+    filters = _m(queue.get("filters"))
+    active_filters = {
+        key: value for key, value in filters.items() if value not in (None, "", "all")
+    }
     if not open_items:
-        message = "The queue is clear — no open work items match."
+        scope = f" matching {_describe_queue_filters(active_filters)}" if active_filters else ""
+        message = f"The queue is clear — no open work items{scope}."
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
@@ -1693,12 +1702,27 @@ def _compose_work_queue(
     # the head of the queue without reciting its row.
     first = open_items[0]
     first_student = _m(first.get("student"))
-    message = (
-        f"{_count(len(open_items), 'open item')} in canonical order (priority, then due "
-        f"date) — {counts.get('urgent', 0)} urgent, "
-        f"{counts.get('escalated', 0)} escalated. First up: {first.get('key')} "
-        f"for {first_student.get('name')}. The queue:"
-    )
+    if active_filters:
+        # A filtered slice must report its own numbers, never blend the
+        # whole-queue counts with a filtered head item.
+        filtered_open = int(queue.get("filteredOpen") or len(open_items))
+        distinct = queue.get("distinctOpenStudents")
+        students_part = (
+            f" across {_count(int(distinct), 'student')}" if distinct is not None else ""
+        )
+        message = (
+            f"{_count(filtered_open, 'open Action Center item')}{students_part} matching "
+            f"{_describe_queue_filters(active_filters)}, in canonical order (priority, "
+            f"then due date). First up: {first.get('key')} for "
+            f"{first_student.get('name')}. The matching items:"
+        )
+    else:
+        message = (
+            f"{_count(len(open_items), 'open item')} in canonical order (priority, then due "
+            f"date) — {counts.get('urgent', 0)} urgent, "
+            f"{counts.get('escalated', 0)} escalated. First up: {first.get('key')} "
+            f"for {first_student.get('name')}. The queue:"
+        )
     block = table_block(
         [
             {"key": "key", "label": "Key"},
@@ -1729,6 +1753,74 @@ def _compose_work_queue(
         blocks=[text_block(message), block, open_board],
         evidence_texts=evidence,
     )
+
+
+def _describe_queue_filters(active: dict[str, Any]) -> str:
+    labels = {
+        "ownership": "ownership",
+        "component": "component",
+        "status": "status",
+        "dueWindow": "due window",
+        "topic": "topic",
+    }
+    return "; ".join(f"{labels.get(key, key)} “{value}”" for key, value in active.items())
+
+
+def _compose_student_action_center(
+    _classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    """Answer Action Center membership from the student's actual open staff
+    work items — never inferred from their blockers."""
+
+    evidence = build_staff_evidence_bundle(state)
+    name = _student_name(state) or "This student"
+    if state.student is None:
+        message = "I couldn't read that student's record just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    open_work = state.open_work
+    blocker_titles = _join_titles(state.blockers) if state.blockers else None
+    blocks: list[JsonDict] = []
+    if open_work:
+        first = _m(open_work[0])
+        message = (
+            f"Yes — {name} is in the Action Center with "
+            f"{_count(len(open_work), 'open staff work item')}. "
+            f"{first.get('key')}: {first.get('title')} "
+            f"({str(first.get('priority') or '').strip() or 'unprioritized'}, "
+            f"{str(first.get('status', '')).replace('_', ' ')}) is what put them there."
+        )
+        if blocker_titles:
+            message += f" On the student's own side, they are blocked on: {blocker_titles}."
+        blocks.append(text_block(message))
+        blocks.append(
+            bullet_list_block(
+                [
+                    {
+                        "text": f"{item.get('key')}: {item.get('title')} — "
+                        f"{str(item.get('status', '')).replace('_', ' ')} "
+                        f"({item.get('priority')})"
+                    }
+                    for item in open_work[:5]
+                ],
+                title="Open staff work",
+            )
+        )
+    else:
+        message = (
+            f"No — {name} is not in the Action Center right now: there are no "
+            "open staff work items on their record."
+        )
+        if blocker_titles:
+            message += (
+                f" They do still have open blockers on their side ({blocker_titles}), "
+                "but no staff task is currently queued for them."
+            )
+        else:
+            message += " Nothing is blocking them either."
+        blocks.append(text_block(message))
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
 
 
 def _compose_work_item_detail(
@@ -2078,6 +2170,7 @@ _COMPOSERS = {
     "student_engagement": _compose_engagement,
     "student_timeline": _compose_timeline,
     "student_ownership": _compose_ownership,
+    "student_action_center": _compose_student_action_center,
     "cohort_search": _compose_cohort_search,
     "cohort_aggregate": _compose_cohort_aggregate,
     "attention_ranking": _compose_attention,

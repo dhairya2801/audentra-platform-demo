@@ -526,3 +526,104 @@ async def test_blocker_answer_names_hold_system_honestly() -> None:
     service = _service()
     result = await _ask(service, "Does Alex Morgan have any holds?")
     assert re.search(r"no registrar hold system", result["message"], re.I)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic routing added for the database-backed staff eval
+# ---------------------------------------------------------------------------
+
+
+def _classify(message: str) -> Any:
+    from audentra.integrations.staff_assistant.classify import classify_staff_request
+    from audentra.integrations.staff_assistant.normalize import normalize_staff_request
+
+    return classify_staff_request(normalize_staff_request(message))
+
+
+def test_action_center_phrases_route_to_the_canonical_queue() -> None:
+    for message in (
+        "What is in my Action Center?",
+        "How many open items are in my Action Center right now?",
+        "What are the transcript items in the Action Center?",
+    ):
+        classification = _classify(message)
+        assert classification is not None, message
+        assert classification.request_type == "work_queue", message
+    topical = _classify("Which students have transcript-related items in my Action Center?")
+    assert topical is not None
+    assert topical.request_type == "work_queue"
+    assert topical.reference == "topic:transcript"
+
+
+def test_action_center_membership_questions_are_student_scoped() -> None:
+    for message in (
+        "Why is Marisol Fennwick in my Action Center?",
+        "Is Tobias Quillfeather currently in the Action Center?",
+    ):
+        classification = _classify(message)
+        assert classification is not None, message
+        assert classification.request_type == "student_action_center", message
+
+
+def test_action_center_membership_counts_stay_with_the_cohort_classifier() -> None:
+    classification = _classify("How many students are in the Action Center?")
+    assert classification is not None
+    assert classification.request_type == "cohort_aggregate"
+    assert classification.cohort_filter == {"hasOpenWorkItem": True}
+
+
+def test_cohort_deposit_predicate_accepts_the_plural() -> None:
+    classification = _classify("How many students have unpaid deposits?")
+    assert classification is not None
+    assert classification.request_type == "cohort_aggregate"
+    assert classification.cohort_filter == {"depositState": "unpaid"}
+
+
+def test_pasted_student_id_is_not_a_work_item_question() -> None:
+    classification = _classify("Show me the student with ID SYN-000004.")
+    assert classification is not None
+    assert classification.request_type == "student_overview"
+    # ...while an explicit task question keeps the work-item route.
+    task = _classify("What happened on the task ENR-104?")
+    assert task is not None
+    assert task.request_type == "work_item_detail"
+
+
+def test_mark_as_accepted_is_an_action_request() -> None:
+    classification = _classify("Mark Devon Ashgrove's transcript as accepted.")
+    assert classification is not None
+    assert classification.request_type == "action_request"
+
+
+def test_highest_risk_and_odds_phrasings_stay_honest() -> None:
+    ranking = _classify("Which students are highest risk right now?")
+    assert ranking is not None
+    assert ranking.request_type == "attention_ranking"
+    odds = _classify("What are the odds Wren Halloway actually enrolls this fall?")
+    assert odds is not None
+    assert odds.request_type in {"unsupported_metric", "attention_ranking"}
+    assert odds.reference == "enrollment_probability"
+
+
+def test_has_anyone_emailed_routes_to_communications() -> None:
+    classification = _classify("Has anyone from our office emailed Odalys Brightwater recently?")
+    assert classification is not None
+    assert classification.request_type == "student_communications"
+
+
+@pytest.mark.anyio
+async def test_refusal_intents_never_run_referent_resolution() -> None:
+    service = _service()
+    response = await _ask(service, "Mark Alex Morgan's transcript as accepted.")
+    assert response["resolvedStudent"] is None
+    message = response["message"].lower()
+    assert "read-only" in message or "can't" in message or "cannot" in message
+    assert "which one do you mean" not in message
+
+
+def test_break_down_phrasing_is_a_cohort_aggregate() -> None:
+    classification = _classify("Break down the students still in onboarding by program.")
+    assert classification is not None
+    assert classification.request_type == "cohort_aggregate"
+    assert classification.cohort_filter == {"onboardingStatus": "in_progress"}
+    assert classification.cohort_group_by == "program"

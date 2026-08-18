@@ -26,6 +26,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
+from difflib import SequenceMatcher
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -123,14 +124,28 @@ class PostgresStaffAssistantRepository:
                 f"(person.first_name ILIKE :{key} ESCAPE '\\'"
                 f" OR person.last_name ILIKE :{key} ESCAPE '\\'"
                 f" OR COALESCE(profile.preferred_name, person.preferred_name, '')"
-                f" ILIKE :{key} ESCAPE '\\')"
+                f" ILIKE :{key} ESCAPE '\\'"
+                f" OR COALESCE(student.external_ref, '') ILIKE :{key} ESCAPE '\\')"
             )
         if program:
             params["program"] = f"%{_escape_like(program.strip())}%"
             clauses.append("COALESCE(offer_program.name, '') ILIKE :program ESCAPE '\\'")
         where = f"WHERE student.tenant_id = :tenant_id{''.join(f' AND {c}' for c in clauses)}"
-        sql = f"""
-            SELECT student.id, person.first_name, person.last_name,
+        async with self._engine.connect() as connection:
+            rows = (
+                (await connection.execute(text(self._roster_search_sql(where)), params))
+                .mappings()
+                .all()
+            )
+        return {
+            "items": [self._map_roster_row(row) for row in rows],
+            "total": len(rows),
+            "limit": bounded_limit,
+        }
+
+    def _roster_search_sql(self, where: str, *, limit_clause: str = "LIMIT :limit") -> str:
+        return f"""
+            SELECT student.id, student.external_ref, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
               student.class_year,
@@ -158,31 +173,122 @@ class PostgresStaffAssistantRepository:
             LEFT JOIN LATERAL ({self._requirement_progress_sql()}) AS requirement_progress ON true
             {where}
             ORDER BY person.last_name, person.first_name, student.id
-            LIMIT :limit
+            {limit_clause}
+        """
+
+    @staticmethod
+    def _map_roster_row(row: Mapping[Any, Any]) -> JsonDict:
+        return {
+            "id": str(row["id"]),
+            "externalRef": _optional_text(row["external_ref"]),
+            "name": f"{row['first_name']} {row['last_name']}",
+            "preferredName": str(row["preferred_name"]),
+            "programName": str(row["program_name"]),
+            "classYear": int(row["class_year"]),
+            "offerStatus": _optional_text(row["offer_status"]),
+            "requirements": {
+                "total": int(row["requirement_total"]),
+                "completed": int(row["requirement_completed"]),
+                "openBlocking": int(row["open_blocking_count"]),
+            },
+            "nextDueAt": _optional_iso(row["next_due_at"]),
+        }
+
+    async def get_student_by_external_ref(
+        self, auth: AuthContext, external_ref: str
+    ) -> JsonDict | None:
+        """Exact institutional-ID lookup inside the authenticated tenant."""
+
+        _require_staff(auth)
+        ref = (external_ref or "").strip()
+        if not ref:
+            return None
+        where = (
+            "WHERE student.tenant_id = :tenant_id "
+            "AND UPPER(student.external_ref) = UPPER(:external_ref)"
+        )
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(self._roster_search_sql(where, limit_clause="LIMIT 1")),
+                        {"tenant_id": _uuid(auth.tenant_id), "external_ref": ref},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return self._map_roster_row(row) if row is not None else None
+
+    async def search_students_fuzzy(
+        self, auth: AuthContext, *, query: str, limit: int = 5
+    ) -> JsonDict:
+        """Close-spelling name suggestions when the exact search found nothing.
+
+        Deterministic: the tenant's roster names are compared with difflib
+        ratios in code — no extension requirements, no model involvement.
+        Results are suggestions for the staff member to confirm, and carry
+        ``matchQuality: "fuzzy"`` so no caller auto-resolves them.
+        """
+
+        _require_staff(auth)
+        needle = re.sub(r"\s+", " ", (query or "").strip().lower())
+        if not needle:
+            return {"items": [], "total": 0, "matchQuality": "fuzzy"}
+        bounded_limit = max(1, min(int(limit or 5), 10))
+        sql = f"""
+            SELECT student.id, person.first_name, person.last_name,
+              COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
+                AS preferred_name
+            FROM {self._table("student")} AS student
+            JOIN {self._table("person")} AS person
+              ON person.id = student.person_id AND person.tenant_id = student.tenant_id
+            LEFT JOIN {self._table("student_profile")} AS profile
+              ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+            WHERE student.tenant_id = :tenant_id
+            LIMIT 10000
         """
         async with self._engine.connect() as connection:
-            rows = (await connection.execute(text(sql), params)).mappings().all()
-        return {
-            "items": [
-                {
-                    "id": str(row["id"]),
-                    "name": f"{row['first_name']} {row['last_name']}",
-                    "preferredName": str(row["preferred_name"]),
-                    "programName": str(row["program_name"]),
-                    "classYear": int(row["class_year"]),
-                    "offerStatus": _optional_text(row["offer_status"]),
-                    "requirements": {
-                        "total": int(row["requirement_total"]),
-                        "completed": int(row["requirement_completed"]),
-                        "openBlocking": int(row["open_blocking_count"]),
-                    },
-                    "nextDueAt": _optional_iso(row["next_due_at"]),
-                }
-                for row in rows
-            ],
-            "total": len(rows),
-            "limit": bounded_limit,
-        }
+            rows = (
+                (await connection.execute(text(sql), {"tenant_id": _uuid(auth.tenant_id)}))
+                .mappings()
+                .all()
+            )
+        scored: list[tuple[float, str]] = []
+        for row in rows:
+            candidates = (
+                f"{row['first_name']} {row['last_name']}".lower(),
+                f"{row['preferred_name']} {row['last_name']}".lower(),
+                str(row["last_name"]).lower(),
+            )
+            score = max(SequenceMatcher(None, needle, name).ratio() for name in candidates)
+            if score >= 0.72:
+                scored.append((score, str(row["id"])))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        top_ids = [student_id for _, student_id in scored[:bounded_limit]]
+        if not top_ids:
+            return {"items": [], "total": 0, "matchQuality": "fuzzy"}
+        where = "WHERE student.tenant_id = :tenant_id AND student.id = ANY(:ids)"
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(self._roster_search_sql(where, limit_clause="")),
+                        {
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "ids": [_uuid(student_id) for student_id in top_ids],
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        order = {student_id: index for index, student_id in enumerate(top_ids)}
+        items = sorted(
+            (self._map_roster_row(row) for row in rows),
+            key=lambda item: order.get(str(item["id"]), len(order)),
+        )
+        return {"items": items, "total": len(items), "matchQuality": "fuzzy"}
 
     async def get_student_overview(self, auth: AuthContext, student_id: str) -> JsonDict | None:
         """One student's staff-facing overview, or None when the id does not

@@ -37,6 +37,7 @@ STAFF_REQUEST_TYPES = (
     "student_engagement",
     "student_timeline",
     "student_ownership",
+    "student_action_center",
     "cohort_search",
     "cohort_aggregate",
     "attention_ranking",
@@ -65,6 +66,7 @@ STUDENT_REQUIRED_REQUEST_TYPES = frozenset(
         "student_engagement",
         "student_timeline",
         "student_ownership",
+        "student_action_center",
         "recommendation",
         "draft_email",
         "draft_sms",
@@ -108,8 +110,8 @@ _COHORT_LIST_INTENT = re.compile(
 )
 _COHORT_COUNT_INTENT = re.compile(
     r"\bhow many\b|\bwhat (?:is|'s) the (?:number|count|breakdown|split)\b"
-    r"|\bcount of\b|\bmost common\b|\bbreakdown\b|\bdistribution\b"
-    r"|\bwhat percentage\b|\bwhat share\b",
+    r"|\bcount of\b|\bmost common\b|\bbreak\s?down\b|\bdistribution\b"
+    r"|\bsplit (?:of|by)\b|\bwhat percentage\b|\bwhat share\b",
     re.IGNORECASE,
 )
 
@@ -132,16 +134,16 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     (
         re.compile(
             r"(?:haven'?t|have not|not|no|without|missing|outstanding|unpaid|owe)"
-            r"[^.?]{0,28}\bdeposit\b"
-            r"|\bdeposit\b[^.?]{0,20}(?:unpaid|outstanding|not paid|missing)",
+            r"[^.?]{0,28}\bdeposits?\b"
+            r"|\bdeposits?\b[^.?]{0,20}(?:unpaid|outstanding|not paid|missing)",
             re.I,
         ),
         {"depositState": "unpaid"},
     ),
     (
         re.compile(
-            r"\b(?:paid|posted|settled)\b[^.?]{0,20}\bdeposit\b"
-            r"|\bdeposit(?:ed)?\b[^.?]{0,16}\b(?:paid|posted)\b"
+            r"\b(?:paid|posted|settled)\b[^.?]{0,20}\bdeposits?\b"
+            r"|\bdeposit(?:ed)?s?\b[^.?]{0,16}\b(?:paid|posted)\b"
             r"|\bdeposited students\b",
             re.I,
         ),
@@ -212,7 +214,10 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     (
         re.compile(
             r"\bopen (?:action center |action )?(?:item|task|work)\b"
-            r"|\bassigned work\b",
+            r"|\bassigned work\b"
+            # "students in the Action Center" means students with open staff
+            # work — the same membership rule the Staff Portal renders.
+            r"|\b(?:in|on) (?:the |my |your )?action cent(?:er|re)\b",
             re.I,
         ),
         {"hasOpenWorkItem": True},
@@ -312,6 +317,9 @@ _UNSUPPORTED_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"\b(?:probability|likelihood|odds|chance)s? (?:of|that|she'?ll|he'?ll|they'?ll)"
             r".{0,24}\b(?:enroll|matriculat|show(?:ing)? up|yield)"
+            r"|\b(?:probability|likelihood|odds|chance)s?\b.{0,40}"
+            r"\b(?:enrolls?|matriculates?|shows? up|yields?)\b"
+            r"|\b(?:likely|going) to (?:enroll|matriculate|show up)\b"
             r"|\byield (?:rate|probability|score)\b|\benroll(?:ment)? probability\b",
             re.I,
         ),
@@ -394,6 +402,9 @@ _RANKING_LANGUAGE = re.compile(
     r"|\bwhich students? (?:need|require|deserve)s? (?:my )?attention\b"
     r"|\bwho needs (?:help|attention|outreach)\b"
     r"|\bat[- ]risk students?\b|\bstudents?\b.{0,32}\bat risk\b"
+    r"|\bstudents?\b.{0,24}\b(?:highest|high|most)[- ]risk\b"
+    r"|\b(?:highest|high|most)[- ]risk\b.{0,24}\bstudents?\b"
+    r"|\bstudents?\b.{0,24}\b(?:riskiest|most concerning)\b"
     r"|\bprioriti[sz]e (?:my )?(?:students|outreach)\b|\bwho(?:'s| is) (?:slipping|stuck)\b"
     r"|\brank (?:the )?students\b|\bwhich students?\b.{0,32}\b(?:first|most|urgent)\b",
     re.IGNORECASE,
@@ -403,6 +414,8 @@ _RANKING_LANGUAGE = re.compile(
 _RANKABLE_METRICS = frozenset(
     {"melt_risk", "enrollment_probability", "recovery_likelihood", "risk_score", "student_value"}
 )
+
+_ACTION_CENTER = re.compile(r"\baction cent(?:er|re)\b", re.IGNORECASE)
 
 _DOCUMENT_ENTITY = re.compile(
     r"\btranscript\b|\bimmuni[sz]\w*\b|\bresidency\b|\bidentity doc\w*\b|\bdocuments?\b"
@@ -458,6 +471,30 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     if ranking_language:
         return StaffClassification("attention_ranking", 1)
 
+    # Action Center questions route deterministically to the same canonical
+    # queue the Staff Portal renders — never to a model-guessed filter.
+    if _ACTION_CENTER.search(text):
+        has_referent = bool(
+            request.candidate_student_name
+            or request.candidate_student_id
+            or request.reference_token
+            or request.uses_pronoun_referent
+        )
+        if has_referent:
+            # "Why is X in my Action Center?" / "Is X in the Action Center?"
+            # — a membership question about one student, answered from that
+            # student's actual open work items, never inferred from blockers.
+            return StaffClassification("student_action_center", 0.97)
+        topic = _document_reference(text)
+        if topic is not None:
+            # "transcript items in my Action Center" — the canonical queue,
+            # filtered by topic.
+            return StaffClassification("work_queue", 0.97, reference=f"topic:{topic}")
+        if not _COHORT_SUBJECT.search(text):
+            return StaffClassification("work_queue", 0.95)
+        # "how many/which students are in the Action Center" falls through to
+        # the cohort classifier, which owns per-student membership counts.
+
     # Cohort questions are settled before the student-referent branches: a
     # question about a *group* must not be answered by resolving one student
     # who happens to match a word in it.
@@ -475,9 +512,12 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     ):
         return StaffClassification("work_queue", 1)
 
-    if request.work_item_key is not None or re.search(
+    # A pasted PREFIX-SUFFIX token is only a work-item question when the
+    # message talks about work; the same shape is also how staff paste a
+    # student ID, and that resolution happens against the roster instead.
+    if re.search(
         r"\bwork item\b|\bwhat happened (?:on|with) (?:the )?(?:task|item|case)\b", text
-    ):
+    ) or (request.work_item_key is not None and re.search(r"\b(?:task|item|case|ticket)\b", text)):
         return StaffClassification("work_item_detail", 0.97, reference=request.work_item_key)
 
     if re.search(
@@ -498,12 +538,14 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     has_referent_language = (
         request.candidate_student_name is not None
         or request.candidate_student_id is not None
+        or request.reference_token is not None
         or request.uses_pronoun_referent
         or request.is_follow_up
     )
 
     if re.search(
         r"\bwhat should (?:i|we) do (?:next |first |today )?(?:for|about|with)\b"
+        r"|\bwhat should (?:i|we) follow up\b|\bfollow up (?:with|on)\b.{0,48}\babout\b"
         r"|\brecommend\b|\bbest (?:next )?(?:step|action)\b"
         r"|\bnext (?:step|action|move) for\b|\bhow (?:do|should) (?:i|we) help\b"
         r"|\bmost suitable intervention\b|\bintervention\b",
@@ -516,6 +558,10 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         r"|written back|gotten back)\b|\bresponse (?:from|history)\b|\breplied\b"
         r"|\b(?:communication|outreach|contact) history\b|\brecorded (?:communications?|outreach)\b"
         r"|\blast (?:time )?(?:we|anyone) (?:contacted|emailed|texted|called)\b"
+        r"|\bhas anyone\b.{0,32}\b(?:emailed|contacted|called|texted|messaged"
+        r"|reached out)\b"
+        r"|\b(?:have|has) (?:we|anyone|our office|the office)\b.{0,24}"
+        r"\b(?:emailed|contacted|called|texted|reached out)\b"
         r"|\bheard (?:back|from)\b",
         text,
     ):
@@ -594,6 +640,11 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     if request.candidate_student_name is not None:
         # A bare name ("Maria Alvarez?") is an overview request.
         return StaffClassification("student_overview", 0.85)
+
+    if request.reference_token is not None:
+        # A bare pasted ID ("SYN-000123?") is an overview request too; the
+        # pipeline resolves whether the token is a student or a work item.
+        return StaffClassification("student_overview", 0.7)
 
     return None
 

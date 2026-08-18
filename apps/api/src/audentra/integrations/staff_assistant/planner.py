@@ -91,6 +91,13 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     ),
     "student_timeline": ("getStudentTimeline",),
     "student_ownership": ("getStudentOwnership",),
+    # Membership is decided by the student's actual open work items (the
+    # summary carries them); blockers/deadlines give the "why" context.
+    "student_action_center": (
+        "getStudentStaffSummary",
+        "getStudentBlockers",
+        "getStudentDeadlines",
+    ),
     "attention_ranking": ("getStudentsNeedingAttention",),
     "recommendation": (
         "getStudentStaffSummary",
@@ -111,7 +118,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
 # Arguments a model plan is permitted to carry per tool. Identity arguments
 # are conspicuously absent — the pipeline binds those.
 _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
-    "searchStudents": ("query", "program", "limit"),
+    "searchStudents": ("query", "externalRef", "program", "limit"),
     # Cohort selection is not identity: the filter is validated against the
     # domain vocabulary and the tenant stays server-bound, so a model may
     # propose one.
@@ -120,7 +127,7 @@ _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "getStudentCommunicationHistory": ("channel",),
     "getStudentTimeline": ("limit",),
     "getStudentsNeedingAttention": ("limit",),
-    "getStaffWorkQueue": ("ownership", "component", "status", "dueWindow"),
+    "getStaffWorkQueue": ("ownership", "component", "status", "dueWindow", "topic"),
     "getInquiries": ("status",),
 }
 

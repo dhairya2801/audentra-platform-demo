@@ -1778,9 +1778,19 @@ class PostgresPlatformService:
             items = await portal.list_staff_help_requests(auth)
             return {"items": items}
 
+        async def student_by_external_ref(external_ref: str) -> Mapping[str, Any]:
+            found = await assistant.get_student_by_external_ref(auth, external_ref)
+            return found or {}
+
         return StaffAssistantToolHost(
             {
                 "search_students": lambda **kwargs: assistant.search_students(auth, **kwargs),
+                "search_students_fuzzy": (
+                    lambda query, limit=5: assistant.search_students_fuzzy(
+                        auth, query=query, limit=limit
+                    )
+                ),
+                "student_by_external_ref": student_by_external_ref,
                 # The domain has already validated the cohort vocabulary;
                 # tenant and staff identities remain bound to `auth` here.
                 "find_students": lambda cohort, limit: cohort_result(cohort, limit),

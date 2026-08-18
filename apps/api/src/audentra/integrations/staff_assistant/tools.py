@@ -253,15 +253,45 @@ def _deadline_bucket(due_at: str, now: datetime) -> str:
 async def _tool_search_students(
     host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
 ) -> JsonDict:
-    return dict(
+    external_ref = str(arguments.get("externalRef") or "").strip()
+    query = str(arguments.get("query") or "").strip()
+    if external_ref and host.supports("student_by_external_ref"):
+        # Exact institutional-ID lookup: zero or one student, never a guess.
+        found = await _primitive(host, "student_by_external_ref", external_ref=external_ref)
+        items = [dict(found)] if found and found.get("id") else []
+        return {
+            "items": items,
+            "total": len(items),
+            "matchQuality": "exact_external_ref",
+            "externalRef": external_ref,
+        }
+    if not query and not external_ref:
+        return {"items": [], "total": 0, "matchQuality": "no_criteria"}
+    result = dict(
         await _primitive(
             host,
             "search_students",
-            query=str(arguments.get("query") or ""),
+            query=query or external_ref,
             program=arguments.get("program"),
             limit=int(arguments.get("limit") or 10),
         )
     )
+    result.setdefault("matchQuality", "exact")
+    if not result.get("items") and query and host.supports("search_students_fuzzy"):
+        # Deterministic close-spelling fallback: suggestions to confirm,
+        # marked as such — resolution code must never auto-pick from these.
+        fuzzy = dict(
+            await _primitive(
+                host,
+                "search_students_fuzzy",
+                query=query,
+                limit=int(arguments.get("limit") or 5),
+            )
+        )
+        if fuzzy.get("items"):
+            fuzzy.setdefault("matchQuality", "fuzzy")
+            return fuzzy
+    return result
 
 
 async def _tool_find_students(
@@ -613,6 +643,14 @@ async def _tool_work_queue(
     component = arguments.get("component")
     status = arguments.get("status")
     due_window = str(arguments.get("dueWindow") or "all")
+    topic = str(arguments.get("topic") or "").strip().lower()
+    if topic:
+        items = [
+            item
+            for item in items
+            if topic in str(item.get("title") or "").lower()
+            or topic in str(item.get("description") or "").lower()
+        ]
     if ownership == "mine" and host.staff_member_id:
         items = [
             item
@@ -635,11 +673,19 @@ async def _tool_work_queue(
         "counts": dict(_mapping(queue.get("counts"))),
         "filteredTotal": len(items),
         "filteredOpen": len(open_items),
+        "distinctOpenStudents": len(
+            {
+                str(_mapping(item.get("student")).get("id") or "")
+                for item in open_items
+                if _mapping(item.get("student")).get("id")
+            }
+        ),
         "filters": {
             "ownership": ownership,
             "component": component,
             "status": status,
             "dueWindow": due_window,
+            "topic": topic or None,
         },
         "generatedAt": queue.get("generatedAt"),
     }
