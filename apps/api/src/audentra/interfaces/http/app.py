@@ -37,7 +37,6 @@ ALLOWED_HEADERS = [
     "X-Demo-Student-Id",
     "X-Demo-Actor-Id",
     "X-Demo-Actor-Type",
-    "X-Tenant-Slug",
     "X-VV-Worker-Token",
 ]
 

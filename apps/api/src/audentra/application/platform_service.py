@@ -167,10 +167,7 @@ class InMemoryPlatformService:
             return {"status": "ready", "service": "vv-api"}
         if operation == "public.get_tenant_bootstrap":
             requested_id = str(call.path_params.get("tenantId") or "")
-            requested_slug = str(call.path_params.get("slug") or "")
             if requested_id and requested_id != DEMO_IDS["tenant_id"]:
-                raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-            if requested_slug and requested_slug != "audentra-lab":
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
             return dict(DEMO_TENANT_BOOTSTRAP)
 

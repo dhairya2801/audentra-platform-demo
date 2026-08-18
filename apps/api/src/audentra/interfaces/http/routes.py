@@ -80,7 +80,7 @@ from .dependencies import (
     VoiceAgentTokenDependency,
     VoiceSessionServiceDependency,
     WorkerTokenDependency,
-    is_valid_tenant_slug,
+    get_settings,
 )
 
 MAXIMUM_DOCUMENT_BYTES = 10_485_760
@@ -454,22 +454,13 @@ async def get_portal_media(
     return _binary_response(result)
 
 
-@router.get("/v1/tenants/{slug}/bootstrap", status_code=200, response_model=None)
-async def get_tenant_bootstrap(
-    slug: Annotated[
-        str,
-        Path(pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"),
-    ],
-    request: Request,
-    service: ServiceDependency,
-) -> object:
-    if not is_valid_tenant_slug(slug):
-        raise BadRequestError("INVALID_TENANT_SLUG", "The tenant slug is not routable")
+@router.get("/v1/tenant/bootstrap", status_code=200, response_model=None)
+async def get_tenant_bootstrap(request: Request, service: ServiceDependency) -> object:
     return await _dispatch(
         service=service,
         request=request,
         operation="public.get_tenant_bootstrap",
-        path_params={"slug": slug},
+        path_params={"tenantId": get_settings(request).demo_tenant_id},
     )
 
 

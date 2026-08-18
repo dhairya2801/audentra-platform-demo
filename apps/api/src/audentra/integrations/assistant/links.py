@@ -13,7 +13,7 @@ Verified route inventory (Audentra-portals):
   ``audentra.domain.student_state.requirement_href``
 - /documents?document={documentId} — Documents page focused on one upload
 - /campus-life/clubs/{clubId} — a club's detail page
-The portal client prefixes the tenant slug and preserves query and hash.
+The portal client preserves these unscoped paths, queries, and fragments.
 """
 
 from __future__ import annotations

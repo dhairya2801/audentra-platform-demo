@@ -17,33 +17,6 @@ from .config import HttpSettings
 from .demo_identity import DEMO_STUDENT_COOKIE, read_demo_student_cookie
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
-TENANT_SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-RESERVED_TENANT_SLUGS = frozenset(
-    {
-        "appointments",
-        "campus-life",
-        "classrooms",
-        "dashboard",
-        "documents",
-        "edward",
-        "enrollment",
-        "financials",
-        "health",
-        "help",
-        "messages",
-        "offer",
-        "onboarding",
-        "payments",
-        "profile",
-        "sign-in",
-        "staff",
-        "v1",
-    }
-)
-
-
-def is_valid_tenant_slug(value: str) -> bool:
-    return bool(TENANT_SLUG_PATTERN.fullmatch(value)) and value not in RESERVED_TENANT_SLUGS
 
 
 def get_settings(request: Request) -> HttpSettings:
@@ -73,18 +46,13 @@ async def resolve_request_tenant(request: Request) -> tuple[str, str | None]:
     if not _valid_uuid(tenant_id):
         raise UnauthorizedError("Demo identity headers must be valid UUIDs")
 
-    tenant_slug = request.headers.get("x-tenant-slug")
-    if tenant_slug is not None and not is_valid_tenant_slug(tenant_slug):
-        raise UnauthorizedError("The tenant slug is invalid")
     try:
         bootstrap = await get_platform_service(request).dispatch(
             ServiceCall(
                 operation="public.get_tenant_bootstrap",
                 auth=None,
                 request_id=getattr(request.state, "request_id", "tenant-resolution"),
-                path_params=(
-                    {"slug": tenant_slug} if tenant_slug is not None else {"tenantId": tenant_id}
-                ),
+                path_params={"tenantId": tenant_id},
             )
         )
     except ApiError as error:
@@ -97,7 +65,7 @@ async def resolve_request_tenant(request: Request) -> tuple[str, str | None]:
         not isinstance(resolved_tenant_id, str)
         or not _valid_uuid(resolved_tenant_id)
         or not isinstance(resolved_tenant_slug, str)
-        or not is_valid_tenant_slug(resolved_tenant_slug)
+        or not resolved_tenant_slug
     ):
         raise ApiError(
             503,
@@ -105,7 +73,7 @@ async def resolve_request_tenant(request: Request) -> tuple[str, str | None]:
             "Tenant configuration returned an invalid tenant identity",
         )
     if explicit_tenant_id is not None and UUID(explicit_tenant_id) != UUID(resolved_tenant_id):
-        raise UnauthorizedError("The tenant slug conflicts with the tenant identity header")
+        raise UnauthorizedError("The configured tenant conflicts with the tenant identity header")
     return resolved_tenant_id, resolved_tenant_slug
 
 

@@ -36,19 +36,11 @@ class FakePlatformService:
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
         if call.operation == "public.get_tenant_bootstrap":
-            tenant_ids = {"aster": TENANT_ID}
-            requested_slug = call.path_params.get("slug")
             requested_id = call.path_params.get("tenantId")
-            tenant_id = (
-                tenant_ids.get(str(requested_slug))
-                if requested_slug is not None
-                else str(requested_id)
-                if requested_id == TENANT_ID
-                else None
-            )
+            tenant_id = str(requested_id) if requested_id == TENANT_ID else None
             if tenant_id is None:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-            return {"tenantId": tenant_id, "slug": str(requested_slug or "aster")}
+            return {"tenantId": tenant_id, "slug": "aster"}
         return {"operation": call.operation}
 
 
@@ -522,7 +514,7 @@ async def test_guided_reset_validates_tenant_before_mutating_fixture(
 ) -> None:
     response = await client.post(
         "/v1/auth/demo/start-guided-onboarding",
-        headers={"X-Tenant-Slug": "unknown"},
+        headers={"X-Demo-Tenant-Id": "00000000-0000-7000-8000-000000000099"},
         json={"completedOnboarding": False},
     )
 

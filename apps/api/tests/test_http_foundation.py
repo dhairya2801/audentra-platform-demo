@@ -29,22 +29,11 @@ class FakePlatformService:
                 "aster": "00000000-0000-7000-8000-000000000001",
                 "harvard": HARVARD_TENANT_ID,
             }
-            requested_slug = call.path_params.get("slug")
             requested_id = call.path_params.get("tenantId")
-            tenant_id = (
-                tenant_ids.get(str(requested_slug))
-                if requested_slug is not None
-                else str(requested_id)
-                if requested_id in tenant_ids.values()
-                else None
-            )
+            tenant_id = str(requested_id) if requested_id in tenant_ids.values() else None
             if tenant_id is None:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-            slug = (
-                str(requested_slug)
-                if requested_slug is not None
-                else next(key for key, value in tenant_ids.items() if value == tenant_id)
-            )
+            slug = next(key for key, value in tenant_ids.items() if value == tenant_id)
             return {"tenantId": tenant_id, "slug": slug}
         if call.operation == "student.get_document_content":
             return BinaryPayload(
@@ -168,27 +157,26 @@ async def test_staff_routes_require_explicit_demo_staff_identity(
     assert service.calls[-1].auth.actor_type == "staff"
 
 
-async def test_tenant_slug_resolves_to_uuid_tenant(
+async def test_tenant_is_resolved_from_server_configuration(
     client: AsyncClient, service: FakePlatformService
 ) -> None:
-    response = await client.get("/v1/student/dashboard", headers={"X-Tenant-Slug": "harvard"})
+    response = await client.get("/v1/student/dashboard")
 
     assert response.status_code == 200
     assert service.calls[-1].auth is not None
-    assert service.calls[-1].auth.tenant_slug == "harvard"
-    assert service.calls[-1].auth.tenant_id == HARVARD_TENANT_ID
+    assert service.calls[-1].auth.tenant_slug == "aster"
+    assert service.calls[-1].auth.tenant_id.endswith("0001")
 
 
-async def test_public_tenant_bootstrap_returns_known_and_404s_unknown(
+async def test_public_tenant_bootstrap_uses_server_configuration(
     client: AsyncClient,
 ) -> None:
-    known = await client.get("/v1/tenants/aster/bootstrap")
-    unknown = await client.get("/v1/tenants/unknown/bootstrap")
+    known = await client.get("/v1/tenant/bootstrap")
+    removed_slug_route = await client.get("/v1/tenants/aster/bootstrap")
 
     assert known.status_code == 200
     assert known.json()["tenantId"].endswith("0001")
-    assert unknown.status_code == 404
-    assert error_body(unknown)["code"] == "TENANT_NOT_FOUND"
+    assert removed_slug_route.status_code == 404
 
 
 async def test_staff_tenant_patch_is_authorized_validated_and_dispatched(
@@ -223,26 +211,11 @@ async def test_staff_tenant_patch_is_authorized_validated_and_dispatched(
     assert partial.status_code == 400
 
 
-@pytest.mark.parametrize(
-    ("headers", "message_fragment"),
-    [
-        ({"X-Tenant-Slug": "unknown"}, "not recognized"),
-        (
-            {
-                "X-Tenant-Slug": "harvard",
-                "X-Demo-Tenant-Id": "00000000-0000-7000-8000-000000000001",
-            },
-            "conflicts",
-        ),
-    ],
-)
-async def test_unknown_or_conflicting_tenant_slug_is_rejected(
-    client: AsyncClient, headers: dict[str, str], message_fragment: str
-) -> None:
-    response = await client.get("/v1/student/dashboard", headers=headers)
+async def test_invalid_demo_tenant_identity_is_rejected(client: AsyncClient) -> None:
+    response = await client.get("/v1/student/dashboard", headers={"X-Demo-Tenant-Id": "not-a-uuid"})
 
     assert response.status_code == 401
-    assert message_fragment in error_body(response)["message"]
+    assert "valid UUIDs" in error_body(response)["message"]
 
 
 def test_tenant_slug_map_environment_variable_is_no_longer_runtime_configuration(
@@ -295,7 +268,7 @@ async def test_worker_token_bypasses_browser_cookie_requirement_only_for_interna
     assert any(call.operation == "internal.process_document_extraction" for call in service.calls)
 
 
-async def test_cors_preflight_allows_tenant_slug_and_worker_token(
+async def test_cors_preflight_allows_worker_token_without_portal_id_header(
     client: AsyncClient,
 ) -> None:
     response = await client.options(
@@ -303,13 +276,13 @@ async def test_cors_preflight_allows_tenant_slug_and_worker_token(
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "X-Tenant-Slug,X-VV-Worker-Token",
+            "Access-Control-Request-Headers": "X-VV-Worker-Token",
         },
     )
 
     assert response.status_code == 200
     allowed = response.headers["access-control-allow-headers"].lower()
-    assert "x-tenant-slug" in allowed
+    assert "x-tenant-slug" not in allowed
     assert "x-vv-worker-token" in allowed
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 

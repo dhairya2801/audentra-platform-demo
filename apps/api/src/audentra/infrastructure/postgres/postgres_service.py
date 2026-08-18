@@ -515,9 +515,6 @@ class PostgresPlatformService:
                 raise ApiError(
                     503, "TENANT_CONFIGURATION_UNAVAILABLE", "Tenant configuration is unavailable"
                 )
-            slug = call.path_params.get("slug")
-            if slug is not None:
-                return await tenant.get_public_by_slug(str(slug))
             return await tenant.get_active_by_id(self._path(call, "tenantId"))
 
         auth = self._auth(call)

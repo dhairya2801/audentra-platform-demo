@@ -15,7 +15,6 @@ from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, ConflictError, NotFoundError
 from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
 from audentra.infrastructure.seeding.relational import _RESET_PRESERVED_TABLES
-from audentra.interfaces.http.dependencies import RESERVED_TENANT_SLUGS, is_valid_tenant_slug
 
 TENANT_ID = "00000000-0000-7000-8000-000000000001"
 STUDENT_ID = "00000000-0000-7000-8000-000000000101"
@@ -166,32 +165,6 @@ def test_explicit_demo_reset_preserves_staff_edited_tenant_configuration() -> No
     assert "staff_core_play" in _RESET_PRESERVED_TABLES
 
 
-def test_tenant_slug_rejects_trailing_hyphens_and_unscoped_routes() -> None:
-    assert is_valid_tenant_slug("north-campus") is True
-    assert is_valid_tenant_slug("north-campus-") is False
-    assert is_valid_tenant_slug("onboarding") is False
-    assert {
-        "appointments",
-        "campus-life",
-        "classrooms",
-        "dashboard",
-        "documents",
-        "edward",
-        "enrollment",
-        "financials",
-        "health",
-        "help",
-        "messages",
-        "offer",
-        "onboarding",
-        "payments",
-        "profile",
-        "sign-in",
-        "staff",
-        "v1",
-    } == RESERVED_TENANT_SLUGS
-
-
 def test_patch_request_requires_complete_groups_and_safe_typed_values() -> None:
     accepted = UpdateTenantPortalConfigurationRequest.model_validate(
         {
@@ -331,20 +304,6 @@ async def test_staff_patch_rejects_stale_version_before_any_write() -> None:
 
     assert error.value.code == "VERSION_CONFLICT"
     assert len(connection.executions) == 1
-
-
-@pytest.mark.anyio
-async def test_public_bootstrap_unknown_or_deactivated_slug_is_not_found() -> None:
-    connection = FakeConnection(lambda sql, values: FakeResult())
-    repository = PostgresTenantRepository(FakeEngine(connection))  # type: ignore[arg-type]
-
-    with pytest.raises(NotFoundError) as error:
-        await repository.get_public_by_slug("deactivated-tenant")
-
-    assert error.value.code == "TENANT_NOT_FOUND"
-    sql, values = connection.executions[0]
-    assert "tenant.status='active'" in sql
-    assert values == {"slug": "deactivated-tenant"}
 
 
 @pytest.mark.anyio
