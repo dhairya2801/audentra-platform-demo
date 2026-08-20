@@ -2075,6 +2075,8 @@ class InMemoryPlatformStore:
         assistant_message: dict[str, Any],
         referenced_student_id: str | None,
         request_id: str,
+        referent_action: str = "set",
+        active_student_id: str | None = None,
     ) -> dict[str, Any]:
         self.require_staff(auth)
         if conversation_id is None:
@@ -2085,8 +2087,13 @@ class InMemoryPlatformStore:
             raise NotFoundError(
                 "STAFF_ASSISTANT_CONVERSATION_NOT_FOUND", "The conversation was not found"
             )
-        if referenced_student_id:
-            conversation["activeStudentId"] = referenced_student_id
+        # The active referent has a lifecycle: a resolved student sets it, a
+        # population/queue/ranking turn clears it, everything else leaves it.
+        carried = active_student_id or referenced_student_id
+        if referent_action == "set" and carried:
+            conversation["activeStudentId"] = carried
+        elif referent_action == "clear":
+            conversation["activeStudentId"] = None
         user_id = str(uuid4())
         assistant_id = str(uuid4())
         self.staff_assistant_messages.append(

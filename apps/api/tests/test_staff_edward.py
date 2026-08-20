@@ -627,3 +627,306 @@ def test_break_down_phrasing_is_a_cohort_aggregate() -> None:
     assert classification.request_type == "cohort_aggregate"
     assert classification.cohort_filter == {"onboardingStatus": "in_progress"}
     assert classification.cohort_group_by == "program"
+
+
+# ---------------------------------------------------------------------------
+# Conversational scope: context is an input to interpretation, never a
+# standing scope. These pin the rule that a resolved student is inherited only
+# by a student-scoped turn that refers back, and that a population, queue, or
+# ranking turn clears the referent instead of being answered about one student.
+# ---------------------------------------------------------------------------
+
+
+def _normalized(message: str, history: list[dict[str, str]] | None = None) -> Any:
+    from audentra.integrations.staff_assistant.normalize import normalize_staff_request
+
+    return normalize_staff_request(message, history=history or [])
+
+
+_PRIOR_STUDENT_TURN = [
+    {"role": "user", "content": "Tell me about Alex Morgan."},
+    {"role": "assistant", "content": "Alex Morgan is a Computer Science student..."},
+]
+
+
+def test_student_scoped_follow_up_inherits_the_referent() -> None:
+    from audentra.integrations.staff_assistant.scope import may_inherit_referent
+
+    request = _normalized("What's blocking her?", _PRIOR_STUDENT_TURN)
+    assert may_inherit_referent(request, "student_blockers") is True
+
+
+def test_cohort_turn_never_inherits_the_referent() -> None:
+    from audentra.integrations.staff_assistant.scope import may_inherit_referent
+
+    request = _normalized("How many students still have unpaid deposits?", _PRIOR_STUDENT_TURN)
+    assert may_inherit_referent(request, "cohort_aggregate") is False
+
+
+def test_queue_turn_never_inherits_the_referent() -> None:
+    from audentra.integrations.staff_assistant.scope import may_inherit_referent
+
+    request = _normalized("What is in my Action Center?", _PRIOR_STUDENT_TURN)
+    assert may_inherit_referent(request, "work_queue") is False
+
+
+def test_explicit_new_student_replaces_the_referent() -> None:
+    from audentra.integrations.staff_assistant.scope import may_inherit_referent
+
+    request = _normalized("What about James Carter?", _PRIOR_STUDENT_TURN)
+    assert request.candidate_student_name == "James Carter"
+    assert may_inherit_referent(request, "student_overview") is False
+
+
+def test_team_scoped_deadline_question_is_not_a_student_question() -> None:
+    classification = _classify("What deadlines should my team care about today?")
+    assert classification is not None
+    assert classification.request_type == "work_queue"
+
+
+def test_population_turn_clears_the_conversation_referent() -> None:
+    from audentra.integrations.staff_assistant.scope import referent_action
+
+    assert referent_action(resolved_student_id=None, request_type="cohort_aggregate") == "clear"
+    assert referent_action(resolved_student_id=None, request_type="work_queue") == "clear"
+    assert referent_action(resolved_student_id=None, request_type="attention_ranking") == "clear"
+    assert referent_action(resolved_student_id="abc", request_type="student_overview") == "set"
+    assert referent_action(resolved_student_id=None, request_type="action_request") == "keep"
+
+
+def test_plural_they_with_a_plural_subject_is_not_a_student_reference() -> None:
+    from audentra.integrations.staff_assistant.scope import has_singular_student_reference
+
+    request = _normalized(
+        "How many open Action Center items do I have, and how many students do they cover?"
+    )
+    assert has_singular_student_reference(request) is False
+
+
+@pytest.mark.anyio
+async def test_cohort_question_after_a_student_lookup_is_not_scoped_to_that_student() -> None:
+    service = _service()
+    conversation = await service.dispatch(
+        ServiceCall(
+            operation="staff.create_assistant_conversation",
+            auth=_staff_auth(),
+            payload={},
+            path_params={},
+            query_params={},
+            request_id="staff-edward-scope",
+        )
+    )
+    assert isinstance(conversation, dict)
+    conversation_id = str(conversation.get("conversationId") or conversation["id"])
+    first = await _ask(service, "Tell me about Alex Morgan.", conversation_id=conversation_id)
+    assert first["resolvedStudent"] is not None
+    second = await _ask(
+        service,
+        "How many students still have unpaid deposits?",
+        conversation_id=conversation_id,
+    )
+    assert second["resolvedStudent"] is None
+    assert "alex" not in second["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Multi-intent decomposition
+# ---------------------------------------------------------------------------
+
+
+def test_three_clause_student_question_decomposes() -> None:
+    classification = _classify(
+        "Is Alex Morgan in my Action Center, what's blocking them, and has anyone contacted them?"
+    )
+    assert classification is not None
+    assert classification.request_type == "student_action_center"
+    assert "student_communications" in classification.additional_request_types
+
+
+def test_multi_intent_is_bounded_to_two_extras() -> None:
+    classification = _classify(
+        "For Alex Morgan: blockers, documents, deadlines, housing, deposit and communications?"
+    )
+    assert classification is not None
+    assert len(classification.additional_request_types) <= 2
+
+
+def test_compound_cohort_question_keeps_both_asks() -> None:
+    classification = _classify(
+        "How many students have unpaid deposits, and which programs have the most?"
+    )
+    assert classification is not None
+    assert classification.request_type == "cohort_aggregate"
+    assert classification.cohort_filter == {"depositState": "unpaid"}
+    assert classification.cohort_group_by == "program"
+
+
+# ---------------------------------------------------------------------------
+# Cohort filters must never silently drop
+# ---------------------------------------------------------------------------
+
+
+def test_owe_phrasings_keep_the_requirement_filter() -> None:
+    classification = _classify("How many students still owe an immunization record?")
+    assert classification is not None
+    assert classification.cohort_filter == {
+        "requirementCode": "immunization_record",
+        "requirementState": "open",
+    }
+
+
+def test_waiting_on_transcripts_is_a_cohort_question() -> None:
+    classification = _classify("Which students are waiting on transcripts?")
+    assert classification is not None
+    assert classification.request_type in {"cohort_search", "cohort_aggregate"}
+    assert classification.cohort_filter == {
+        "documentCategory": "transcript",
+        "documentState": "missing",
+    }
+
+
+def test_roster_size_is_the_unfiltered_cohort() -> None:
+    classification = _classify("How big is the roster?")
+    assert classification is not None
+    assert classification.request_type == "cohort_aggregate"
+    assert classification.cohort_filter == {}
+
+
+def test_cohort_refinement_reuses_the_previous_turn_filter() -> None:
+    from audentra.integrations.staff_assistant.classify import classify_staff_request
+
+    request = _normalized(
+        "Break that down by program.",
+        [
+            {"role": "user", "content": "How many students have unpaid deposits?"},
+            {"role": "assistant", "content": "685 students have unpaid deposits."},
+        ],
+    )
+    classification = classify_staff_request(request)
+    assert classification is not None
+    assert classification.cohort_filter == {"depositState": "unpaid"}
+    assert classification.cohort_group_by == "program"
+
+
+# ---------------------------------------------------------------------------
+# Question focus, action gate, and portal parity
+# ---------------------------------------------------------------------------
+
+
+def test_intent_comes_from_the_question_not_the_premise() -> None:
+    classification = _classify(
+        "Alex Morgan's identity document is accepted. What is preventing her housing?"
+    )
+    assert classification is not None
+    assert classification.request_type == "student_housing"
+
+
+def test_a_question_about_past_contact_is_not_a_send_request() -> None:
+    classification = _classify("When did we last email Alex Morgan?")
+    assert classification is not None
+    assert classification.request_type == "student_communications"
+
+
+def test_briefing_questions_route_to_the_morning_brew_read() -> None:
+    from audentra.integrations.staff_assistant.planner import select_staff_tools
+
+    classification = _classify("What changed in the last 24 hours?")
+    assert classification is not None
+    assert classification.request_type == "daily_briefing"
+    assert "getMorningBriefing" in select_staff_tools(classification, student_resolved=False)
+
+
+def test_briefing_tool_takes_no_arguments() -> None:
+    assert validate_tool_arguments("getMorningBriefing", {}) == {}
+    with pytest.raises(ToolArgumentError):
+        validate_tool_arguments("getMorningBriefing", {"limit": 5})
+
+
+def test_identity_survives_a_rewrite_that_drops_it() -> None:
+    from audentra.integrations.staff_assistant.compose import ComposedStaffAnswer
+    from audentra.integrations.staff_assistant.pipeline import _restore_required_phrases
+
+    draft = ComposedStaffAnswer(
+        message="Alex Morgan — Computer Science, class of 2027. Offer accepted.",
+        required_phrases=[
+            ("Computer Science", "Alex Morgan — Computer Science, class of 2027."),
+            ("2027", "Alex Morgan — Computer Science, class of 2027."),
+        ],
+    )
+    dropped = "Alex Morgan has accepted their offer and has three items open."
+    restored = _restore_required_phrases(dropped, draft)
+    assert "Computer Science" in restored
+    assert restored.endswith(dropped)
+
+    kept = "Alex Morgan is a Computer Science student in the class of 2027."
+    assert _restore_required_phrases(kept, draft) == kept
+
+
+def test_queue_answers_state_the_queue_count_not_the_page_size() -> None:
+    from audentra.integrations.staff_assistant.compose import compose_staff_deterministic
+    from audentra.integrations.staff_assistant.derive import StaffDerivedState
+
+    state = StaffDerivedState(
+        queue={
+            "items": [
+                {
+                    "key": f"ENR-{index}",
+                    "title": "Follow up",
+                    "status": "todo",
+                    "priority": "high",
+                    "student": {"id": f"s{index}", "name": "Alex Morgan"},
+                }
+                for index in range(25)
+            ],
+            "counts": {"todo": 1027, "urgent": 97, "escalated": 300},
+            "filteredOpen": 1027,
+            "filteredTotal": 1027,
+        }
+    )
+    answer = compose_staff_deterministic(
+        StaffClassificationForTest("work_queue"),
+        state,
+    )
+    assert "1027" in answer.message
+    assert "25 open item" not in answer.message
+
+
+def StaffClassificationForTest(request_type: str) -> Any:
+    """A bare classification for composer-level tests."""
+
+    from audentra.integrations.staff_assistant.classify import StaffClassification
+
+    return StaffClassification(request_type, 1)
+
+
+# ---------------------------------------------------------------------------
+# Generalization gaps the holdout suite exposed, pinned.
+# ---------------------------------------------------------------------------
+
+
+def test_colloquial_unpaid_phrasings_keep_the_deposit_filter() -> None:
+    for question in (
+        "how many admits still haven't paid up",
+        "how many students still owe",
+        "how many students have not paid yet",
+    ):
+        classification = _classify(question)
+        assert classification is not None, question
+        assert classification.cohort_filter == {"depositState": "unpaid"}, question
+
+
+def test_paid_deposit_phrasing_is_not_read_as_unpaid() -> None:
+    classification = _classify("How many students have paid their deposit?")
+    assert classification is not None
+    assert classification.cohort_filter == {"depositState": "paid"}
+
+
+def test_task_board_synonyms_reach_the_membership_read() -> None:
+    for question in (
+        "Is Alex Morgan on my task board?",
+        "Why does Alex Morgan have a task on him?",
+        "Does Alex Morgan have any open work items?",
+    ):
+        classification = _classify(question)
+        assert classification is not None, question
+        assert classification.request_type == "student_action_center", question

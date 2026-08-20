@@ -1838,6 +1838,10 @@ class PostgresPlatformService:
                 ),
                 # Pure queue read: never the mutating get_action_center path.
                 "work_queue": lambda: staff.get_work_queue(auth),
+                # The Staff Portal's own briefing composer — Edward reads the
+                # same briefing the staff member can already see, rather than
+                # recomputing a second, divergent one.
+                "morning_brew": lambda: self._morning_brew_for_assistant(auth),
                 "work_item_detail": lambda work_item_id: staff.get_work_item_detail(
                     auth, work_item_id, ensure_document_work_items=False
                 ),
@@ -1850,6 +1854,17 @@ class PostgresPlatformService:
             },
             staff_member_id=auth.actor_id,
         )
+
+    async def _morning_brew_for_assistant(self, auth: AuthContext) -> Mapping[str, Any]:
+        """The canonical Morning Brew, or an honest unavailability."""
+
+        brew = self.repository.morning_brew
+        if brew is None:
+            raise NotFoundError(
+                "MORNING_BREW_UNAVAILABLE",
+                "The morning briefing is not available on this deployment",
+            )
+        return await build_morning_brew(auth, brew)
 
     async def _ask_staff_edward(
         self,
@@ -1888,6 +1903,8 @@ class PostgresPlatformService:
 
         guarded = guarded_staff_response(message)
         resolved_student_id: str | None = None
+        referent_action = "keep"
+        active_student_id: str | None = None
         if guarded is not None:
             response = dict(guarded)
             trace.path = "pre_pipeline_safety_gate"
@@ -1920,6 +1937,8 @@ class PostgresPlatformService:
                 trace=trace,
             )
             resolved_student_id = result.resolved_student_id
+            referent_action = result.referent_action
+            active_student_id = result.next_referent_student_id
             trace.student_id = resolved_student_id
             response = {
                 "message": result.message,
@@ -1956,6 +1975,8 @@ class PostgresPlatformService:
                 },
                 referenced_student_id=resolved_student_id,
                 request_id=request_id,
+                referent_action=referent_action,
+                active_student_id=active_student_id,
             )
             response.update(stored)
             trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id

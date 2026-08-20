@@ -24,6 +24,19 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CASES } from "./cases.mjs";
 import { HOLDOUT_CASES } from "./holdout-cases.mjs";
+import { CASES as CASES_V2 } from "./cases-v2.mjs";
+import { HOLDOUT_CASES as HOLDOUT_V2 } from "./holdout-cases-v2.mjs";
+
+/**
+ * `v1` is the original 40+8 suite kept as a regression floor; `v2` is the
+ * 80+20 comprehensive suite (identification, overview, Action Center,
+ * cohorts, risk, cross-domain, communications, recommendations, multi-intent,
+ * and the conversational-scope stress family).
+ */
+const SUITES = {
+  v1: { development: CASES, holdout: HOLDOUT_CASES },
+  v2: { development: CASES_V2, holdout: HOLDOUT_V2 },
+};
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", "..");
@@ -41,13 +54,25 @@ const PRICE_PROMPT = 0.15e-6;
 const PRICE_COMPLETION = 0.6e-6;
 
 function parseArgs(argv) {
-  const args = { batch: "staff-db-adhoc", ids: [], verbose: false, holdout: false };
+  const args = {
+    batch: "staff-db-adhoc",
+    ids: [],
+    verbose: false,
+    holdout: false,
+    suite: "v2",
+    // Re-grade a stored batch against the current case specs without calling
+    // Edward again — how a corrected expectation is applied to an
+    // already-recorded baseline.
+    regrade: null,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--batch") args.batch = argv[++index];
     else if (flag === "--id" || flag === "--ids") args.ids.push(...argv[++index].split(","));
     else if (flag === "--category") args.category = argv[++index];
     else if (flag === "--holdout") args.holdout = true;
+    else if (flag === "--suite") args.suite = argv[++index];
+    else if (flag === "--regrade") args.regrade = argv[++index];
     else if (flag === "-v" || flag === "--verbose") args.verbose = true;
     else throw new Error(`Unknown flag: ${flag}`);
   }
@@ -190,6 +215,11 @@ function toolArgumentsText(trace, tool) {
     .join("\n");
 }
 
+/** Whether this trace can answer argument questions at all. */
+function hasToolArguments(trace) {
+  return Array.isArray(trace?.toolCalls) && trace.toolCalls.some((call) => call.arguments);
+}
+
 function gradeTurn(turn, payload, trace, truth) {
   const expect = turn.expect ?? {};
   const corpus = answerCorpus(payload);
@@ -213,6 +243,9 @@ function gradeTurn(turn, payload, trace, truth) {
     if (tools.has(tool)) failures.push({ kind: "forbidden_tool_called", detail: tool });
   }
   for (const [tool, pattern] of Object.entries(expect.toolArgPatterns ?? {})) {
+    // A re-graded transcript from before arguments were recorded cannot
+    // answer this; skip rather than fail on missing evidence.
+    if (!hasToolArguments(trace)) continue;
     const text = toolArgumentsText(trace, tool);
     if (!new RegExp(resolveTemplate(pattern, truth), "i").test(text)) {
       failures.push({ kind: "tool_arguments", detail: `${tool} !~ ${pattern}` });
@@ -262,7 +295,9 @@ function gradeTurn(turn, payload, trace, truth) {
 // ---------------------------------------------------------------------------
 
 const args = parseArgs(process.argv.slice(2));
-const suite = args.holdout ? HOLDOUT_CASES : CASES;
+const chosen = SUITES[args.suite];
+if (!chosen) throw new Error(`Unknown suite "${args.suite}" (expected v1 or v2)`);
+const suite = args.holdout ? chosen.holdout : chosen.development;
 let cases = args.ids.length ? suite.filter((item) => args.ids.includes(item.id)) : suite;
 if (args.category) cases = cases.filter((item) => item.category === args.category);
 if (cases.length === 0) {
@@ -271,10 +306,12 @@ if (cases.length === 0) {
 }
 
 const truth = JSON.parse(readFileSync(GROUND_TRUTH_PATH, "utf8"));
-const health = await fetch(`${BASE_URL}/health`).then(
-  (response) => response.ok,
-  () => false,
-);
+const health = args.regrade
+  ? true
+  : await fetch(`${BASE_URL}/health`).then(
+      (response) => response.ok,
+      () => false,
+    );
 if (!health) {
   console.error(`No healthy Staff Edward host at ${BASE_URL}. Start it against the snapshot DB.`);
   process.exit(2);
@@ -286,13 +323,61 @@ let promptTokens = 0;
 let completionTokens = 0;
 let modelCalls = 0;
 
+const stored = args.regrade
+  ? new Map(
+      JSON.parse(
+        readFileSync(join(REPO_ROOT, "artifacts", "runs", args.regrade, "transcript.json"), "utf8"),
+      ).map((record) => [record.id, record]),
+    )
+  : null;
+
+/** One turn's observations: live from the host, or replayed from a batch. */
+async function observeTurn(testCase, turn, index, conversationId) {
+  if (stored) {
+    const record = stored.get(testCase.id);
+    const replay = record?.turns?.[index];
+    if (!replay) throw new Error(`No stored turn ${index} for ${testCase.id}`);
+    return {
+      status: 200,
+      latencyMs: replay.latencyMs ?? null,
+      payload: {
+        message: replay.message,
+        blocks: replay.blocks ?? [],
+        resolvedStudent: replay.resolvedStudent ?? null,
+        provider: replay.provider,
+      },
+      trace: {
+        classification: { requestType: replay.requestType },
+        toolSelectionSource: replay.toolSelectionSource ?? null,
+        toolCalls: (replay.toolCalls ?? replay.tools ?? []).map((call) =>
+          typeof call === "string" ? { tool: call, status: "available" } : call,
+        ),
+        modelCalls: [],
+      },
+    };
+  }
+  const { status, payload, latencyMs } = await postMessage(turn.question, conversationId);
+  const trace = await fetchTrace(payload.requestId);
+  return { status, payload, latencyMs, trace };
+}
+
+if (stored) console.log(`re-grading ${cases.length} stored case(s) from ${args.regrade}`);
+
+let turnIndex = 0;
 for (const testCase of cases) {
-  const conversationId = testCase.conversation ? await createConversation() : null;
+  const conversationId =
+    testCase.conversation && !stored ? await createConversation() : null;
   const turnRecords = [];
   let caseGrade = "PASS";
+  turnIndex = 0;
   for (const turn of testCase.turns) {
-    const { status, payload, latencyMs } = await postMessage(turn.question, conversationId);
-    const trace = await fetchTrace(payload.requestId);
+    const { status, payload, latencyMs, trace } = await observeTurn(
+      testCase,
+      turn,
+      turnIndex,
+      conversationId,
+    );
+    turnIndex += 1;
     for (const call of trace?.modelCalls ?? []) {
       modelCalls += 1;
       promptTokens += call.usage?.promptTokens ?? 0;
@@ -317,6 +402,12 @@ for (const testCase of cases) {
       failures: graded.failures,
       softMisses: graded.softMisses,
       blocks: payload.blocks,
+      // Recorded so a later re-grade can still check tool arguments.
+      toolCalls: (trace?.toolCalls ?? []).map((call) => ({
+        tool: call.tool,
+        status: call.status,
+        arguments: call.arguments ?? null,
+      })),
     });
   }
   records.push({

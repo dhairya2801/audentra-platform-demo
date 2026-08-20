@@ -225,6 +225,18 @@ _ACTION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 
+# A question that reports a premise before asking the actual question
+# ("Her transcript is complete. What is preventing housing?"). Intent must come
+# from the ask, not from the premise — otherwise the premise's vocabulary wins.
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+# An interrogative opener: a question *about* an action ("When did we last
+# email her?") is not a request to perform it.
+_INTERROGATIVE_OPENER = re.compile(
+    r"^(?:did|do|does|when|has|have|had|was|were|is|are|who|whom|whose|which|why|how)\b",
+    re.IGNORECASE,
+)
+
 _DRAFT_REQUEST = re.compile(
     r"\b(?:draft|compose|write(?:\s+me)?(?:\s+up)?|prepare|prep|give me|put together"
     r"|make me)\b.{0,60}"
@@ -237,8 +249,14 @@ _DRAFT_REQUEST = re.compile(
 @dataclass(frozen=True)
 class NormalizedStaffRequest:
     text: str
+    # The sentence that carries the ask, when the message states a premise
+    # first. Classification reads this; entity extraction reads the whole text.
+    focus_text: str
     resolved_text: str
+    # Lowercased focus sentence — what the domain branches classify on.
     comparable_text: str
+    # Lowercased whole message — what the multi-intent scan reads.
+    comparable_full_text: str
     history: tuple[dict[str, str], ...]
     is_follow_up: bool
     uses_pronoun_referent: bool
@@ -269,7 +287,9 @@ def normalize_staff_request(
     )
     is_draft = bool(_DRAFT_REQUEST.search(text))
     action_kind = None
-    if not is_draft:
+    if not is_draft and not _INTERROGATIVE_OPENER.match(text):
+        # "When did we last email Marisol?" asks about history; only an
+        # imperative or a request to act is an action request.
         for kind, pattern in _ACTION_KINDS:
             if pattern.search(text):
                 action_kind = kind
@@ -280,8 +300,10 @@ def normalize_staff_request(
     )
     return NormalizedStaffRequest(
         text=text,
+        focus_text=question_focus(text),
         resolved_text=_resolve_referent(text, bounded_history, is_follow_up),
-        comparable_text=text.lower(),
+        comparable_text=question_focus(text).lower(),
+        comparable_full_text=text.lower(),
         history=bounded_history,
         is_follow_up=is_follow_up,
         uses_pronoun_referent=uses_pronoun,
@@ -292,6 +314,26 @@ def normalize_staff_request(
         action_kind=action_kind,
         is_draft_request=is_draft,
     )
+
+
+def question_focus(text: str) -> str:
+    """The sentence that carries the ask.
+
+    A staff member often states what they believe before asking
+    ("Marisol paid her deposit. What is actually blocking her?"). Classifying
+    the whole message lets the premise's vocabulary ("deposit") outrank the
+    question's ("blocking"). The last interrogative sentence — or, failing
+    that, the last sentence — is the ask; entity extraction still reads the
+    whole message so the premise's name is not lost.
+    """
+
+    sentences = [part.strip() for part in _SENTENCE_SPLIT.split(text) if part.strip()]
+    if len(sentences) < 2:
+        return text
+    questions = [part for part in sentences if part.endswith("?")]
+    if questions:
+        return questions[-1]
+    return sentences[-1]
 
 
 def extract_candidate_name(text: str) -> str | None:
@@ -312,7 +354,9 @@ def extract_candidate_name(text: str) -> str | None:
             return " ".join(words[:3])
         if len(words) == 1 and _is_referred_single_name(text, words[0]):
             return words[0]
-    single = re.search(r"\b(?:about|for|on|regarding|student)\s+([A-Z][a-z]{2,})\b", text)
+    single = re.search(
+        r"\b(?:about|for|on|regarding|student|named|called)\s+([A-Z][a-z]{2,})\b", text
+    )
     if single and single.group(1).lower() not in _NAME_STOPWORDS:
         return single.group(1)
     # A lookup verb followed by one capitalized word is a name too ("Pull up
@@ -321,7 +365,9 @@ def extract_candidate_name(text: str) -> str | None:
     verb_led = re.search(
         # The verb may open the sentence ("Pull up ..."), so it matches
         # case-insensitively; the (?-i:) group keeps the name capitalized.
-        r"\b(?i:pull up|look ?up|open|find|show me|search for)\s+([A-Z][a-z]{2,})\s*[.!?]?$",
+        # A trailing courtesy ("… for me.", "… please") must not hide the name.
+        r"\b(?i:pull up|look ?up|open|find|show me|search for|pull)\s+([A-Z][a-z]{2,})\b"
+        r"(?i:\s+(?:for me|please|please\.|now))?\s*[.!?]?$",
         text,
     )
     if verb_led and verb_led.group(1).lower() not in _NAME_STOPWORDS:
@@ -330,7 +376,9 @@ def extract_candidate_name(text: str) -> str | None:
 
 
 def _is_referred_single_name(text: str, word: str) -> bool:
-    return bool(re.search(rf"\b(?:about|for|on|regarding|student)\s+{re.escape(word)}\b", text))
+    return bool(
+        re.search(rf"\b(?:about|for|on|regarding|student|named|called)\s+{re.escape(word)}\b", text)
+    )
 
 
 def _extract_uuid(text: str) -> str | None:

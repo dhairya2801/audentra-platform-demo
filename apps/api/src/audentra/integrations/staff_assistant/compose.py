@@ -168,6 +168,11 @@ class ComposedStaffAnswer:
     message: str
     blocks: list[JsonDict] = field(default_factory=list)
     evidence_texts: list[str] = field(default_factory=list)
+    # Facts the deterministic draft states that a rewrite must not drop —
+    # (phrase that must survive, sentence restored when it did not). Used for
+    # identity: an overview that loses "Chemistry, class of 2030" has lost the
+    # part that told the reader *which* student this is.
+    required_phrases: list[tuple[str, str]] = field(default_factory=list)
 
 
 def compose_staff_deterministic(
@@ -176,10 +181,53 @@ def compose_staff_deterministic(
 ) -> ComposedStaffAnswer:
     composer = _COMPOSERS.get(classification.request_type, _compose_general)
     answer = composer(classification, state)
+    _append_additional_intents(answer, classification, state)
     for note in _unavailable_notes(state):
         answer.message = f"{answer.message} {note}"
     answer.message = answer.message.strip()[:1_600]
     return answer
+
+
+def _append_additional_intents(
+    answer: ComposedStaffAnswer,
+    classification: StaffClassification,
+    state: StaffDerivedState,
+) -> None:
+    """Answer the other clauses of a multi-intent question.
+
+    Each additional intent is composed by its own canonical composer over the
+    same derived state — so the second and third clauses are answered from
+    reads, never from the model's sense of what was probably true. Duplicate
+    blocks are dropped, and the whole answer stays inside the message bound.
+    """
+
+    if not classification.additional_request_types:
+        return
+    seen_blocks = {_block_identity(block) for block in answer.blocks}
+    for request_type in classification.additional_request_types:
+        composer = _COMPOSERS.get(request_type)
+        if composer is None:
+            continue
+        supplement = composer(
+            StaffClassification(request_type, classification.confidence, source="multi_intent"),
+            state,
+        )
+        sentence = supplement.message.strip()
+        if sentence and sentence not in answer.message:
+            answer.message = f"{answer.message} {sentence}".strip()
+        for block in supplement.blocks:
+            identity = _block_identity(block)
+            if identity in seen_blocks:
+                continue
+            seen_blocks.add(identity)
+            answer.blocks.append(block)
+        for fact in supplement.evidence_texts:
+            if fact not in answer.evidence_texts:
+                answer.evidence_texts.append(fact)
+
+
+def _block_identity(block: JsonDict) -> tuple[str, str]:
+    return (str(block.get("type") or ""), str(block.get("title") or block.get("text") or "")[:80])
 
 
 def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
@@ -228,10 +276,15 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
                 f"These bucket counts are {represents}, not headcounts — one student can "
                 "appear in several buckets, so the buckets do not sum to the student total."
             )
+        dimension = str(summary.get("groupBy") or "group").replace("_", " ")
         for entry in summary.get("buckets") or []:
             bucket = _m(entry)
+            # Name the dimension rather than the word "Group": a rewrite that
+            # copies the evidence line verbatim otherwise says "Group
+            # Psychology has 60 students".
             lines.append(
-                f"Group {bucket.get('value')}: {bucket.get('count')} {represents}"
+                f"{dimension.capitalize()} {bucket.get('value')}: "
+                f"{bucket.get('count')} {represents}"
                 + (
                     f" across {bucket.get('students')} student(s)"
                     if represents != "students"
@@ -679,6 +732,12 @@ def _compose_student_overview(
     if student.get("openWorkItems"):
         parts.append(f"{student['openWorkItems']} open staff work item(s) on {name}.")
     message = " ".join(parts)
+    identity = parts[0]
+    required = [
+        (str(value), identity)
+        for value in (student.get("programName"), student.get("classYear"))
+        if value
+    ]
     blocks: list[JsonDict] = [text_block(message)]
     if state.open_work:
         blocks.append(
@@ -694,7 +753,12 @@ def _compose_student_overview(
                 title="Open staff work",
             )
         )
-    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+    return ComposedStaffAnswer(
+        message=message,
+        blocks=blocks,
+        evidence_texts=evidence,
+        required_phrases=required,
+    )
 
 
 def _compose_search_results(state: StaffDerivedState, evidence: list[str]) -> ComposedStaffAnswer:
@@ -1676,6 +1740,114 @@ def _compose_draft_call_points(
 # ---------------------------------------------------------------------------
 
 
+def _compose_daily_briefing(
+    _classification: StaffClassification,
+    state: StaffDerivedState,
+) -> ComposedStaffAnswer:
+    """The Staff Portal's Morning Brew, answered as prose plus its own blocks.
+
+    Every number here is one the briefing already computed and the staff
+    member can already see; the briefing's own "not tracked" list is carried
+    through so a missing metric reads as missing rather than as zero.
+    """
+
+    briefing = state.briefing
+    if not briefing:
+        message = (
+            "I couldn't read today's briefing just now. I can still show your "
+            "work queue, the attention scan, or any student's record."
+        )
+        return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+
+    evidence: list[str] = []
+    sentences: list[str] = []
+    headline = str(briefing.get("headline") or "").strip()
+    if headline:
+        sentences.append(headline)
+        evidence.append(f"Briefing headline: {headline}")
+    window = str(briefing.get("window") or "").strip()
+    if window:
+        evidence.append(f"Briefing window: {window}.")
+
+    bullets = [str(item) for item in briefing.get("bullets") or [] if str(item).strip()]
+    for bullet in bullets:
+        evidence.append(f"Briefing point: {bullet}")
+
+    attention = [item for item in briefing.get("attention") or [] if isinstance(item, dict)]
+    for item in attention:
+        title = str(item.get("title") or "")
+        count = item.get("count")
+        if title:
+            evidence.append(
+                f"Attention theme: {title}"
+                + (f" — {count} student(s)." if isinstance(count, int) else ".")
+            )
+
+    staff_work = briefing.get("staffWork") or {}
+    if isinstance(staff_work, dict) and staff_work:
+        open_items = staff_work.get("openItems")
+        assigned = staff_work.get("assignedToMe")
+        urgent = staff_work.get("urgent")
+        overdue = staff_work.get("overdue")
+        parts = []
+        if isinstance(open_items, int):
+            parts.append(f"{open_items} open Action Center item(s)")
+        if isinstance(assigned, int):
+            parts.append(f"{assigned} assigned to you")
+        if isinstance(urgent, int):
+            parts.append(f"{urgent} urgent")
+        if isinstance(overdue, int):
+            parts.append(f"{overdue} overdue")
+        if parts:
+            summary = "Work queue: " + ", ".join(parts) + "."
+            evidence.append(summary)
+            sentences.append(summary)
+
+    requests = briefing.get("requests") or {}
+    if isinstance(requests, dict) and isinstance(requests.get("total"), int):
+        evidence.append(
+            f"Open student requests: {requests['total']}, "
+            f"{requests.get('awaitingFirstReply', 0)} awaiting a first reply."
+        )
+
+    unsupported = [item for item in briefing.get("unsupported") or [] if isinstance(item, dict)]
+    if unsupported:
+        evidence.append(
+            "The briefing states these are not tracked: "
+            + "; ".join(str(item.get("metric")) for item in unsupported[:3])
+            + "."
+        )
+
+    blocks: list[JsonDict] = []
+    if bullets:
+        blocks.append(
+            numbered_or_bullet(
+                [{"text": bullet} for bullet in bullets],
+                title="This morning",
+            )
+        )
+    if attention:
+        blocks.append(
+            numbered_or_bullet(
+                [
+                    {
+                        "text": str(item.get("title") or "")
+                        + (
+                            f" — {item.get('count')} student(s)"
+                            if isinstance(item.get("count"), int)
+                            else ""
+                        )
+                    }
+                    for item in attention
+                ],
+                title="Where attention is concentrated",
+            )
+        )
+    message = " ".join(sentences).strip() or headline or "Here is today's briefing."
+    blocks.insert(0, text_block(message))
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
 def _compose_work_queue(
     _classification: StaffClassification, state: StaffDerivedState
 ) -> ComposedStaffAnswer:
@@ -1717,8 +1889,12 @@ def _compose_work_queue(
             f"{first_student.get('name')}. The matching items:"
         )
     else:
+        # `open_items` is the returned page (the read caps `items` at 25); the
+        # queue's own open count is the number to state. Saying the page size
+        # here is how a 1,027-item queue got reported as 25 items.
+        total_open = int(queue.get("filteredOpen") or counts.get("todo") or len(open_items))
         message = (
-            f"{_count(len(open_items), 'open item')} in canonical order (priority, then due "
+            f"{_count(total_open, 'open item')} in canonical order (priority, then due "
             f"date) — {counts.get('urgent', 0)} urgent, "
             f"{counts.get('escalated', 0)} escalated. First up: {first.get('key')} "
             f"for {first_student.get('name')}. The queue:"
@@ -2176,6 +2352,7 @@ _COMPOSERS = {
     "attention_ranking": _compose_attention,
     "recommendation": _compose_recommendation,
     "work_queue": _compose_work_queue,
+    "daily_briefing": _compose_daily_briefing,
     "work_item_detail": _compose_work_item_detail,
     "inquiries": _compose_inquiries,
     "playbook_lookup": _compose_playbooks,

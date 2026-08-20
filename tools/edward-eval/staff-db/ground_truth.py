@@ -25,6 +25,7 @@ from typing import Any, cast
 
 from sqlalchemy import text
 
+from audentra.application.morning_brew import build_morning_brew
 from audentra.core.auth import AuthContext
 from audentra.domain.student_cohort import CohortFilter
 from audentra.infrastructure.db.engine import DatabaseEngineOptions, create_database_engine
@@ -36,6 +37,9 @@ from audentra.infrastructure.postgres.portal_repository import PostgresPortalRep
 from audentra.infrastructure.postgres.postgres_service import (
     PostgresPlatformService,
     PostgresRepositoryBundle,
+)
+from audentra.infrastructure.postgres.morning_brew_repository import (
+    PostgresMorningBrewRepository,
 )
 from audentra.infrastructure.postgres.staff_assistant_repository import (
     PostgresStaffAssistantRepository,
@@ -76,6 +80,7 @@ def _service(engine: Any) -> PostgresPlatformService:
             staff=PostgresStaffRepository(engine, portal),
             managed=PostgresManagedConfigurationRepository(engine),
             staff_assistant=PostgresStaffAssistantRepository(engine),
+            morning_brew=PostgresMorningBrewRepository(engine),
         ),
         storage=cast(Any, None),
         ai=cast(Any, None),
@@ -260,6 +265,20 @@ async def main() -> None:
         auth, CohortFilter(onboarding_status="in_progress"), group_by="program"
     )
     summaries["onboardingInProgressByProgram"] = onboarding_by_program
+    summaries["depositUnpaidByProgram"] = await assistant.summarize_students(
+        auth, CohortFilter(deposit_state="unpaid"), group_by="program"
+    )
+    summaries["depositUnpaidByClassYear"] = await assistant.summarize_students(
+        auth, CohortFilter(deposit_state="unpaid"), group_by="class_year"
+    )
+    summaries["transcriptsMissingByProgram"] = await assistant.summarize_students(
+        auth,
+        CohortFilter(document_category="transcript", document_state="missing"),
+        group_by="program",
+    )
+    summaries["actionCenterByProgram"] = await assistant.summarize_students(
+        auth, CohortFilter(has_open_work_item=True), group_by="program"
+    )
 
     # --- Derived case anchors ---------------------------------------------
     caleb_group = name_groups.get("Caleb Dunmire", {}).get("students", [])
@@ -288,8 +307,46 @@ async def main() -> None:
             residency_status="international", onboarding_status="in_progress"
         ),
         "offeredNotAccepted": await cohort_total(offer_status="offered"),
+        # Action Center membership is "has an open staff work item" — the same
+        # rule the Staff Portal renders, expressed as a cohort.
+        "inActionCenter": await cohort_total(has_open_work_item=True),
+        "immunizationOpen": await cohort_total(
+            requirement_code="immunization_record", requirement_state="open"
+        ),
+        "aidVerificationOutstanding": await cohort_total(aid_document_state="outstanding"),
+        "onboardingInProgress": await cohort_total(onboarding_status="in_progress"),
+        "onboardingCompleted": await cohort_total(onboarding_status="completed"),
+        "international": await cohort_total(residency_status="international"),
+        "transcriptsMissingPage": await cohort_page(
+            limit=5, document_category="transcript", document_state="missing"
+        ),
         "summaries": summaries,
     }
+
+    # --- Morning Brew (the staff-portal briefing, same builder) -----------
+    brew_repository = service.repository.morning_brew
+    if brew_repository is not None:
+        brew = await build_morning_brew(auth, brew_repository)
+        truth["morningBrew"] = {
+            "population": brew.get("population"),
+            "synthesis": brew.get("synthesis"),
+            "metrics": brew.get("metrics"),
+            "attention": [
+                {
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "count": item.get("count"),
+                    "severity": item.get("severity"),
+                }
+                for item in brew.get("attention", [])
+            ],
+            "priorities": brew.get("priorities"),
+            "staffWork": brew.get("staffWork"),
+            "requests": {
+                key: value for key, value in (brew.get("requests") or {}).items() if key != "items"
+            },
+            "changes": brew.get("changes"),
+        }
 
     await engine.dispose()
     json.dump(truth, sys.stdout, indent=2, default=str)

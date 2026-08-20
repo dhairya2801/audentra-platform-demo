@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -746,6 +746,8 @@ class InMemoryPlatformService:
 
         guarded = guarded_staff_response(message)
         resolved_student_id: str | None = None
+        referent_action = "keep"
+        active_student_id: str | None = None
         if guarded is not None:
             response: dict[str, Any] = dict(guarded)
             trace.path = "pre_pipeline_safety_gate"
@@ -809,6 +811,9 @@ class InMemoryPlatformService:
                         )
                     ),
                     "work_queue": lambda: _async_value(store.staff_work_queue(auth)),
+                    # The in-memory store has no briefing composer; the tool
+                    # reports the read as unavailable rather than inventing one.
+                    "morning_brew": _unavailable_primitive("morning_brew"),
                     "work_item_detail": (
                         lambda work_item_id: _async_value(
                             store.staff_work_item_detail(auth, work_item_id)
@@ -848,6 +853,8 @@ class InMemoryPlatformService:
                 trace=trace,
             )
             resolved_student_id = result.resolved_student_id
+            referent_action = result.referent_action
+            active_student_id = result.next_referent_student_id
             trace.student_id = resolved_student_id
             response = {
                 "message": result.message,
@@ -880,6 +887,8 @@ class InMemoryPlatformService:
                 },
                 referenced_student_id=resolved_student_id,
                 request_id=request_id,
+                referent_action=referent_action,
+                active_student_id=active_student_id,
             )
             response.update(stored)
             trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id
@@ -1059,6 +1068,23 @@ async def _async_value(value: dict[str, Any]) -> dict[str, Any]:
     """Wrap an already-computed store read for the async tool host."""
 
     return value
+
+
+def _unavailable_primitive(name: str) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """A primitive this composition cannot serve, reported honestly.
+
+    The tool host turns the raised error into an ``unavailable`` read with a
+    reason, so composition says the briefing could not be read rather than
+    answering from something else.
+    """
+
+    async def read(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise NotFoundError(
+            f"{name.upper()}_UNAVAILABLE",
+            f"The {name.replace('_', ' ')} read is not available on this deployment",
+        )
+
+    return read
 
 
 _ONE_PIXEL_JPEG = bytes.fromhex(

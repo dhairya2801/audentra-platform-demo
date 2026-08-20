@@ -567,3 +567,224 @@ def test_classification_dataclass_shape() -> None:
     classification = Classification("greeting", 1)
     assert classification.source == "deterministic"
     assert classification.additional_request_types == ()
+
+
+# ---------------------------------------------------------------------------
+# Portal navigation: "where do I …" is product help, not a status question.
+# Every destination is a route from `links`, so no answer can invent a page.
+# ---------------------------------------------------------------------------
+
+
+def test_where_do_i_upload_names_the_documents_page() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "Where do I upload my immunization records?")
+
+    assert result.classification is not None
+    assert result.classification.request_type == "portal_navigation"
+    assert "/documents" in _visible(result).lower() or "documents page" in _visible(result).lower()
+
+
+def test_where_do_i_pay_names_the_payments_page() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "where do i pay the deposit")
+
+    assert result.classification is not None
+    assert result.classification.request_type == "portal_navigation"
+    assert "payments" in _visible(result).lower()
+
+
+def test_navigation_answers_carry_a_real_route_only() -> None:
+    from audentra.integrations.assistant import links
+
+    known = {
+        value
+        for name, value in vars(links).items()
+        if name.isupper() and isinstance(value, str) and value.startswith("/")
+    }
+    host = RecordingHost(_full_primitives())
+    for question in (
+        "Where can I see my checklist?",
+        "Where can I check the status of my transcript?",
+        "how do i find my advising appointment",
+        "where in the portal do i see what i owe",
+    ):
+        result = _run(AssistantPipeline(host), question)
+        hrefs = [
+            item.get("href")
+            for block in result.blocks
+            for item in block.get("items", [])
+            if isinstance(item, dict) and item.get("href")
+        ]
+        assert hrefs, question
+        for href in hrefs:
+            path = str(href).split("?")[0]
+            # `/enrollment/requirements/{slug}` is the documented per-requirement
+            # route, built by `requirement_href` from requirement data.
+            assert path in known or path.startswith("/enrollment/requirements/"), (
+                question,
+                href,
+            )
+
+
+def test_housing_assignment_questions_decline_instead_of_answering_the_step() -> None:
+    host = RecordingHost(_full_primitives())
+    for question in ("Will I get into my first choice dorm?", "Who is my roommate?"):
+        result = _run(AssistantPipeline(host), question)
+        assert result.classification is not None
+        assert result.classification.request_type == "unsupported_or_out_of_scope"
+        assert result.classification.requirement_reference == "housing_assignment_unavailable"
+        message = result.message.lower()
+        assert "doesn't hold room assignments" in message or "room assignment" in message
+
+
+def test_housing_eligibility_still_answers_from_the_record() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "Why can't I apply for housing?")
+
+    assert result.classification is not None
+    assert result.classification.request_type in {
+        "housing_eligibility",
+        "housing_status",
+        "housing_remaining_steps",
+    }
+
+
+def _visible(result: AssistantPipelineResult) -> str:
+    extras = [str(block.get("fallbackText") or "") for block in result.blocks]
+    return "\n".join([result.message, *extras])
+
+
+def test_blocking_and_non_blocking_split_does_not_double_count_the_deposit() -> None:
+    """The deposit gate is titled differently in the blocker list ("Enrollment
+    deposit not posted") and on the checklist ("Pay the enrollment deposit"),
+    so a title-based split lists the same gate as both blocking and open-but-
+    not-blocking. The split matches canonical gate codes instead."""
+
+    from audentra.integrations.assistant.compose import compose_deterministic
+    from audentra.integrations.assistant.derive import DerivedState
+
+    state = DerivedState(
+        remaining_steps=[
+            {"code": "enrollment_deposit", "title": "Pay the enrollment deposit"},
+            {"code": "housing_preference", "title": "Select your housing preference"},
+        ],
+        derived_blockers=[
+            {
+                "code": "enrollment_deposit_posted",
+                "title": "Enrollment deposit not posted",
+                "owner": "student",
+                "clearingAction": "Pay the enrollment deposit from the Payments page.",
+                "href": "/payments",
+            }
+        ],
+        available_reads=["getEnrollmentHolds"],
+    )
+    answer = compose_deterministic(Classification("holds_and_blockers", 1), state)
+    assert "not blocking" in answer.message.lower()
+    assert "housing" in answer.message.lower()
+    assert "deposit" not in answer.message.lower().split("separately,")[-1]
+
+
+def test_enrollment_position_reads_the_checklist_before_summarising() -> None:
+    """The enrollment projection carries no open-item list. Answering from it
+    alone leaves a silence a rewrite fills with "nothing outstanding"."""
+
+    from audentra.integrations.assistant.compose import compose_deterministic
+    from audentra.integrations.assistant.derive import DerivedState
+    from audentra.integrations.assistant.planner import select_tool_reads
+
+    assert "getOnboardingChecklist" in select_tool_reads(Classification("enrollment_state", 1))
+
+    # And when the checklist genuinely was not read, the answer says so rather
+    # than leaving a silence that reads as "nothing outstanding".
+    unread = DerivedState(
+        enrollment={"admission": {"offerStatus": "accepted", "programName": "Computer Science"}},
+        available_reads=["getEnrollmentState"],
+    )
+    answer = compose_deterministic(Classification("enrollment_state", 1), unread)
+    assert "haven't checked your open checklist" in answer.message
+
+    read_and_clear = DerivedState(
+        enrollment={"admission": {"offerStatus": "accepted", "programName": "Computer Science"}},
+        available_reads=["getEnrollmentState", "getOnboardingChecklist"],
+    )
+    answer = compose_deterministic(Classification("enrollment_state", 1), read_and_clear)
+    assert "Every checklist item is complete." in answer.message
+
+
+def test_a_pending_deposit_is_never_offered_as_a_student_action() -> None:
+    from audentra.integrations.assistant.compose import step_action_row
+
+    row = step_action_row(
+        {
+            "title": "Pay the enrollment deposit",
+            "href": "/payments",
+            "processingPending": True,
+        }
+    )
+    assert row["owner"] == "university"
+    assert "already pending" in row["text"]
+
+    ordinary = step_action_row({"title": "Upload an identity document", "href": "/documents"})
+    assert ordinary["owner"] == "student"
+    assert ordinary["text"] == "Upload an identity document"
+
+
+def test_a_returned_document_is_named_among_the_outstanding_ones() -> None:
+    """A rejected upload is the student's move, and the one they are most
+    likely to think is done — counting only never-submitted documents drops
+    it from the answer entirely."""
+
+    from audentra.integrations.assistant.compose import compose_deterministic
+    from audentra.integrations.assistant.derive import DerivedState
+
+    state = DerivedState(
+        document_states=[
+            {
+                "title": "Submit your official transcript",
+                "submissionState": "needs_resubmission",
+                "href": "/documents",
+            },
+            {
+                "title": "Upload an identity document",
+                "submissionState": "not_submitted",
+                "href": "/documents",
+            },
+        ],
+        missing_documents=[
+            {
+                "title": "Upload an identity document",
+                "submissionState": "not_submitted",
+                "href": "/documents",
+            }
+        ],
+        available_reads=["getDocumentStatuses", "getOnboardingChecklist"],
+    )
+    answer = compose_deterministic(Classification("missing_documents", 1), state)
+    visible = "\n".join(
+        [answer.message, *[str(block.get("fallbackText") or "") for block in answer.blocks]]
+    ).lower()
+    assert "returned" in visible
+    assert "transcript" in visible
+    assert "identity" in visible
+
+
+def test_a_waiver_claim_is_answered_as_a_claim() -> None:
+    """ "I thought that was waived" asks whether a waiver exists. Restating the
+    requirement's status without answering that reads as not having listened."""
+
+    host = RecordingHost(_full_primitives())
+    result = _run(
+        AssistantPipeline(host), "I thought the immunization requirement was waived for me."
+    )
+
+    assert result.classification is not None
+    assert result.classification.claims_waiver is True
+    assert "no waiver or exemption is recorded" in _visible(result).lower()
+
+
+def test_no_waiver_sentence_when_the_student_did_not_claim_one() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(AssistantPipeline(host), "Which documents am I missing?")
+
+    assert "waiver" not in _visible(result).lower()

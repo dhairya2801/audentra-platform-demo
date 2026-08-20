@@ -7,6 +7,17 @@ suite (`tools/edward-eval/run-staff.mjs`, single demo student, honesty
 invariants) with duplicate-name resolution, Action Center parity, cohort
 counts, and cross-domain reasoning over real data volume.
 
+## Suites
+
+Two case banks share one runner and one ground-truth extractor:
+
+| Suite | Cases | Focus |
+| --- | --- | --- |
+| `v1` (`cases.mjs`, `holdout-cases.mjs`) | 40 dev + 8 holdout | the original bank: lookup, summary, cross-domain, Action Center, aggregate, risk, negative. Kept as a regression floor. |
+| `v2` (`cases-v2.mjs`, `holdout-cases-v2.mjs`) | 80 dev + 20 holdout | the comprehensive bank: identification, overview, Action Center, cohorts, risk, cross-domain, communications, recommendations, multi-intent, and the **conversational-scope** family (carry-forward, explicit replacement, cohort/queue/ranking after a student turn). Default. |
+
+Select with `--suite v1` / `--suite v2` (default `v2`).
+
 ## Pieces
 
 | File | Role |
@@ -52,10 +63,11 @@ DATABASE_URL=postgresql://vv:vv_local_password@127.0.0.1:55432/vv_enrollment_sta
   "$(pwd)/tools/edward-eval/staff-db/ground_truth.py" \
   > artifacts/staff-db-eval/ground-truth.json
 
-npm run eval:edward:staff-db -- --batch staff-db-dev -v      # dev suite
-npm run eval:edward:staff-db -- --holdout --batch staff-db-holdout
-npm run eval:edward:staff-db -- --id sdb-agg-001 -v          # one case
-npm run eval:edward:staff-db -- --category action-center -v  # one category
+npm run eval:edward:staff-db -- --batch staff-v2-dev -v            # v2 dev suite
+npm run eval:edward:staff-db -- --holdout --batch staff-v2-holdout # v2 holdout
+npm run eval:edward:staff-db -- --suite v1 --batch staff-v1        # v1 regression floor
+npm run eval:edward:staff-db -- --id s2-ctx-008 -v                 # one case
+npm run eval:edward:staff-db -- --category context -v              # one category
 ```
 
 Environment overrides: `STAFF_EVAL_BASE_URL`, `STAFF_EVAL_ACTOR_ID`,

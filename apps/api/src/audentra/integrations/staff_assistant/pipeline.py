@@ -46,6 +46,12 @@ from audentra.integrations.staff_assistant.planner import (
     select_staff_tools,
     validate_staff_model_plan,
 )
+from audentra.integrations.staff_assistant.scope import (
+    has_explicit_entity,
+    may_inherit_referent,
+    referent_action,
+    refers_back,
+)
 from audentra.integrations.staff_assistant.tools import (
     DEFAULT_STAFF_TOOL_TIMEOUT_SECONDS,
     PlannedToolCall,
@@ -131,6 +137,17 @@ class StaffAssistantPipelineResult:
     failure_codes: list[str] = field(default_factory=list)
     resolved_student_id: str | None = None
     resolved_student_name: str | None = None
+    # What the durable conversation referent should do after this turn:
+    # "set" (this turn resolved a student or put one on the table), "clear"
+    # (this turn was explicitly about the population or the attention scan),
+    # or "keep".
+    referent_action: str = "keep"
+    # The student the conversation should carry forward. Usually the resolved
+    # referent; for a queue turn it is the head item's student, so
+    # "What else is blocking that student?" has something to refer to. It is
+    # deliberately NOT reported as the turn's resolved student — the queue
+    # answer is about the queue.
+    next_referent_student_id: str | None = None
 
 
 class StaffAssistantPipeline:
@@ -367,6 +384,12 @@ class StaffAssistantPipeline:
                         tools=list(second.executed_tools),
                     )
 
+        # A queue turn puts one case — and so one student — on the table. That
+        # student becomes the conversation's current object so a demonstrative
+        # follow-up has an antecedent, without the queue answer itself
+        # claiming to be about a student.
+        queue_referent = _queue_head_student_id(classification, state)
+
         # --- Compose + optional rewrite ---------------------------------------
         stage_started = time.perf_counter()
         draft = compose_staff_deterministic(classification, state)
@@ -402,6 +425,15 @@ class StaffAssistantPipeline:
             failure_codes=failure_codes,
             resolved_student_id=resolution.student_id,
             resolved_student_name=resolution.student_name,
+            referent_action=(
+                "set"
+                if (resolution.student_id or queue_referent)
+                else referent_action(
+                    resolved_student_id=None,
+                    request_type=classification.request_type,
+                )
+            ),
+            next_referent_student_id=resolution.student_id or queue_referent,
         )
 
     # ------------------------------------------------------------------
@@ -444,7 +476,40 @@ class StaffAssistantPipeline:
         classified_work_item = (
             classification is not None and classification.request_type == "work_item_detail"
         )
-        if not (needs_student or explicit_name or explicit_id or reference_token):
+        # Inheriting the conversation's active student is conditional on the
+        # CURRENT turn: it must be student-scoped, name nobody itself, and
+        # actually refer back. An unclassified turn (the model-planner path)
+        # inherits only when its language refers back — otherwise a global
+        # question would silently become a question about the last student.
+        may_inherit = (
+            may_inherit_referent(
+                request, classification.request_type if classification is not None else None
+            )
+            if classification is not None
+            else (refers_back(request) and not has_explicit_entity(request))
+        )
+        # A pick from a just-offered disambiguation list ("The second one.")
+        # is its own resolution path: it names nobody and refers back to a
+        # *list*, not to a student, so the inheritance gate must not close on
+        # it before the candidate selector runs.
+        is_candidate_selection = (
+            explicit_id is None
+            and request.is_follow_up
+            and _looks_like_candidate_selection(request, explicit_name)
+        )
+        if (
+            not (explicit_name or explicit_id or reference_token)
+            and not may_inherit
+            and not is_candidate_selection
+        ):
+            return resolution
+        if not (
+            needs_student
+            or explicit_name
+            or explicit_id
+            or reference_token
+            or is_candidate_selection
+        ):
             return resolution
 
         async def run_referent_read(call: PlannedToolCall) -> Mapping[str, Any] | None:
@@ -504,11 +569,7 @@ class StaffAssistantPipeline:
         # A disambiguation follow-up ("the one in Civil Engineering") picks a
         # candidate deterministically from the re-run canonical search — the
         # model never chooses identity.
-        if (
-            explicit_id is None
-            and request.is_follow_up
-            and _looks_like_candidate_selection(request, explicit_name)
-        ):
+        if is_candidate_selection:
             selected = await self._resolve_candidate_selection(request, run_referent_read)
             if selected is not None:
                 return selected
@@ -537,7 +598,24 @@ class StaffAssistantPipeline:
                 resolution.short_circuit = _disambiguation_answer(explicit_name, items)
             return resolution
 
-        if context_student_id is not None:
+        if may_inherit and context_student_id is None:
+            # A student named in the previous *answer* — "Show me the top
+            # transcript case." → "What else is blocking that student?" The
+            # queue turn resolved no referent (it is not student-scoped), so
+            # the demonstrative has to resolve against what was said. The name
+            # still goes through the canonical roster search; the model never
+            # supplies identity.
+            carried = _name_from_prior_answer(request)
+            if carried is not None:
+                search = await run_referent_read(
+                    PlannedToolCall(tool="searchStudents", arguments={"query": carried, "limit": 4})
+                )
+                items = _search_items(search)
+                if len(items) == 1:
+                    resolve_item(items[0])
+                    return resolution
+
+        if context_student_id is not None and may_inherit:
             overview = await run_referent_read(
                 PlannedToolCall(
                     tool="getStudentStaffSummary",
@@ -800,6 +878,7 @@ class StaffAssistantPipeline:
                     "not institutional policy.)"
                 )
             answer_text = _restore_dropped_caveats(answer_text, draft.message)
+            answer_text = _restore_required_phrases(answer_text, draft)
             blocks = [
                 {"type": "text", "fallbackText": answer_text, "text": answer_text},
                 *[block for block in draft.blocks if block.get("type") != "text"],
@@ -814,6 +893,24 @@ class StaffAssistantPipeline:
             )
         failure_codes.append(f"written_answer_rejected:{verdict.reason_code}")
         return deterministic
+
+
+def _restore_required_phrases(answer: str, draft: ComposedStaffAnswer) -> str:
+    """Put back a must-survive fact the rewrite dropped.
+
+    Identity is the case this exists for: an overview whose rewrite loses the
+    program and class year still reads fluently, and tells the staff member
+    nothing about *which* student they are looking at.
+    """
+
+    lowered = answer.lower()
+    for phrase, restoration in draft.required_phrases:
+        if phrase.lower() in lowered:
+            continue
+        if restoration in answer:
+            continue
+        return f"{restoration} {answer}".strip()
+    return answer
 
 
 # Honesty caveats the deterministic draft states that a rewrite must not
@@ -845,6 +942,33 @@ def _restore_dropped_caveats(answer_text: str, draft_message: str) -> str:
             answer_text = f"{answer_text} {sentence}"
             answer_lowered = answer_text.lower()
     return answer_text
+
+
+def _queue_head_student_id(
+    classification: StaffClassification, state: StaffDerivedState
+) -> str | None:
+    """The student on the head of the queue slice this turn presented."""
+
+    if classification.request_type not in {"work_queue", "work_item_detail"}:
+        return None
+    if classification.request_type == "work_item_detail":
+        student = _as_mapping((state.work_item or {}).get("student"))
+        return str(student.get("id")) if student.get("id") else None
+    for item in (state.queue or {}).get("items", []):
+        student = _as_mapping(_as_mapping(item).get("student"))
+        if student.get("id"):
+            return str(student["id"])
+    return None
+
+
+def _name_from_prior_answer(request: NormalizedStaffRequest) -> str | None:
+    """The student name Edward's own previous answer put on the table."""
+
+    for item in reversed(request.history):
+        if item["role"] != "assistant" or not item["content"]:
+            continue
+        return extract_candidate_name(item["content"])
+    return None
 
 
 def _classification_dict(

@@ -16,6 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from audentra.integrations.staff_assistant.normalize import NormalizedStaffRequest
+from audentra.integrations.staff_assistant.scope import (
+    has_singular_student_reference,
+    is_globally_scoped,
+)
 
 STAFF_REQUEST_TYPES = (
     "greeting",
@@ -47,6 +51,7 @@ STAFF_REQUEST_TYPES = (
     "inquiries",
     "playbook_lookup",
     "action_rules",
+    "daily_briefing",
     "general_question",
     "unsupported_or_out_of_scope",
 )
@@ -100,7 +105,8 @@ class StaffClassification:
 # correct baseline to improve on rather than invent from.
 
 _COHORT_SUBJECT = re.compile(
-    r"\b(?:students?|applicants?|admits?|admitted|cohort|class|population|people)\b",
+    r"\b(?:students?|applicants?|admits?|admitted|cohort|class|population|people|roster"
+    r"|caseload|intake)\b",
     re.IGNORECASE,
 )
 _COHORT_LIST_INTENT = re.compile(
@@ -109,9 +115,14 @@ _COHORT_LIST_INTENT = re.compile(
     re.IGNORECASE,
 )
 _COHORT_COUNT_INTENT = re.compile(
-    r"\bhow many\b|\bwhat (?:is|'s) the (?:number|count|breakdown|split)\b"
+    r"\bhow many\b|\bhow (?:big|large)\b|\bwhat (?:is|'s) the (?:number|count|breakdown"
+    r"|split|size|total)\b"
     r"|\bcount of\b|\bmost common\b|\bbreak\s?down\b|\bdistribution\b"
-    r"|\bsplit (?:of|by)\b|\bwhat percentage\b|\bwhat share\b",
+    r"|\bsplit (?:of|by|the)\b|\bwhat percentage\b|\bwhat share\b"
+    # "Which programs have the most students with unpaid deposits?" is a
+    # grouped count, not a student list.
+    r"|\bwhich (?:programs?|class years?|years?|counsell?ors?|advisors?|components?)\b"
+    r"|\bhow does .{0,24}break\s?down\b",
     re.IGNORECASE,
 )
 
@@ -133,9 +144,21 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     (re.compile(r"\bdeclined\b", re.I), {"offerStatus": "declined"}),
     (
         re.compile(
-            r"(?:haven'?t|have not|not|no|without|missing|outstanding|unpaid|owe)"
+            r"(?:haven'?t|have not|not|no|without|missing|outstanding|unpaid|owe|owing)"
             r"[^.?]{0,28}\bdeposits?\b"
-            r"|\bdeposits?\b[^.?]{0,20}(?:unpaid|outstanding|not paid|missing)",
+            r"|\bdeposits?\b[^.?]{0,20}(?:unpaid|outstanding|not paid|missing)"
+            # The enrollment deposit is the only payment a cohort filter knows,
+            # so "haven't paid up" / "still owe" in a question about students
+            # means the deposit. Without this the filter silently drops and the
+            # whole population is reported as the answer.
+            r"|(?:haven'?t|have not|hasn'?t|has not|not|still)[^.?]{0,20}"
+            r"\bpaid(?:\s+(?:up|yet|in))?\b"
+            # Only when no other object is named: "still owe an immunization
+            # record" is a requirement question, not a deposit question.
+            r"|\bstill (?:owe|owing|to pay|need to pay)\b"
+            r"(?![^.?]{0,32}\b(?:transcript|immuni\w*|document|record|form|worksheet"
+            r"|verification|orientation|housing)\b)"
+            r"|\bnon[- ]?depositors?\b|\bundeposited\b",
             re.I,
         ),
         {"depositState": "unpaid"},
@@ -151,9 +174,12 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     ),
     (
         re.compile(
-            r"\b(?:missing|no|without|haven'?t (?:sent|submitted|uploaded))"
+            r"\b(?:missing|no|without|owes?|owing|awaiting|await|lacking"
+            r"|haven'?t (?:sent|submitted|uploaded)|still (?:need|owe|missing)"
+            r"|waiting (?:on|for)|yet to (?:send|submit|upload))"
             r"[^.?]{0,28}\btranscripts?\b"
-            r"|\btranscripts?\b[^.?]{0,20}\b(?:missing|outstanding)\b",
+            r"|\btranscripts?\b[^.?]{0,24}\b(?:missing|outstanding|not (?:in|received)"
+            r"|still (?:missing|outstanding|owed))\b",
             re.I,
         ),
         {"documentCategory": "transcript", "documentState": "missing"},
@@ -164,8 +190,10 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     ),
     (
         re.compile(
-            r"\bimmuni[sz]ation\b[^.?]{0,28}(?:missing|outstanding|incomplete|not)"
-            r"|(?:missing|without|no)[^.?]{0,20}\bimmuni[sz]ation\b",
+            r"\bimmuni[sz]ation\b[^.?]{0,28}(?:missing|outstanding|incomplete|not|open)"
+            r"|(?:missing|without|no|owes?|owing|still (?:owe|need|missing)|awaiting"
+            r"|waiting (?:on|for)|haven'?t (?:sent|submitted|uploaded))"
+            r"[^.?]{0,24}\bimmuni[sz]ation\b",
             re.I,
         ),
         {"requirementCode": "immunization_record", "requirementState": "open"},
@@ -234,8 +262,18 @@ _COHORT_GROUP_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = (
         ),
         "blocking_requirement",
     ),
-    (re.compile(r"\bby program\b|\bper program\b|\bacross programs\b", re.I), "program"),
-    (re.compile(r"\bby (?:class )?year\b|\bper class year\b", re.I), "class_year"),
+    (
+        re.compile(
+            r"\bby program\b|\bper program\b|\bacross programs\b|\bwhich programs?\b"
+            r"|\bprograms? (?:have|has|with) the (?:most|fewest|highest|lowest)\b",
+            re.I,
+        ),
+        "program",
+    ),
+    (
+        re.compile(r"\bby (?:class )?year\b|\bper class year\b|\bwhich (?:class )?years?\b", re.I),
+        "class_year",
+    ),
     (
         re.compile(
             r"\bby (?:counselor|counsellor|advisor|staff|owner)\b"
@@ -276,6 +314,12 @@ def classify_cohort_question(text: str) -> StaffClassification | None:
     if not counting and not listing:
         return None
     filters = _cohort_predicates(text)
+    if not filters and _ACTION_CENTER.search(text):
+        # "…and how many students do they cover?" asks about the population
+        # behind the queue. An empty filter here would count the whole roster
+        # and present it as the answer, which is the worst failure this
+        # classifier can produce.
+        filters = {"hasOpenWorkItem": True}
     group_by = next(
         (dimension for pattern, dimension in _COHORT_GROUP_PHRASES if pattern.search(text)),
         None,
@@ -406,7 +450,11 @@ _RANKING_LANGUAGE = re.compile(
     r"|\b(?:highest|high|most)[- ]risk\b.{0,24}\bstudents?\b"
     r"|\bstudents?\b.{0,24}\b(?:riskiest|most concerning)\b"
     r"|\bprioriti[sz]e (?:my )?(?:students|outreach)\b|\bwho(?:'s| is) (?:slipping|stuck)\b"
-    r"|\brank (?:the )?students\b|\bwhich students?\b.{0,32}\b(?:first|most|urgent)\b",
+    r"|\brank (?:the )?students\b|\bwhich students?\b.{0,32}\b(?:first|most|urgent)\b"
+    r"|\btop (?:attention|at[- ]risk) student\b"
+    r"|\bwhy is the top\b.{0,32}\b(?:student|case)\b.{0,16}\bflagged\b"
+    r"|\bwho(?:'s| is) (?:the )?(?:most )?(?:at risk|slipping|stuck|falling behind)\b"
+    r"|\bstudents? (?:who )?need(?:ing)? (?:the most )?attention\b",
     re.IGNORECASE,
 )
 # Metrics where ranking intent should fall through to the honest attention
@@ -415,7 +463,17 @@ _RANKABLE_METRICS = frozenset(
     {"melt_risk", "enrollment_probability", "recovery_likelihood", "risk_score", "student_value"}
 )
 
-_ACTION_CENTER = re.compile(r"\baction cent(?:er|re)\b", re.IGNORECASE)
+# One board, many names. A membership question phrased "is X on my task
+# board?" or "why does X have a task on him?" must reach the same canonical
+# work-item read as "is X in the Action Center?".
+_ACTION_CENTER = re.compile(
+    r"\baction cent(?:er|re)\b|\btask board\b|\bwork board\b"
+    r"|\b(?:have|has|got)\s+(?:(?:a|an|any|some|open|other|outstanding|staff)\s+)*"
+    r"(?:task|work item|ticket)s?\b"
+    r"|\b(?:task|work item|ticket)s?\s+(?:on|for|against)\s+(?:her|him|them|the student"
+    r"|(?-i:[A-Z][a-z]+))\b",
+    re.IGNORECASE,
+)
 
 _DOCUMENT_ENTITY = re.compile(
     r"\btranscript\b|\bimmuni[sz]\w*\b|\bresidency\b|\bidentity doc\w*\b|\bdocuments?\b"
@@ -424,15 +482,204 @@ _DOCUMENT_ENTITY = re.compile(
 )
 _FINANCIAL_ENTITY = re.compile(
     r"\bfinancial[- ]?aid\b|\bfafsa\b|\baid\b|\bdeposit\b|\bbalance\b|\baward\b|\bpayment\b"
-    r"|\bsap\b|\bverification\b|\bscholarship\b|\bloan\b",
+    r"|\bsap\b|\bverification\b|\bscholarship\b|\bloan\b"
+    r"|\bfinancials?\b|\bfinancial (?:situation|state|picture|standing|position)\b"
+    r"|\bbilling\b|\bcharges?\b",
     re.IGNORECASE,
 )
 _HOUSING_ENTITY = re.compile(r"\bhousing\b|\bdorm\w*\b|\bresidence\b", re.IGNORECASE)
 
 
+# --- multi-intent decomposition --------------------------------------------
+#
+# One staff message often carries more than one information need ("Is Maya in
+# my Action Center, what's blocking her, and has anyone contacted her?").
+# Forcing it into a single intent answered one clause and let the composer
+# improvise the rest — which is how an unread domain became a confident
+# "there is no record of anyone contacting her". Each recognised extra ask
+# becomes an *additional* request type, whose canonical reads are executed and
+# whose deterministic answer is appended. Bounded to two extras: this is a
+# decomposition, not an agent loop.
+
+MAX_ADDITIONAL_INTENTS = 2
+
+_CLAUSE_SPLIT = re.compile(r"\s*(?:,|;|\band\b|\bplus\b|\balso\b|\bthen\b)\s*", re.IGNORECASE)
+
+# Per-domain probes, ordered. Each is a *sufficient* signal that the clause
+# asks about that domain; identity resolution is unchanged and shared.
+_CLAUSE_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "student_communications",
+        re.compile(
+            r"\b(?:contacted|emailed|called|texted|messaged|reached out|replied|responded"
+            r"|heard back|outreach|communication)\b",
+            re.I,
+        ),
+    ),
+    (
+        "student_action_center",
+        re.compile(r"\baction cent(?:er|re)\b|\bwork item\b|\bstaff task\b|\bmy queue\b", re.I),
+    ),
+    (
+        "student_blockers",
+        re.compile(r"\bblock(?:ed|ing|ers?)\b|\bstuck\b|\bholding (?:her|him|them) back\b", re.I),
+    ),
+    (
+        "student_documents",
+        re.compile(
+            r"\bdocuments?\b|\btranscripts?\b|\bimmuni[sz]\w*\b|\buploads?\b|\bon file\b",
+            re.I,
+        ),
+    ),
+    (
+        "student_deadlines",
+        re.compile(
+            r"\bdeadlines?\b|\bwhen (?:is|are|was) (?:it|they|that|this)\b|\bdue\b|\boverdue\b",
+            re.I,
+        ),
+    ),
+    (
+        "student_financials",
+        re.compile(r"\bdeposit\b|\bfinancial\b|\baid\b|\bbalance\b|\bpayment\b", re.I),
+    ),
+    ("student_housing", re.compile(r"\bhousing\b|\bdorm\w*\b|\bresidence\b", re.I)),
+    ("student_missing_items", re.compile(r"\bmissing\b|\bstill needs?\b|\boutstanding\b", re.I)),
+)
+
+
+# The operational counterpart: a queue/cohort question can also carry more
+# than one ask ("How many items do I have, and how many students do they
+# cover?"). Same bound, same rule — each clause maps to a canonical read.
+_OPERATIONAL_CLAUSE_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "work_queue",
+        re.compile(
+            r"\b(?:items?|tasks?|cases?)\b|\bqueue\b|\bboard\b|\bplate\b"
+            r"|\baction cent(?:er|re)\b",
+            re.I,
+        ),
+    ),
+    (
+        "cohort_aggregate",
+        re.compile(r"\bhow many students\b|\bstudents (?:do|does) (?:they|it|these)\b", re.I),
+    ),
+    ("attention_ranking", re.compile(r"\bwho should i\b|\bneeds? attention\b|\bat risk\b", re.I)),
+)
+
+
+def detect_additional_intents(
+    request: NormalizedStaffRequest, primary: StaffClassification
+) -> tuple[str, ...]:
+    """The other supported asks in a multi-clause question."""
+
+    from audentra.integrations.staff_assistant.scope import (
+        COHORT_SCOPE,
+        QUEUE_SCOPE,
+        STUDENT_SCOPE,
+        scope_of,
+    )
+
+    scope = scope_of(primary.request_type)
+    if scope is STUDENT_SCOPE:
+        table = _CLAUSE_INTENTS
+    elif scope in (COHORT_SCOPE, QUEUE_SCOPE):
+        table = _OPERATIONAL_CLAUSE_INTENTS
+    else:
+        return ()
+    text = request.comparable_full_text
+    clauses = [clause for clause in _CLAUSE_SPLIT.split(text) if len(clause.strip()) > 3]
+    if len(clauses) < 2:
+        return ()
+    found: list[str] = []
+    for clause in clauses:
+        for request_type, pattern in table:
+            if request_type == primary.request_type or request_type in found:
+                continue
+            if pattern.search(clause):
+                found.append(request_type)
+                break
+        if len(found) >= MAX_ADDITIONAL_INTENTS:
+            break
+    return tuple(found[:MAX_ADDITIONAL_INTENTS])
+
+
+# --- conversational cohort refinement ---------------------------------------
+#
+# "How many students have unpaid deposits?" → "Break that down by program."
+# The refinement carries no predicate of its own; the cohort it refines is the
+# previous turn's. Deterministic: the prior user question is re-read and its
+# filter reused, with the new grouping applied.
+
+_COHORT_REFINEMENT = re.compile(
+    r"^(?:and |ok(?:ay)?[,.]? |now )?(?:break|split|group|slice)\s+(?:that|it|this|them|those)?"
+    r"\s*(?:down)?\s*by\b"
+    r"|^(?:and |ok(?:ay)?[,.]? |now )?by (?:program|class year|year|counsell?or|advisor)\b"
+    r"|^what about by\b|^same (?:thing )?by\b",
+    re.IGNORECASE,
+)
+
+
+def classify_cohort_refinement(request: NormalizedStaffRequest) -> StaffClassification | None:
+    """A follow-up that re-groups the previous turn's cohort."""
+
+    if not request.history or not _COHORT_REFINEMENT.search(request.text.strip()):
+        return None
+    group_by = next(
+        (dimension for pattern, dimension in _COHORT_GROUP_PHRASES if pattern.search(request.text)),
+        None,
+    )
+    if group_by is None:
+        return None
+    for item in reversed(request.history):
+        if item["role"] != "user":
+            continue
+        prior = classify_cohort_question(item["content"].lower())
+        if prior is None:
+            continue
+        return StaffClassification(
+            "cohort_aggregate",
+            0.95,
+            source="cohort_refinement",
+            cohort_filter=prior.cohort_filter,
+            cohort_group_by=group_by,
+        )
+    return None
+
+
 def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassification | None:
+    classification = _classify_primary(request)
+    if classification is None:
+        return None
+    additional = detect_additional_intents(request, classification)
+    if not additional:
+        return classification
+    cohort_filter = classification.cohort_filter
+    if (
+        "cohort_aggregate" in additional
+        and not cohort_filter
+        and _ACTION_CENTER.search(request.comparable_full_text)
+    ):
+        # The supplementary student count behind a queue question is queue
+        # membership, not the whole roster.
+        cohort_filter = {"hasOpenWorkItem": True}
+    return StaffClassification(
+        classification.request_type,
+        classification.confidence,
+        source=classification.source,
+        reference=classification.reference,
+        additional_request_types=additional,
+        cohort_filter=cohort_filter,
+        cohort_group_by=classification.cohort_group_by,
+    )
+
+
+def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | None:
     text = request.comparable_text
     raw = request.text
+
+    refinement = classify_cohort_refinement(request)
+    if refinement is not None:
+        return refinement
 
     if not request.is_follow_up:
         if _GREETING_ONLY.search(raw):
@@ -474,26 +721,33 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     # Action Center questions route deterministically to the same canonical
     # queue the Staff Portal renders — never to a model-guessed filter.
     if _ACTION_CENTER.search(text):
-        has_referent = bool(
-            request.candidate_student_name
-            or request.candidate_student_id
-            or request.reference_token
-            or request.uses_pronoun_referent
-        )
+        # A *singular* student reference makes this a membership question.
+        # The plain pronoun test used to be enough, which made "…and how many
+        # students do they cover?" a question about one student.
+        has_referent = has_singular_student_reference(request)
         if has_referent:
             # "Why is X in my Action Center?" / "Is X in the Action Center?"
             # — a membership question about one student, answered from that
             # student's actual open work items, never inferred from blockers.
             return StaffClassification("student_action_center", 0.97)
-        topic = _document_reference(text)
+        topic = _queue_topic(text)
         if topic is not None:
             # "transcript items in my Action Center" — the canonical queue,
             # filtered by topic.
             return StaffClassification("work_queue", 0.97, reference=f"topic:{topic}")
-        if not _COHORT_SUBJECT.search(text):
+        # Only "how many/which *students* are in the Action Center" is a
+        # membership count. The cohort subject must sit in the same clause as
+        # the Action Center mention — otherwise a compound question whose
+        # second clause happens to say "students" turns an item count into a
+        # student count.
+        action_clause = next(
+            (clause for clause in _CLAUSE_SPLIT.split(text) if _ACTION_CENTER.search(clause)),
+            text,
+        )
+        if not _COHORT_SUBJECT.search(action_clause):
             return StaffClassification("work_queue", 0.95)
-        # "how many/which students are in the Action Center" falls through to
-        # the cohort classifier, which owns per-student membership counts.
+        # A membership count falls through to the cohort classifier, which
+        # owns per-student membership.
 
     # Cohort questions are settled before the student-referent branches: a
     # question about a *group* must not be answered by resolving one student
@@ -504,13 +758,26 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
 
     if re.search(
         r"\bwhat should i (?:work on|do) (?:first|today|next)\b(?!\s*(?:for|about|with)\b)"
-        r"|\bmy (?:queue|tasks|work items?)\b"
-        r"|\bwhat(?:'s| is) (?:on|in) (?:my|the) (?:queue|board|plate)\b"
+        r"|\bmy (?:queue|tasks|work items?|board|plate|desk)\b"
+        r"|\bwhat(?:'s| is) (?:on|in) (?:my|the) (?:queue|board|plate|desk)\b"
+        r"|\b(?:on|in) (?:the|my) queue\b|\bon (?:the|my) board\b|\bon my plate\b"
         r"|\b(?:open|urgent|overdue) (?:tasks|work items?)\b|\btask board\b"
-        r"|\bwork queue\b|\bunassigned (?:tasks|items|work)\b",
+        r"|\bwork queue\b|\bunassigned (?:tasks|items|work)\b"
+        r"|\bhow (?:much|many).{0,24}\b(?:on my plate|in my queue|on my board)\b",
         text,
     ):
-        return StaffClassification("work_queue", 1)
+        topic = _queue_topic(text)
+        return StaffClassification("work_queue", 1, reference=f"topic:{topic}" if topic else None)
+
+    # A briefing question is the Morning Brew the Staff Portal already renders.
+    if re.search(
+        r"\bmorning brew\b|\b(?:my |the |today'?s )?(?:morning |daily |weekly )?brief(?:ing)?\b"
+        r"|\bwhat changed (?:in the )?(?:last |past )?(?:24 ?hours?|day|overnight)\b"
+        r"|\bwhat happened (?:overnight|since yesterday|in the last (?:24 ?hours?|day))\b"
+        r"|\bstart of day\b|\bcatch me up\b|\bwhere do things stand (?:today|overall)\b",
+        text,
+    ):
+        return StaffClassification("daily_briefing", 0.97)
 
     # A pasted PREFIX-SUFFIX token is only a work-item question when the
     # message talks about work; the same shape is also how staff paste a
@@ -534,7 +801,16 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         return StaffClassification("action_rules", 0.95)
 
     # Student-scoped branches. These fire whether or not the message names the
-    # student — the pipeline resolves the referent separately.
+    # student — the pipeline resolves the referent separately — but a turn
+    # whose own language is about the team, the queue, or the population must
+    # never fall into them. Without this guard, "What deadlines should my team
+    # care about today?" became "student_deadlines" and then inherited
+    # whichever student the conversation had touched last.
+    if is_globally_scoped(request) and not has_singular_student_reference(request):
+        global_intent = _classify_global_scope(text)
+        if global_intent is not None:
+            return global_intent
+
     has_referent_language = (
         request.candidate_student_name is not None
         or request.candidate_student_id is not None
@@ -545,6 +821,7 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
 
     if re.search(
         r"\bwhat should (?:i|we) do (?:next |first |today )?(?:for|about|with)\b"
+        r"|\bwhat should (?:i|we) (?:contact|call|email|tell|ask|say to|discuss with|raise with)\b"
         r"|\bwhat should (?:i|we) follow up\b|\bfollow up (?:with|on)\b.{0,48}\babout\b"
         r"|\brecommend\b|\bbest (?:next )?(?:step|action)\b"
         r"|\bnext (?:step|action|move) for\b|\bhow (?:do|should) (?:i|we) help\b"
@@ -562,7 +839,13 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         r"|reached out)\b"
         r"|\b(?:have|has) (?:we|anyone|our office|the office)\b.{0,24}"
         r"\b(?:emailed|contacted|called|texted|reached out)\b"
-        r"|\bheard (?:back|from)\b",
+        r"|\bheard (?:back|from)\b"
+        r"|\b(?:did|has|have)\b[^.?]{0,40}\b(?:ever )?(?:repl(?:y|ied)|respond(?:ed)?"
+        r"|answer(?:ed)?|get(?:ten)? back|written back)\b"
+        r"|\bwhen did (?:we|anyone|the office)\b[^.?]{0,24}"
+        r"\b(?:email|contact|call|text|message|reach)\b"
+        r"|\b(?:any|what) (?:outreach|contact|communication)\b"
+        r"|\boutreach history\b",
         text,
     ):
         return StaffClassification("student_communications", 0.97)
@@ -598,7 +881,9 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
 
     if _DOCUMENT_ENTITY.search(text) and re.search(
         r"\bstatus\b|\bwhat happened\b|\breceived\b|\brejected\b|\baccepted\b|\bunder review\b"
-        r"|\bstate\b|\bwhere (?:is|are)\b|\bsubmitted\b|\bmissing\b",
+        r"|\bstate\b|\bwhere (?:is|are)\b|\bsubmitted\b|\bmissing\b"
+        r"|\bon file\b|\bdo we have\b|\buploaded\b|\bwhat documents\b"
+        r"|\bwhich documents\b",
         text,
     ):
         if re.search(r"\bmissing\b|\bstill need\b|\bnot (?:yet )?submitted\b", text):
@@ -613,6 +898,11 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         text,
     ):
         return StaffClassification("student_missing_items", 0.95)
+
+    if _DOCUMENT_ENTITY.search(text) and has_referent_language:
+        # A bare topical follow-up ("And his documents?") is a document
+        # question about the referent the pipeline resolves separately.
+        return StaffClassification("student_documents", 0.85, reference=_document_reference(text))
 
     if _FINANCIAL_ENTITY.search(text):
         return StaffClassification("student_financials", 0.9)
@@ -649,6 +939,30 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
     return None
 
 
+def _classify_global_scope(text: str) -> StaffClassification | None:
+    """Where a plainly team/population-scoped turn should go instead.
+
+    Deadlines, priorities and "what should we care about" at team scope are
+    the work queue and the attention scan; anything counting students is a
+    cohort question. Returning None lets the ordinary branches continue, so
+    the guard can only ever redirect a question it recognises.
+    """
+
+    cohort = classify_cohort_question(text)
+    if cohort is not None:
+        return cohort
+    if re.search(
+        r"\bdeadlines?\b|\bdue\b|\boverdue\b|\bpast due\b|\bthis week\b|\btoday\b"
+        r"|\bprioriti[sz]e\b|\bfocus on\b|\bcare about\b|\bwatch (?:out )?for\b"
+        r"|\bworry about\b|\bmost urgent\b",
+        text,
+    ):
+        return StaffClassification("work_queue", 0.9, reference="team_scope")
+    if _ACTION_CENTER.search(text) or re.search(r"\bqueue\b|\bboard\b|\bplate\b", text):
+        return StaffClassification("work_queue", 0.9)
+    return None
+
+
 def _document_reference(text: str) -> str | None:
     for keyword, reference in (
         ("transcript", "transcript"),
@@ -656,6 +970,31 @@ def _document_reference(text: str) -> str | None:
         ("residency", "residency"),
         ("identity", "identity"),
         ("health", "immunization"),
+    ):
+        if keyword in text:
+            return reference
+    return None
+
+
+def _queue_topic(text: str) -> str | None:
+    """What a queue question is filtered by.
+
+    Broader than the document vocabulary: staff slice their board by the work
+    itself ("deposit cases", "orientation follow-ups"), not only by document
+    category.
+    """
+
+    document = _document_reference(text)
+    if document is not None:
+        return document
+    for keyword, reference in (
+        ("deposit", "deposit"),
+        ("orientation", "orientation"),
+        ("housing", "housing"),
+        ("financial aid", "aid"),
+        ("aid", "aid"),
+        ("payment", "payment"),
+        ("enrollment", "enrollment"),
     ):
         if keyword in text:
             return reference

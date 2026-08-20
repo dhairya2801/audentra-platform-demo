@@ -42,6 +42,7 @@ STAFF_TOOL_NAMES = (
     "getStudentOwnership",
     "getStudentsNeedingAttention",
     "getStaffWorkQueue",
+    "getMorningBriefing",
     "getWorkItemDetail",
     "getInquiries",
     "getInquiryThread",
@@ -72,6 +73,7 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getStudentOwnership": "operational_state",
     "getStudentsNeedingAttention": "operational_state",
     "getStaffWorkQueue": "operational_state",
+    "getMorningBriefing": "operational_state",
     "getWorkItemDetail": "operational_state",
     "getInquiries": "operational_state",
     "getInquiryThread": "operational_state",
@@ -169,6 +171,15 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "and topic (title keyword) filters, plus counts. Authoritative for "
         "what is in the Action Center and in which order."
     ),
+    "getMorningBriefing": (
+        "Read today's Morning Brew — the same start-of-day briefing the Staff "
+        "Portal renders, built by the same canonical composer. Carries the "
+        "population and cohort counts, what changed in the last 24 hours, the "
+        "ranked attention themes, the work-queue summary, open student "
+        "requests, and an explicit list of metrics the platform does not hold. "
+        "Use for 'what's my briefing', 'what changed overnight', 'catch me up' "
+        "and other start-of-day questions. Takes no arguments."
+    ),
     "getWorkItemDetail": (
         "Read one work item's full detail: state, interactions, recorded "
         "communications, call transcript references, outcomes, comments, and "
@@ -201,6 +212,7 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "getStudentOwnership": "ownership",
     "getStudentsNeedingAttention": "attention_queue",
     "getStaffWorkQueue": "work_queue",
+    "getMorningBriefing": "morning_brew",
     "getWorkItemDetail": "work_item",
     "getInquiries": "inquiries",
     "getInquiryThread": "inquiry_thread",
@@ -280,6 +292,7 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
         "dueWindow": {"kind": "enum", "values": _QUEUE_DUE_WINDOWS, "optional": True},
         "topic": {"kind": "text", "max_length": 80, "optional": True},
     },
+    "getMorningBriefing": {},
     "getWorkItemDetail": {"workItemId": {"kind": "uuid"}},
     "getInquiries": {
         "status": {"kind": "enum", "values": _INQUIRY_STATUSES, "optional": True},

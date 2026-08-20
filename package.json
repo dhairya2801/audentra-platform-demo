@@ -38,6 +38,7 @@
     "eval:edward:full": "node tools/edward-eval/run.mjs --tier full --batch full",
     "eval:edward:staff": "node tools/edward-eval/run-staff.mjs",
     "eval:edward:staff-db": "node tools/edward-eval/staff-db/run.mjs",
+    "eval:edward:student-v3": "node tools/edward-eval/student-v3/run.mjs",
     "eval:edward:compare": "node tools/edward-eval/compare.mjs",
     "eval:edward:compare-modes": "node tools/edward-eval/compare-modes.mjs",
     "eval:edward:inspect": "node tools/edward-eval/inspect.mjs",

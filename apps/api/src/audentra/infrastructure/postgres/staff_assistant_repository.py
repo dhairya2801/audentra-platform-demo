@@ -1336,6 +1336,8 @@ class PostgresStaffAssistantRepository:
         assistant_message: Mapping[str, Any],
         referenced_student_id: str | None,
         request_id: str,
+        referent_action: str = "set",
+        active_student_id: str | None = None,
     ) -> JsonDict:
         """Atomically create/reuse a conversation and append one replay-safe exchange."""
 
@@ -1343,6 +1345,9 @@ class PostgresStaffAssistantRepository:
         client_message_id = _optional_text(user_message.get("clientMessageId"))
         requested_conversation_id = _uuid(conversation_id) if conversation_id else None
         referent = _uuid(referenced_student_id) if referenced_student_id else None
+        # What the conversation carries forward may differ from what this turn
+        # resolved: a queue turn resolves no student but puts one on the table.
+        carried = _uuid(active_student_id) if active_student_id else referent
         user_message_id = str(self._uuid_factory())
         assistant_message_id = str(self._uuid_factory())
         exchange_id = str(self._uuid_factory())
@@ -1362,7 +1367,20 @@ class PostgresStaffAssistantRepository:
         update_sql = f"""
             UPDATE {self._table("staff_assistant_conversation")}
             SET last_message_at = NOW(),
-                active_student_id = COALESCE(:active_student_id, active_student_id)
+                -- The active referent has a lifecycle. "set" records the
+                -- student this turn resolved; "clear" drops it because the
+                -- turn was explicitly about the population, the queue, or the
+                -- attention scan; "keep" leaves it for a genuine follow-up.
+                -- COALESCE-only (the previous rule) made the column
+                -- monotonic, so one student lookup scoped the rest of the
+                -- conversation to that student.
+                active_student_id = CASE
+                  WHEN :referent_action = 'clear' THEN NULL
+                  WHEN :referent_action = 'set' THEN COALESCE(
+                    :active_student_id, active_student_id
+                  )
+                  ELSE active_student_id
+                END
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND id = :conversation_id
         """
@@ -1466,7 +1484,8 @@ class PostgresStaffAssistantRepository:
                     "tenant_id": _uuid(auth.tenant_id),
                     "staff_member_id": _uuid(auth.actor_id),
                     "conversation_id": _uuid(conversation_id),
-                    "active_student_id": referent,
+                    "active_student_id": carried,
+                    "referent_action": referent_action,
                 },
             )
         return {
