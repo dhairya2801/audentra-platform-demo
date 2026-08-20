@@ -106,10 +106,13 @@ SIGNED_TEMPLATES = (
 
 ASTER_TENANT_ID = "00000000-0000-7000-8000-000000000001"
 HARVARD_TENANT_ID = "00000000-0000-7000-8000-000000000002"
+# Tenants with their own reviewed template artwork. Every other university signs
+# the standard set below, so signing is never withheld from a student.
 SIGNED_TEMPLATE_TENANT_PREFIXES = {
     ASTER_TENANT_ID: "aster",
     HARVARD_TENANT_ID: "harvard",
 }
+DEFAULT_SIGNED_TEMPLATE_PREFIX = "aster"
 
 _EDWARD_DEPOSIT_ACTION = re.compile(
     r"(?:pay|make|complete).{0,24}deposit|deposit.{0,24}(?:pay|payment)", re.I
@@ -410,13 +413,9 @@ class PostgresSignedDocumentGenerator:
             and signature.get("onboardingVersion") == version
         }
         requested = set(data["signedDocumentIds"])
-        tenant_prefix = SIGNED_TEMPLATE_TENANT_PREFIXES.get(auth.tenant_id)
-        if tenant_prefix is None:
-            raise ApiError(
-                503,
-                "ONBOARDING_TEMPLATE_NOT_PROVISIONED",
-                "Signed onboarding templates are not provisioned for this university",
-            )
+        tenant_prefix = SIGNED_TEMPLATE_TENANT_PREFIXES.get(
+            auth.tenant_id, DEFAULT_SIGNED_TEMPLATE_PREFIX
+        )
         created = 0
         for template in SIGNED_TEMPLATES:
             if template["code"] not in requested or template["code"] in existing_codes:

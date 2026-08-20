@@ -151,7 +151,8 @@ def test_signed_generator_uses_injected_harvard_template_and_drawn_signature(
     assert len(signed) > len(source.read_bytes())
 
 
-def test_signed_generator_fails_closed_for_tenant_without_reviewed_templates() -> None:
+def test_signed_generator_uses_standard_templates_for_tenant_without_own_artwork() -> None:
+    """A university with no branded artwork still signs the standard packet."""
     repository = FakeSignedRepository()
     storage = FakeStorage()
     unknown_tenant_auth = AuthContext(
@@ -161,20 +162,23 @@ def test_signed_generator_fails_closed_for_tenant_without_reviewed_templates() -
         actor_type="student",
     )
 
-    with pytest.raises(ApiError) as raised:
-        asyncio.run(
-            PostgresSignedDocumentGenerator().ensure(
-                auth=unknown_tenant_auth,
-                onboarding=_onboarding("typed"),
-                repository=cast(PostgresPortalRepository, repository),
-                storage=storage,
-                request_id="request-unknown-tenant",
-            )
+    created = asyncio.run(
+        PostgresSignedDocumentGenerator().ensure(
+            auth=unknown_tenant_auth,
+            onboarding=_onboarding("typed"),
+            repository=cast(PostgresPortalRepository, repository),
+            storage=storage,
+            request_id="request-unknown-tenant",
         )
+    )
 
-    assert raised.value.code == "ONBOARDING_TEMPLATE_NOT_PROVISIONED"
-    assert repository.saved == []
-    assert storage.objects == {}
+    assert created == 1
+    document = repository.saved[0]
+    signed = storage.objects[document["storageKey"]]
+    assert signed.startswith(b"%PDF-")
+    assert "Alex Morgan" in " ".join(
+        page.get_text() for page in fitz.open(stream=signed, filetype="pdf")
+    )
 
 
 class FakeConnection:
