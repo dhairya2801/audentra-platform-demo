@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from audentra.infrastructure.db.engine import DatabaseEngineOptions
+from audentra.infrastructure.postgres.oidc_repository import (
+    OidcProviderConfig,
+    OidcSettings,
+)
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings, StorageSettings
 from audentra.infrastructure.voice.config import VoiceSettings
 from audentra.integrations.ai.gateway import GatewaySettings
@@ -21,7 +28,7 @@ from audentra.interfaces.http.config import (
 )
 
 Environment = Literal["development", "preview", "test", "production"]
-AuthMode = Literal["demo"]
+AuthMode = Literal["demo", "oidc"]
 ObjectStorageProvider = Literal["s3", "gcs"]
 
 LOCAL_DATABASE_URL = "postgresql://vv:vv_local_password@localhost:5432/vv_enrollment"
@@ -65,12 +72,14 @@ class RuntimeSettings:
     demo_student_id: str
     demo_actor_id: str
     demo_staff_actor_id: str
+    oidc_tenant_id: str | None
     object_storage: StorageSettings
     ai: GatewaySettings
     worker: WorkerSettings
     voice: VoiceSettings | None
     onboarding_template_dir: Path
     assistant_trace_debug_enabled: bool = False
+    oidc: OidcSettings | None = None
 
     @classmethod
     def from_environment(
@@ -84,7 +93,7 @@ class RuntimeSettings:
             values.get("AUDENTRA_ENV", values.get("NODE_ENV", "development"))
         )
         auth_mode = values.get("AUTH_MODE", "demo").strip().lower()
-        if auth_mode != "demo":
+        if auth_mode not in {"demo", "oidc"}:
             raise ValueError(f"Unsupported AUTH_MODE: {auth_mode}")
 
         database_url = values.get("DATABASE_URL", "").strip()
@@ -107,7 +116,7 @@ class RuntimeSettings:
             or values.get("VV_STAFF_BOOTSTRAP_PASSWORD", "").strip()
             or (LOCAL_STAFF_INVITATION_CODE if not deployed_environment else "")
         )
-        if len(staff_invitation_code) < 16:
+        if auth_mode == "demo" and len(staff_invitation_code) < 16:
             raise ValueError("VV_STAFF_INVITATION_CODE must contain at least 16 characters")
 
         origins = _origins(values.get("WEB_ORIGIN", "http://localhost:3000"))
@@ -164,9 +173,24 @@ class RuntimeSettings:
 
         voice = _voice_settings(values, deployed_environment=deployed_environment)
 
+        oidc = _oidc_settings(values, environment=app_environment, auth_mode=auth_mode)
+        configured_oidc_tenant = (
+            values.get("OIDC_AUDENTRA_TENANT_ID", "").strip()
+            if auth_mode == "oidc"
+            else ""
+        )
+        oidc_tenant_id: str | None = None
+        if configured_oidc_tenant:
+            try:
+                oidc_tenant_id = str(UUID(configured_oidc_tenant))
+            except ValueError as error:
+                raise ValueError("OIDC_AUDENTRA_TENANT_ID must be a tenant UUID") from error
+        if auth_mode == "oidc" and oidc_tenant_id is None:
+            raise ValueError("AUTH_MODE=oidc requires OIDC_AUDENTRA_TENANT_ID")
+
         return cls(
             environment=app_environment,
-            auth_mode="demo",
+            auth_mode=auth_mode,  # type: ignore[arg-type]
             host=values.get("API_HOST", "0.0.0.0").strip() or "0.0.0.0",  # noqa: S104
             port=port,
             database_url=database_url,
@@ -197,6 +221,7 @@ class RuntimeSettings:
             demo_staff_actor_id=values.get(
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
+            oidc_tenant_id=oidc_tenant_id,
             object_storage=_object_storage_settings(
                 values,
                 provider=object_storage_provider,
@@ -283,11 +308,13 @@ class RuntimeSettings:
             voice=voice,
             onboarding_template_dir=template_dir,
             assistant_trace_debug_enabled=assistant_trace_debug_enabled,
+            oidc=oidc,
         )
 
     def http_settings(self) -> HttpSettings:
         return HttpSettings(
             environment=self.environment,
+            auth_mode=self.auth_mode,
             browser_auth_required=self.browser_auth_required,
             assistant_trace_debug_enabled=self.assistant_trace_debug_enabled,
             web_origins=self.web_origins,
@@ -298,6 +325,8 @@ class RuntimeSettings:
             demo_student_id=self.demo_student_id,
             demo_actor_id=self.demo_actor_id,
             demo_staff_actor_id=self.demo_staff_actor_id,
+            oidc_tenant_id=self.oidc_tenant_id,
+            oidc_portal_base_url=(self.oidc.portal_base_url if self.oidc else ""),
         )
 
     def assert_api_deployable(self) -> None:
@@ -308,6 +337,141 @@ class RuntimeSettings:
                 "The demo identity adapter is disabled in production; configure a production "
                 "identity adapter first"
             )
+
+        if self.auth_mode == "oidc" and self.oidc is None:
+            raise ValueError("AUTH_MODE=oidc requires a configured OIDC provider")
+
+
+def _oidc_settings(
+    values: Mapping[str, str],
+    *,
+    environment: Environment,
+    auth_mode: str,
+) -> OidcSettings | None:
+    # Provider credentials can remain present while a developer deliberately
+    # switches back to the local credential flow.  AUTH_MODE is the authority:
+    # never compose or expose an OIDC adapter unless it explicitly selects OIDC.
+    if auth_mode != "oidc":
+        return None
+
+    public_base = values.get("OIDC_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    legacy_callback_base = values.get("OIDC_CALLBACK_BASE_URL", "").strip().rstrip("/")
+    if public_base and legacy_callback_base and public_base != legacy_callback_base:
+        raise ValueError(
+            "OIDC_PUBLIC_BASE_URL and OIDC_CALLBACK_BASE_URL must match when both are set"
+        )
+    callback_base = public_base or legacy_callback_base
+    portal_base = values.get("OIDC_PORTAL_BASE_URL", "").strip().rstrip("/") or callback_base
+    google_id = values.get("GOOGLE_OIDC_CLIENT_ID", "").strip()
+    google_secret = values.get("GOOGLE_OIDC_CLIENT_SECRET", "").strip()
+    microsoft_id = values.get("MICROSOFT_OIDC_CLIENT_ID", "").strip()
+    microsoft_secret = values.get("MICROSOFT_OIDC_CLIENT_SECRET", "").strip()
+    microsoft_tenant = values.get("MICROSOFT_OIDC_TENANT_ID", "").strip()
+
+    if bool(google_id) != bool(google_secret):
+        raise ValueError("GOOGLE_OIDC_CLIENT_ID and GOOGLE_OIDC_CLIENT_SECRET must both be set")
+    microsoft_values = (microsoft_id, microsoft_secret, microsoft_tenant)
+    if any(microsoft_values) and not all(microsoft_values):
+        raise ValueError(
+            "MICROSOFT_OIDC_CLIENT_ID, MICROSOFT_OIDC_CLIENT_SECRET, and "
+            "MICROSOFT_OIDC_TENANT_ID must all be set"
+        )
+    if not callback_base:
+        raise ValueError("OIDC_PUBLIC_BASE_URL is required when OIDC is configured")
+    _oidc_origin(callback_base, "OIDC_PUBLIC_BASE_URL", environment)
+    _oidc_origin(portal_base, "OIDC_PORTAL_BASE_URL", environment)
+
+    providers: list[OidcProviderConfig] = []
+    if google_id:
+        providers.append(
+            OidcProviderConfig(
+                id="google",
+                label="Google",
+                client_id=google_id,
+                client_secret=google_secret,
+                issuer="https://accounts.google.com",
+                authorization_endpoint="https://accounts.google.com/o/oauth2/v2/auth",
+                token_endpoint="https://oauth2.googleapis.com/token",  # noqa: S106
+                jwks_uri="https://www.googleapis.com/oauth2/v3/certs",
+            )
+        )
+    if microsoft_id:
+        try:
+            tenant_id = str(UUID(microsoft_tenant))
+        except ValueError as error:
+            raise ValueError("MICROSOFT_OIDC_TENANT_ID must be a tenant UUID") from error
+        authority = f"https://login.microsoftonline.com/{tenant_id}"
+        providers.append(
+            OidcProviderConfig(
+                id="microsoft",
+                label="Microsoft",
+                client_id=microsoft_id,
+                client_secret=microsoft_secret,
+                issuer=f"{authority}/v2.0",
+                authorization_endpoint=f"{authority}/oauth2/v2.0/authorize",
+                token_endpoint=f"{authority}/oauth2/v2.0/token",
+                jwks_uri=f"{authority}/discovery/v2.0/keys",
+                tenant_id=tenant_id,
+            )
+        )
+    if not providers:
+        raise ValueError("AUTH_MODE=oidc requires at least one configured OIDC provider")
+    return OidcSettings(
+        callback_base_url=callback_base,
+        portal_base_url=portal_base,
+        providers=tuple(providers),
+    )
+
+
+def _oidc_origin(value: str, name: str, environment: Environment) -> None:
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"{name} must be an exact HTTPS origin") from error
+
+    local_http = parsed.scheme == "http" and hostname in {"localhost", "127.0.0.1"}
+    canonical_host = f"[{hostname}]" if hostname is not None and ":" in hostname else hostname
+    canonical_netloc = (
+        f"{canonical_host}:{port}"
+        if canonical_host is not None and port is not None
+        else canonical_host
+    )
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or not _oidc_hostname(hostname)
+        or port == 0
+        or canonical_netloc is None
+        or parsed.netloc.casefold() != canonical_netloc.casefold()
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or (parsed.scheme != "https" and not local_http)
+        or (environment in {"preview", "production"} and parsed.scheme != "https")
+    ):
+        raise ValueError(f"{name} must be an exact HTTPS origin")
+
+
+def _oidc_hostname(value: str) -> bool:
+    """Accept an IP literal or an ASCII DNS name, never an ambiguous authority."""
+
+    try:
+        ip_address(value)
+    except ValueError:
+        if not value.isascii() or len(value) > 253:
+            return False
+        candidate = value[:-1] if value.endswith(".") else value
+        labels = candidate.split(".")
+        return bool(candidate) and all(
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+            for label in labels
+        )
+    return True
 
 
 def _environment(value: str) -> Environment:

@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from typing import Literal
+from uuid import UUID
 
 CookieSameSite = Literal["lax", "none", "strict"]
 HttpEnvironment = Literal["development", "preview", "test", "production"]
@@ -11,6 +12,7 @@ HttpEnvironment = Literal["development", "preview", "test", "production"]
 @dataclass(frozen=True, slots=True)
 class HttpSettings:
     environment: HttpEnvironment = "development"
+    auth_mode: Literal["demo", "oidc"] = "demo"
     browser_auth_required: bool = False
     web_origins: tuple[str, ...] = ("http://localhost:3000",)
     session_cookie_samesite: CookieSameSite = "lax"
@@ -22,6 +24,8 @@ class HttpSettings:
     demo_student_id: str = "00000000-0000-7000-8000-000000000101"
     demo_actor_id: str = "00000000-0000-7000-8000-000000000100"
     demo_staff_actor_id: str = "00000000-0000-7000-8000-000000000901"
+    oidc_tenant_id: str | None = None
+    oidc_portal_base_url: str = ""
     demo_session_token: str = "demo-session-v2"  # noqa: S105
     # Developer-only trace inspection; production composition rejects it.
     assistant_trace_debug_enabled: bool = False
@@ -44,6 +48,7 @@ class HttpSettings:
         )
         return cls(
             environment=environment,  # type: ignore[arg-type]
+            auth_mode=_auth_mode(os.getenv("AUTH_MODE")),
             browser_auth_required=_boolean_environment(os.getenv("BROWSER_AUTH_REQUIRED"), False),
             assistant_trace_debug_enabled=_boolean_environment(
                 os.getenv("ASSISTANT_TRACE_DEBUG_ENABLED"),
@@ -64,6 +69,15 @@ class HttpSettings:
             demo_actor_id=os.getenv("DEMO_ACTOR_ID", "00000000-0000-7000-8000-000000000100"),
             demo_staff_actor_id=os.getenv(
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
+            ),
+            oidc_tenant_id=_oidc_tenant_id(
+                os.getenv("OIDC_AUDENTRA_TENANT_ID"),
+                auth_mode=_auth_mode(os.getenv("AUTH_MODE")),
+            ),
+            oidc_portal_base_url=(
+                os.getenv("OIDC_PORTAL_BASE_URL", "").strip().rstrip("/")
+                or os.getenv("OIDC_PUBLIC_BASE_URL", "").strip().rstrip("/")
+                or os.getenv("OIDC_CALLBACK_BASE_URL", "").strip().rstrip("/")
             ),
         )
 
@@ -93,3 +107,22 @@ def _boolean_environment(value: str | None, fallback: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError("Boolean environment values must be true or false")
+
+
+def _auth_mode(value: str | None) -> Literal["demo", "oidc"]:
+    normalized = (value or "demo").strip().lower()
+    if normalized not in {"demo", "oidc"}:
+        raise ValueError("AUTH_MODE must be demo or oidc")
+    return normalized  # type: ignore[return-value]
+
+
+def _oidc_tenant_id(value: str | None, *, auth_mode: Literal["demo", "oidc"]) -> str | None:
+    candidate = (value or "").strip()
+    if not candidate:
+        if auth_mode == "oidc":
+            raise ValueError("AUTH_MODE=oidc requires OIDC_AUDENTRA_TENANT_ID")
+        return None
+    try:
+        return str(UUID(candidate))
+    except ValueError as error:
+        raise ValueError("OIDC_AUDENTRA_TENANT_ID must be a tenant UUID") from error
