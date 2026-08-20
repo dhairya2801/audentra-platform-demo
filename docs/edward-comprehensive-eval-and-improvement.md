@@ -190,7 +190,11 @@ No expectation is prose an author believed to be true.
 
 The staff eval runs against a **frozen `pg_dump` snapshot**
 (`vv_enrollment_staff_eval`) because the dev worker rewrites work items
-continuously, which makes ground truth drift mid-run.
+continuously, which makes ground truth drift mid-run. One class of truth drifts
+even against the snapshot: anything relative to `now()` — `overdueRequirements`
+and the deadline buckets — so the truth file must be regenerated on the day the
+suite runs. (`overdueRequirements` moved 1511 → 1535 overnight, failing
+`s2-coh-007` on a correct answer.)
 
 ### Grading
 

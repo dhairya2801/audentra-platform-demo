@@ -47,10 +47,12 @@ from audentra.integrations.staff_assistant.planner import (
     validate_staff_model_plan,
 )
 from audentra.integrations.staff_assistant.scope import (
+    STUDENT_SCOPE,
     has_explicit_entity,
     may_inherit_referent,
     referent_action,
     refers_back,
+    scope_of,
 )
 from audentra.integrations.staff_assistant.tools import (
     DEFAULT_STAFF_TOOL_TIMEOUT_SECONDS,
@@ -402,8 +404,19 @@ class StaffAssistantPipeline:
             trace.evidence = list(draft.evidence_texts)
 
         stage_started = time.perf_counter()
+        # The follow-up preamble (the previous question and answer) exists so a
+        # genuine continuation reads coherently. Attaching it to a turn that
+        # *changed scope* is how the previous student got back into the prose
+        # of a queue answer — the reads were right, the rewrite was told to
+        # "resolve what this refers to from the turn before it". Hand the
+        # composer the bare question unless this turn really is about the
+        # previous turn's student.
+        continues_prior_turn = scope_of(classification.request_type) is STUDENT_SCOPE and (
+            resolution.student_id is not None and not has_explicit_entity(request)
+        )
+        composer_question = request.resolved_text if continues_prior_turn else request.text
         message_text, blocks, provider, model, usage = await self._maybe_rewrite(
-            classification, request.resolved_text, draft, failure_codes, trace=trace
+            classification, composer_question, draft, failure_codes, trace=trace
         )
         if trace is not None:
             trace.add_stage("model_rewrite", (time.perf_counter() - stage_started) * 1_000)

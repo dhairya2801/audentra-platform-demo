@@ -930,3 +930,35 @@ def test_task_board_synonyms_reach_the_membership_read() -> None:
         classification = _classify(question)
         assert classification is not None, question
         assert classification.request_type == "student_action_center", question
+
+
+def test_the_follow_up_preamble_does_not_cross_a_scope_switch() -> None:
+    """A turn that changes scope must not be handed the previous turn's
+    question and answer.
+
+    The reads and the resolved entity were already correct for
+    "Tell me about X." → "What deadlines should my team care about today?";
+    the leak was in the prose, because the composer was told to "resolve what
+    this refers to from the turn before it" and duly wove X back in.
+    """
+
+    from audentra.integrations.staff_assistant.normalize import normalize_staff_request
+    from audentra.integrations.staff_assistant.scope import STUDENT_SCOPE, scope_of
+
+    history = [
+        {"role": "user", "content": "Tell me about Alex Morgan."},
+        {"role": "assistant", "content": "Alex Morgan is a Computer Science student..."},
+    ]
+
+    # The preamble is built for any follow-up …
+    switched = normalize_staff_request(
+        "What deadlines should my team care about today?", history=history
+    )
+    assert "Your previous answer" in switched.resolved_text
+    # … but the turn is queue-scoped, so the pipeline must not use it.
+    assert scope_of("work_queue") is not STUDENT_SCOPE
+
+    # A genuine continuation stays student-scoped and keeps the preamble.
+    continued = normalize_staff_request("What's blocking her?", history=history)
+    assert "Your previous answer" in continued.resolved_text
+    assert scope_of("student_blockers") is STUDENT_SCOPE

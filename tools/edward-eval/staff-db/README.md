@@ -89,3 +89,10 @@ Artifacts land in `artifacts/runs/<batch>/` (`transcript.json`,
   disambiguators (student IDs).
 - The dev worker must not run against the snapshot database while the suite
   executes.
+- **Regenerate `ground-truth.json` on the day you run the suite.** Some truths
+  are relative to `now()` — `overdueRequirements`, and every deadline bucket —
+  so a truth file from yesterday fails those cases against a correct answer.
+  Observed: `overdueRequirements` moved 1511 → 1535 overnight as requirements
+  crossed their due date, failing `s2-coh-007` on a right answer. Only
+  time-relative counts drift; everything else is stable against the frozen
+  snapshot.
