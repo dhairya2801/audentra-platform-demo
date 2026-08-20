@@ -10,6 +10,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
   "asyncpg>=0.30,<1",
   "boto3>=1.43,<2",
+  "cryptography>=46,<47",
   "fastapi>=0.120,<1",
   "google-auth>=2.43,<3",
   "google-cloud-storage>=3.8,<4",
@@ -18,6 +19,7 @@ dependencies = [
   "opentelemetry-api>=1.39,<2",
   "pillow>=11,<13",
   "pymupdf==1.28.0",
+  "pyjwt>=2.10,<3",
   "python-multipart>=0.0.22,<1",
   "pyyaml>=6,<7",
   "sqlalchemy[asyncio]>=2.0.51,<3",

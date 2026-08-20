@@ -1237,10 +1237,96 @@ export interface StaffStudentRecord {
 
 export interface StaffSession {
   authenticated: true;
-  mode: "credentials";
+  mode: "credentials" | "google" | "microsoft";
   actorType: "staff";
   staff: StaffMemberSummary;
   notice: string;
+}
+
+export type StaffIdentityProvider = "google" | "microsoft";
+
+export interface StaffAuthOptions {
+  tenantSlug: string;
+  providers: StaffIdentityProvider[];
+  passwordEnabled: boolean;
+}
+
+export interface StaffMailbox {
+  id: string;
+  provider: StaffIdentityProvider;
+  address: string;
+  displayName: string | null;
+  kind: "personal" | "shared";
+  status: "active" | "reconnect_required" | "disabled";
+  canRead: boolean;
+  canSend: boolean;
+  canManage: boolean;
+  lastSyncedAt: string | null;
+}
+
+export interface StaffMailboxList {
+  items: StaffMailbox[];
+  total: number;
+}
+
+export interface StaffMailMessage {
+  id?: string;
+  providerMessageId?: string;
+  threadId: string | null;
+  sender: string;
+  recipients: string[];
+  subject: string | null;
+  body: string | null;
+  direction?: "inbound" | "outbound";
+  receivedAt: string | null;
+}
+
+export interface StaffMailMessageList {
+  items: StaffMailMessage[];
+  total: number;
+}
+
+export interface SearchStaffMailInput {
+  mailboxId: string;
+  query: string;
+  limit?: number;
+}
+
+export interface CreateStaffEmailSendIntentInput {
+  mailboxId: string;
+  studentId?: string;
+  replyToMessageId?: string;
+  interactionId?: string;
+  subject: string;
+  body: string;
+}
+
+export interface StaffEmailSendIntent {
+  id: string;
+  version: number;
+  status:
+    | "pending_confirmation"
+    | "queued"
+    | "sending"
+    | "sent"
+    | "failed"
+    | "expired"
+    | "cancelled";
+  mailboxId: string;
+  sender: string;
+  recipients: string[];
+  subject: string;
+  body: string;
+  contentSha256: string;
+  expiresAt: string;
+  confirmedAt?: string | null;
+  sentAt?: string | null;
+  error?: { code: string; message: string } | null;
+}
+
+export interface ConfirmStaffEmailSendIntentInput {
+  expectedVersion: number;
+  contentSha256: string;
 }
 
 export interface StaffSignInInput {

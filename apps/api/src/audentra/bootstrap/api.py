@@ -33,6 +33,7 @@ from audentra.infrastructure.postgres.postgres_service import (
 from audentra.infrastructure.postgres.staff_assistant_repository import (
     PostgresStaffAssistantRepository,
 )
+from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
 from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
 from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
@@ -62,6 +63,7 @@ class ApiRuntimeResources:
     object_storage: ObjectStorage
     service: PlatformService
     auth_service: BrowserAuthService = field(default_factory=UnavailableBrowserAuthService)
+    staff_email_service: PostgresStaffEmailService | None = None
     voice_service: VoiceSessionServiceProtocol = field(
         default_factory=UnavailableVoiceSessionService
     )
@@ -119,6 +121,12 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             environment=settings.environment,
             staff_invitation_code=settings.staff_invitation_code,
         )
+        staff_email_service = PostgresStaffEmailService(
+            engine,
+            http_client,
+            settings.institutional_oauth,
+            auth_service,
+        )
         voice_service: VoiceSessionServiceProtocol = (
             VoiceSessionService(
                 settings.voice,
@@ -129,7 +137,13 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             else UnavailableVoiceSessionService()
         )
         return ApiRuntimeResources(
-            engine, http_client, storage, service, auth_service, voice_service
+            engine,
+            http_client,
+            storage,
+            service,
+            auth_service,
+            staff_email_service,
+            voice_service,
         )
     except BaseException:
         try:
@@ -156,12 +170,14 @@ def create_production_app(settings: RuntimeSettings | None = None) -> FastAPI:
         app.state.runtime_resources = resources
         app.state.platform_service = resources.service
         app.state.browser_auth_service = resources.auth_service
+        app.state.staff_email_service = resources.staff_email_service
         app.state.voice_session_service = resources.voice_service
         try:
             yield
         finally:
             app.state.platform_service = UnavailablePlatformService()
             app.state.browser_auth_service = UnavailableBrowserAuthService()
+            app.state.staff_email_service = None
             app.state.voice_session_service = UnavailableVoiceSessionService()
             await resources.close()
 

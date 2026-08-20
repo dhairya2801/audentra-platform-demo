@@ -49,7 +49,8 @@ _CAPABILITY_MESSAGE = (
     "deadlines, financial aid, housing, appointments — plus your work queue, "
     "recorded communications, support inquiries, and the deterministic "
     "attention signals. I can recommend next steps and draft emails, SMS, or "
-    "call talking points for your review. I'm read-only: I never send, "
+    "call talking points for your review. I can also prioritize recent mail "
+    "from mailboxes you are authorized to read. I'm read-only: I never send, "
     "assign, escalate, or change records."
 )
 
@@ -572,6 +573,24 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
             + f", creates {rule.get('priority')} {rule.get('actionType')} work for "
             f"{rule.get('component')}"
         )
+    for message in state.mailbox_messages[:25]:
+        reasons = ", ".join(
+            str(reason).replace("_", " ") for reason in message.get("priorityReasons", [])
+        )
+        lines.append(
+            f"Authorized mailbox message: {message.get('receivedAt')} from "
+            f"{message.get('sender')} to {message.get('mailboxAddress')} â€” "
+            f"{message.get('subject') or '(no subject)'}"
+            + (
+                f"; linked student {message.get('linkedStudentName')}"
+                if message.get("linkedStudentName")
+                else ""
+            )
+            + (f"; priority reasons: {reasons}" if reasons else "")
+            + f"; body: {str(message.get('body') or '')[:300]}"
+        )
+    if state.mailbox_ranking_method:
+        lines.append(f"Mailbox ranking method: {state.mailbox_ranking_method}")
     return [line for line in lines if line]
 
 
@@ -2014,6 +2033,56 @@ def _compose_action_rules(
     )
 
 
+def _compose_mailbox_read(
+    _classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    messages = state.mailbox_messages
+    if not messages:
+        message = (
+            "I found no messages in the authorized seven-day mailbox cache. "
+            "Connect or refresh a mailbox in the Mailboxes workspace, or use its "
+            "provider search for older mail."
+        )
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    urgent = sum(1 for item in messages if int(item.get("priorityScore") or 0) == 2)
+    linked = sum(1 for item in messages if item.get("linkedStudentId"))
+    message = (
+        f"I found {len(messages)} recent authorized message(s): {urgent} contain explicit "
+        f"urgent or time-sensitive language and {linked} match a student record. "
+        "The order is deterministicâ€”keywords, then student match, then recencyâ€”"
+        "not an AI risk score."
+    )
+    block = table_block(
+        [
+            {"key": "priority", "label": "Priority basis"},
+            {"key": "from", "label": "From"},
+            {"key": "subject", "label": "Subject"},
+            {"key": "student", "label": "Student"},
+            {"key": "received", "label": "Received"},
+        ],
+        [
+            {
+                "priority": ", ".join(
+                    str(reason).replace("_", " ") for reason in item.get("priorityReasons", [])
+                )
+                or "recency",
+                "from": str(item.get("sender") or ""),
+                "subject": str(item.get("subject") or "(No subject)"),
+                "student": str(item.get("linkedStudentName") or "â€”"),
+                "received": str(item.get("receivedAt") or "")[:16],
+            }
+            for item in messages[:10]
+        ],
+        caption="Recent authorized email priorities",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
 def _compose_general(
     classification: StaffClassification, state: StaffDerivedState
 ) -> ComposedStaffAnswer:
@@ -2180,6 +2249,7 @@ _COMPOSERS = {
     "inquiries": _compose_inquiries,
     "playbook_lookup": _compose_playbooks,
     "action_rules": _compose_action_rules,
+    "mailbox_read": _compose_mailbox_read,
     "general_question": _compose_general,
     "unsupported_or_out_of_scope": _compose_unsupported,
 }
@@ -2209,6 +2279,7 @@ def _unavailable_notes(state: StaffDerivedState) -> list[str]:
         "getInquiryThread": "the inquiry thread",
         "getPlaybooks": "staff guidance",
         "getActionRules": "automation rules",
+        "getMailboxMessages": "authorized mailbox messages",
     }
     notes = []
     for item in state.unavailable_data:

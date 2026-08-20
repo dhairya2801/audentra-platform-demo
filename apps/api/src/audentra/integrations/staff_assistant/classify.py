@@ -47,6 +47,7 @@ STAFF_REQUEST_TYPES = (
     "inquiries",
     "playbook_lookup",
     "action_rules",
+    "mailbox_read",
     "general_question",
     "unsupported_or_out_of_scope",
 )
@@ -452,6 +453,15 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         if re.search(r"\btalking points?\b|\bcall (?:script|points|notes|prep)\b|\bprep\b", text):
             return StaffClassification("draft_call_points", 1, reference=subject)
         return StaffClassification("draft_email", 1, reference=subject)
+
+    if re.search(
+        r"\b(?:read|show|list|search|find|scan|summari[sz]e|sort|prioriti[sz]e)\b"
+        r".{0,48}\b(?:my |our |the )?(?:emails?|e-mails?|inbox|mailbox|mail)\b"
+        r"|\b(?:emails?|e-mails?|inbox|mailbox)\b.{0,48}"
+        r"\b(?:urgent|important|priority|recent|new|unread)\b",
+        text,
+    ):
+        return StaffClassification("mailbox_read", 0.99)
 
     if request.action_kind is not None:
         return StaffClassification("action_request", 1, reference=request.action_kind)

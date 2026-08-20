@@ -11,6 +11,7 @@ from fastapi import Depends, Header, Request
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
 from audentra.core.ports import BrowserAuthService, PlatformService, ServiceCall
+from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
 from audentra.infrastructure.voice import VoiceSessionServiceProtocol
 
 from .config import HttpSettings
@@ -29,6 +30,13 @@ def get_platform_service(request: Request) -> PlatformService:
 
 def get_browser_auth_service(request: Request) -> BrowserAuthService:
     return cast(BrowserAuthService, request.app.state.browser_auth_service)
+
+
+def get_staff_email_service(request: Request) -> PostgresStaffEmailService:
+    service = getattr(request.app.state, "staff_email_service", None)
+    if service is None:
+        raise ApiError(503, "STAFF_EMAIL_UNAVAILABLE", "Institutional email is unavailable")
+    return cast(PostgresStaffEmailService, service)
 
 
 def _valid_uuid(value: str) -> bool:
@@ -240,3 +248,4 @@ VoiceAgentTokenDependency = Annotated[None, Depends(require_voice_agent_token)]
 VoiceSessionServiceDependency = Annotated[
     VoiceSessionServiceProtocol, Depends(get_voice_session_service)
 ]
+StaffEmailServiceDependency = Annotated[PostgresStaffEmailService, Depends(get_staff_email_service)]

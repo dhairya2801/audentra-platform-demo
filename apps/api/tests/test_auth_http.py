@@ -142,6 +142,23 @@ class FakeBrowserAuthService:
             raise UnauthorizedError("Email or password is incorrect")
         return self._staff_session(email=email)
 
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+    ) -> StaffSession:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug == "aster"
+        assert provider in {"google", "microsoft"}
+        assert provider_subject
+        assert provider_tenant
+        return self._staff_session(email=email)
+
     async def sign_up_staff(
         self,
         *,
