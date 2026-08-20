@@ -21,7 +21,7 @@
  * metered from the per-turn trace and reported in summary.json.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCases } from "../src/runner.mjs";
@@ -270,8 +270,14 @@ if (args.regrade) {
     },
   }));
   process.stdout.write("\n");
+  // Merge rather than replace: a category- or holdout-scoped run only boots
+  // the personas it needs, and overwriting the cache with that subset breaks
+  // a later `--regrade` (or export) of a run that used the others.
   mkdirSync(dirname(SNAPSHOT_CACHE), { recursive: true });
-  writeFileSync(SNAPSHOT_CACHE, JSON.stringify(snapshots));
+  const cached = existsSync(SNAPSHOT_CACHE)
+    ? JSON.parse(readFileSync(SNAPSHOT_CACHE, "utf8"))
+    : {};
+  writeFileSync(SNAPSHOT_CACHE, JSON.stringify({ ...cached, ...snapshots }));
 }
 
 const factsByPersona = Object.fromEntries(

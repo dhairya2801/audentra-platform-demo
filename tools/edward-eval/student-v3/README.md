@@ -66,6 +66,18 @@ composer calls, metered from each turn's trace and reported in `summary.json`
 
 Artifacts land in `artifacts/runs/<batch>/`.
 
+## Exporting the bank
+
+```bash
+node tools/edward-eval/export-question-bank.mjs
+```
+
+Writes `docs/edward-eval-question-bank.tsv` and `.csv` — all 200 scenarios
+(both personas, both suites) as one flat table, one row per user turn, with the
+`{{gt:…}}` / `{{f:…}}` ground-truth templates **resolved to their actual
+values** and Edward's final-run answer, intent, tools and grade attached. Paste
+the TSV directly into Google Sheets or Excel.
+
 ## Case-authoring rules
 
 - Every question must be answerable — or intentionally unanswerable — from the

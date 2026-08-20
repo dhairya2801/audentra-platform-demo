@@ -466,6 +466,7 @@ Three supporting changes complete it:
 | `tools/edward-eval/staff-db/cases-v2.mjs`, `holdout-cases-v2.mjs` | 80 dev + 20 holdout scenarios |
 | `tools/edward-eval/staff-db/run.mjs` | `--suite v1|v2`, `--regrade`, tool arguments recorded per turn |
 | `tools/edward-eval/staff-db/ground_truth.py` | Morning Brew truths, per-program/per-year cohort breakdowns, Action Center membership count, immunization/aid/onboarding/international totals |
+| `tools/edward-eval/export-question-bank.mjs` | Exports all 200 scenarios as one spreadsheet-pasteable table (`docs/edward-eval-question-bank.tsv` / `.csv`), with ground-truth templates resolved to actual values and each turn's final answer, intent, tools and grade attached |
 | `package.json` | `eval:edward:student-v3` |
 
 ### Tests
