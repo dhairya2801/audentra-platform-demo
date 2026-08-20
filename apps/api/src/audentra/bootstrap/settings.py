@@ -175,9 +175,7 @@ class RuntimeSettings:
 
         oidc = _oidc_settings(values, environment=app_environment, auth_mode=auth_mode)
         configured_oidc_tenant = (
-            values.get("OIDC_AUDENTRA_TENANT_ID", "").strip()
-            if auth_mode == "oidc"
-            else ""
+            values.get("OIDC_AUDENTRA_TENANT_ID", "").strip() if auth_mode == "oidc" else ""
         )
         oidc_tenant_id: str | None = None
         if configured_oidc_tenant:
