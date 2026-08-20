@@ -896,3 +896,6 @@ npm run eval:edward:staff-db -- --suite v1 --batch staff-v1-regression
 
 Suite documentation: `tools/edward-eval/student-v3/README.md` and
 `tools/edward-eval/staff-db/README.md`.
+
+All implementation and evaluation changes described here are in commit
+`003d0ed`.
