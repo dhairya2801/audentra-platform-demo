@@ -15,6 +15,17 @@ Configure the server-only variables documented in `apps/api/.env.example`. `MAIL
 
 Google mailbox consent requests `gmail.readonly` and `gmail.send`. These scopes require the appropriate Google OAuth consent-screen publication, verification, and security review for the intended deployment. Microsoft mailbox consent uses delegated `Mail.Read`, `Mail.Send`, and the shared-mail variants. Institutional administrators may need to approve consent.
 
+### Local personal Outlook SSO test
+
+This temporary path tests staff sign-in only; it is not an institutional Microsoft deployment or a Microsoft 365 mailbox test.
+
+1. Register a Microsoft app that supports personal Microsoft accounts and add the staff SSO callback under the current `API_PUBLIC_URL`.
+2. In the ignored local environment file, set `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET`, and `MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS=true`. The application rejects that last setting in preview and production.
+3. Configure the tenant's Microsoft policy with the Microsoft consumer tenant ID `9188040d-6c67-4c5b-b112-36a304b66dad`, then create an exact active `staff_sso_provisioning_grant` for the personal Outlook address.
+4. The server directs OAuth to the Microsoft `consumers` authority, but still validates the immutable consumer tenant ID and requires the exact local staff/grant authorization.
+
+Consumer-account mailbox connection is intentionally rejected. To convert this test to organizational Microsoft SSO later, use an organizational or multitenant app registration, replace the policy value with the university's Entra Directory ID, disable `MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS`, and obtain the university administrator's consent. The staff profile and provisioning grant remain unchanged.
+
 ## Tenant policy
 
 Provider enablement is data, not inferred from an email suffix. Insert the institution's verified Google hosted domain or immutable Microsoft Entra tenant ID:
@@ -41,6 +52,18 @@ INSERT INTO staff_sso_provisioning_grant (
 ```
 
 The first successful callback binds that grant to the immutable Google `sub` or Microsoft `oid` plus the verified provider organization. The profile name comes from the OIDC `name` claim; the component remains the institution-controlled value in the grant.
+
+## Provisioning lifecycle and acceptance boundary
+
+The grant is an approval to create one local profile, not a domain-wide entitlement or an ongoing role source:
+
+1. An unprovisioned identity needs an exact active grant matching tenant, provider, and normalized email.
+2. The first verified callback locks that grant, creates exactly one active `staff_member`, and pins the provider subject and provider organization.
+3. Later sign-ins use the existing active staff profile and its `staff_federated_identity`; a different provider subject, provider organization, or email fails closed.
+4. The identity-provider `name` is display-only. The local grant supplies the component, and sign-in never updates that component from provider claims.
+5. Deactivating an unclaimed grant prevents creation. Once claimed, the local `staff_member.active` value—not a modified grant—governs whether a new federated sign-in can proceed.
+
+Test this independently from ordinary SSO: first confirm an unapproved member of the configured institution is denied, then confirm the exact approved identity creates one staff profile and that a repeated sign-in does not create a duplicate. Do not use a whole hosted domain or Entra tenant as the authorization rule.
 
 Approve a shared mailbox explicitly before a staff member can connect it:
 

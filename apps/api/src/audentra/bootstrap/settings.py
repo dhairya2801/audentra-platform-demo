@@ -54,6 +54,7 @@ class InstitutionalOAuthSettings:
     google_client_secret: str
     microsoft_client_id: str
     microsoft_client_secret: str
+    microsoft_allow_personal_accounts: bool
     token_encryption_key: str
 
     def provider_configured(self, provider: str) -> bool:
@@ -161,6 +162,13 @@ class RuntimeSettings:
         )
         if app_environment == "production" and e2e_malicious_provider_enabled:
             raise ValueError("EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED is prohibited in production")
+        microsoft_allow_personal_accounts = _boolean(
+            values.get("MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS"), False
+        )
+        if microsoft_allow_personal_accounts and app_environment not in {"development", "test"}:
+            raise ValueError(
+                "MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS is allowed only in development or test"
+            )
         assistant_trace_debug_enabled = _boolean(
             values.get("ASSISTANT_TRACE_DEBUG_ENABLED"),
             app_environment in {"development", "test"},
@@ -310,6 +318,7 @@ class RuntimeSettings:
                 google_client_secret=values.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
                 microsoft_client_id=values.get("MICROSOFT_OAUTH_CLIENT_ID", "").strip(),
                 microsoft_client_secret=values.get("MICROSOFT_OAUTH_CLIENT_SECRET", "").strip(),
+                microsoft_allow_personal_accounts=microsoft_allow_personal_accounts,
                 token_encryption_key=values.get("MAIL_TOKEN_ENCRYPTION_KEY", "").strip(),
             ),
             voice=voice,

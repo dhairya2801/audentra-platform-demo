@@ -78,6 +78,7 @@ portal UI.
 27. [Student experience changelog — 2026-07-31](./changelog/2026-07-31-student-experience.md)
 28. [Staff operations changelog — 2026-07-31](./changelog/2026-07-31-staff-operations.md)
 29. [Release changelog](../CHANGELOG.md)
+30. [Staff SSO and delegated email acceptance and operations](./staff-sso-and-email-integration.md)
 
 For a new engineer, read documents 14, 15, and 16 first. Documents 1–13
 explain the architectural decisions, domain workflows, and longer-term design

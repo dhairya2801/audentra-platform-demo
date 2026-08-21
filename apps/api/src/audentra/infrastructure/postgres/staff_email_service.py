@@ -42,6 +42,7 @@ _SESSION_RETURN_RE = re.compile(r"^[A-Za-z0-9/_?&=.:~-]+$")
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c|25)", re.IGNORECASE)
 _GOOGLE_ISSUERS = {"https://accounts.google.com", "accounts.google.com"}
+_MICROSOFT_CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
 
 
 class _TextExtractor(HTMLParser):
@@ -98,7 +99,7 @@ class PostgresStaffEmailService:
             result = await connection.execute(
                 text(
                     """
-                    SELECT provider FROM tenant_identity_provider
+                    SELECT provider, microsoft_tenant_id FROM tenant_identity_provider
                     WHERE tenant_id=:tenant_id AND enabled=true
                     ORDER BY provider
                     """
@@ -108,7 +109,10 @@ class PostgresStaffEmailService:
         providers = [
             str(row["provider"])
             for row in result.mappings().all()
-            if self._settings.provider_configured(str(row["provider"]))
+            if self._provider_available(
+                str(row["provider"]),
+                str(row.get("microsoft_tenant_id") or ""),
+            )
         ]
         return {
             "tenantSlug": str(tenant["slug"]),
@@ -122,6 +126,8 @@ class PostgresStaffEmailService:
         async with self._engine.begin() as connection:
             tenant = await self._tenant_by_slug(connection, tenant_slug)
             expected = await self._provider_tenant(connection, tenant["id"], checked_provider)
+            if checked_provider == "microsoft":
+                self._microsoft_authority(expected, mailbox=False)
             state, verifier, nonce, redirect_uri = await self._insert_transaction(
                 connection,
                 flow_type="staff_sso",
@@ -176,6 +182,8 @@ class PostgresStaffEmailService:
         async with self._engine.begin() as connection:
             tenant = await self._tenant_by_id(connection, auth.tenant_id)
             expected = await self._provider_tenant(connection, tenant["id"], checked_provider)
+            if checked_provider == "microsoft":
+                self._microsoft_authority(expected, mailbox=True)
             staff = (
                 (
                     await connection.execute(
@@ -1135,7 +1143,11 @@ class PostgresStaffEmailService:
             client_id = self._settings.google_client_id
             client_secret = self._settings.google_client_secret
         else:
-            tenant = quote(str(transaction["expected_provider_tenant"]), safe="")
+            authority = self._microsoft_authority(
+                str(transaction["expected_provider_tenant"]),
+                mailbox=str(transaction.get("flow_type") or "") == "mailbox_connect",
+            )
+            tenant = quote(authority, safe="")
             url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
             client_id = self._settings.microsoft_client_id
             client_secret = self._settings.microsoft_client_secret
@@ -1175,7 +1187,11 @@ class PostgresStaffEmailService:
         if provider == "google":
             jwks_url = "https://www.googleapis.com/oauth2/v3/certs"
         else:
-            tenant_segment = quote(expected_tenant, safe="")
+            authority = self._microsoft_authority(
+                expected_tenant,
+                mailbox=str(transaction.get("flow_type") or "") == "mailbox_connect",
+            )
+            tenant_segment = quote(authority, safe="")
             jwks_url = f"https://login.microsoftonline.com/{tenant_segment}/discovery/v2.0/keys"
         jwks_response = await self._client.get(jwks_url)
         jwks_response.raise_for_status()
@@ -1293,7 +1309,8 @@ class PostgresStaffEmailService:
         }
         if login_hint:
             params["login_hint"] = login_hint
-        tenant = quote(expected_tenant, safe="")
+        authority = self._microsoft_authority(expected_tenant, mailbox=mailbox)
+        tenant = quote(authority, safe="")
         return f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize?" + urlencode(
             params
         )
@@ -1413,7 +1430,11 @@ class PostgresStaffEmailService:
                 "refresh_token": refresh_token,
             }
         else:
-            tenant = quote(str(mailbox["provider_tenant"]), safe="")
+            authority = self._microsoft_authority(
+                str(mailbox["provider_tenant"]),
+                mailbox=True,
+            )
+            tenant = quote(authority, safe="")
             url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
             data = {
                 "client_id": self._settings.microsoft_client_id,
@@ -1697,6 +1718,38 @@ class PostgresStaffEmailService:
         if not self._settings.provider_configured(provider):
             raise ApiError(503, "SSO_PROVIDER_NOT_CONFIGURED", "This provider is unavailable")
 
+    def _provider_available(self, provider: str, microsoft_tenant_id: str) -> bool:
+        if not self._settings.provider_configured(provider):
+            return False
+        return provider != "microsoft" or (
+            not _is_microsoft_consumer_tenant(microsoft_tenant_id)
+            or self._settings.microsoft_allow_personal_accounts
+        )
+
+    def _microsoft_authority(self, expected_tenant: str, *, mailbox: bool) -> str:
+        """Resolve the narrowly enabled personal-account test authority.
+
+        A personal Microsoft account uses the shared consumer tenant. It is
+        never an institutional domain signal, so this branch remains explicit,
+        development/test-only, and subject to the normal exact local staff
+        authorization rules.
+        """
+
+        if not _is_microsoft_consumer_tenant(expected_tenant):
+            return expected_tenant
+        if not self._settings.microsoft_allow_personal_accounts:
+            raise ApiError(
+                503,
+                "MICROSOFT_PERSONAL_ACCOUNTS_DISABLED",
+                "Personal Microsoft accounts are unavailable in this environment",
+            )
+        if mailbox:
+            raise BadRequestError(
+                "MICROSOFT_PERSONAL_MAILBOX_UNSUPPORTED",
+                "Personal Microsoft account testing supports staff SSO only",
+            )
+        return "consumers"
+
     @staticmethod
     def _require_mail_scopes(provider: Provider, kind: str, scopes: Sequence[str]) -> None:
         granted = set(scopes)
@@ -1726,6 +1779,13 @@ def _provider(value: str) -> Provider:
     if normalized not in {"google", "microsoft"}:
         raise NotFoundError("SSO_PROVIDER_NOT_FOUND", "The identity provider is not supported")
     return cast(Provider, normalized)
+
+
+def _is_microsoft_consumer_tenant(value: str) -> bool:
+    return secrets.compare_digest(
+        value.strip().lower(),
+        _MICROSOFT_CONSUMER_TENANT_ID,
+    )
 
 
 def _hash(value: str) -> str:

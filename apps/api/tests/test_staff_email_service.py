@@ -23,6 +23,7 @@ from audentra.infrastructure.postgres.auth_repository import (
     _hash_password,
 )
 from audentra.infrastructure.postgres.staff_email_service import (
+    _MICROSOFT_CONSUMER_TENANT_ID,
     PostgresStaffEmailService,
     _base64url,
     _email,
@@ -103,6 +104,7 @@ class FakeConnection:
         self.missing: set[str] = set()
         self.intent_status = "pending_confirmation"
         self.password_hash = "invalid"  # noqa: S105
+        self.microsoft_tenant_id = TENANT_ID
 
     async def execute(self, statement: object, _params: object = None) -> FakeResult:
         sql = str(statement)
@@ -121,12 +123,23 @@ class FakeConnection:
             )
         if "SELECT id, slug FROM tenant WHERE id" in sql:
             return self._row("tenant", {"id": UUID(TENANT_ID), "slug": "harvard"})
-        if "SELECT provider FROM tenant_identity_provider" in sql:
-            return FakeResult([{"provider": "google"}, {"provider": "microsoft"}])
+        if "SELECT provider, microsoft_tenant_id FROM tenant_identity_provider" in sql:
+            return FakeResult(
+                [
+                    {"provider": "google", "microsoft_tenant_id": None},
+                    {
+                        "provider": "microsoft",
+                        "microsoft_tenant_id": self.microsoft_tenant_id,
+                    },
+                ]
+            )
         if "SELECT google_hosted_domain, microsoft_tenant_id" in sql:
             return self._row(
                 "provider",
-                {"google_hosted_domain": "harvard.edu", "microsoft_tenant_id": TENANT_ID},
+                {
+                    "google_hosted_domain": "harvard.edu",
+                    "microsoft_tenant_id": self.microsoft_tenant_id,
+                },
             )
         if "SELECT id, email_normalized FROM staff_member" in sql:
             return self._row(
@@ -396,6 +409,7 @@ def settings() -> InstitutionalOAuthSettings:
         google_client_secret="google-secret",  # noqa: S106
         microsoft_client_id="microsoft-client",
         microsoft_client_secret="microsoft-secret",  # noqa: S106
+        microsoft_allow_personal_accounts=False,
         token_encryption_key=base64.urlsafe_b64encode(b"k" * 32).rstrip(b"=").decode(),
     )
 
@@ -522,6 +536,36 @@ async def test_oauth_start_options_and_callback_are_tenant_bound(
         assert session.email == "staff@harvard.edu"
         assert return_url == "https://portal.example/staff/mail"
         assert auth.federated is not None and auth.federated["tenant_id"] == TENANT_ID
+    finally:
+        await client.aclose()
+
+
+async def test_personal_microsoft_account_sso_is_explicit_and_mail_is_unsupported() -> None:
+    service, engine, _auth, client = await make_service()
+    engine.connection.microsoft_tenant_id = _MICROSOFT_CONSUMER_TENANT_ID
+    try:
+        hidden_options = await service.staff_options("harvard")
+        assert hidden_options["providers"] == ["google"]
+
+        with pytest.raises(ApiError, match="Personal Microsoft accounts"):
+            await service.start_sso("microsoft", "harvard", "/staff")
+
+        service._settings = replace(settings(), microsoft_allow_personal_accounts=True)
+        visible_options = await service.staff_options("harvard")
+        assert visible_options["providers"] == ["google", "microsoft"]
+
+        sign_in_url = await service.start_sso("microsoft", "harvard", "/staff")
+        assert "login.microsoftonline.com/consumers/oauth2/v2.0/authorize" in sign_in_url
+        assert _MICROSOFT_CONSUMER_TENANT_ID not in sign_in_url
+
+        with pytest.raises(BadRequestError, match="staff SSO only"):
+            await service.start_mailbox_connect(
+                staff_context(),
+                "microsoft",
+                "personal",
+                "staff@harvard.edu",
+                "/staff/mail",
+            )
     finally:
         await client.aclose()
 
