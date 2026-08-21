@@ -150,6 +150,7 @@ class BrowserAuthService(Protocol):
         provider_subject: str,
         provider_tenant: str,
         email: str,
+        display_name: str,
     ) -> StaffSession: ...
 
     async def sign_out_staff(self, token: str | None) -> None: ...
@@ -214,6 +215,7 @@ class UnavailableBrowserAuthService:
         provider_subject: str,
         provider_tenant: str,
         email: str,
+        display_name: str,
     ) -> StaffSession:
         self._raise()
 

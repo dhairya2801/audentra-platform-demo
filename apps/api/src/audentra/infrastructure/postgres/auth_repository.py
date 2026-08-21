@@ -662,10 +662,12 @@ class PostgresDevelopmentAuth:
         provider_subject: str,
         provider_tenant: str,
         email: str,
+        display_name: str,
     ) -> StaffSession:
         if provider not in {"google", "microsoft"}:
             raise UnauthorizedError("The institutional identity provider is not supported")
         normalized_email = _normalize_email(email)
+        resolved_display_name = _federated_display_name(display_name, normalized_email)
         expires_at = datetime.now(UTC) + _STAFF_SESSION_LIFETIME
         token = secrets.token_urlsafe(32)
         token_hash = _required_session_token_hash(token)
@@ -683,8 +685,80 @@ class PostgresDevelopmentAuth:
             )
             row = member_result.mappings().first()
             if row is None:
-                raise UnauthorizedError(
-                    "This institutional identity is not provisioned as active staff"
+                grant_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id, component, provider_subject, provider_tenant
+                        FROM staff_sso_provisioning_grant
+                        WHERE tenant_id=:tenant_id AND provider=:provider
+                          AND email_normalized=:email AND active=true
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "tenant_id": UUID(tenant_id),
+                        "provider": provider,
+                        "email": normalized_email,
+                    },
+                )
+                grant = grant_result.mappings().first()
+                if grant is None:
+                    raise UnauthorizedError(
+                        "This institutional identity is not provisioned as active staff"
+                    )
+                bound_subject = grant["provider_subject"]
+                bound_tenant = grant["provider_tenant"]
+                if (
+                    bound_subject is not None
+                    and not secrets.compare_digest(str(bound_subject), provider_subject)
+                ) or (
+                    bound_tenant is not None
+                    and not secrets.compare_digest(
+                        str(bound_tenant).lower(), provider_tenant.lower()
+                    )
+                ):
+                    raise UnauthorizedError(
+                        "This staff provisioning approval is linked to another "
+                        "institutional identity"
+                    )
+                created_member = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_member (
+                          id, tenant_id, display_name, email_normalized, component, active
+                        ) VALUES (
+                          :id, :tenant_id, :display_name, :email, :component, true
+                        )
+                        RETURNING id, display_name, email_normalized, component
+                        """
+                    ),
+                    {
+                        "id": uuid4(),
+                        "tenant_id": UUID(tenant_id),
+                        "display_name": resolved_display_name,
+                        "email": normalized_email,
+                        "component": str(grant["component"]),
+                    },
+                )
+                row = created_member.mappings().first()
+                if row is None:
+                    raise RuntimeError("The staff provisioning insert returned no record")
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE staff_sso_provisioning_grant
+                        SET provider_subject=COALESCE(provider_subject, :provider_subject),
+                            provider_tenant=COALESCE(provider_tenant, :provider_tenant),
+                            claimed_at=COALESCE(claimed_at, NOW()),
+                            updated_at=NOW()
+                        WHERE id=:id
+                        """
+                    ),
+                    {
+                        "id": grant["id"],
+                        "provider_subject": provider_subject,
+                        "provider_tenant": provider_tenant,
+                    },
                 )
             identity_result = await connection.execute(
                 text(
@@ -1035,6 +1109,11 @@ def _credential_session(
 
 def _normalize_email(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().lower()
+
+
+def _federated_display_name(value: str, fallback_email: str) -> str:
+    normalized = " ".join(unicodedata.normalize("NFKC", value).split())[:160]
+    return normalized or fallback_email
 
 
 def _demo_session(

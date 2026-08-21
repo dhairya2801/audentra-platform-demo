@@ -1,6 +1,6 @@
 # Staff SSO and delegated email integration
 
-The platform supports tenant-bound staff sign-in and separately consented Google Workspace or Microsoft 365 mailbox access. Staff must already exist as an active `staff_member`; SSO never provisions or changes staff roles.
+The platform supports tenant-bound staff sign-in and separately consented Google Workspace or Microsoft 365 mailbox access. By default, staff must already exist as an active `staff_member`. An institution may instead issue a narrow, exact-email `staff_sso_provisioning_grant`; its first verified SSO sign-in creates the active staff profile with the approved local component. SSO never grants a broad role merely because an account belongs to a hosted domain or Entra tenant.
 
 ## Provider registration
 
@@ -29,6 +29,19 @@ INSERT INTO tenant_identity_provider (
 
 Only configure the provider actually owned by that tenant. The OAuth transaction stores the Audentra tenant, provider, expected hosted domain or Entra tenant, nonce, PKCE verifier, and canonical return path. Callbacks consume the transaction once and do not accept a tenant selector.
 
+For just-in-time creation, issue one grant per approved person. This is intentionally an allowlist, not a domain-wide switch:
+
+```sql
+INSERT INTO staff_sso_provisioning_grant (
+  id, tenant_id, provider, email_normalized, component
+) VALUES (
+  gen_random_uuid(), '<tenant-uuid>', 'google',
+  'approved.staff@university.edu', 'Admissions'
+);
+```
+
+The first successful callback binds that grant to the immutable Google `sub` or Microsoft `oid` plus the verified provider organization. The profile name comes from the OIDC `name` claim; the component remains the institution-controlled value in the grant.
+
 Approve a shared mailbox explicitly before a staff member can connect it:
 
 ```sql
@@ -45,7 +58,7 @@ Use `default_visibility='owner'` when only the connecting staff member should re
 
 ## Runtime behavior
 
-- Password sign-in remains available. SSO is an additional route for pre-provisioned active staff.
+- Password sign-in remains available. SSO is an additional route for pre-provisioned active staff or an exact, active provisioning grant.
 - `returnTo` accepts only a relative path under `/staff` on the tenant-bound portal; the start endpoint verifies the requested tenant matches that portal before it creates state. External, cross-tenant, encoded-separator, backslash, fragment, and traversal forms fall back to the staff home.
 - SSO links an immutable Google `sub` or Microsoft `(tid, oid)` identity to one staff record. A later subject or tenant mismatch fails closed.
 - Mailbox OAuth is separate from SSO. Personal mailboxes must match the provisioned staff email. Shared mailboxes must match active tenant policy and pass a provider access probe.

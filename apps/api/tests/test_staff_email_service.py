@@ -142,6 +142,29 @@ class FakeConnection:
                     "component": "Advising",
                 },
             )
+        if "FROM staff_sso_provisioning_grant" in sql:
+            return self._row(
+                "provisioning_grant",
+                {
+                    "id": UUID(AUTHORIZATION_ID),
+                    "component": "Admissions",
+                    "provider_subject": None,
+                    "provider_tenant": None,
+                },
+            )
+        if "INSERT INTO staff_member (" in sql and "RETURNING id" in sql:
+            values = cast(Mapping[str, object], _params or {})
+            return self._row(
+                "provisioned_staff",
+                {
+                    "id": UUID(STAFF_ID),
+                    "display_name": values["display_name"],
+                    "email_normalized": values["email"],
+                    "component": values["component"],
+                },
+            )
+        if "UPDATE staff_sso_provisioning_grant" in sql:
+            return FakeResult()
         if "SELECT member.id, member.display_name" in sql:
             return self._row(
                 "staff_session",
@@ -704,12 +727,14 @@ async def test_oidc_claim_validation_binds_nonce_and_provider_tenant(
                 "sub": "subject-1",
                 "email": "staff@harvard.edu",
                 "email_verified": True,
+                "name": "Staff Member",
             },
         )
         verified = await service._verify_identity(
             "google", transaction, {"id_token": "identity-token"}
         )
         assert verified["provider_tenant"] == "harvard.edu"
+        assert verified["display_name"] == "Staff Member"
 
         monkeypatch.setattr(
             jwt,
@@ -719,6 +744,7 @@ async def test_oidc_claim_validation_binds_nonce_and_provider_tenant(
                 "tid": TENANT_ID,
                 "oid": "object-1",
                 "preferred_username": "staff@harvard.edu",
+                "name": "Microsoft Staff",
             },
         )
         microsoft = await service._verify_identity(
@@ -727,6 +753,7 @@ async def test_oidc_claim_validation_binds_nonce_and_provider_tenant(
             {"id_token": "identity-token"},
         )
         assert microsoft["subject"] == "object-1"
+        assert microsoft["display_name"] == "Microsoft Staff"
     finally:
         await client.aclose()
 
@@ -824,6 +851,7 @@ async def test_federated_auth_repository_preprovisions_and_pins_identity() -> No
         provider_subject="immutable-subject",
         provider_tenant="harvard.edu",
         email="Staff@Harvard.edu",
+        display_name="Staff Member",
     )
     assert session.context.authentication_method == "google"
     assert session.context.tenant_id == TENANT_ID
@@ -840,6 +868,45 @@ async def test_federated_auth_repository_preprovisions_and_pins_identity() -> No
             provider_subject="subject",
             provider_tenant="harvard.edu",
             email="staff@harvard.edu",
+            display_name="Staff Member",
+        )
+
+
+async def test_federated_auth_repository_provisions_an_allowlisted_staff_member() -> None:
+    engine = FakeEngine()
+    engine.connection.missing.add("staff")
+    repository = PostgresDevelopmentAuth(
+        cast(Any, engine), environment="test", staff_invitation_code="invitation-code"
+    )
+
+    session = await repository.sign_in_staff_federated(
+        tenant_id=TENANT_ID,
+        tenant_slug="harvard",
+        provider="google",
+        provider_subject="immutable-subject",
+        provider_tenant="harvard.edu",
+        email="sait.yucekaya@vekend.com",
+        display_name="Sait Yucekaya",
+    )
+
+    assert session.name == "Sait Yucekaya"
+    assert session.component == "Admissions"
+    assert any("FROM staff_sso_provisioning_grant" in query for query in engine.connection.queries)
+    assert any("INSERT INTO staff_member" in query for query in engine.connection.queries)
+    assert any(
+        "UPDATE staff_sso_provisioning_grant" in query for query in engine.connection.queries
+    )
+
+    engine.connection.missing.add("provisioning_grant")
+    with pytest.raises(ApiError):
+        await repository.sign_in_staff_federated(
+            tenant_id=TENANT_ID,
+            tenant_slug="harvard",
+            provider="google",
+            provider_subject="another-subject",
+            provider_tenant="harvard.edu",
+            email="another@vekend.com",
+            display_name="Another User",
         )
 
 
@@ -944,6 +1011,7 @@ async def test_password_fallback_and_staff_session_resolution_remain_available()
         await repository.demo_student_by_reference(TENANT_ID, "harvard", "")
 
     engine.connection.missing.add("staff")
+    engine.connection.missing.add("provisioning_grant")
     with pytest.raises(ApiError):
         await repository.sign_in_staff_federated(
             tenant_id=TENANT_ID,
@@ -952,8 +1020,10 @@ async def test_password_fallback_and_staff_session_resolution_remain_available()
             provider_subject="object-id",
             provider_tenant=TENANT_ID,
             email="staff@harvard.edu",
+            display_name="Staff Member",
         )
     engine.connection.missing.remove("staff")
+    engine.connection.missing.remove("provisioning_grant")
     engine.connection.missing.add("identity")
     with pytest.raises(ApiError):
         await repository.sign_in_staff_federated(
@@ -963,6 +1033,7 @@ async def test_password_fallback_and_staff_session_resolution_remain_available()
             provider_subject="different-subject",
             provider_tenant="harvard.edu",
             email="staff@harvard.edu",
+            display_name="Staff Member",
         )
 
 

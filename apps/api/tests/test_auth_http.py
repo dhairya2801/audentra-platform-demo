@@ -151,12 +151,14 @@ class FakeBrowserAuthService:
         provider_subject: str,
         provider_tenant: str,
         email: str,
+        display_name: str,
     ) -> StaffSession:
         assert tenant_id == TENANT_ID
         assert tenant_slug == "aster"
         assert provider in {"google", "microsoft"}
         assert provider_subject
         assert provider_tenant
+        assert isinstance(display_name, str)
         return self._staff_session(email=email)
 
     async def sign_up_staff(

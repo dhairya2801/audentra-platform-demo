@@ -154,6 +154,7 @@ class PostgresStaffEmailService:
             provider_subject=str(claims["subject"]),
             provider_tenant=str(claims["provider_tenant"]),
             email=str(claims["email"]),
+            display_name=str(claims.get("display_name") or ""),
         )
         return session, self._portal_url(str(transaction["return_path"]))
 
@@ -1226,6 +1227,7 @@ class PostgresStaffEmailService:
             "subject": subject,
             "provider_tenant": provider_tenant,
             "email": _email(email_value),
+            "display_name": _identity_display_name(claims.get("name")),
         }
 
     def _authorization_url(
@@ -1739,6 +1741,14 @@ def _email(value: str) -> str:
     if len(normalized) > 320 or not _EMAIL_RE.fullmatch(normalized):
         raise BadRequestError("EMAIL_INVALID", "A valid email address is required")
     return normalized
+
+
+def _identity_display_name(value: object) -> str:
+    """Return bounded display-only profile data from a verified ID token."""
+
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.split())[:160]
 
 
 def _provider_email(value: str) -> str:
