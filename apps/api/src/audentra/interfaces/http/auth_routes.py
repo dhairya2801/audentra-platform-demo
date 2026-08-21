@@ -218,9 +218,6 @@ async def exchange_delegate_link(
         token=session.token,
         expires_at_epoch=session.expires_at_epoch,
     )
-    _expire_cookie(response, request, "vv_session")
-    _expire_cookie(response, request, "vv_demo_session")
-    _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     return _delegate_response(session)
 
 
@@ -264,7 +261,6 @@ async def sign_in_demo_student(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     # Signing in as "the demo student" clears any earlier per-student choice.
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
@@ -291,7 +287,6 @@ async def sign_in_demo_student_by_reference(
     session = await auth.demo_student_by_reference(tenant_id, tenant_slug, body.student_ref)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     _demo_cookie(response, request)
     _set_session_cookie(
         response,
@@ -324,7 +319,6 @@ async def start_guided_onboarding(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
     return _demo_response(session)
@@ -340,7 +334,6 @@ async def sign_out_demo_student(
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     return {"authenticated": False, "mode": "demo"}
 
@@ -359,6 +352,7 @@ async def sign_up_student(
         tenant_slug=tenant_slug,
         email=body.email,
         phone=body.phone,
+        legal_name=body.legal_name,
         password=body.password,
     )
     if session.token is None or session.expires_at_epoch is None:
@@ -371,7 +365,6 @@ async def sign_up_student(
         expires_at_epoch=session.expires_at_epoch,
     )
     _expire_cookie(response, request, "vv_demo_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     return _credential_response(session)
 
 
@@ -400,7 +393,6 @@ async def sign_in_student(
         expires_at_epoch=session.expires_at_epoch,
     )
     _expire_cookie(response, request, "vv_demo_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     return _credential_response(session)
 
 
@@ -414,7 +406,6 @@ async def sign_out_student(
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
-    _expire_cookie(response, request, "vv_delegate_session")
     return {"authenticated": False, "mode": "credentials"}
 
 

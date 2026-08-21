@@ -270,9 +270,23 @@ class DemoStudentSignInRequest(StrictRequest):
 class StudentSignUpRequest(StrictRequest):
     email: StrictStr
     phone: PhoneE164
+    # Optional for existing API clients, required by the account-creation UI.
+    # Retaining the compatibility default avoids breaking institution SSO
+    # adapters that create the person record independently.
+    legal_name: NameText | None = None
     password: Annotated[StrictStr, StringConstraints(min_length=12, max_length=128)]
 
     _normalize_email_value = field_validator("email", mode="before")(_normalize_email)
+
+    @field_validator("legal_name")
+    @classmethod
+    def _legal_name_has_given_and_family_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(unicodedata.normalize("NFKC", value).split())
+        if len(normalized.split(" ")) < 2:
+            raise ValueError("must include both a given name and family name")
+        return normalized
 
     @field_validator("password")
     @classmethod
@@ -363,6 +377,15 @@ class OnboardingEmergencyContactRequest(StrictRequest):
     full_name: NameText
     relationship: Literal["parent", "guardian", "partner", "sibling", "relative", "friend", "other"]
     mobile_phone: PhoneE164
+    # Emergency contacts do not receive portal access automatically.  An email
+    # is collected only so a parent/guardian can later be selected, reviewed,
+    # and explicitly authorized in FERPA.
+    email: StrictStr | None = None
+
+    @field_validator("email")
+    @classmethod
+    def _validate_optional_email(cls, value: str | None) -> str | None:
+        return None if value is None else _ensure_email(value)
 
 
 class OnboardingFamilyPermissionRequest(StrictRequest):

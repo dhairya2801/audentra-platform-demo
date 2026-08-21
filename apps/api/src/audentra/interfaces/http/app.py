@@ -24,6 +24,7 @@ from audentra.infrastructure.voice import (
 
 from .auth_routes import auth_router
 from .config import HttpSettings
+from .dependencies import PORTAL_SESSION_MODE_HEADER
 from .error_handlers import install_error_handlers
 from .middleware import RequestContextMiddleware
 from .routes import router
@@ -38,6 +39,7 @@ ALLOWED_HEADERS = [
     "X-Demo-Actor-Id",
     "X-Demo-Actor-Type",
     "X-VV-Worker-Token",
+    PORTAL_SESSION_MODE_HEADER,
 ]
 
 

@@ -213,6 +213,7 @@ class PostgresDevelopmentAuth:
         tenant_slug: str | None,
         email: str,
         phone: str,
+        legal_name: str | None,
         password: str,
     ) -> CredentialStudentSession:
         normalized_email = _normalize_email(email)
@@ -315,6 +316,7 @@ class PostgresDevelopmentAuth:
                     offer_id=offer_id,
                     email=normalized_email,
                     phone=phone,
+                    legal_name=legal_name,
                     password_hash=password_hash,
                     template=dict(template),
                 )
@@ -859,6 +861,7 @@ class PostgresDevelopmentAuth:
         offer_id: UUID,
         email: str,
         phone: str,
+        legal_name: str | None,
         password_hash: str,
         template: Mapping[str, Any],
     ) -> None:
@@ -870,6 +873,7 @@ class PostgresDevelopmentAuth:
             "offer_id": offer_id,
             "email": email,
             "phone": phone,
+            **_new_student_identity(legal_name),
             "password_hash": password_hash,
             "program_id": template["program_id"],
             "academic_term_id": template["academic_term_id"],
@@ -883,7 +887,7 @@ class PostgresDevelopmentAuth:
         for statement in (
             """
             INSERT INTO person (id, tenant_id, preferred_name, first_name, last_name)
-            VALUES (:person_id, :tenant_id, NULL, 'Student', 'Account')
+            VALUES (:person_id, :tenant_id, :preferred_name, :first_name, :last_name)
             """,
             """
             INSERT INTO student (id, tenant_id, person_id, class_year)
@@ -901,12 +905,22 @@ class PostgresDevelopmentAuth:
             """
             INSERT INTO student_onboarding (
               tenant_id, student_id, status, current_step, completed_steps, payload, version
-            ) VALUES (:tenant_id, :student_id, 'in_progress', 'offer', '{}', '{}'::jsonb, 1)
+            ) VALUES (
+              :tenant_id, :student_id, 'in_progress', 'offer', '{}',
+              jsonb_build_object(
+                'firstName', CAST(:first_name AS text),
+                'lastName', CAST(:last_name AS text),
+                'preferredName', CAST(:preferred_name AS text),
+                'personalEmail', CAST(:email AS text),
+                'mobilePhone', CAST(:phone AS text)
+              ),
+              1
+            )
             """,
             """
             INSERT INTO student_profile (
-              tenant_id, student_id, preferred_name, communication_preference, version
-            ) VALUES (:tenant_id, :student_id, 'Student', 'email', 1)
+              tenant_id, student_id, preferred_name, mobile_phone, communication_preference, version
+            ) VALUES (:tenant_id, :student_id, :preferred_name, :phone, 'email', 1)
             """,
             """
             INSERT INTO credential_account (
@@ -1142,6 +1156,30 @@ def _delegate_session(
 
 def _normalize_email(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().lower()
+
+
+def _new_student_identity(legal_name: str | None) -> dict[str, str]:
+    """Create the initial canonical identity without relying on onboarding JS.
+
+    Existing API clients may still omit legalName while their institution SSO
+    creates the person record elsewhere, so retain the harmless historical
+    placeholder only for that compatibility path.  The portal's account form
+    always supplies both legal-name parts.
+    """
+
+    normalized = " ".join(unicodedata.normalize("NFKC", legal_name or "").split())
+    if not normalized:
+        return {
+            "first_name": "Student",
+            "last_name": "Account",
+            "preferred_name": "Student",
+        }
+    given_name, family_name = normalized.split(" ", 1)
+    return {
+        "first_name": given_name,
+        "last_name": family_name,
+        "preferred_name": given_name,
+    }
 
 
 def _demo_session(

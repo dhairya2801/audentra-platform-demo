@@ -215,6 +215,8 @@ export interface OnboardingEmergencyContact {
     | "friend"
     | "other";
   mobilePhone: string;
+  /** Optional emergency-contact email, used only to prefill a later FERPA choice. */
+  email?: string;
 }
 
 export interface OnboardingFamilyPermission {

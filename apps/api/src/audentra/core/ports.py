@@ -126,7 +126,14 @@ class BrowserAuthService(Protocol):
     ) -> CredentialStudentSession | None: ...
 
     async def sign_up_student(
-        self, *, tenant_id: str, tenant_slug: str | None, email: str, phone: str, password: str
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        phone: str,
+        legal_name: str | None,
+        password: str,
     ) -> CredentialStudentSession: ...
 
     async def sign_in_student(
@@ -186,7 +193,14 @@ class UnavailableBrowserAuthService:
         return None
 
     async def sign_up_student(
-        self, *, tenant_id: str, tenant_slug: str | None, email: str, phone: str, password: str
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        phone: str,
+        legal_name: str | None,
+        password: str,
     ) -> CredentialStudentSession:
         self._raise()
 

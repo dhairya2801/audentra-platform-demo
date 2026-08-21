@@ -24,6 +24,13 @@ from .demo_identity import DEMO_STUDENT_COOKIE, read_demo_student_cookie
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
+# This header only chooses between two independently authenticated browser
+# sessions.  It never grants access on its own: the selected HTTP-only cookie
+# is still resolved and authorized below.  Keeping the choice per tab prevents
+# a parent-link tab from changing the identity used by an already-open student
+# portal tab on the same origin.
+PORTAL_SESSION_MODE_HEADER = "x-audentra-session-mode"
+
 
 def get_settings(request: Request) -> HttpSettings:
     return cast(HttpSettings, request.app.state.http_settings)
@@ -112,8 +119,11 @@ async def get_auth_context(request: Request) -> AuthContext:
         if request.headers.get("x-demo-actor-type") != "staff":
             raise UnauthorizedError("Staff routes require the development staff identity header")
     else:
-        delegate_token = request.cookies.get("vv_delegate_session")
-        if delegate_token is not None:
+        requested_mode = request.headers.get(PORTAL_SESSION_MODE_HEADER, "").strip().lower()
+        if requested_mode == "delegate":
+            delegate_token = request.cookies.get("vv_delegate_session")
+            if delegate_token is None:
+                raise UnauthorizedError("The parent or guardian session is invalid or has expired")
             delegate_session = await cast(
                 DelegateBrowserAuthService, auth_service
             ).resolve_delegate(
@@ -129,6 +139,10 @@ async def get_auth_context(request: Request) -> AuthContext:
                 request.url.path,
             )
             return delegate_session.context
+
+        # Student is the deliberate safe default.  A delegate cookie may be
+        # present because another tab opened a secure link, but it must never
+        # take over ordinary student requests merely by existing.
         credential_token = request.cookies.get("vv_session")
         if credential_token is not None:
             student_session = await auth_service.resolve_student(

@@ -233,16 +233,63 @@ def _list(value: object) -> list[Any]:
 
 
 def _map_onboarding(row: Mapping[str, Any]) -> JsonDict:
+    payload = _mapping(row["payload"])
+    contacts = _normalized_emergency_contacts(payload.get("emergencyContacts"))
+    if contacts:
+        payload["emergencyContacts"] = contacts
     return {
         "studentId": str(row["student_id"]),
         "status": row["status"],
         "currentStep": row["current_step"],
         "completedSteps": _list(row["completed_steps"]),
-        "data": _mapping(row["payload"]),
+        "data": payload,
         "version": int(row["version"]),
         "completedAt": _nullable_iso(row["completed_at"]),
         "updatedAt": _iso(row["updated_at"]),
     }
+
+
+def _normalized_emergency_contacts(value: object) -> list[JsonDict]:
+    """Project historic contact spellings into the single portal shape.
+
+    Older seed/import payloads used ``name``/``phone`` while the current
+    onboarding form writes ``fullName``/``mobilePhone``.  Returning one shape
+    lets FERPA safely offer saved parents and guardians without silently
+    copying a person into an authorization.
+    """
+
+    valid_relationships = {
+        "parent",
+        "guardian",
+        "partner",
+        "sibling",
+        "relative",
+        "friend",
+        "other",
+    }
+    contacts: list[JsonDict] = []
+    for raw in _list(value):
+        if not isinstance(raw, Mapping):
+            continue
+        full_name = str(
+            raw.get("fullName") or raw.get("full_name") or raw.get("name") or ""
+        ).strip()
+        mobile_phone = str(
+            raw.get("mobilePhone") or raw.get("mobile_phone") or raw.get("phone") or ""
+        ).strip()
+        relationship = str(raw.get("relationship") or "other")
+        if not full_name or relationship not in valid_relationships:
+            continue
+        contact: JsonDict = {
+            "fullName": full_name,
+            "relationship": relationship,
+            "mobilePhone": mobile_phone,
+        }
+        email = raw.get("email")
+        if isinstance(email, str) and email.strip():
+            contact["email"] = email.strip().lower()
+        contacts.append(contact)
+    return contacts
 
 
 def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
@@ -3596,7 +3643,8 @@ class PostgresPortalRepository:
                    ca.email_normalized AS email,
                    ca.email_verified_at IS NOT NULL AS email_verified,
                    ca.phone_verified_at IS NOT NULL AS phone_verified,
-                   sp.pronouns, sp.mobile_phone, sp.communication_preference,
+                   sp.pronouns, COALESCE(sp.mobile_phone, ca.phone_e164) AS mobile_phone,
+                   sp.communication_preference,
                    sp.version, sp.updated_at
             FROM student_profile sp
             JOIN student s ON s.id=sp.student_id AND s.tenant_id=sp.tenant_id

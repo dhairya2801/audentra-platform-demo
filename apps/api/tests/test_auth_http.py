@@ -9,6 +9,7 @@ from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, NotFoundError, UnauthorizedError
 from audentra.core.ports import (
     CredentialStudentSession,
+    DelegateSession,
     DemoStudentSession,
     ServiceCall,
     StaffSession,
@@ -21,6 +22,8 @@ STUDENT_ID = "00000000-0000-7000-8000-000000000101"
 ACTOR_ID = "00000000-0000-7000-8000-000000000100"
 STAFF_ID = "00000000-0000-7000-8000-000000000901"
 STUDENT_TOKEN = "student-session-token-that-is-long-enough"  # noqa: S105
+DELEGATE_TOKEN = "delegate-session-token-that-is-long-enough"  # noqa: S105
+DELEGATE_LINK_TOKEN = "delegate-link-token-that-is-long-enough"  # noqa: S105
 STAFF_TOKEN = "staff-session-token-that-is-long-enough"  # noqa: S105
 WRONG_PASSWORD = "wrong-password"  # noqa: S105
 STAFF_PASSWORD = "Individual-staff-password-2027"  # noqa: S105
@@ -49,6 +52,7 @@ class FakeBrowserAuthService:
         self.reset_completed: bool | None = None
         self.sign_up_input: dict[str, str | None] | None = None
         self.student_revoked = False
+        self.delegate_revoked = False
         self.staff_revoked = False
         self.staff_sign_up_input: dict[str, str | None] | None = None
         self.demo_reference: str | None = None
@@ -96,6 +100,7 @@ class FakeBrowserAuthService:
         tenant_slug: str | None,
         email: str,
         phone: str,
+        legal_name: str | None,
         password: str,
     ) -> CredentialStudentSession:
         self.sign_up_input = {
@@ -103,6 +108,7 @@ class FakeBrowserAuthService:
             "tenant_slug": tenant_slug,
             "email": email,
             "phone": phone,
+            "legal_name": legal_name,
             "password": password,
         }
         return self._credential_session(email=email, phone=phone)
@@ -122,6 +128,28 @@ class FakeBrowserAuthService:
     async def sign_out_student(self, token: str | None) -> None:
         assert token in {None, STUDENT_TOKEN}
         self.student_revoked = True
+
+    async def exchange_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug in {None, "aster"}
+        if token != DELEGATE_LINK_TOKEN:
+            raise UnauthorizedError("The parent or guardian link is invalid or expired")
+        return self._delegate_session()
+
+    async def resolve_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession | None:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug in {None, "aster"}
+        if self.delegate_revoked or token != DELEGATE_TOKEN:
+            return None
+        return self._delegate_session()
+
+    async def sign_out_delegate(self, token: str | None) -> None:
+        assert token in {None, DELEGATE_TOKEN}
+        self.delegate_revoked = True
 
     async def resolve_staff(
         self, token: str, tenant_id: str, tenant_slug: str | None
@@ -200,6 +228,29 @@ class FakeBrowserAuthService:
             email=email,
             component="Admissions",
             token=STAFF_TOKEN,
+            expires_at_epoch=4_102_444_800,
+        )
+
+    def _delegate_session(self) -> DelegateSession:
+        return DelegateSession(
+            context=AuthContext(
+                tenant_id=TENANT_ID,
+                student_id=STUDENT_ID,
+                actor_id="00000000-0000-7000-8000-000000000201",
+                actor_type="delegate",
+                authentication_method="delegate_link",
+                tenant_slug="aster",
+                delegate_scopes=frozenset({"dashboard"}),
+                delegate_relationship="parent",
+                delegate_name="Robin Parent",
+                subject_student_name="Alex Student",
+            ),
+            full_name="Robin Parent",
+            relationship="parent",
+            email="robin.parent@example.com",
+            student_preferred_name="Alex",
+            student_name="Alex Student",
+            token=DELEGATE_TOKEN,
             expires_at_epoch=4_102_444_800,
         )
 
@@ -384,6 +435,7 @@ async def test_signup_normalizes_email_and_issues_an_http_only_credential_cookie
         "/v1/auth/sign-up",
         json={
             "email": "  BROWSER.STUDENT@EXAMPLE.COM  ",
+            "legalName": "Maya Chen",
             "phone": "+15551230001",
             "password": "Browser-student-123",
         },
@@ -393,8 +445,65 @@ async def test_signup_normalizes_email_and_issues_an_http_only_credential_cookie
     assert response.json()["student"]["email"] == "browser.student@example.com"
     assert auth_service.sign_up_input is not None
     assert auth_service.sign_up_input["email"] == "browser.student@example.com"
+    assert auth_service.sign_up_input["legal_name"] == "Maya Chen"
     assert f"vv_session={STUDENT_TOKEN}" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
+
+
+async def test_signup_accepts_contact_details_before_legal_name_is_collected(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    response = await client.post(
+        "/v1/auth/sign-up",
+        json={
+            "email": "new.student@example.com",
+            "phone": "+15551230002",
+            "password": "Browser-student-123",
+        },
+    )
+
+    assert response.status_code == 201
+    assert auth_service.sign_up_input is not None
+    assert auth_service.sign_up_input["legal_name"] is None
+
+
+async def test_parent_link_uses_a_tab_selected_cookie_without_clobbering_student(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+) -> None:
+    """Both HTTP-only sessions may coexist; the request selects one safely."""
+
+    student_sign_in = await client.post(
+        "/v1/auth/sign-in",
+        json={"email": "student@example.com", "password": "Browser-student-123"},
+    )
+    parent_exchange = await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+    student_request = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "student"},
+    )
+    parent_request = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert student_sign_in.status_code == 200
+    assert parent_exchange.status_code == 200
+    assert "vv_delegate_session=" in parent_exchange.headers["set-cookie"]
+    assert "vv_session=signed-out" not in parent_exchange.headers["set-cookie"]
+    assert student_request.status_code == 200
+    assert parent_request.status_code == 200
+    bootstrap_calls = [
+        call for call in platform_service.calls if call.operation == "student.get_bootstrap"
+    ]
+    assert bootstrap_calls[-2].auth is not None
+    assert bootstrap_calls[-2].auth.actor_type == "student"
+    assert bootstrap_calls[-1].auth is not None
+    assert bootstrap_calls[-1].auth.actor_type == "delegate"
 
 
 async def test_invalid_credentials_use_one_non_enumerating_message(client: AsyncClient) -> None:

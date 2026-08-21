@@ -52,8 +52,8 @@ flows:
         points: 15
       - id: emergency_contacts
         student_step: emergency_contacts
-        title: Add emergency contacts
-        description: Provide at least one contact the College may reach in an emergency.
+        title: Add parent, guardian & emergency contacts
+        description: Provide people the College may reach in an emergency. Include an email for any parent or guardian you may later select for FERPA portal access.
         task_type: form
         owner: Student Services
         required: true
