@@ -371,8 +371,7 @@ flows:
       - id: consent
         title: Sign consent
         description: Sign the student consent form.
-        task_type: docusign
-        docusign_template_id: consent-v2
+        task_type: signature
       - id: enrollment_deposit
         title: Pay deposit
         description: Pay the enrollment deposit.
@@ -404,10 +403,7 @@ flows:
     assert authored[2]["interactionType"] == "upload_file"
     assert authored[2]["inputConfig"]["acceptedMimeTypes"] == ["application/pdf"]
     assert current[1]["inputConfig"]["maximumSelections"] == 2
-    assert current[2]["inputConfig"] == {
-        "signatureProvider": "docusign",
-        "docusignTemplateId": "consent-v2",
-    }
+    assert current[2]["inputConfig"] == {"signatureProvider": "built_in"}
 
 
 def test_journey_input_aliases_normalize_form_signature_and_upload_configuration() -> None:

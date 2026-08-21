@@ -10,6 +10,7 @@ from audentra.bootstrap.settings import (
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+FERPA_LINK_SECRET = "test-ferpa-delegate-link-secret-at-least-32-bytes"  # noqa: S105
 
 
 def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
@@ -66,6 +67,7 @@ def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: P
                 **complete,
                 "AUDENTRA_ENV": "preview",
                 "BROWSER_AUTH_REQUIRED": "true",
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "VV_STAFF_INVITATION_CODE": "a-long-enough-invitation-code",
                 "LIVEKIT_URL": "ws://livekit.internal:7880",
             },
@@ -126,6 +128,7 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
             "AUDENTRA_ENV": "preview",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
             "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
         },
@@ -145,6 +148,7 @@ def test_gcs_storage_uses_application_default_credentials(tmp_path: Path) -> Non
             "AUDENTRA_ENV": "preview",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
             "OBJECT_STORAGE_PROVIDER": "gcs",
             "OBJECT_STORAGE_BUCKET": "audentra-preview-documents",
@@ -167,6 +171,7 @@ def test_preview_requires_a_private_staff_invitation_code(tmp_path: Path) -> Non
                 "AUDENTRA_ENV": "preview",
                 "DATABASE_URL": "postgresql://example/preview",
                 "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
             },
             package_root=tmp_path,
@@ -215,6 +220,7 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
             "AUDENTRA_ENV": "production",
             "DATABASE_URL": "postgresql://example/prod",
             "DOCUMENT_WORKER_TOKEN": "x" * 40,
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "OBJECT_STORAGE_SECRET_KEY": "external-secret",
             "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
         },
@@ -230,6 +236,7 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
                 "AUDENTRA_ENV": "production",
                 "DATABASE_URL": "postgresql://example/prod",
                 "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "external-secret",
                 "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
                 "SESSION_COOKIE_SAMESITE": "none",
@@ -245,6 +252,7 @@ def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Pa
                 "AUDENTRA_ENV": "production",
                 "DATABASE_URL": "postgresql://example/prod",
                 "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "external-secret",
                 "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
                 "EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED": "true",

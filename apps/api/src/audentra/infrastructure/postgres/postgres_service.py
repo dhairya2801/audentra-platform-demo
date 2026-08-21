@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import hmac
 import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,7 @@ from audentra.core.assistant_execution import (
     model_hook,
 )
 from audentra.core.auth import AuthContext
+from audentra.core.delegate_authorization import require_delegate_scope
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
 from audentra.domain.documents import (
@@ -47,7 +50,7 @@ from audentra.infrastructure.documents.processing import (
     create_signed_onboarding_pdf,
     extract_student_document_image_region,
 )
-from audentra.infrastructure.storage.s3 import StorageError
+from audentra.infrastructure.storage.s3 import ObjectNotFoundError, StorageError
 from audentra.integrations.ai.edward_safety import (
     EdwardActionAuthority,
     guarded_response,
@@ -76,6 +79,7 @@ from audentra.integrations.staff_assistant.pipeline import (
 from audentra.integrations.staff_assistant.safety import guarded_staff_response
 from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
+from .ferpa_repository import PostgresFerpaRepository
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .morning_brew_repository import PostgresMorningBrewRepository
 from .platform_repository import PostgresPlatformRepository
@@ -86,15 +90,9 @@ from .tenant_repository import PostgresTenantRepository
 
 JsonDict = dict[str, Any]
 LOGGER = logging.getLogger(__name__)
+_LOCAL_FERPA_LINK_SECRET = "local-development-ferpa-delegate-link-secret-v1"  # noqa: S105
 
 SIGNED_TEMPLATES = (
-    {
-        "code": "ferpa_release",
-        "title": "FERPA Information Release",
-        "fileName": "ferpa-information-release-signed.pdf",
-        "sourceSuffix": "ferpa-release.pdf",
-        "signatureBox": {"x": 0.098, "y": 0.488, "width": 0.53, "height": 0.054},
-    },
     {
         "code": "enrollment_acknowledgment",
         "title": "Enrollment Information Acknowledgment",
@@ -342,6 +340,7 @@ class PostgresRepositoryBundle:
     tenant: PostgresTenantRepository | None = None
     staff_assistant: PostgresStaffAssistantRepository | None = None
     morning_brew: PostgresMorningBrewRepository | None = None
+    ferpa: PostgresFerpaRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -354,6 +353,18 @@ class SignedDocumentGenerator(Protocol):
         storage: ObjectStorage,
         request_id: str,
     ) -> int: ...
+
+
+class FerpaSignedDocumentGenerator(Protocol):
+    async def create_ferpa(
+        self,
+        *,
+        auth: AuthContext,
+        authorization: Mapping[str, Any],
+        signature: Mapping[str, Any],
+        reservation: Mapping[str, Any],
+        storage: ObjectStorage,
+    ) -> JsonDict: ...
 
 
 class PostgresSignedDocumentGenerator:
@@ -475,6 +486,66 @@ class PostgresSignedDocumentGenerator:
             created += 1
         return created
 
+    async def create_ferpa(
+        self,
+        *,
+        auth: AuthContext,
+        authorization: Mapping[str, Any],
+        signature: Mapping[str, Any],
+        reservation: Mapping[str, Any],
+        storage: ObjectStorage,
+    ) -> JsonDict:
+        signer_name = str(signature.get("signerName") or "").strip()
+        method = str(signature.get("signatureMethod") or "typed")
+        if (
+            signature.get("accepted") is not True
+            or not signer_name
+            or method not in {"typed", "drawn"}
+        ):
+            raise BadRequestError("FERPA_SIGNATURE_REQUIRED", "Provide a valid FERPA signature")
+        signed_at = str(reservation["signedAt"])
+        authorization_id = str(authorization["id"])
+        document_id = str(reservation["documentId"])
+        storage_key = str(reservation["storageKey"])
+        try:
+            pdf = await storage.get(storage_key)
+        except ObjectNotFoundError:
+            tenant_prefix = SIGNED_TEMPLATE_TENANT_PREFIXES.get(
+                auth.tenant_id, DEFAULT_SIGNED_TEMPLATE_PREFIX
+            )
+            pdf = await create_signed_onboarding_pdf(
+                SigningInput(
+                    template_bytes=self._read_template(f"{tenant_prefix}-ferpa-release.pdf"),
+                    signer_name=signer_name,
+                    signature_method=cast(Any, method),
+                    signature_image_data=(
+                        str(signature["signatureImageData"])
+                        if method == "drawn" and signature.get("signatureImageData")
+                        else None
+                    ),
+                    signed_at=signed_at,
+                    audit_receipt=f"ferpa.{authorization_id}.{auth.student_id}",
+                    signature_box=SignatureBox(x=0.098, y=0.488, width=0.53, height=0.054),
+                )
+            )
+            digest = hashlib.sha256(pdf).hexdigest()
+            await storage.put(storage_key, pdf, content_type="application/pdf", sha256=digest)
+        digest = hashlib.sha256(pdf).hexdigest()
+        return {
+            "id": document_id,
+            "tenantId": auth.tenant_id,
+            "studentId": auth.student_id,
+            "title": "FERPA Information Release",
+            "fileName": "ferpa-information-release-signed.pdf",
+            "sizeBytes": len(pdf),
+            "storageProvider": "s3",
+            "storageKey": storage_key,
+            "sha256": digest,
+            "signerName": signer_name,
+            "signatureMethod": method,
+            "signedAt": signed_at,
+        }
+
 
 class PostgresPlatformService:
     """Dispatch canonical and preview operations without coupling them to FastAPI."""
@@ -486,12 +557,15 @@ class PostgresPlatformService:
         ai: StudentAI,
         signed_documents: SignedDocumentGenerator,
         worker_token: str,
+        *,
+        ferpa_link_secret: str = _LOCAL_FERPA_LINK_SECRET,
     ) -> None:
         self.repository = repository
         self.storage = storage
         self.ai = ai
         self.signed_documents = signed_documents
         self.worker_token = worker_token
+        self.ferpa_link_secret = ferpa_link_secret
 
     async def dispatch(self, call: ServiceCall) -> object:
         operation = call.operation
@@ -524,22 +598,23 @@ class PostgresPlatformService:
         staff = self.repository.staff
 
         if operation == "student.get_dashboard":
-            return await platform.get_student_dashboard(auth)
+            return await self._delegate_dashboard(auth, platform.get_student_dashboard(auth))
         if operation == "student.get_academics":
-            return await portal.get_student_academics(auth)
+            return self._delegate_academics(auth, await portal.get_student_academics(auth))
         if operation == "catalog.search_courses":
             return await portal.search_catalog_courses(
                 auth, str(call.query_params.get("query", ""))
             )
         if operation == "student.get_financials":
-            return await portal.get_student_financials(auth)
+            return self._delegate_financials(auth, await portal.get_student_financials(auth))
         if operation == "student.select_payment_plan":
             return await portal.select_financial_payment_plan(
                 auth, str(payload["planId"]), self._key(key), call.request_id
             )
         if operation == "student.get_campus_life":
-            return await portal.get_campus_life(auth)
+            return self._delegate_campus_life(auth, await portal.get_campus_life(auth))
         if operation == "student.register_campus_event":
+            require_delegate_scope(auth, "campus_life")
             return await portal.register_campus_event(
                 auth,
                 self._path(call, "eventId", "id"),
@@ -548,6 +623,12 @@ class PostgresPlatformService:
                 call.request_id,
             )
         if operation == "admission.accept_offer":
+            if auth.is_delegate:
+                raise ApiError(
+                    403,
+                    "DELEGATE_ROUTE_NOT_ALLOWED",
+                    "Parent and guardian onboarding access is view-only",
+                )
             return await platform.accept_admission_offer(
                 auth,
                 self._path(call, "offerId", "offer_id"),
@@ -566,6 +647,31 @@ class PostgresPlatformService:
                 if self.repository.managed is not None
                 else []
             )
+            bootstrap["actor"] = (
+                {
+                    "type": "delegate",
+                    "delegateId": auth.actor_id,
+                    "name": auth.delegate_name,
+                    "relationship": auth.delegate_relationship,
+                    "studentId": auth.student_id,
+                    "studentName": auth.subject_student_name,
+                    "scopes": sorted(auth.delegate_scopes),
+                }
+                if auth.is_delegate
+                else {"type": "student"}
+            )
+            if auth.is_delegate:
+                bootstrap.pop("rewards", None)
+                if "enrollment" not in auth.delegate_scopes:
+                    onboarding = _mapping(bootstrap.get("onboarding"))
+                    bootstrap["onboarding"] = {
+                        "required": bool(onboarding.get("required")),
+                        "status": "restricted",
+                    }
+                if "messages" not in auth.delegate_scopes:
+                    bootstrap["unreadMessageCount"] = 0
+                if "dashboard" not in auth.delegate_scopes:
+                    bootstrap["experienceUpdates"] = []
             return bootstrap
         if operation == "student.decide_experience_update":
             if self.repository.managed is None:
@@ -591,10 +697,12 @@ class PostgresPlatformService:
                 call.request_id,
             )
         if operation == "student.get_onboarding":
-            return await portal.get_student_onboarding(auth)
+            return await self._delegate_onboarding(auth, portal.get_student_onboarding(auth))
         if operation == "student.update_onboarding":
+            self._guard_delegate_onboarding_payload(auth, payload)
             return await portal.update_student_onboarding(auth, payload, call.request_id)
         if operation == "student.complete_onboarding":
+            self._guard_delegate_onboarding_payload(auth, payload)
             result = await portal.complete_student_onboarding(
                 auth, payload, self._key(key), call.request_id
             )
@@ -603,20 +711,203 @@ class PostgresPlatformService:
         if operation == "student.get_housing_plan":
             return await portal.get_student_housing_plan(auth)
         if operation == "student.update_housing_plan":
+            require_delegate_scope(auth, "enrollment")
             return await portal.update_student_housing_plan(auth, payload, call.request_id)
         if operation == "student.list_requirements":
-            return await portal.get_student_requirements(auth)
-        if operation == "student.get_requirement":
-            return await portal.get_student_requirement(
-                auth, self._path(call, "requirementId", "id", "requirement_id")
+            return await self._delegate_requirement_list(
+                auth, portal.get_student_requirements(auth)
             )
+        if operation == "student.get_requirement":
+            identifier = self._path(call, "requirementId", "id", "requirement_id")
+            if auth.is_delegate:
+                await self._ferpa().requirement_flow(auth, identifier)
+            requirement = await portal.get_student_requirement(auth, identifier)
+            return self._delegate_requirement_projection(auth, requirement)
+        if operation == "student.list_requirement_appointments":
+            identifier = self._path(call, "requirementId", "id", "requirement_id")
+            await self._authorize_requirement_appointment(auth, identifier, mutation=False)
+            appointments = await portal.get_student_appointments(auth)
+            active_items = [
+                dict(_mapping(item))
+                for item in _sequence(appointments.get("items"))
+                if _mapping(item).get("status") in {"scheduled", "rescheduled"}
+            ]
+            return {"items": active_items, "total": len(active_items)}
+        if operation == "student.create_requirement_appointment":
+            identifier = self._path(call, "requirementId", "id", "requirement_id")
+            await self._authorize_requirement_appointment(auth, identifier, mutation=True)
+            return await portal.create_student_appointment(
+                auth, payload, self._key(key), call.request_id
+            )
+        if operation == "student.update_requirement_profile":
+            identifier = self._path(call, "requirementId", "id", "requirement_id")
+            await self._authorize_requirement_profile(auth, identifier)
+            return await portal.update_student_profile(auth, payload, call.request_id)
         if operation == "student.submit_requirement_response":
+            identifier = self._path(call, "requirementId", "id", "requirement_id")
+            context = await self._ferpa().requirement_context(auth, identifier)
+            interaction_type = str(context["interactionType"])
+            if interaction_type == "ferpa":
+                raise ApiError(
+                    403 if auth.is_delegate else 409,
+                    (
+                        "FERPA_STUDENT_CONTROL_REQUIRED"
+                        if auth.is_delegate
+                        else "REQUIREMENT_SPECIALIZED_SUBMISSION_REQUIRED"
+                    ),
+                    "Use the student FERPA completion flow for this task",
+                )
+            if auth.is_delegate and context.get("flowKind") == "onboarding":
+                raise ApiError(
+                    403,
+                    "DELEGATE_ROUTE_NOT_ALLOWED",
+                    "Parent and guardian onboarding access is view-only",
+                )
             return await portal.submit_student_requirement_response(
                 auth,
-                self._path(call, "requirementId", "id", "requirement_id"),
+                identifier,
                 payload,
                 self._key(key),
                 call.request_id,
+            )
+        if operation == "student.get_ferpa_authorization":
+            return {"authorization": await self._ferpa().get_current(auth)}
+        if operation == "student.complete_ferpa_authorization":
+            requirement_id = self._path(call, "requirementId", "id", "requirement_id")
+            idempotency_key = self._key(key)
+            preflight = await self._ferpa().preflight_completion(
+                auth,
+                requirement_id,
+                payload,
+                idempotency_key,
+            )
+            cached = preflight.get("cachedResponse")
+            if isinstance(cached, Mapping):
+                return dict(cached)
+            current = _mapping(preflight.get("authorization"))
+            signature = _mapping(payload.get("signature"))
+            signed_document: JsonDict | None = None
+            reservation = _mapping(preflight.get("signingReservation"))
+            if reservation.get("status") == "stored":
+                required = (
+                    "documentId",
+                    "signedAt",
+                    "storageKey",
+                    "sha256",
+                    "sizeBytes",
+                    "title",
+                    "fileName",
+                    "signerName",
+                    "signatureMethod",
+                )
+                if any(reservation.get(field) is None for field in required):
+                    raise ApiError(
+                        500,
+                        "FERPA_SIGNING_RESERVATION_INVALID",
+                        "The prepared FERPA document is incomplete",
+                    )
+                signed_document = {
+                    "id": reservation["documentId"],
+                    "tenantId": auth.tenant_id,
+                    "studentId": auth.student_id,
+                    "title": reservation["title"],
+                    "fileName": reservation["fileName"],
+                    "sizeBytes": reservation["sizeBytes"],
+                    "storageProvider": "s3",
+                    "storageKey": reservation["storageKey"],
+                    "sha256": reservation["sha256"],
+                    "signerName": reservation["signerName"],
+                    "signatureMethod": reservation["signatureMethod"],
+                    "signedAt": reservation["signedAt"],
+                }
+                return await self._ferpa().complete(
+                    auth,
+                    requirement_id,
+                    payload,
+                    signed_document,
+                    idempotency_key,
+                    call.request_id,
+                )
+            if signature and not bool(preflight.get("hasSignedEvidence")):
+                if not reservation.get("id"):
+                    raise ApiError(
+                        500,
+                        "FERPA_SIGNING_RESERVATION_MISSING",
+                        "The FERPA signing attempt could not be reserved",
+                    )
+                claimed = await self._ferpa().claim_signing_reservation(
+                    auth, str(reservation["id"])
+                )
+                signed_document = await cast(
+                    FerpaSignedDocumentGenerator, self.signed_documents
+                ).create_ferpa(
+                    auth=auth,
+                    authorization=current,
+                    signature=signature,
+                    reservation=claimed,
+                    storage=self.storage,
+                )
+                await self._ferpa().mark_signing_reservation_stored(
+                    auth,
+                    str(reservation["id"]),
+                    signed_document,
+                )
+                return await self._ferpa().complete(
+                    auth,
+                    requirement_id,
+                    payload,
+                    signed_document,
+                    idempotency_key,
+                    call.request_id,
+                )
+            elif not bool(preflight.get("hasSignedEvidence")):
+                raise BadRequestError(
+                    "FERPA_SIGNATURE_REQUIRED",
+                    "The FERPA document must be signed before completion",
+                )
+            return await self._ferpa().complete(
+                auth,
+                requirement_id,
+                payload,
+                signed_document,
+                idempotency_key,
+                call.request_id,
+            )
+        if operation == "student.update_ferpa_access":
+            return await self._ferpa().update_access(
+                auth,
+                self._path(call, "authorizationId", "id"),
+                payload,
+                call.request_id,
+            )
+        if operation == "student.issue_ferpa_delegate_link":
+            authorization_id = self._path(call, "authorizationId")
+            delegate_id = self._path(call, "delegateId")
+            idempotency_key = self._key(key)
+            token = self._delegate_link_token(
+                auth,
+                authorization_id,
+                delegate_id,
+                idempotency_key,
+            )
+            result = await self._ferpa().issue_link(
+                auth,
+                authorization_id,
+                delegate_id,
+                expected_version=_integer(payload.get("expectedVersion")),
+                token=token,
+                idempotency_key=idempotency_key,
+                request_id=call.request_id,
+            )
+            result["url"] = f"/delegate#token={token}"
+            return result
+        if operation == "student.revoke_ferpa_delegate_link":
+            return await self._ferpa().revoke_link(
+                auth,
+                self._path(call, "authorizationId"),
+                self._path(call, "delegateId"),
+                expected_version=_integer(payload.get("expectedVersion")),
+                request_id=call.request_id,
             )
         if operation == "student.list_messages":
             return await portal.get_student_messages(auth)
@@ -641,20 +932,25 @@ class PostgresPlatformService:
                 auth, self._path(call, "messageId", "id", "message_id"), call.request_id
             )
         if operation == "student.list_documents":
-            await self._ensure_signed(
-                auth, await portal.get_student_onboarding(auth), call.request_id
-            )
-            return await portal.get_student_documents(auth)
+            if not auth.is_delegate:
+                await self._ensure_signed(
+                    auth, await portal.get_student_onboarding(auth), call.request_id
+                )
+            documents = await portal.get_student_documents(auth)
+            return await self._delegate_document_list(auth, documents)
         if operation == "student.create_document":
+            require_delegate_scope(auth, "documents")
             return await portal.create_student_document(
                 auth, payload, self._key(key), call.request_id
             )
         if operation == "student.upload_document":
             return await self._upload_document(auth, call)
         if operation == "student.get_document_content":
+            document_id = self._path(call, "documentId", "id", "document_id")
+            await self._authorize_document_action(auth, document_id)
             return await self._get_document_content(
                 auth,
-                self._path(call, "documentId", "id", "document_id"),
+                document_id,
                 cache_control="private, no-store",
             )
         if operation == "student.get_document_profile_photo":
@@ -662,17 +958,26 @@ class PostgresPlatformService:
                 auth, self._path(call, "documentId", "id", "document_id")
             )
         if operation == "student.confirm_document_extraction":
+            document_id = self._path(call, "documentId", "id", "document_id")
+            await self._authorize_document_action(auth, document_id, mutation=True)
             return await portal.confirm_student_document_extraction(
                 auth,
-                self._path(call, "documentId", "id", "document_id"),
+                document_id,
                 payload,
                 self._key(key),
                 call.request_id,
             )
         if operation == "student.retry_document_extraction":
+            document_id = self._path(call, "documentId", "id", "document_id")
+            if payload:
+                raise BadRequestError(
+                    "RETRY_EXTRACTION_BODY_NOT_ALLOWED",
+                    "Document extraction retry does not accept a request body",
+                )
+            await self._authorize_document_action(auth, document_id, mutation=True)
             return await self._retry_document_extraction(
                 auth,
-                self._path(call, "documentId", "id", "document_id"),
+                document_id,
                 payload,
                 self._key(key),
                 call.request_id,
@@ -693,28 +998,46 @@ class PostgresPlatformService:
             )
         if operation == "student.create_assistant_conversation":
             page = _assistant_page_context(payload.get("pageContext"))
+            if auth.is_delegate:
+                return {
+                    "id": str(uuid4()),
+                    "status": "active",
+                    "messages": [],
+                    "createdAt": self._timestamp(),
+                    "ephemeral": True,
+                }
             return await portal.create_assistant_conversation(
                 auth, page_path=page[0], page_label=page[1]
             )
         if operation == "student.get_assistant_conversation_messages":
+            if auth.is_delegate:
+                return {
+                    "conversationId": self._path(call, "conversationId", "id"),
+                    "messages": [],
+                    "ephemeral": True,
+                }
             return await portal.get_assistant_conversation_messages(
                 auth, self._path(call, "conversationId", "id")
             )
         if operation == "student.list_appointments":
             return await portal.get_student_appointments(auth)
         if operation == "student.create_appointment":
+            require_delegate_scope(auth, "appointments")
             return await portal.create_student_appointment(
                 auth, payload, self._key(key), call.request_id
             )
         if operation == "student.list_payments":
             return await portal.get_student_payments(auth)
         if operation == "student.create_deposit":
+            if auth.is_delegate and not ({"payments", "enrollment"} & auth.delegate_scopes):
+                require_delegate_scope(auth, "payments")
             return await portal.create_deposit_payment(
                 auth, payload, self._key(key), call.request_id
             )
         if operation == "student.get_profile":
             return await portal.get_student_profile(auth)
         if operation == "student.update_profile":
+            require_delegate_scope(auth, "profile")
             return await portal.update_student_profile(auth, payload, call.request_id)
         if operation == "student.get_help":
             return await portal.get_student_help(auth)
@@ -983,6 +1306,178 @@ class PostgresPlatformService:
             raise UnauthorizedError()
         return call.auth
 
+    def _ferpa(self) -> PostgresFerpaRepository:
+        if self.repository.ferpa is None:
+            raise ApiError(
+                503,
+                "FERPA_REPOSITORY_UNAVAILABLE",
+                "FERPA authorization is not configured",
+            )
+        return self.repository.ferpa
+
+    @staticmethod
+    def _guard_delegate_onboarding_payload(auth: AuthContext, payload: Mapping[str, Any]) -> None:
+        del payload
+        if not auth.is_delegate:
+            return
+        raise ApiError(
+            403,
+            "DELEGATE_ROUTE_NOT_ALLOWED",
+            "Parent and guardian onboarding access is view-only",
+        )
+
+    @staticmethod
+    def _delegate_requirement_projection(auth: AuthContext, requirement: JsonDict) -> JsonDict:
+        if not auth.is_delegate or requirement.get("interactionType") != "ferpa":
+            return requirement
+        projected = dict(requirement)
+        projected["inputConfig"] = {}
+        projected.pop("response", None)
+        projected["ferpa"] = {
+            "studentManaged": True,
+            "delegateId": auth.actor_id,
+            "relationship": auth.delegate_relationship,
+            "scopes": sorted(auth.delegate_scopes),
+            "completed": requirement.get("status") == "completed",
+        }
+        return projected
+
+    async def _delegate_requirement_list(
+        self,
+        auth: AuthContext,
+        pending: Awaitable[JsonDict],
+    ) -> JsonDict:
+        requirements = await pending
+        if not auth.is_delegate:
+            return requirements
+        allowed_flows = (
+            {"onboarding", "enrollment"} if "enrollment" in auth.delegate_scopes else set()
+        )
+        items = [
+            self._delegate_requirement_projection(auth, dict(_mapping(item)))
+            for item in _sequence(requirements.get("items"))
+            if _mapping(item).get("flowKind") in allowed_flows
+        ]
+        return {"items": items, "total": len(items)}
+
+    async def _delegate_dashboard(
+        self,
+        auth: AuthContext,
+        pending: Awaitable[JsonDict],
+    ) -> JsonDict:
+        dashboard = await pending
+        if not auth.is_delegate:
+            return dashboard
+
+        # Dashboard is a compound projection. Cross-page consumers may call it,
+        # but each embedded section stays bound to the page scope that owns it.
+        if "dashboard" in auth.delegate_scopes:
+            dashboard["delegateRestricted"] = True
+            return dashboard
+        if not ({"enrollment", "payments"} & auth.delegate_scopes):
+            dashboard.pop("offer", None)
+        if "enrollment" not in auth.delegate_scopes:
+            dashboard.pop("journey", None)
+        dashboard["unreadMessageCount"] = 0
+        dashboard["delegateRestricted"] = True
+        return dashboard
+
+    @staticmethod
+    def _delegate_financials(auth: AuthContext, financials: JsonDict) -> JsonDict:
+        if (
+            not auth.is_delegate
+            or "financials" in auth.delegate_scopes
+            or "dashboard" not in auth.delegate_scopes
+        ):
+            return financials
+        return {
+            key: financials[key]
+            for key in (
+                "academicYear",
+                "acceptedAidCents",
+                "paymentsCents",
+                "remainingBalanceCents",
+                "requiredDocuments",
+                "paymentPlans",
+                "paymentSchedule",
+                "generatedAt",
+            )
+            if key in financials
+        }
+
+    @staticmethod
+    def _delegate_academics(auth: AuthContext, academics: JsonDict) -> JsonDict:
+        if (
+            not auth.is_delegate
+            or {"classrooms", "enrollment"} & auth.delegate_scopes
+            or "dashboard" not in auth.delegate_scopes
+        ):
+            return academics
+        return {
+            key: academics[key]
+            for key in ("selectedProgram", "exemptionRecommendations", "generatedAt")
+            if key in academics
+        }
+
+    @staticmethod
+    def _delegate_campus_life(auth: AuthContext, campus_life: JsonDict) -> JsonDict:
+        if (
+            not auth.is_delegate
+            or "campus_life" in auth.delegate_scopes
+            or "dashboard" not in auth.delegate_scopes
+        ):
+            return campus_life
+        return {key: campus_life[key] for key in ("events", "generatedAt") if key in campus_life}
+
+    async def _delegate_onboarding(
+        self,
+        auth: AuthContext,
+        pending: Awaitable[JsonDict],
+    ) -> JsonDict:
+        onboarding = await pending
+        if not auth.is_delegate:
+            return onboarding
+        data = dict(_mapping(onboarding.get("data")))
+        for field in (
+            "familyPermissions",
+            "signatureFullName",
+            "signatureMethod",
+            "signatureImageData",
+            "signatureConsent",
+            "signedDocumentIds",
+        ):
+            data.pop(field, None)
+        onboarding["data"] = data
+        if self.repository.ferpa is not None:
+            authorization = await self.repository.ferpa.get_current(auth)
+            onboarding["ferpa"] = {
+                "status": (
+                    str(authorization.get("status")) if authorization is not None else "unavailable"
+                ),
+                "studentManaged": True,
+            }
+        return onboarding
+
+    def _delegate_link_token(
+        self,
+        auth: AuthContext,
+        authorization_id: str,
+        delegate_id: str,
+        idempotency_key: str,
+    ) -> str:
+        material = ":".join(
+            (
+                auth.tenant_id,
+                auth.student_id,
+                auth.actor_id,
+                authorization_id,
+                delegate_id,
+                idempotency_key,
+            )
+        ).encode("utf-8")
+        digest = hmac.new(self.ferpa_link_secret.encode("utf-8"), material, hashlib.sha256).digest()
+        return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
     async def _managed_configuration(self, auth: AuthContext, kind: str) -> JsonDict:
         if self.repository.managed is None:
             raise NotFoundError(
@@ -1030,10 +1525,162 @@ class PostgresPlatformService:
             request_id=request_id,
         )
 
+    async def _authorize_requirement_appointment(
+        self,
+        auth: AuthContext,
+        requirement_id: str,
+        *,
+        mutation: bool,
+    ) -> JsonDict:
+        context = await self._ferpa().requirement_context(auth, requirement_id)
+        if context.get("interactionType") != "scheduling":
+            raise ApiError(
+                409,
+                "REQUIREMENT_SCHEDULING_REQUIRED",
+                "Appointments can be managed here only for a scheduling requirement",
+            )
+        if mutation and context.get("status") not in {
+            "ready",
+            "help_requested",
+            "in_progress",
+            "rejected",
+        }:
+            raise ApiError(
+                409,
+                "STUDENT_REQUIREMENT_NOT_ACTIONABLE",
+                "This scheduling requirement cannot accept an appointment now",
+            )
+        if auth.is_delegate and mutation and context.get("flowKind") == "onboarding":
+            raise ApiError(
+                403,
+                "DELEGATE_ROUTE_NOT_ALLOWED",
+                "Parent and guardian onboarding access is view-only",
+            )
+        return context
+
+    async def _authorize_requirement_profile(
+        self,
+        auth: AuthContext,
+        requirement_id: str,
+    ) -> JsonDict:
+        context = await self._ferpa().requirement_context(auth, requirement_id)
+        if (
+            context.get("flowKind") != "enrollment"
+            or context.get("code") != "profile_verification"
+            or context.get("interactionType") != "form"
+        ):
+            raise ApiError(
+                409,
+                "REQUIREMENT_PROFILE_UPDATE_REQUIRED",
+                "Profile changes here require the active enrollment profile task",
+            )
+        if context.get("status") not in {
+            "ready",
+            "help_requested",
+            "in_progress",
+            "rejected",
+        }:
+            raise ApiError(
+                409,
+                "STUDENT_REQUIREMENT_NOT_ACTIONABLE",
+                "This profile requirement cannot accept changes now",
+            )
+        return context
+
+    async def _authorize_document_action(
+        self,
+        auth: AuthContext,
+        document_id: str,
+        *,
+        mutation: bool = False,
+    ) -> JsonDict | None:
+        if self.repository.ferpa is None:
+            if auth.is_delegate:
+                self._ferpa()
+            return None
+        context = await self._ferpa().document_requirement_context(auth, document_id)
+        if context is None:
+            if auth.is_delegate:
+                require_delegate_scope(auth, "documents")
+            return None
+        if context.get("interactionType") == "ferpa":
+            raise ApiError(
+                403 if auth.is_delegate else 409,
+                (
+                    "FERPA_STUDENT_CONTROL_REQUIRED"
+                    if auth.is_delegate
+                    else "REQUIREMENT_SPECIALIZED_SUBMISSION_REQUIRED"
+                ),
+                "FERPA evidence is managed only through the canonical e-signature flow",
+            )
+        if auth.is_delegate:
+            if "documents" in auth.delegate_scopes:
+                return context
+            if mutation and context.get("flowKind") == "onboarding":
+                require_delegate_scope(auth, "documents")
+                return context
+            require_delegate_scope(auth, "enrollment")
+        return context
+
+    async def _delegate_document_list(self, auth: AuthContext, documents: JsonDict) -> JsonDict:
+        if not auth.is_delegate or "documents" in auth.delegate_scopes:
+            return documents
+        visible: list[JsonDict] = []
+        for raw in _sequence(documents.get("items")):
+            document = dict(_mapping(raw))
+            requirement_id = document.get("requirementId")
+            if not isinstance(requirement_id, str):
+                continue
+            document_id = document.get("id")
+            if not isinstance(document_id, str):
+                continue
+            context = await self._ferpa().document_requirement_context(auth, document_id)
+            if context is None or context.get("interactionType") == "ferpa":
+                continue
+            if "enrollment" in auth.delegate_scopes:
+                visible.append(document)
+        return {**documents, "items": visible, "total": len(visible)}
+
+    async def _delegate_document_read(
+        self,
+        auth: AuthContext,
+        pending: Awaitable[JsonDict],
+    ) -> JsonDict:
+        return await self._delegate_document_list(auth, await pending)
+
     async def _upload_document(self, auth: AuthContext, call: ServiceCall) -> JsonDict:
         upload = call.upload
         if upload is None:
             raise BadRequestError("FILE_REQUIRED", "Choose a document file to upload")
+        if auth.is_delegate:
+            if upload.requirement_id is not None:
+                context = await self._ferpa().requirement_context(
+                    auth,
+                    upload.requirement_id,
+                    enforce_delegate_scope=False,
+                )
+                if context.get("interactionType") == "ferpa":
+                    raise ApiError(
+                        403,
+                        "FERPA_STUDENT_CONTROL_REQUIRED",
+                        "FERPA accepts only the student's canonical e-signature",
+                    )
+                if "documents" in auth.delegate_scopes:
+                    pass
+                elif context.get("flowKind") == "onboarding":
+                    require_delegate_scope(auth, "documents")
+                else:
+                    require_delegate_scope(auth, "enrollment")
+            else:
+                require_delegate_scope(auth, "documents")
+        elif upload.requirement_id is not None and self.repository.ferpa is not None:
+            interaction_type = await self._ferpa().requirement_flow(auth, upload.requirement_id)
+            if interaction_type == "ferpa":
+                raise ApiError(
+                    409,
+                    "REQUIREMENT_SPECIALIZED_SUBMISSION_REQUIRED",
+                    "FERPA accepts only the canonical e-signature flow",
+                )
         category = upload.category or "other"
         file_name = validate_document_upload(
             upload.file_name, upload.mime_type, category, upload.content
@@ -1228,9 +1875,15 @@ class PostgresPlatformService:
     async def _get_document_content(
         self, auth: AuthContext, document_id: str, *, cache_control: str
     ) -> BinaryPayload:
-        reference = await self.repository.portal.get_student_document_content_reference(
-            auth, document_id
-        )
+        reference: JsonDict | None
+        try:
+            reference = await self.repository.portal.get_student_document_content_reference(
+                auth, document_id
+            )
+        except NotFoundError:
+            reference = await self._ferpa().get_document_reference(auth, document_id)
+            if reference is None:
+                raise
         try:
             content = await self.storage.get(str(reference["storageKey"]))
         except (OSError, StorageError) as error:
@@ -1497,23 +2150,46 @@ class PostgresPlatformService:
 
         portal = self.repository.portal
         platform = self.repository.platform
-        return AssistantToolHost(
-            {
-                "profile": lambda: portal.get_student_profile(auth),
-                "requirements": lambda: portal.get_student_requirements(auth),
-                "documents": lambda: portal.get_student_documents(auth),
-                "payments": lambda: portal.get_student_payments(auth),
-                "financials": lambda: portal.get_student_financials(auth),
-                "dashboard": lambda: platform.get_student_dashboard(auth),
-                "onboarding": lambda: portal.get_student_onboarding(auth),
-                "housing_plan": lambda: portal.get_student_housing_plan(auth),
-                "appointments": lambda: portal.get_student_appointments(auth),
-                "help": lambda: portal.get_student_help(auth),
-                "academics": lambda: portal.get_student_academics(auth),
-                "campus_life": lambda: portal.get_campus_life(auth),
-                "messages": lambda: portal.get_student_messages(auth),
-            }
-        )
+        primitives: dict[str, Callable[[], Any]] = {}
+
+        def granted(*scopes: str) -> bool:
+            return not auth.is_delegate or bool(set(scopes) & auth.delegate_scopes)
+
+        if granted("profile", "enrollment"):
+            primitives["profile"] = lambda: portal.get_student_profile(auth)
+        if granted("enrollment"):
+            primitives["requirements"] = lambda: self._delegate_requirement_list(
+                auth, portal.get_student_requirements(auth)
+            )
+        if granted("documents", "enrollment"):
+            primitives["documents"] = lambda: self._delegate_document_read(
+                auth, portal.get_student_documents(auth)
+            )
+        if granted("payments", "enrollment"):
+            primitives["payments"] = lambda: portal.get_student_payments(auth)
+        if granted("financials"):
+            primitives["financials"] = lambda: portal.get_student_financials(auth)
+        if granted("dashboard", "enrollment", "payments"):
+            primitives["dashboard"] = lambda: self._delegate_dashboard(
+                auth, platform.get_student_dashboard(auth)
+            )
+        if granted("enrollment"):
+            primitives["onboarding"] = lambda: self._delegate_onboarding(
+                auth, portal.get_student_onboarding(auth)
+            )
+        if granted("enrollment"):
+            primitives["housing_plan"] = lambda: portal.get_student_housing_plan(auth)
+        if granted("appointments", "enrollment"):
+            primitives["appointments"] = lambda: portal.get_student_appointments(auth)
+        if granted("help"):
+            primitives["help"] = lambda: portal.get_student_help(auth)
+        if granted("classrooms", "enrollment"):
+            primitives["academics"] = lambda: portal.get_student_academics(auth)
+        if granted("campus_life"):
+            primitives["campus_life"] = lambda: portal.get_campus_life(auth)
+        if granted("messages"):
+            primitives["messages"] = lambda: portal.get_student_messages(auth)
+        return AssistantToolHost(cast(Any, primitives))
 
     async def _ask_edward(
         self,
@@ -1527,7 +2203,9 @@ class PostgresPlatformService:
         page_path, page_label = _assistant_page_context(payload.get("pageContext"))
         conversation_id = payload.get("conversationId")
         client_message_id = payload.get("clientMessageId")
-        persist = conversation_id is not None or client_message_id is not None
+        persist = not auth.is_delegate and (
+            conversation_id is not None or client_message_id is not None
+        )
         trace = AssistantTurnTrace(
             trace_id=request_id,
             tenant_id=auth.tenant_id,
@@ -1539,7 +2217,7 @@ class PostgresPlatformService:
             ignored_execution_mode_request=execution.ignored_request,
         )
 
-        if isinstance(client_message_id, str) and client_message_id:
+        if not auth.is_delegate and isinstance(client_message_id, str) and client_message_id:
             replay = await self.repository.portal.find_assistant_exchange_by_client_id(
                 auth, client_message_id
             )
@@ -1557,7 +2235,7 @@ class PostgresPlatformService:
             trace.provider = str(response.get("provider") or "guided")
         else:
             history: Sequence[Mapping[str, Any]]
-            if conversation_id is not None:
+            if conversation_id is not None and not auth.is_delegate:
                 history = await self.repository.portal.get_recent_assistant_history(
                     auth, str(conversation_id)
                 )
@@ -1597,6 +2275,10 @@ class PostgresPlatformService:
             response = normalize_response(
                 response, await self._edward_action_authority(auth, message)
             )
+            if auth.is_delegate:
+                response["suggestedActions"] = self._delegate_edward_actions(
+                    auth, _sequence(response.get("suggestedActions"))
+                )
             response["contextReceipts"] = result.context_receipts
 
         if persist:
@@ -1640,10 +2322,15 @@ class PostgresPlatformService:
         wants_deposit = bool(_EDWARD_DEPOSIT_ACTION.search(message))
         wants_document = bool(_EDWARD_DOCUMENT_ACTION.search(message))
         wants_appointment = bool(_EDWARD_APPOINTMENT_ACTION.search(message))
+        deposit_scoped = not auth.is_delegate or bool(
+            {"payments", "enrollment"} & auth.delegate_scopes
+        )
+        document_scoped = not auth.is_delegate or "documents" in auth.delegate_scopes
+        appointment_scoped = not auth.is_delegate or "appointments" in auth.delegate_scopes
         offer_id = ""
         deposit_amount = 0
         deposit_paid = False
-        if wants_deposit:
+        if wants_deposit and deposit_scoped:
             dashboard, payments = await asyncio.gather(
                 self.repository.platform.get_student_dashboard(auth),
                 self.repository.portal.get_student_payments(auth),
@@ -1654,12 +2341,12 @@ class PostgresPlatformService:
             # A pending deposit must not produce a second payment widget.
             deposit_paid = state.paid or state.pending
         document_upload_category = None
-        if wants_document:
+        if wants_document and document_scoped:
             document_upload_category = (
                 "transcript" if "transcript" in message.lower() else "financial_aid"
             )
         appointment_type = None
-        if wants_appointment:
+        if wants_appointment and appointment_scoped:
             appointment_type = (
                 "financial_aid"
                 if _EDWARD_FINANCIAL_APPOINTMENT.search(message)
@@ -1673,6 +2360,41 @@ class PostgresPlatformService:
             document_upload_category=document_upload_category,
             appointment_type=appointment_type,
         )
+
+    @staticmethod
+    def _delegate_edward_actions(
+        auth: AuthContext,
+        actions: Sequence[object],
+    ) -> list[JsonDict]:
+        required: tuple[tuple[str, frozenset[str]], ...] = (
+            ("/dashboard", frozenset({"dashboard"})),
+            ("/enrollment", frozenset({"enrollment"})),
+            ("/financials", frozenset({"financials"})),
+            ("/classrooms", frozenset({"classrooms", "enrollment"})),
+            ("/campus-life", frozenset({"campus_life"})),
+            ("/documents", frozenset({"documents"})),
+            ("/messages", frozenset({"messages"})),
+            ("/appointments", frozenset({"appointments"})),
+            ("/payments", frozenset({"payments"})),
+            ("/profile", frozenset({"profile", "enrollment"})),
+            ("/help", frozenset({"help"})),
+            ("/edward", frozenset({"edward"})),
+        )
+        visible: list[JsonDict] = []
+        for raw in actions:
+            action = _mapping(raw)
+            href = str(action.get("href") or "")
+            scopes = next(
+                (
+                    allowed
+                    for prefix, allowed in required
+                    if href == prefix or href.startswith(f"{prefix}/")
+                ),
+                frozenset(),
+            )
+            if scopes & auth.delegate_scopes:
+                visible.append(dict(action))
+        return visible
 
     def _assistant_planner(self, auth: AuthContext, request_id: str) -> ModelPlanner | None:
         planner = getattr(self.ai, "plan_assistant_tool_reads", None)

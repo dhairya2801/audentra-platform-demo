@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Request, Response
 
 from audentra.contracts.requests import (
     DemoStudentSignInRequest,
     EmptyBody,
+    ExchangeDelegateLinkRequest,
     StaffSignInRequest,
     StaffSignUpRequest,
     StartGuidedOnboardingRequest,
@@ -18,7 +19,13 @@ from audentra.contracts.requests import (
 )
 from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.errors import ApiError
-from audentra.core.ports import CredentialStudentSession, DemoStudentSession, StaffSession
+from audentra.core.ports import (
+    CredentialStudentSession,
+    DelegateBrowserAuthService,
+    DelegateSession,
+    DemoStudentSession,
+    StaffSession,
+)
 
 from .demo_identity import DEMO_STUDENT_COOKIE, issue_demo_student_cookie
 from .dependencies import (
@@ -29,7 +36,8 @@ from .dependencies import (
 
 auth_router = APIRouter(
     responses={
-        status_code: {"model": ApiErrorEnvelope} for status_code in (400, 401, 404, 409, 500, 503)
+        status_code: {"model": ApiErrorEnvelope}
+        for status_code in (400, 401, 403, 404, 409, 500, 503)
     }
 )
 
@@ -151,6 +159,99 @@ def _staff_response(session: StaffSession) -> dict[str, Any]:
     }
 
 
+def _delegate_response(session: DelegateSession) -> dict[str, Any]:
+    routes = {
+        "dashboard": "/dashboard",
+        "enrollment": "/enrollment",
+        "financials": "/financials",
+        "classrooms": "/classrooms",
+        "campus_life": "/campus-life",
+        "edward": "/edward",
+        "documents": "/documents",
+        "messages": "/messages",
+        "appointments": "/appointments",
+        "payments": "/payments",
+        "profile": "/profile",
+        "help": "/help",
+    }
+    initial_route = next(
+        (route for scope, route in routes.items() if scope in session.context.delegate_scopes),
+        "/help",
+    )
+    return {
+        "authenticated": True,
+        "mode": "delegate",
+        "actorType": "delegate",
+        "delegate": {
+            "id": session.context.actor_id,
+            "fullName": session.full_name,
+            "relationship": session.relationship,
+            "email": session.email,
+            "studentId": session.context.student_id,
+            "studentName": session.student_name,
+            "studentPreferredName": session.student_preferred_name,
+            "scopes": sorted(session.context.delegate_scopes),
+        },
+        "initialRoute": initial_route,
+        "capabilities": {"canManageFerpa": False, "canSignFerpa": False},
+        "expiresAt": session.expires_at_epoch,
+    }
+
+
+@auth_router.post("/v1/auth/delegate/exchange", status_code=200, response_model=None)
+async def exchange_delegate_link(
+    body: ExchangeDelegateLinkRequest,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    session = await cast(DelegateBrowserAuthService, auth).exchange_delegate(
+        body.token, tenant_id, tenant_slug
+    )
+    if session.token is None or session.expires_at_epoch is None:
+        raise ApiError(500, "AUTH_SESSION_FAILED", "The delegate session could not be created")
+    _set_session_cookie(
+        response,
+        request,
+        name="vv_delegate_session",
+        token=session.token,
+        expires_at_epoch=session.expires_at_epoch,
+    )
+    _expire_cookie(response, request, "vv_session")
+    _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
+    return _delegate_response(session)
+
+
+@auth_router.get("/v1/auth/delegate/session", status_code=200, response_model=None)
+async def get_delegate_session(
+    request: Request,
+    auth: AuthServiceDependency,
+) -> object:
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    token = request.cookies.get("vv_delegate_session")
+    session = await cast(DelegateBrowserAuthService, auth).resolve_delegate(
+        token or "", tenant_id, tenant_slug
+    )
+    if session is None:
+        raise ApiError(401, "UNAUTHORIZED", "The parent or guardian session has expired")
+    return _delegate_response(session)
+
+
+@auth_router.post("/v1/auth/delegate/sign-out", status_code=200, response_model=None)
+async def sign_out_delegate(
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    await cast(DelegateBrowserAuthService, auth).sign_out_delegate(
+        request.cookies.get("vv_delegate_session")
+    )
+    _expire_cookie(response, request, "vv_delegate_session")
+    return {"authenticated": False, "mode": "delegate"}
+
+
 @auth_router.post("/v1/auth/demo/sign-in", status_code=200, response_model=None)
 async def sign_in_demo_student(
     _body: EmptyBody,
@@ -163,6 +264,7 @@ async def sign_in_demo_student(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     # Signing in as "the demo student" clears any earlier per-student choice.
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
@@ -189,6 +291,7 @@ async def sign_in_demo_student_by_reference(
     session = await auth.demo_student_by_reference(tenant_id, tenant_slug, body.student_ref)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     _demo_cookie(response, request)
     _set_session_cookie(
         response,
@@ -221,6 +324,7 @@ async def start_guided_onboarding(
     session = await auth.demo_student(tenant_id, tenant_slug)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     _demo_cookie(response, request)
     return _demo_response(session)
@@ -236,6 +340,7 @@ async def sign_out_demo_student(
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     _expire_cookie(response, request, DEMO_STUDENT_COOKIE)
     return {"authenticated": False, "mode": "demo"}
 
@@ -266,6 +371,7 @@ async def sign_up_student(
         expires_at_epoch=session.expires_at_epoch,
     )
     _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     return _credential_response(session)
 
 
@@ -294,6 +400,7 @@ async def sign_in_student(
         expires_at_epoch=session.expires_at_epoch,
     )
     _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     return _credential_response(session)
 
 
@@ -307,6 +414,7 @@ async def sign_out_student(
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
+    _expire_cookie(response, request, "vv_delegate_session")
     return {"authenticated": False, "mode": "credentials"}
 
 

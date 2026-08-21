@@ -17,6 +17,7 @@ from audentra.contracts.requests import (
     ActivityEventBatchRequest,
     AskEdwardRequest,
     AskStaffEdwardRequest,
+    CompleteFerpaAuthorizationRequest,
     CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
     ConfirmStudentDocumentExtractionRequest,
@@ -36,6 +37,7 @@ from audentra.contracts.requests import (
     DecideStudentExperienceUpdateRequest,
     DeferStudentExperienceUpdatesRequest,
     DraftStaffManagedConfigurationRequest,
+    FerpaLinkCommandRequest,
     PreviewStaffEdwardRequest,
     RecordStaffCommunicationRequest,
     RegisterCampusEventRequest,
@@ -47,6 +49,7 @@ from audentra.contracts.requests import (
     StartStaffInteractionRequest,
     SubmitAssistantVoiceTurnRequest,
     SubmitStudentRequirementResponseRequest,
+    UpdateFerpaAccessRequest,
     UpdateStaffActionRuleRequest,
     UpdateStaffClubRequest,
     UpdateStaffCorePlayRequest,
@@ -738,6 +741,72 @@ async def get_requirement(
     )
 
 
+@router.get(
+    "/v1/student/requirements/{id}/appointments",
+    status_code=200,
+    response_model=None,
+)
+async def list_requirement_appointments(
+    requirement_id: Annotated[str, Path(alias="id", min_length=1, max_length=128)],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.list_requirement_appointments",
+        auth=auth,
+        path_params={"requirementId": requirement_id},
+    )
+
+
+@router.post(
+    "/v1/student/requirements/{id}/appointments",
+    status_code=201,
+    response_model=None,
+)
+async def create_requirement_appointment(
+    requirement_id: Annotated[str, Path(alias="id", min_length=1, max_length=128)],
+    body: CreateStudentAppointmentRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.create_requirement_appointment",
+        auth=auth,
+        path_params={"requirementId": requirement_id},
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.patch(
+    "/v1/student/requirements/{id}/profile",
+    status_code=200,
+    response_model=None,
+)
+async def update_requirement_profile(
+    requirement_id: Annotated[str, Path(alias="id", min_length=1, max_length=128)],
+    body: UpdateStudentProfileRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.update_requirement_profile",
+        auth=auth,
+        path_params={"requirementId": requirement_id},
+        payload=body.public_payload(),
+    )
+
+
 @router.post(
     "/v1/student/requirements/{id}/responses",
     status_code=200,
@@ -759,6 +828,124 @@ async def submit_requirement_response(
         path_params={"requirementId": requirement_id},
         payload=body.public_payload(),
         idempotency_key=idempotency_key,
+    )
+
+
+@router.get(
+    "/v1/student/ferpa-authorizations/current",
+    status_code=200,
+    response_model=None,
+)
+async def get_current_ferpa_authorization(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.get_ferpa_authorization",
+        auth=auth,
+    )
+
+
+@router.post(
+    "/v1/student/requirements/{id}/ferpa/complete",
+    status_code=200,
+    response_model=None,
+)
+async def complete_ferpa_authorization(
+    requirement_id: Annotated[str, Path(alias="id", min_length=1, max_length=128)],
+    body: CompleteFerpaAuthorizationRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.complete_ferpa_authorization",
+        auth=auth,
+        path_params={"requirementId": requirement_id},
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.patch(
+    "/v1/student/ferpa-authorizations/{id}/access",
+    status_code=200,
+    response_model=None,
+)
+async def update_ferpa_access(
+    authorization_id: Annotated[UUID, Path(alias="id")],
+    body: UpdateFerpaAccessRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.update_ferpa_access",
+        auth=auth,
+        path_params={"authorizationId": _uuid(authorization_id)},
+        payload=body.public_payload(),
+    )
+
+
+@router.post(
+    "/v1/student/ferpa-authorizations/{id}/delegates/{delegateId}/link",
+    status_code=200,
+    response_model=None,
+)
+async def issue_ferpa_delegate_link(
+    authorization_id: Annotated[UUID, Path(alias="id")],
+    delegate_id: Annotated[UUID, Path(alias="delegateId")],
+    body: FerpaLinkCommandRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.issue_ferpa_delegate_link",
+        auth=auth,
+        path_params={
+            "authorizationId": _uuid(authorization_id),
+            "delegateId": _uuid(delegate_id),
+        },
+        payload=body.public_payload(),
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post(
+    "/v1/student/ferpa-authorizations/{id}/delegates/{delegateId}/link/revoke",
+    status_code=200,
+    response_model=None,
+)
+async def revoke_ferpa_delegate_link(
+    authorization_id: Annotated[UUID, Path(alias="id")],
+    delegate_id: Annotated[UUID, Path(alias="delegateId")],
+    body: FerpaLinkCommandRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.revoke_ferpa_delegate_link",
+        auth=auth,
+        path_params={
+            "authorizationId": _uuid(authorization_id),
+            "delegateId": _uuid(delegate_id),
+        },
+        payload=body.public_payload(),
     )
 
 

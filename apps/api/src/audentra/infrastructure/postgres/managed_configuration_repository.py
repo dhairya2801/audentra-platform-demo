@@ -17,6 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.infrastructure.postgres.ferpa_repository import (
+    reconcile_completed_ferpa_requirements,
+)
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
@@ -85,6 +88,7 @@ _INTERACTION_TYPE_ALIASES = {
     "docu_sign": "signature",
     "payment": "payment",
     "scheduling": "scheduling",
+    "ferpa": "ferpa",
 }
 _SUBMISSION_TYPES = {
     "information": "none",
@@ -97,7 +101,22 @@ _SUBMISSION_TYPES = {
     "signature": "form",
     "payment": "payment",
     "scheduling": "appointment",
+    "ferpa": "form",
 }
+_FERPA_PORTAL_SCOPES = [
+    "dashboard",
+    "enrollment",
+    "financials",
+    "classrooms",
+    "campus_life",
+    "edward",
+    "documents",
+    "messages",
+    "appointments",
+    "payments",
+    "profile",
+    "help",
+]
 _CAMPUS_CATEGORIES = frozenset({"academic", "social", "career", "wellness", "athletics"})
 _CAMPUS_ACCENTS = frozenset({"gold", "navy", "blue", "coral"})
 _CAMPUS_THEMES = frozenset({"festival", "discovery", "career", "community"})
@@ -1298,6 +1317,48 @@ class PostgresManagedConfigurationRepository:
                 "onboarding_required": onboarding_required,
             },
         )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO ferpa_authorization (id, tenant_id, student_id, requirement_id)
+                SELECT gen_random_uuid(), candidate.tenant_id, candidate.student_id,
+                       candidate.requirement_id
+                FROM (
+                  SELECT DISTINCT ON (requirement.tenant_id, journey.student_id)
+                         requirement.tenant_id, journey.student_id,
+                         requirement.id AS requirement_id
+                  FROM student_requirement requirement
+                  JOIN enrollment_journey journey
+                    ON journey.id=requirement.journey_id
+                   AND journey.tenant_id=requirement.tenant_id
+                  JOIN requirement_definition_version evidence_definition
+                    ON evidence_definition.id=requirement.requirement_definition_version_id
+                   AND evidence_definition.tenant_id=requirement.tenant_id
+                  JOIN journey_requirement_definition current_link
+                    ON current_link.journey_definition_version_id=
+                       journey.journey_definition_version_id
+                  JOIN requirement_definition_version current_definition
+                    ON current_definition.id=current_link.requirement_definition_version_id
+                   AND current_definition.tenant_id=requirement.tenant_id
+                   AND current_definition.code=evidence_definition.code
+                  WHERE requirement.tenant_id=:tenant_id
+                    AND requirement.retired_at IS NULL
+                    AND current_definition.interaction_type='ferpa'
+                  ORDER BY requirement.tenant_id, journey.student_id,
+                           requirement.created_at DESC, requirement.id DESC
+                ) candidate
+                ON CONFLICT (tenant_id, student_id) DO UPDATE SET
+                  requirement_id=EXCLUDED.requirement_id,
+                  version=ferpa_authorization.version+1, updated_at=NOW()
+                WHERE ferpa_authorization.requirement_id<>EXCLUDED.requirement_id
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id)},
+        )
+        await reconcile_completed_ferpa_requirements(
+            connection,
+            tenant_id=_uuid(auth.tenant_id),
+        )
         return inserted
 
     async def _materialize_campus_life(
@@ -1939,9 +2000,9 @@ class PostgresManagedConfigurationRepository:
                   resource_type, resource_id, authorization_basis, request_id,
                   correlation_id, metadata, occurred_at, created_at
                 ) VALUES (
-                  :id, :tenant_id, 'student', :actor_id, :student_id,
+                  :id, :tenant_id, :actor_type, :actor_id, :student_id,
                   'student.experience_update_decided', 'student_experience_update',
-                  :resource_id, 'student_self_service', :request_id, :request_id,
+                  :resource_id, :authorization_basis, :request_id, :request_id,
                   CAST(:metadata AS jsonb), NOW(), NOW()
                 )
                 """
@@ -1949,10 +2010,14 @@ class PostgresManagedConfigurationRepository:
             {
                 "id": self._uuid_factory(),
                 "tenant_id": _uuid(auth.tenant_id),
+                "actor_type": auth.actor_type,
                 "actor_id": _uuid(auth.actor_id),
                 "student_id": _uuid(auth.student_id),
                 "resource_id": _uuid(update_id),
                 "request_id": request_id,
+                "authorization_basis": (
+                    "ferpa_delegation" if auth.is_delegate else "student_self_service"
+                ),
                 "metadata": _json({"action": action, "version": version}),
             },
         )
@@ -1964,7 +2029,7 @@ class PostgresManagedConfigurationRepository:
 
     @staticmethod
     def _require_student(auth: AuthContext) -> None:
-        if auth.actor_type != "student":
+        if auth.actor_type not in {"student", "delegate"}:
             raise ApiError(403, "STUDENT_ACCESS_REQUIRED", "Student access is required")
 
 
@@ -2295,8 +2360,11 @@ def materialized_journey_tasks(
                     f"Journey task {code} is duplicated",
                 )
             seen.add(code)
+            authored_task_type = str(raw_task.get("task_type") or "information").lower()
             core_onboarding_task = (
-                flow_kind == "onboarding" and raw_task.get("student_step") in _CORE_ONBOARDING_STEPS
+                flow_kind == "onboarding"
+                and raw_task.get("student_step") in _CORE_ONBOARDING_STEPS
+                and authored_task_type != "ferpa"
             )
             active = raw_task.get("active", True)
             if not isinstance(active, bool):
@@ -2305,12 +2373,35 @@ def materialized_journey_tasks(
                     f"Journey task {code} active must be true or false",
                 )
             display_orders[flow_kind] += 10
-            authored_task_type = str(raw_task.get("task_type") or "information").lower()
             interaction_type = _INTERACTION_TYPE_ALIASES.get(authored_task_type)
             if interaction_type is None:
                 raise BadRequestError(
                     "INVALID_MANAGED_JOURNEY_TASK",
                     f"Journey task {code} has an invalid interaction type",
+                )
+            required = raw_task.get("required", False)
+            if not isinstance(required, bool):
+                raise BadRequestError(
+                    "INVALID_MANAGED_JOURNEY_TASK",
+                    f"Journey task {code} required must be true or false",
+                )
+            if active and interaction_type == "ferpa" and required is not True:
+                raise BadRequestError(
+                    "INVALID_MANAGED_FERPA_TASK",
+                    "An active FERPA task must be required because the student must sign it",
+                )
+            if (
+                active
+                and interaction_type == "ferpa"
+                and flow_kind == "onboarding"
+                and (
+                    code != "family_permissions"
+                    or raw_task.get("student_step") != "family_permissions"
+                )
+            ):
+                raise BadRequestError(
+                    "INVALID_MANAGED_FERPA_TASK",
+                    "Onboarding FERPA must use the protected family_permissions step",
                 )
             if interaction_type == "payment" and not (
                 code == "enrollment_deposit"
@@ -2338,6 +2429,11 @@ def materialized_journey_tasks(
                 task_code=code,
                 materialized=not core_onboarding_task and validate_materialized_inputs,
             )
+            if active and input_config.get("signatureProvider") == "docusign":
+                raise BadRequestError(
+                    "MANAGED_DOCUSIGN_NOT_CONFIGURED",
+                    "DocuSign tasks cannot be published until server-side execution is configured",
+                )
             activation = _journey_activation(raw_task, task_code=code)
             title = _required_string(raw_task.get("title"), "journey task title", maximum=180)
             description = _required_string(
@@ -2387,7 +2483,7 @@ def materialized_journey_tasks(
                     "description": description,
                     "owner": owner,
                     "active": active,
-                    "required": bool(raw_task.get("required", False)),
+                    "required": required,
                     "priority": priority,
                     "displayOrder": display_orders[flow_kind],
                     "dependsOn": list(raw_dependencies),
@@ -2404,6 +2500,18 @@ def materialized_journey_tasks(
             )
             if tasks[-1]["materialized"] is False:
                 skipped_core_task_ids.add(code)
+    active_ferpa = [
+        task
+        for task in tasks
+        if task["active"] is True
+        and task["materialized"] is True
+        and task["interactionType"] == "ferpa"
+    ]
+    if len(active_ferpa) > 1:
+        raise BadRequestError(
+            "DUPLICATE_MANAGED_FERPA_TASK",
+            "Publish only one active FERPA task across onboarding and enrollment",
+        )
     available = {
         str(item["code"])
         for item in tasks
@@ -2759,7 +2867,7 @@ def _validate_core_onboarding_invariants(
                 include_inactive=True,
                 validate_materialized_inputs=False,
             )
-            if task["materialized"] is False
+            if task["materialized"] is False and task.get("studentStep") != "family_permissions"
         ]
 
     if signature(document) != signature(previous_document):
@@ -2873,7 +2981,7 @@ def _journey_input_config(
         "signature_provider",
         config.get("signatureProvider", raw_task.get("signature_provider")),
     )
-    if interaction_type == "signature":
+    if interaction_type in {"signature", "ferpa"}:
         template_value = config.pop(
             "docusign_template_id",
             config.pop(
@@ -2916,6 +3024,14 @@ def _journey_input_config(
             "INVALID_MANAGED_JOURNEY_INPUT",
             f"Journey task {task_code} signature provider requires a signature task",
         )
+
+    if interaction_type == "ferpa":
+        if any(key in config for key in ("fields", "form", "flow", "options", "maximumSelections")):
+            raise BadRequestError(
+                "INVALID_MANAGED_FERPA_TASK",
+                "FERPA uses its fixed signing and portal-access fields",
+            )
+        config["portalScopes"] = list(_FERPA_PORTAL_SCOPES)
 
     accepted_types = config.pop(
         "accepted_mime_types",

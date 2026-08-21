@@ -227,6 +227,7 @@ jobs:
       GCS_BUCKET: audentra-906906351296-preview-documents
       DATABASE_URL_SECRET: audentra-preview-database-url
       DOCUMENT_WORKER_TOKEN_SECRET: audentra-preview-document-worker-token
+      FERPA_DELEGATE_LINK_SECRET_SECRET: audentra-preview-ferpa-delegate-link-secret
       STAFF_INVITATION_CODE_SECRET: audentra-preview-staff-invitation-code
       # Optional until a portal origin is selected; the deploy script keeps its
       # restrictive localhost default when this environment variable is empty.

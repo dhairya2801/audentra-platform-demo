@@ -456,6 +456,17 @@ export interface DeferStudentExperienceUpdatesResult {
 
 export interface StudentBootstrap {
   authenticated: true;
+  actor?:
+    | { type: "student" }
+    | {
+        type: "delegate";
+        delegateId: string;
+        name: string;
+        relationship: string;
+        studentId: string;
+        studentName: string;
+        scopes: FerpaPortalScope[];
+      };
   tenant?: {
     id: string;
     slug: string;
@@ -471,12 +482,17 @@ export interface StudentBootstrap {
     preferredName: string;
     fullName: string;
   };
-  onboarding: {
-    required: boolean;
-    status: OnboardingStatus;
-    currentStep: OnboardingStep;
-    version: number;
-  };
+  onboarding?:
+    | {
+        required: boolean;
+        status: OnboardingStatus;
+        currentStep: OnboardingStep;
+        version: number;
+      }
+    | {
+        required: boolean;
+        status: "restricted";
+      };
   rewards?: StudentRewardSummary;
   unreadMessageCount: number;
   experienceUpdates: StudentExperienceUpdate[];
@@ -494,7 +510,8 @@ export type StudentRequirementInteractionType =
   | "upload_file"
   | "signature"
   | "payment"
-  | "scheduling";
+  | "scheduling"
+  | "ferpa";
 
 export interface StudentRequirementInputField {
   id: string;
@@ -675,6 +692,161 @@ export function documentCategoryForRequirement(
 export interface StudentRequirementList {
   items: StudentRequirementDetail[];
   total: number;
+}
+
+export type FerpaPortalScope =
+  | "dashboard"
+  | "enrollment"
+  | "financials"
+  | "classrooms"
+  | "campus_life"
+  | "edward"
+  | "documents"
+  | "messages"
+  | "appointments"
+  | "payments"
+  | "profile"
+  | "help";
+
+export type FerpaAccessDecision = "grant" | "no_access";
+
+export interface FerpaDelegateLinkState {
+  status: "not_issued" | "active" | "revoked";
+  issuedAt: string | null;
+  rotatedAt: string | null;
+  lastUsedAt: string | null;
+  updatedAt: string;
+}
+
+export interface StudentFerpaDelegate {
+  id: string;
+  fullName: string;
+  relationship:
+    | "parent"
+    | "guardian"
+    | "partner"
+    | "sponsor"
+    | "relative"
+    | "other";
+  email: string;
+  scopes: FerpaPortalScope[];
+  legacyReviewRequired?: boolean;
+  link: FerpaDelegateLinkState;
+}
+
+export interface StudentFerpaAuthorization {
+  id: string;
+  requirementId: string;
+  requirementVersion: number;
+  flowKind: "onboarding" | "enrollment";
+  status: "incomplete" | "completed";
+  accessDecision: FerpaAccessDecision | null;
+  document:
+    | { status: "unsigned" }
+    | {
+        status: "signed";
+        signedDocumentId: string;
+        title: string;
+        fileName: string;
+        signedAt: string;
+        signerName: string;
+        signatureMethod: "typed" | "drawn";
+      };
+  delegates: StudentFerpaDelegate[];
+  version: number;
+  completedAt: string | null;
+  updatedAt: string;
+  configuration: {
+    signatureProvider: "built_in" | "docusign";
+    docusignTemplateId: string | null;
+    portalScopes: FerpaPortalScope[];
+  };
+  capabilities: {
+    canSign: boolean;
+    canManageAccess: boolean;
+    canManageLinks: boolean;
+  };
+}
+
+export interface StudentFerpaAuthorizationEnvelope {
+  authorization: StudentFerpaAuthorization | null;
+}
+
+export interface FerpaDelegateInput {
+  id?: string;
+  fullName: string;
+  relationship: StudentFerpaDelegate["relationship"];
+  email: string;
+  scopes: FerpaPortalScope[];
+}
+
+export interface FerpaSignatureInput {
+  accepted: true;
+  signerName: string;
+  signatureMethod: "typed" | "drawn";
+  signatureImageData?: string;
+}
+
+export interface CompleteStudentFerpaInput {
+  expectedVersion: number;
+  signature?: FerpaSignatureInput;
+  accessDecision: FerpaAccessDecision;
+  delegates: FerpaDelegateInput[];
+}
+
+export interface UpdateStudentFerpaAccessInput {
+  expectedVersion: number;
+  accessDecision: FerpaAccessDecision;
+  delegates: FerpaDelegateInput[];
+}
+
+export interface FerpaLinkCommandInput {
+  expectedVersion: number;
+}
+
+export interface FerpaDelegateLinkIssueResult {
+  authorizationVersion: number;
+  delegateId: string;
+  status: "active";
+  token: string;
+  /** Relative portal URL. The bearer token is kept in the fragment. */
+  url: `/delegate#token=${string}`;
+  issuedAt: string;
+}
+
+export interface DelegateSession {
+  authenticated: true;
+  mode: "delegate";
+  actorType: "delegate";
+  delegate: {
+    id: string;
+    fullName: string;
+    relationship: string;
+    email: string;
+    studentId: string;
+    studentName: string;
+    studentPreferredName: string;
+    scopes: FerpaPortalScope[];
+  };
+  initialRoute:
+    | "/dashboard"
+    | "/enrollment"
+    | "/financials"
+    | "/classrooms"
+    | "/campus-life"
+    | "/edward"
+    | "/documents"
+    | "/messages"
+    | "/appointments"
+    | "/payments"
+    | "/profile"
+    | "/help";
+  capabilities: { canManageFerpa: false; canSignFerpa: false };
+  expiresAt: number;
+}
+
+export interface ExchangeDelegateLinkInput {
+  token: string;
 }
 
 export interface StudentMessage {
@@ -1530,7 +1702,8 @@ export interface StaffJourneyBlueprintItem {
     | "selection_flow"
     | "signature"
     | "payment"
-    | "scheduling";
+    | "scheduling"
+    | "ferpa";
   submissionType: "none" | "form" | "document" | "payment" | "appointment";
   selectionOptions?: string[];
   maximumSelections?: number | null;

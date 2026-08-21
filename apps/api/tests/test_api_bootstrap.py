@@ -86,6 +86,7 @@ def test_production_composition_fails_closed_for_demo_auth(tmp_path: Path) -> No
             "AUDENTRA_ENV": "production",
             "DATABASE_URL": "postgresql://example/prod",
             "DOCUMENT_WORKER_TOKEN": "x" * 40,
+            "FERPA_DELEGATE_LINK_SECRET": "test-ferpa-delegate-link-secret-at-least-32-bytes",
             "OBJECT_STORAGE_SECRET_KEY": "external-secret",
             "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
         },

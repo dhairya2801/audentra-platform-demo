@@ -28,6 +28,7 @@ LOCAL_DATABASE_URL = "postgresql://vv:vv_local_password@localhost:5432/vv_enroll
 LOCAL_WORKER_TOKEN = "local-development-document-worker-token"  # noqa: S105
 LOCAL_STORAGE_SECRET = "vv_minio_password"  # noqa: S105
 LOCAL_STAFF_INVITATION_CODE = "local-staff-invitation-2027"
+LOCAL_FERPA_DELEGATE_LINK_SECRET = "local-development-ferpa-delegate-link-secret-v1"  # noqa: S105
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +72,7 @@ class RuntimeSettings:
     voice: VoiceSettings | None
     onboarding_template_dir: Path
     assistant_trace_debug_enabled: bool = False
+    ferpa_delegate_link_secret: str = LOCAL_FERPA_DELEGATE_LINK_SECRET
 
     @classmethod
     def from_environment(
@@ -100,6 +102,14 @@ class RuntimeSettings:
             worker_token = LOCAL_WORKER_TOKEN
         if app_environment == "production" and len(worker_token) < 32:
             raise ValueError("DOCUMENT_WORKER_TOKEN must contain at least 32 characters")
+
+        ferpa_link_secret = values.get("FERPA_DELEGATE_LINK_SECRET", "").strip()
+        if not ferpa_link_secret:
+            if app_environment in {"preview", "production"}:
+                raise ValueError("FERPA_DELEGATE_LINK_SECRET is required in deployed environments")
+            ferpa_link_secret = LOCAL_FERPA_DELEGATE_LINK_SECRET
+        if len(ferpa_link_secret) < 32:
+            raise ValueError("FERPA_DELEGATE_LINK_SECRET must contain at least 32 characters")
 
         deployed_environment = app_environment in {"preview", "production"}
         staff_invitation_code = (
@@ -191,6 +201,7 @@ class RuntimeSettings:
             session_cookie_samesite=session_cookie_samesite,
             staff_invitation_code=staff_invitation_code,
             document_worker_token=worker_token,
+            ferpa_delegate_link_secret=ferpa_link_secret,
             demo_tenant_id=values.get("DEMO_TENANT_ID", "00000000-0000-7000-8000-000000000001"),
             demo_student_id=values.get("DEMO_STUDENT_ID", "00000000-0000-7000-8000-000000000101"),
             demo_actor_id=values.get("DEMO_ACTOR_ID", "00000000-0000-7000-8000-000000000100"),

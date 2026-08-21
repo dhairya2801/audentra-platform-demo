@@ -9,8 +9,14 @@ from uuid import UUID
 from fastapi import Depends, Header, Request
 
 from audentra.core.auth import AuthContext
+from audentra.core.delegate_authorization import authorize_delegate_route
 from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
-from audentra.core.ports import BrowserAuthService, PlatformService, ServiceCall
+from audentra.core.ports import (
+    BrowserAuthService,
+    DelegateBrowserAuthService,
+    PlatformService,
+    ServiceCall,
+)
 from audentra.infrastructure.voice import VoiceSessionServiceProtocol
 
 from .config import HttpSettings
@@ -106,6 +112,23 @@ async def get_auth_context(request: Request) -> AuthContext:
         if request.headers.get("x-demo-actor-type") != "staff":
             raise UnauthorizedError("Staff routes require the development staff identity header")
     else:
+        delegate_token = request.cookies.get("vv_delegate_session")
+        if delegate_token is not None:
+            delegate_session = await cast(
+                DelegateBrowserAuthService, auth_service
+            ).resolve_delegate(
+                delegate_token,
+                tenant_id,
+                tenant_slug,
+            )
+            if delegate_session is None:
+                raise UnauthorizedError("The parent or guardian session is invalid or has expired")
+            authorize_delegate_route(
+                delegate_session.context,
+                request.method,
+                request.url.path,
+            )
+            return delegate_session.context
         credential_token = request.cookies.get("vv_session")
         if credential_token is not None:
             student_session = await auth_service.resolve_student(

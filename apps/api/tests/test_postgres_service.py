@@ -72,7 +72,7 @@ def _onboarding(method: str, image_data: str | None = None) -> dict[str, Any]:
         "signatureConsent": True,
         "signatureFullName": "Alex Morgan",
         "signatureMethod": method,
-        "signedDocumentIds": ["ferpa_release"],
+        "signedDocumentIds": ["enrollment_acknowledgment"],
     }
     if image_data is not None:
         data["signatureImageData"] = image_data
@@ -120,7 +120,7 @@ def test_signed_generator_uses_default_aster_template_and_typed_signature() -> N
 def test_signed_generator_uses_injected_harvard_template_and_drawn_signature(
     tmp_path: Path,
 ) -> None:
-    source = Path("assets/onboarding/harvard-ferpa-release.pdf")
+    source = Path("assets/onboarding/harvard-enrollment-acknowledgment.pdf")
     (tmp_path / source.name).write_bytes(source.read_bytes())
     repository = FakeSignedRepository()
     storage = FakeStorage()

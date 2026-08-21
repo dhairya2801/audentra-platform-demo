@@ -487,6 +487,7 @@ def test_dispatch_routes_every_direct_operation_with_auth_and_contract_arguments
     expected_result: dict[str, object] = {"method": method}
     if operation == "student.get_bootstrap":
         expected_result["experienceUpdates"] = []
+        expected_result["actor"] = {"type": "student"}
     assert result == expected_result
     if payload and operation != "activity.ingest_batch":
         assert payload in routed.args or any(value in routed.args for value in payload.values())
