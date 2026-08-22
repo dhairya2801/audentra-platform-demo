@@ -1503,10 +1503,16 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
                         text(
                             """
                             SELECT definition.onboarding_required,
-                                   COUNT(link.requirement_definition_version_id) AS link_count
+                                   COUNT(link.requirement_definition_version_id) AS link_count,
+                                   array_agg(requirement.code ORDER BY requirement.code)
+                                     FILTER (
+                                       WHERE requirement.id IS NOT NULL
+                                     ) AS linked_codes
                             FROM journey_definition_version definition
                             LEFT JOIN journey_requirement_definition link
                               ON link.journey_definition_version_id=definition.id
+                            LEFT JOIN requirement_definition_version requirement
+                              ON requirement.id=link.requirement_definition_version_id
                             WHERE definition.tenant_id=CAST(:tenant_id AS uuid)
                               AND definition.active=1
                             GROUP BY definition.id
@@ -1519,7 +1525,8 @@ async def test_publications_materialize_into_student_facing_postgres_tables() ->
                 .one()
             )
         assert zero_active["onboarding_required"] is True
-        assert zero_active["link_count"] == 0
+        assert zero_active["link_count"] == 1
+        assert zero_active["linked_codes"] == ["family_permissions"]
     finally:
         try:
             await reset_relational_data(

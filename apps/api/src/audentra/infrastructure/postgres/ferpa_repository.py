@@ -1208,7 +1208,7 @@ class PostgresFerpaRepository:
                     """
                     SELECT current_definition.flow_kind,
                            current_definition.interaction_type
-                    FROM student_document document
+                    FROM document_record document
                     JOIN student_requirement requirement
                       ON requirement.id=document.requirement_id
                      AND requirement.tenant_id=document.tenant_id

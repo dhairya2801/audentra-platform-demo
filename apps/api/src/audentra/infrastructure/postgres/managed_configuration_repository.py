@@ -1320,33 +1320,39 @@ class PostgresManagedConfigurationRepository:
         await connection.execute(
             text(
                 """
-                INSERT INTO ferpa_authorization (id, tenant_id, student_id, requirement_id)
-                SELECT gen_random_uuid(), candidate.tenant_id, candidate.student_id,
-                       candidate.requirement_id
-                FROM (
+                WITH current_ferpa_tasks AS MATERIALIZED (
+                  SELECT current_definition.tenant_id,
+                         link.journey_definition_version_id,
+                         current_definition.code
+                  FROM requirement_definition_version current_definition
+                  JOIN journey_requirement_definition link
+                    ON link.requirement_definition_version_id=current_definition.id
+                  WHERE current_definition.tenant_id=:tenant_id
+                    AND current_definition.interaction_type='ferpa'
+                ), candidate AS (
                   SELECT DISTINCT ON (requirement.tenant_id, journey.student_id)
                          requirement.tenant_id, journey.student_id,
                          requirement.id AS requirement_id
-                  FROM student_requirement requirement
+                  FROM current_ferpa_tasks current_task
                   JOIN enrollment_journey journey
-                    ON journey.id=requirement.journey_id
-                   AND journey.tenant_id=requirement.tenant_id
+                    ON journey.tenant_id=current_task.tenant_id
+                   AND journey.journey_definition_version_id=
+                       current_task.journey_definition_version_id
                   JOIN requirement_definition_version evidence_definition
-                    ON evidence_definition.id=requirement.requirement_definition_version_id
-                   AND evidence_definition.tenant_id=requirement.tenant_id
-                  JOIN journey_requirement_definition current_link
-                    ON current_link.journey_definition_version_id=
-                       journey.journey_definition_version_id
-                  JOIN requirement_definition_version current_definition
-                    ON current_definition.id=current_link.requirement_definition_version_id
-                   AND current_definition.tenant_id=requirement.tenant_id
-                   AND current_definition.code=evidence_definition.code
-                  WHERE requirement.tenant_id=:tenant_id
-                    AND requirement.retired_at IS NULL
-                    AND current_definition.interaction_type='ferpa'
+                    ON evidence_definition.tenant_id=journey.tenant_id
+                   AND evidence_definition.code=current_task.code
+                  JOIN student_requirement requirement
+                    ON requirement.tenant_id=journey.tenant_id
+                   AND requirement.journey_id=journey.id
+                   AND requirement.requirement_definition_version_id=evidence_definition.id
+                  WHERE requirement.retired_at IS NULL
                   ORDER BY requirement.tenant_id, journey.student_id,
                            requirement.created_at DESC, requirement.id DESC
-                ) candidate
+                )
+                INSERT INTO ferpa_authorization (id, tenant_id, student_id, requirement_id)
+                SELECT gen_random_uuid(), candidate.tenant_id, candidate.student_id,
+                       candidate.requirement_id
+                FROM candidate
                 ON CONFLICT (tenant_id, student_id) DO UPDATE SET
                   requirement_id=EXCLUDED.requirement_id,
                   version=ferpa_authorization.version+1, updated_at=NOW()

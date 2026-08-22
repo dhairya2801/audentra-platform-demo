@@ -275,7 +275,7 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 assert bootstrap.json()["initialRoute"] == "/dashboard"
                 requirements = await completed_client.get("/v1/student/requirements")
                 assert requirements.status_code == 200, requirements.text
-                assert len(requirements.json()["items"]) == 8
+                assert len(requirements.json()["items"]) == 9
 
                 harvard = await completed_client.get(
                     "/v1/student/bootstrap",
