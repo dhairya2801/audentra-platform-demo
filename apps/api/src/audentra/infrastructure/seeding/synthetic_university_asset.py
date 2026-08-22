@@ -15,7 +15,7 @@ from typing import Final
 ASSET_RELATIVE_PATH: Final = "demo/synthetic-university-v1.json.gz"
 
 #: SHA-256 of the *compressed* archive exactly as written to disk.
-ASSET_SHA256: Final = "c4b04c0e57a34708b19d80b316006f9b6a35a5eb8601cb2dc818bb0802b8cc3a"
+ASSET_SHA256: Final = "7711cd2a3f74fef99299e3921085723a94f8a6311dd3431466a1efc6e51238ca"
 
 #: Byte length of the compressed archive.
 ASSET_SIZE_BYTES: Final = 3397599
