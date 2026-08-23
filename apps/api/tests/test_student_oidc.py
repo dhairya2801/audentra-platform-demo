@@ -4,7 +4,7 @@ import hashlib
 import secrets
 import time
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
@@ -107,6 +107,8 @@ class SessionBrowserAuth(UnavailableBrowserAuthService):
     ) -> StaffSession | None:
         if tenant_id != TENANT_ID or tenant_slug != "aster":
             return None
+        authentication_method: Literal["credentials", "oidc"]
+        identity_provider: Literal["microsoft"] | None
         if token == OLD_STAFF_SESSION_TOKEN:
             authentication_method = "credentials"
             identity_provider = None
