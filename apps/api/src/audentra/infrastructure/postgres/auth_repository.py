@@ -9,7 +9,7 @@ import secrets
 import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -39,16 +39,27 @@ class PostgresDevelopmentAuth:
         *,
         environment: str,
         staff_invitation_code: str,
+        development_flows_enabled: bool = True,
     ) -> None:
-        if environment not in {"development", "preview", "test"}:
+        if environment not in {"development", "preview", "test"} and development_flows_enabled:
             raise ValueError("The development authentication adapter is disabled in production")
-        if not staff_invitation_code:
+        if development_flows_enabled and not staff_invitation_code:
             raise ValueError("A private staff invitation code is required")
         self._engine = engine
         self._environment = environment
         self._staff_invitation_code = staff_invitation_code
+        self._development_flows_enabled = development_flows_enabled
+
+    def _require_development_flows(self) -> None:
+        if not self._development_flows_enabled:
+            raise ApiError(
+                404,
+                "DEVELOPMENT_AUTH_DISABLED",
+                "Development authentication is not available",
+            )
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
+        self._require_development_flows()
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -91,6 +102,7 @@ class PostgresDevelopmentAuth:
         tenant that has not opted into demo identities has none.
         """
 
+        self._require_development_flows()
         candidate = reference.strip()
         if not candidate or len(candidate) > 64:
             raise ApiError(
@@ -160,7 +172,8 @@ class PostgresDevelopmentAuth:
                            account.email_normalized, account.phone_e164,
                            account.email_verified_at, account.phone_verified_at,
                            student.person_id, onboarding.status AS onboarding_status,
-                           profile.preferred_name, session.expires_at
+                           profile.preferred_name, session.expires_at,
+                           session.authentication_method, session.identity_provider
                     FROM auth_session session
                     JOIN credential_account account ON account.id=session.account_id
                     JOIN student ON student.id=account.student_id
@@ -204,6 +217,7 @@ class PostgresDevelopmentAuth:
         phone: str,
         password: str,
     ) -> CredentialStudentSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         password_hash = await asyncio.to_thread(_hash_password, password)
         now = datetime.now(UTC)
@@ -345,6 +359,7 @@ class PostgresDevelopmentAuth:
         email: str,
         password: str,
     ) -> CredentialStudentSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -485,6 +500,7 @@ class PostgresDevelopmentAuth:
         password: str,
         institution_access_code: str,
     ) -> StaffSession:
+        self._require_development_flows()
         invitation_matches = secrets.compare_digest(
             hashlib.sha256(institution_access_code.encode("utf-8")).digest(),
             hashlib.sha256(self._staff_invitation_code.encode("utf-8")).digest(),
@@ -585,6 +601,7 @@ class PostgresDevelopmentAuth:
         email: str,
         password: str,
     ) -> StaffSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -828,6 +845,7 @@ class PostgresDevelopmentAuth:
             )
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None:
+        self._require_development_flows()
         await reset_relational_data(
             self._engine,
             environment=self._environment,
@@ -1084,13 +1102,18 @@ def _credential_session(
     expires_at_epoch: int | None = None,
 ) -> CredentialStudentSession:
     preferred = row.get("preferred_name")
+    authentication_method = str(row.get("authentication_method") or "credentials")
+    identity_provider = row.get("identity_provider")
     return CredentialStudentSession(
         context=AuthContext(
             tenant_id=tenant_id,
             student_id=str(row["student_id"]),
             actor_id=str(row["person_id"]),
             actor_type="student",
-            authentication_method="credentials",
+            authentication_method=("oidc" if authentication_method == "oidc" else "credentials"),
+            identity_provider=(
+                cast(Any, str(identity_provider)) if identity_provider is not None else None
+            ),
             tenant_slug=tenant_slug,
         ),
         preferred_name=(

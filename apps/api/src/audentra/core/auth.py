@@ -12,5 +12,6 @@ class AuthContext:
     student_id: str
     actor_id: str
     actor_type: Literal["student", "staff"]
-    authentication_method: Literal["demo", "credentials", "google", "microsoft"] = "demo"
+    authentication_method: Literal["demo", "credentials", "oidc", "google", "microsoft"] = "demo"
+    identity_provider: Literal["google", "microsoft"] | None = None
     tenant_slug: str | None = None

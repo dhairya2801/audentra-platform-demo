@@ -28,6 +28,7 @@ def test_oauth_callback_access_log_filter_removes_code_state_and_error_values() 
     )
 
     assert OAuthCallbackAccessLogFilter().filter(record)
+    assert isinstance(record.args, tuple)
     assert record.args[2] == "/v1/auth/staff/sso/google/callback"
     assert "secret-code" not in record.getMessage()
     assert "secret-state" not in record.getMessage()

@@ -62,7 +62,7 @@ def test_oauth_migration_binds_state_to_expected_tenant() -> None:
     migration = (
         __import__("pathlib").Path(__file__).parents[1]
         / "migrations"
-        / "0040_staff_sso_and_email.sql"
+        / "0041_staff_sso_and_email.sql"
     ).read_text(encoding="utf-8")
     assert "state_hash char(64) NOT NULL UNIQUE" in migration
     assert "tenant_id uuid NOT NULL REFERENCES tenant(id)" in migration
@@ -74,7 +74,7 @@ def test_email_intent_migration_binds_interactions_to_the_same_tenant_student() 
     migration = (
         __import__("pathlib").Path(__file__).parents[1]
         / "migrations"
-        / "0040_staff_sso_and_email.sql"
+        / "0041_staff_sso_and_email.sql"
     ).read_text(encoding="utf-8")
     assert "student_tenant_id_key UNIQUE (tenant_id, id)" in migration
     assert "staff_interaction_tenant_student_id_key UNIQUE (tenant_id, id, student_id)" in migration

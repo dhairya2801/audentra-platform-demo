@@ -1,7 +1,7 @@
 # Current implementation map
 
 This document describes what the repository actually implements as of
-2026-08-02. It complements the design documents by distinguishing the
+2026-08-19. It complements the design documents by distinguishing the
 production-oriented FastAPI path from development-only preview tooling and
 from integrations that remain planned.
 
@@ -54,7 +54,7 @@ Text fallback:
 | Primary state | PostgreSQL 17 | Account-isolated JSON files |
 | Document bytes | MinIO/managed S3-compatible adapter | Ignored local development directory |
 | Async processing | `audentra-worker` outbox consumer from the shared Python image | Recoverable in-process job queue |
-| Authentication | Demo adapter only; production fails closed | Development credential signup/sign-in and hashed sessions |
+| Authentication | Development-only demo adapter or student-only Google/Microsoft OIDC proof | Development credential signup/sign-in and hashed sessions |
 | AI providers | Python OpenRouter and Groq adapters | Node OpenRouter and Groq adapters |
 | Deployment | Compose locally; independent API/worker roles in production | Development process only |
 | Intended use | Target production integration path (identity-gated) | Synthetic-data compatibility preview |
@@ -147,11 +147,13 @@ Security properties:
 Email and SMS verification state is modeled, but delivery providers are not yet
 connected.
 
-The FastAPI composition currently has no credential sign-up route and only
-supports `AUTH_MODE=demo`. `AUDENTRA_ENV=production` rejects that mode at
-startup. An institutional OIDC/SAML identity adapter, session integration, and
-authorization tests are mandatory before production; local Keycloak is an
-integration target, not an active production-auth implementation.
+The FastAPI composition supports `AUTH_MODE=demo` for development/test and
+`AUTH_MODE=oidc` for a student-only Google/Microsoft proof. OIDC uses
+authorization code plus PKCE, tenant-scoped stable provider identities, and
+hashed opaque sessions for existing accounts; it does not create students.
+Credential routes and staff authentication fail closed in OIDC mode, so staff,
+leader, and VP authentication is intentionally unavailable. Hosted use also
+requires the public-edge and callback-log controls in the student SSO runbook.
 
 ### 4.2 Enrollment requirement
 
@@ -279,7 +281,7 @@ a mobile bottom navigation pattern.
 
 | Concern | Current owner | Notes |
 |---|---|---|
-| Credential account/session | Identity | Preview credentials only; institutional adapter pending |
+| Credential account/session | Identity | Hashed demo sessions plus tenant-scoped student OIDC identities/sessions; non-student federation pending |
 | Onboarding answers | Onboarding | Versioned and student-editable |
 | Admission offer | Admissions | Eventually synchronized from CRM |
 | Enrollment requirement state | Enrollment | Deterministic server transitions |
@@ -301,8 +303,8 @@ Implemented:
   pools, statement timeouts, and PostgreSQL-backed readiness;
 - a headless Python outbox worker with leases, idempotent receipts, retries,
   dead-letter behavior, and graceful shutdown;
-- preview credential accounts and a production-oriented identity schema (but no
-  production identity adapter);
+- preview credential accounts plus a student-only Google/Microsoft OIDC proof
+  with PKCE, stable tenant-scoped identities, and hashed opaque sessions;
 - resumable one-time onboarding;
 - enrollment actions in their requirement pages;
 - multiple file uploads, durable originals, parsing, retry, and review;
@@ -318,8 +320,9 @@ Implemented:
 
 Not yet production-complete:
 
-- institutional OIDC/SAML and invitation delivery; production currently fails
-  closed while only `AUTH_MODE=demo` exists;
+- institution-wide OIDC/SAML, staff/leader/VP authentication, account
+  provisioning/invitations, and hosted callback-log controls beyond the
+  current student proof;
 - migration or explicit contract removal of development-preview routes outside
   the 42-operation FastAPI compatibility set;
 - real email/SMS verification;

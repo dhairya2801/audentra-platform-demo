@@ -10,6 +10,7 @@ from fastapi import Depends, Header, Request
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
+from audentra.core.oidc import OidcAuthService
 from audentra.core.ports import BrowserAuthService, PlatformService, ServiceCall
 from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
 from audentra.infrastructure.voice import VoiceSessionServiceProtocol
@@ -39,6 +40,10 @@ def get_staff_email_service(request: Request) -> PostgresStaffEmailService:
     return cast(PostgresStaffEmailService, service)
 
 
+def get_oidc_auth_service(request: Request) -> OidcAuthService:
+    return cast(OidcAuthService, request.app.state.oidc_auth_service)
+
+
 def _valid_uuid(value: str) -> bool:
     try:
         UUID(value)
@@ -49,8 +54,20 @@ def _valid_uuid(value: str) -> bool:
 
 async def resolve_request_tenant(request: Request) -> tuple[str, str | None]:
     settings = get_settings(request)
-    explicit_tenant_id = request.headers.get("x-demo-tenant-id")
-    tenant_id = explicit_tenant_id or settings.demo_tenant_id
+    # Deployed OIDC is currently a single-server-configured-tenant proof. Never
+    # let a browser select its authentication tenant with a demo header.
+    explicit_tenant_id = None
+    if settings.auth_mode == "oidc":
+        tenant_id = settings.oidc_tenant_id
+        if tenant_id is None:
+            raise ApiError(
+                503,
+                "OIDC_TENANT_NOT_CONFIGURED",
+                "The institutional sign-in tenant is not configured",
+            )
+    else:
+        explicit_tenant_id = request.headers.get("x-demo-tenant-id")
+        tenant_id = explicit_tenant_id or settings.demo_tenant_id
     if not _valid_uuid(tenant_id):
         raise UnauthorizedError("Demo identity headers must be valid UUIDs")
 
@@ -108,6 +125,15 @@ async def get_auth_context(request: Request) -> AuthContext:
             )
             if staff_session is None:
                 raise UnauthorizedError("The staff session is invalid or has expired")
+            # `AUTH_MODE=oidc` governs student sign-in.  Staff federation can
+            # be configured independently, so do not reject a valid staff
+            # session solely because students use institutional sign-in.  Old
+            # password-backed staff sessions still cannot cross that boundary.
+            if (
+                settings.auth_mode == "oidc"
+                and staff_session.context.authentication_method == "credentials"
+            ):
+                raise UnauthorizedError("The staff session must use institutional sign-in")
             return staff_session.context
         if settings.browser_auth_required:
             raise UnauthorizedError("Staff authentication is required")
@@ -123,29 +149,37 @@ async def get_auth_context(request: Request) -> AuthContext:
             )
             if student_session is None:
                 raise UnauthorizedError("The student session is invalid or has expired")
+            if (
+                settings.auth_mode == "oidc"
+                and student_session.context.authentication_method != "oidc"
+            ):
+                raise UnauthorizedError("The student session must use institutional sign-in")
             return student_session.context
 
         demo_token = request.cookies.get("vv_demo_session")
-        if demo_token is not None:
+        if (
+            demo_token is not None
+            and settings.auth_mode == "demo"
+            and settings.environment != "production"
+        ):
             if not secrets.compare_digest(demo_token, settings.demo_session_token):
                 raise UnauthorizedError("The student session is invalid or has expired")
-            if settings.environment != "production":
-                chosen_student = read_demo_student_cookie(
-                    settings.demo_session_token,
-                    tenant_id,
-                    request.cookies.get(DEMO_STUDENT_COOKIE),
-                )
-                if chosen_student is not None:
-                    # Resolved through the repository, not trusted from the
-                    # cookie: the signature says which student was chosen, the
-                    # query says whether that student is this tenant's to open.
-                    return (
-                        await auth_service.demo_student_by_reference(
-                            tenant_id, tenant_slug, chosen_student
-                        )
-                    ).context
+            chosen_student = read_demo_student_cookie(
+                settings.demo_session_token,
+                tenant_id,
+                request.cookies.get(DEMO_STUDENT_COOKIE),
+            )
+            if chosen_student is not None:
+                # Resolved through the repository, not trusted from the
+                # cookie: the signature says which student was chosen, the
+                # query says whether that student is this tenant's to open.
+                return (
+                    await auth_service.demo_student_by_reference(
+                        tenant_id, tenant_slug, chosen_student
+                    )
+                ).context
             return (await auth_service.demo_student(tenant_id, tenant_slug)).context
-        if settings.browser_auth_required:
+        if settings.browser_auth_required or settings.auth_mode == "oidc":
             raise UnauthorizedError("Student authentication is required")
 
     student_id = request.headers.get("x-demo-student-id")
@@ -241,6 +275,7 @@ def get_voice_session_service(request: Request) -> VoiceSessionServiceProtocol:
 
 AuthDependency = Annotated[AuthContext, Depends(get_auth_context)]
 AuthServiceDependency = Annotated[BrowserAuthService, Depends(get_browser_auth_service)]
+OidcAuthServiceDependency = Annotated[OidcAuthService, Depends(get_oidc_auth_service)]
 ServiceDependency = Annotated[PlatformService, Depends(get_platform_service)]
 IdempotencyDependency = Annotated[str, Depends(require_idempotency_key)]
 WorkerTokenDependency = Annotated[None, Depends(require_worker_token)]
