@@ -233,16 +233,63 @@ def _list(value: object) -> list[Any]:
 
 
 def _map_onboarding(row: Mapping[str, Any]) -> JsonDict:
+    payload = _mapping(row["payload"])
+    contacts = _normalized_emergency_contacts(payload.get("emergencyContacts"))
+    if contacts:
+        payload["emergencyContacts"] = contacts
     return {
         "studentId": str(row["student_id"]),
         "status": row["status"],
         "currentStep": row["current_step"],
         "completedSteps": _list(row["completed_steps"]),
-        "data": _mapping(row["payload"]),
+        "data": payload,
         "version": int(row["version"]),
         "completedAt": _nullable_iso(row["completed_at"]),
         "updatedAt": _iso(row["updated_at"]),
     }
+
+
+def _normalized_emergency_contacts(value: object) -> list[JsonDict]:
+    """Project historic contact spellings into the single portal shape.
+
+    Older seed/import payloads used ``name``/``phone`` while the current
+    onboarding form writes ``fullName``/``mobilePhone``.  Returning one shape
+    lets FERPA safely offer saved parents and guardians without silently
+    copying a person into an authorization.
+    """
+
+    valid_relationships = {
+        "parent",
+        "guardian",
+        "partner",
+        "sibling",
+        "relative",
+        "friend",
+        "other",
+    }
+    contacts: list[JsonDict] = []
+    for raw in _list(value):
+        if not isinstance(raw, Mapping):
+            continue
+        full_name = str(
+            raw.get("fullName") or raw.get("full_name") or raw.get("name") or ""
+        ).strip()
+        mobile_phone = str(
+            raw.get("mobilePhone") or raw.get("mobile_phone") or raw.get("phone") or ""
+        ).strip()
+        relationship = str(raw.get("relationship") or "other")
+        if not full_name or relationship not in valid_relationships:
+            continue
+        contact: JsonDict = {
+            "fullName": full_name,
+            "relationship": relationship,
+            "mobilePhone": mobile_phone,
+        }
+        email = raw.get("email")
+        if isinstance(email, str) and email.strip():
+            contact["email"] = email.strip().lower()
+        contacts.append(contact)
+    return contacts
 
 
 def _onboarding_screen_configurations(document: Mapping[str, Any]) -> JsonDict:
@@ -854,6 +901,11 @@ class PostgresPortalRepository:
         if auth.actor_type != "student":
             raise ApiError(403, "STUDENT_ACCESS_REQUIRED", "Student access is required")
 
+    @staticmethod
+    def _require_student_or_delegate(auth: AuthContext) -> None:
+        if auth.actor_type not in {"student", "delegate"}:
+            raise ApiError(403, "STUDENT_ACCESS_REQUIRED", "Student access is required")
+
     async def _all(self, statement: str, params: Mapping[str, Any]) -> list[JsonDict]:
         async with self.engine.connect() as connection:
             result = await connection.execute(text(statement), dict(params))
@@ -864,8 +916,9 @@ class PostgresPortalRepository:
         return rows[0] if rows else None
 
     async def get_student_bootstrap(self, auth: AuthContext) -> JsonDict:
-        async with self.engine.begin() as connection:
-            await self._reconcile_authoritative_rewards(connection, auth)
+        if not auth.is_delegate:
+            async with self.engine.begin() as connection:
+                await self._reconcile_authoritative_rewards(connection, auth)
         row = await self._one(
             """
             SELECT s.id AS student_id,
@@ -925,9 +978,10 @@ class PostgresPortalRepository:
             "initialRoute": "/onboarding" if required else "/dashboard",
             "generatedAt": _iso(_utc_now()),
         }
-        rewards = await self._get_reward_summary(auth)
-        if rewards:
-            response["rewards"] = rewards
+        if not auth.is_delegate:
+            rewards = await self._get_reward_summary(auth)
+            if rewards:
+                response["rewards"] = rewards
         return response
 
     async def get_student_onboarding(self, auth: AuthContext) -> JsonDict:
@@ -2065,6 +2119,7 @@ class PostgresPortalRepository:
               SELECT storage_key, file_name, mime_type, 2 AS priority
               FROM student_signed_document WHERE tenant_id=:tenant_id
                 AND student_id=:student_id AND id=:document_id
+                AND template_code<>'ferpa_release'
             ) reference ORDER BY priority LIMIT 1
             """,
             {
@@ -2891,6 +2946,7 @@ class PostgresPortalRepository:
                    signed_at, created_at
             FROM student_signed_document
             WHERE tenant_id=:tenant_id AND student_id=:student_id
+              AND template_code<>'ferpa_release'
             ORDER BY signed_at DESC, id
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
@@ -3587,7 +3643,8 @@ class PostgresPortalRepository:
                    ca.email_normalized AS email,
                    ca.email_verified_at IS NOT NULL AS email_verified,
                    ca.phone_verified_at IS NOT NULL AS phone_verified,
-                   sp.pronouns, sp.mobile_phone, sp.communication_preference,
+                   sp.pronouns, COALESCE(sp.mobile_phone, ca.phone_e164) AS mobile_phone,
+                   sp.communication_preference,
                    sp.version, sp.updated_at
             FROM student_profile sp
             JOIN student s ON s.id=sp.student_id AND s.tenant_id=sp.tenant_id
@@ -4380,7 +4437,7 @@ class PostgresPortalRepository:
         idempotency_key: str,
         request_id: str,
     ) -> JsonDict:
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
 
         async def handler(connection: AsyncConnection) -> JsonDict:
             event_result = await connection.execute(
@@ -6284,7 +6341,7 @@ class PostgresPortalRepository:
                   correlation_id, metadata
                 ) VALUES (
                   :id, :tenant_id, :actor_type, :actor_id, :student_id, :action,
-                  :resource_type, :resource_id, 'student_self_service', :request_id,
+                  :resource_type, :resource_id, :authorization_basis, :request_id,
                   :request_id, CAST(:metadata AS jsonb)
                 )
                 """
@@ -6298,6 +6355,9 @@ class PostgresPortalRepository:
                 "action": action,
                 "resource_type": resource_type,
                 "resource_id": resource_id,
+                "authorization_basis": (
+                    "ferpa_delegation" if auth.is_delegate else "student_self_service"
+                ),
                 "request_id": request_id,
                 "metadata": _json(metadata),
             },
@@ -7408,7 +7468,7 @@ class PostgresPortalRepository:
         page_path: str | None = None,
         page_label: str | None = None,
     ) -> JsonDict:
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
         conversation_id = str(uuid4())
         async with self.engine.begin() as connection:
             row = (
@@ -7450,7 +7510,7 @@ class PostgresPortalRepository:
     async def get_assistant_conversation_messages(
         self, auth: AuthContext, conversation_id: str
     ) -> JsonDict:
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
         conversation = await self._one(
             """
             SELECT id FROM assistant_conversation
@@ -7487,7 +7547,7 @@ class PostgresPortalRepository:
     ) -> list[dict[str, str]]:
         """Return bounded durable history for an owned conversation, oldest first."""
 
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
         rows = await self._all(
             """
             SELECT role, content FROM assistant_message
@@ -7512,7 +7572,7 @@ class PostgresPortalRepository:
     ) -> JsonDict | None:
         """Replay support: the stored assistant turn for a retried user send."""
 
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
         async with self.engine.connect() as connection:
             return await self._find_assistant_exchange_on_connection(
                 connection, auth, client_message_id
@@ -7594,7 +7654,7 @@ class PostgresPortalRepository:
     ) -> JsonDict:
         """Persist one user/assistant exchange, opening a conversation if needed."""
 
-        self._require_student(auth)
+        self._require_student_or_delegate(auth)
         user_id = str(uuid4())
         assistant_id = str(uuid4())
         client_message_id = user_message.get("clientMessageId")

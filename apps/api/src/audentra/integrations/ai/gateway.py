@@ -871,6 +871,14 @@ class StudentAIGateway:
                                                     None,
                                                 ],
                                             },
+                                            "externalRef": {
+                                                "type": ["string", "null"],
+                                                "maxLength": 64,
+                                            },
+                                            "topic": {
+                                                "type": ["string", "null"],
+                                                "maxLength": 80,
+                                            },
                                         },
                                         "required": [
                                             "query",
@@ -881,6 +889,8 @@ class StudentAIGateway:
                                             "ownership",
                                             "component",
                                             "dueWindow",
+                                            "externalRef",
+                                            "topic",
                                         ],
                                     },
                                 },

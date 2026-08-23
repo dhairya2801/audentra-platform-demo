@@ -279,7 +279,7 @@ def test_every_imported_student_has_a_coherent_spine(seeded_url: str) -> None:
         )
         assert orphans == 0
 
-        # Eight canonical requirements per journey, none retired.
+        # Nine canonical requirements per journey, including FERPA, none retired.
         odd = await _scalar(
             harness.engine,
             """
@@ -290,7 +290,7 @@ def test_every_imported_student_has_a_coherent_spine(seeded_url: str) -> None:
                 ON r.journey_id = j.id AND r.retired_at IS NULL
               WHERE j.tenant_id = CAST(:t AS uuid)
               GROUP BY j.id
-            ) counts WHERE total <> 8
+            ) counts WHERE total <> 9
             """,
             t=SYNTHETIC_TENANT_ID,
         )

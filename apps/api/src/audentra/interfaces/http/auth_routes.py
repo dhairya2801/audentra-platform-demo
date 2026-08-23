@@ -1,15 +1,17 @@
-"""Development browser-auth compatibility endpoints."""
+"""Browser authentication endpoints for local credentials and student OIDC."""
 
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from audentra.contracts.requests import (
     DemoStudentSignInRequest,
     EmptyBody,
+    ExchangeDelegateLinkRequest,
     StaffSignInRequest,
     StaffSignUpRequest,
     StartGuidedOnboardingRequest,
@@ -18,24 +20,37 @@ from audentra.contracts.requests import (
 )
 from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.errors import ApiError
-from audentra.core.ports import CredentialStudentSession, DemoStudentSession, StaffSession
+from audentra.core.oidc import OidcErrorCode, OidcFlowError
+from audentra.core.ports import (
+    CredentialStudentSession,
+    DelegateBrowserAuthService,
+    DelegateSession,
+    DemoStudentSession,
+    StaffSession,
+)
 
 from .demo_identity import DEMO_STUDENT_COOKIE, issue_demo_student_cookie
 from .dependencies import (
     AuthServiceDependency,
+    OidcAuthServiceDependency,
     get_settings,
     resolve_request_tenant,
 )
 
 auth_router = APIRouter(
     responses={
-        status_code: {"model": ApiErrorEnvelope} for status_code in (400, 401, 404, 409, 500, 503)
+        status_code: {"model": ApiErrorEnvelope}
+        for status_code in (400, 401, 403, 404, 409, 500, 503)
     }
 )
 
+OIDC_BINDING_COOKIE = "vv_oidc_binding"
+OIDC_SECURE_BINDING_COOKIE = "__Host-vv_oidc_binding"
+
 
 def _development_only(request: Request) -> None:
-    if get_settings(request).environment == "production":
+    settings = get_settings(request)
+    if settings.environment == "production" or settings.auth_mode != "demo":
         raise ApiError(
             404,
             "DEVELOPMENT_AUTH_DISABLED",
@@ -136,7 +151,7 @@ def _credential_response(session: CredentialStudentSession) -> dict[str, Any]:
 def _staff_response(session: StaffSession) -> dict[str, Any]:
     return {
         "authenticated": True,
-        "mode": "credentials",
+        "mode": session.context.authentication_method,
         "actorType": "staff",
         "staff": {
             "id": session.context.actor_id,
@@ -144,11 +159,227 @@ def _staff_response(session: StaffSession) -> dict[str, Any]:
             "email": session.email,
             "component": session.component,
         },
-        "notice": (
-            "Authenticated local staff session. Institutional deployments should replace this "
-            "adapter with university SSO while preserving the same role boundary."
-        ),
+        "notice": "Authenticated tenant-scoped staff session.",
     }
+
+
+def _delegate_response(session: DelegateSession) -> dict[str, Any]:
+    routes = {
+        "dashboard": "/dashboard",
+        "enrollment": "/enrollment",
+        "financials": "/financials",
+        "classrooms": "/classrooms",
+        "campus_life": "/campus-life",
+        "edward": "/edward",
+        "documents": "/documents",
+        "messages": "/messages",
+        "appointments": "/appointments",
+        "payments": "/payments",
+        "profile": "/profile",
+        "help": "/help",
+    }
+    initial_route = next(
+        (route for scope, route in routes.items() if scope in session.context.delegate_scopes),
+        "/help",
+    )
+    return {
+        "authenticated": True,
+        "mode": "delegate",
+        "actorType": "delegate",
+        "delegate": {
+            "id": session.context.actor_id,
+            "fullName": session.full_name,
+            "relationship": session.relationship,
+            "email": session.email,
+            "studentId": session.context.student_id,
+            "studentName": session.student_name,
+            "studentPreferredName": session.student_preferred_name,
+            "scopes": sorted(session.context.delegate_scopes),
+        },
+        "initialRoute": initial_route,
+        "capabilities": {"canManageFerpa": False, "canSignFerpa": False},
+        "expiresAt": session.expires_at_epoch,
+    }
+
+
+@auth_router.post("/v1/auth/delegate/exchange", status_code=200, response_model=None)
+async def exchange_delegate_link(
+    body: ExchangeDelegateLinkRequest,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    session = await cast(DelegateBrowserAuthService, auth).exchange_delegate(
+        body.token, tenant_id, tenant_slug
+    )
+    if session.token is None or session.expires_at_epoch is None:
+        raise ApiError(500, "AUTH_SESSION_FAILED", "The delegate session could not be created")
+    _set_session_cookie(
+        response,
+        request,
+        name="vv_delegate_session",
+        token=session.token,
+        expires_at_epoch=session.expires_at_epoch,
+    )
+    return _delegate_response(session)
+
+
+@auth_router.get("/v1/auth/delegate/session", status_code=200, response_model=None)
+async def get_delegate_session(
+    request: Request,
+    auth: AuthServiceDependency,
+) -> object:
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    token = request.cookies.get("vv_delegate_session")
+    session = await cast(DelegateBrowserAuthService, auth).resolve_delegate(
+        token or "", tenant_id, tenant_slug
+    )
+    if session is None:
+        raise ApiError(401, "UNAUTHORIZED", "The parent or guardian session has expired")
+    return _delegate_response(session)
+
+
+@auth_router.post("/v1/auth/delegate/sign-out", status_code=200, response_model=None)
+async def sign_out_delegate(
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    await cast(DelegateBrowserAuthService, auth).sign_out_delegate(
+        request.cookies.get("vv_delegate_session")
+    )
+    _expire_cookie(response, request, "vv_delegate_session")
+    return {"authenticated": False, "mode": "delegate"}
+
+
+def _oidc_binding_cookie_name(request: Request) -> str:
+    return (
+        OIDC_SECURE_BINDING_COOKIE if get_settings(request).secure_cookies else OIDC_BINDING_COOKIE
+    )
+
+
+def _portal_url(request: Request, path: str) -> str:
+    base_url = get_settings(request).oidc_portal_base_url
+    return f"{base_url}{path}" if base_url else path
+
+
+def _protect_sso_response(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+def _sso_error(request: Request, code: OidcErrorCode) -> RedirectResponse:
+    response = RedirectResponse(
+        url=_portal_url(request, f"/sign-in?sso_error={code}"),
+        status_code=303,
+    )
+    _protect_sso_response(response)
+    return response
+
+
+@auth_router.get("/v1/auth/sso/providers", status_code=200, response_model=None)
+async def sso_providers(
+    request: Request,
+    response: Response,
+    oidc: OidcAuthServiceDependency,
+) -> object:
+    _protect_sso_response(response)
+    settings = get_settings(request)
+    return {
+        "providers": [
+            {"id": provider.id, "label": provider.label}
+            for provider in (oidc.providers() if settings.auth_mode == "oidc" else ())
+        ],
+        "passwordEnabled": settings.auth_mode == "demo",
+    }
+
+
+@auth_router.get("/v1/auth/sso/{provider}/start", response_model=None)
+async def start_sso(
+    provider: str,
+    request: Request,
+    oidc: OidcAuthServiceDependency,
+    return_to: str = Query("/dashboard", alias="returnTo"),
+) -> Response:
+    if get_settings(request).auth_mode != "oidc":
+        return _sso_error(request, "invalid_request")
+    try:
+        tenant_id, _tenant_slug = await resolve_request_tenant(request)
+        start = await oidc.start(
+            provider=provider,
+            tenant_id=tenant_id,
+            return_to=return_to,
+        )
+    except OidcFlowError as error:
+        return _sso_error(request, error.code)
+    except Exception:
+        return _sso_error(request, "invalid_request")
+    response = RedirectResponse(start.authorization_url, status_code=307)
+    response.set_cookie(
+        key=_oidc_binding_cookie_name(request),
+        value=start.binding_token,
+        max_age=max(0, start.expires_at_epoch - int(time.time())),
+        expires=start.expires_at_epoch,
+        path="/",
+        secure=get_settings(request).secure_cookies,
+        httponly=True,
+        samesite="lax",
+    )
+    return _protect_sso_response(response)
+
+
+@auth_router.get("/v1/auth/sso/{provider}/callback", response_model=None)
+async def complete_sso(
+    provider: str,
+    request: Request,
+    oidc: OidcAuthServiceDependency,
+    auth: AuthServiceDependency,
+    state: str | None = Query(None),
+    code: str | None = Query(None),
+    provider_error: str | None = Query(None, alias="error"),
+) -> Response:
+    if get_settings(request).auth_mode != "oidc":
+        return _sso_error(request, "invalid_request")
+    try:
+        login = await oidc.complete(
+            provider=provider,
+            state=state,
+            code=code,
+            provider_error=provider_error,
+            binding_token=request.cookies.get(_oidc_binding_cookie_name(request)),
+        )
+    except OidcFlowError as error:
+        response = _sso_error(request, error.code)
+    except Exception:
+        response = _sso_error(request, "provider_error")
+    else:
+        await auth.sign_out_student(request.cookies.get("vv_session"))
+        response = RedirectResponse(
+            _portal_url(request, login.return_to),
+            status_code=303,
+        )
+        _set_session_cookie(
+            response,
+            request,
+            name="vv_session",
+            token=login.session_token,
+            expires_at_epoch=login.expires_at_epoch,
+        )
+        _expire_cookie(response, request, "vv_demo_session")
+    response.set_cookie(
+        key=_oidc_binding_cookie_name(request),
+        value="consumed",
+        max_age=0,
+        expires=0,
+        path="/",
+        secure=get_settings(request).secure_cookies,
+        httponly=True,
+        samesite="lax",
+    )
+    return _protect_sso_response(response)
 
 
 @auth_router.post("/v1/auth/demo/sign-in", status_code=200, response_model=None)
@@ -254,6 +485,7 @@ async def sign_up_student(
         tenant_slug=tenant_slug,
         email=body.email,
         phone=body.phone,
+        legal_name=body.legal_name,
         password=body.password,
     )
     if session.token is None or session.expires_at_epoch is None:
@@ -303,11 +535,13 @@ async def sign_out_student(
     response: Response,
     auth: AuthServiceDependency,
 ) -> object:
-    _development_only(request)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _expire_cookie(response, request, "vv_demo_session")
-    return {"authenticated": False, "mode": "credentials"}
+    return {
+        "authenticated": False,
+        "mode": "oidc" if get_settings(request).auth_mode == "oidc" else "credentials",
+    }
 
 
 @auth_router.post("/v1/auth/staff/sign-in", status_code=200, response_model=None)
@@ -371,7 +605,6 @@ async def sign_out_staff(
     response: Response,
     auth: AuthServiceDependency,
 ) -> object:
-    _development_only(request)
     await auth.sign_out_staff(request.cookies.get("vv_staff_session"))
     _expire_cookie(response, request, "vv_staff_session")
     return {"authenticated": False, "mode": "credentials", "actorType": "staff"}

@@ -199,7 +199,7 @@ async def test_worker_builder_wires_independent_worker_runtime(
     monkeypatch.setattr(
         worker_bootstrap,
         "build_event_dispatcher",
-        lambda received_projector, received_runner, received_review_projector: (
+        lambda received_projector, received_runner, received_review_projector, _staff_email: (
             dispatcher
             if (received_projector, received_runner, received_review_projector)
             == (projector, runner, review_projector)

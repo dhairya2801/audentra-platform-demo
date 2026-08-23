@@ -13,6 +13,7 @@ bound server-side after validation.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -37,6 +38,7 @@ from audentra.integrations.staff_assistant.derive import (
 from audentra.integrations.staff_assistant.guard import guard_staff_grounded_answer
 from audentra.integrations.staff_assistant.normalize import (
     NormalizedStaffRequest,
+    extract_candidate_name,
     normalize_staff_request,
 )
 from audentra.integrations.staff_assistant.planner import (
@@ -70,6 +72,51 @@ _SKIP_REWRITE = frozenset(
         "draft_email",
         "draft_sms",
         "draft_call_points",
+        # Mailbox content stays inside the platform's deterministic composer;
+        # it is never forwarded to a configured third-party rewrite model.
+        "mailbox_read",
+        # Membership is a yes/no honesty statement ("X is / is not in the
+        # Action Center"); a rewrite could only soften or invert it.
+        "student_action_center",
+    }
+)
+
+# A follow-up that picks one candidate from a just-offered disambiguation
+# list ("the one in Civil Engineering", "the second one", "SYN-000123").
+_SELECTION_PHRASE = re.compile(
+    r"^(?:the\s+)?(?:one|first|second|third|fourth|fifth|sixth|seventh|eighth"
+    r"|last|\d(?:st|nd|rd|th))\b|^the one\b|^that one\b",
+    re.IGNORECASE,
+)
+_ORDINAL_WORDS: Mapping[str, int] = {
+    "first": 0,
+    "1st": 0,
+    "second": 1,
+    "2nd": 1,
+    "third": 2,
+    "3rd": 2,
+    "fourth": 3,
+    "4th": 3,
+    "fifth": 4,
+    "5th": 4,
+    "sixth": 5,
+    "6th": 5,
+    "seventh": 6,
+    "7th": 6,
+    "eighth": 7,
+    "8th": 7,
+}
+_DISAMBIGUATION_MARKER = "which one do you mean"
+
+# Intents whose answers read nothing student-scoped: resolving a mentioned
+# name first would only let a lookup outcome preempt the canned answer.
+_NO_RESOLUTION_TYPES = frozenset(
+    {
+        "greeting",
+        "capability_overview",
+        "action_request",
+        "unsupported_metric",
+        "unsupported_or_out_of_scope",
     }
 )
 
@@ -158,6 +205,28 @@ class StaffAssistantPipeline:
                 derived=state,
                 failure_codes=failure_codes,
             )
+        if resolution.treat_as_work_item:
+            # The pasted token is a work-item key after all; answer the work
+            # item rather than failing a student lookup.
+            classification = StaffClassification(
+                "work_item_detail",
+                0.9,
+                source="reference_resolution",
+                reference=request.work_item_key,
+            )
+            tool_selection_source = "deterministic"
+        if resolution.prior_classification is not None and (
+            classification is None or classification.request_type == "student_overview"
+        ):
+            # A disambiguation follow-up answers the question that triggered
+            # the disambiguation, not a generic overview.
+            classification = StaffClassification(
+                resolution.prior_classification.request_type,
+                resolution.prior_classification.confidence,
+                source="follow_up_selection",
+                reference=resolution.prior_classification.reference,
+            )
+            tool_selection_source = "deterministic"
         student_resolved = resolution.student_id is not None
 
         # --- Planning -------------------------------------------------------
@@ -348,6 +417,12 @@ class StaffAssistantPipeline:
         student_name: str | None = None
         search_results: list[JsonDict] = field(default_factory=list)
         short_circuit: ComposedStaffAnswer | None = None
+        # The pasted reference turned out to be a staff work-item key, not a
+        # student — execute() re-routes the turn to work-item detail.
+        treat_as_work_item: bool = False
+        # Set when a disambiguation follow-up picked a candidate; carries the
+        # intent of the question that triggered the disambiguation.
+        prior_classification: StaffClassification | None = None
 
     async def _resolve_student_referent(
         self,
@@ -358,12 +433,21 @@ class StaffAssistantPipeline:
         trace: AssistantTurnTrace | None,
     ) -> StaffAssistantPipeline._Resolution:
         resolution = StaffAssistantPipeline._Resolution()
+        if classification is not None and classification.request_type in _NO_RESOLUTION_TYPES:
+            # A refusal or canned answer reads nothing — resolving a name
+            # first would let a lookup failure preempt the refusal itself
+            # ("Mark X's transcript as accepted" must refuse, not disambiguate).
+            return resolution
         needs_student = classification is None or (
             classification.request_type in STUDENT_REQUIRED_REQUEST_TYPES
         )
         explicit_name = request.candidate_student_name
         explicit_id = request.candidate_student_id
-        if not (needs_student or explicit_name or explicit_id):
+        reference_token = request.reference_token
+        classified_work_item = (
+            classification is not None and classification.request_type == "work_item_detail"
+        )
+        if not (needs_student or explicit_name or explicit_id or reference_token):
             return resolution
 
         async def run_referent_read(call: PlannedToolCall) -> Mapping[str, Any] | None:
@@ -381,6 +465,10 @@ class StaffAssistantPipeline:
             data = read.get("data")
             return data if isinstance(data, Mapping) else None
 
+        def resolve_item(item: Mapping[str, Any]) -> None:
+            resolution.student_id = str(item.get("id"))
+            resolution.student_name = str(item.get("preferredName") or item.get("name") or "")
+
         if explicit_id is not None:
             overview = await run_referent_read(
                 PlannedToolCall(tool="getStudentStaffSummary", arguments={"studentId": explicit_id})
@@ -388,30 +476,63 @@ class StaffAssistantPipeline:
             if overview is None or not overview.get("id"):
                 resolution.short_circuit = _not_found_answer()
                 return resolution
-            resolution.student_id = str(overview["id"])
-            resolution.student_name = str(
-                overview.get("preferredName") or overview.get("name") or ""
-            )
+            resolve_item(overview)
             return resolution
+
+        # A pasted PREFIX-SUFFIX token: the roster's external reference is
+        # checked first (SIS/registrar IDs are how staff cite students); a
+        # miss falls back to the work-item key namespace.
+        if reference_token is not None and not classified_work_item:
+            search = await run_referent_read(
+                PlannedToolCall(
+                    tool="searchStudents",
+                    arguments={"externalRef": reference_token},
+                )
+            )
+            items = _search_items(search)
+            if len(items) == 1:
+                resolve_item(items[0])
+                return resolution
+            if explicit_name is None:
+                queue = await run_referent_read(PlannedToolCall(tool="getStaffWorkQueue"))
+                if queue is not None and any(
+                    str(_as_mapping(item).get("key")) == reference_token
+                    for item in queue.get("items", [])
+                ):
+                    resolution.treat_as_work_item = True
+                    return resolution
+                resolution.short_circuit = _unknown_reference_answer(reference_token)
+                return resolution
+
+        # A disambiguation follow-up ("the one in Civil Engineering") picks a
+        # candidate deterministically from the re-run canonical search — the
+        # model never chooses identity.
+        if (
+            explicit_id is None
+            and request.is_follow_up
+            and _looks_like_candidate_selection(request, explicit_name)
+        ):
+            selected = await self._resolve_candidate_selection(request, run_referent_read)
+            if selected is not None:
+                return selected
 
         if explicit_name is not None:
             search = await run_referent_read(
                 PlannedToolCall(
                     tool="searchStudents",
-                    arguments={"query": explicit_name, "limit": 8},
+                    arguments={"query": explicit_name, "limit": 12},
                 )
             )
-            items = (
-                [dict(item) for item in search.get("items", []) if isinstance(item, dict)]
-                if search
-                else []
-            )
+            items = _search_items(search)
             resolution.search_results = items
+            match_quality = str((search or {}).get("matchQuality") or "exact")
+            if match_quality == "fuzzy":
+                # Close spellings are suggestions to confirm, never a silent
+                # resolution — the staff member typed something else.
+                resolution.short_circuit = _fuzzy_suggestion_answer(explicit_name, items)
+                return resolution
             if len(items) == 1:
-                resolution.student_id = str(items[0].get("id"))
-                resolution.student_name = str(
-                    items[0].get("preferredName") or items[0].get("name") or ""
-                )
+                resolve_item(items[0])
                 return resolution
             if not items:
                 resolution.short_circuit = _not_found_answer(explicit_name)
@@ -427,11 +548,103 @@ class StaffAssistantPipeline:
                 )
             )
             if overview is not None and overview.get("id"):
-                resolution.student_id = str(overview["id"])
-                resolution.student_name = str(
-                    overview.get("preferredName") or overview.get("name") or ""
-                )
+                resolve_item(overview)
         return resolution
+
+    async def _resolve_candidate_selection(
+        self,
+        request: NormalizedStaffRequest,
+        run_referent_read: Callable[[PlannedToolCall], Awaitable[Mapping[str, Any] | None]],
+    ) -> StaffAssistantPipeline._Resolution | None:
+        """Resolve "the one in Civil Engineering" after a disambiguation.
+
+        Deterministic: the prior turn's name is searched again (same query,
+        same canonical ordering the list was presented in), and the reply's
+        constraint — ordinal, program, class year — filters the candidates.
+        Exactly one survivor resolves; anything else re-asks honestly.
+        """
+
+        offered = any(
+            item["role"] == "assistant" and _DISAMBIGUATION_MARKER in item["content"].lower()
+            for item in request.history
+        )
+        if not offered:
+            return None
+        prior_name = next(
+            (
+                name
+                for item in reversed(request.history)
+                if item["role"] == "user"
+                and (name := extract_candidate_name(item["content"])) is not None
+            ),
+            None,
+        )
+        if prior_name is None:
+            return None
+        search = await run_referent_read(
+            PlannedToolCall(tool="searchStudents", arguments={"query": prior_name, "limit": 12})
+        )
+        items = _search_items(search)
+        if not items:
+            return None
+        resolution = StaffAssistantPipeline._Resolution()
+        text = request.text.lower()
+
+        filtered = items
+        constrained = False
+        ordinal = next(
+            (index for word, index in _ORDINAL_WORDS.items() if re.search(rf"\b{word}\b", text)),
+            None,
+        )
+        if re.search(r"\blast\b", text):
+            ordinal = len(items) - 1
+        if ordinal is not None:
+            constrained = True
+            filtered = [items[ordinal]] if 0 <= ordinal < len(items) else []
+        else:
+            by_program = [
+                item
+                for item in filtered
+                if str(item.get("programName") or "").lower() in text
+                and str(item.get("programName") or "").strip()
+            ]
+            if by_program:
+                constrained = True
+                filtered = by_program
+            year = re.search(r"\b(20\d\d)\b", text)
+            if year:
+                constrained = True
+                filtered = [
+                    item for item in filtered if str(item.get("classYear")) == year.group(1)
+                ]
+        if not constrained:
+            return None
+        if len(filtered) == 1:
+            resolution.student_id = str(filtered[0].get("id"))
+            resolution.student_name = str(
+                filtered[0].get("preferredName") or filtered[0].get("name") or ""
+            )
+            resolution.prior_classification = self._classify_prior_turn(request)
+            return resolution
+        resolution.search_results = filtered or items
+        resolution.short_circuit = _disambiguation_answer(prior_name, filtered or items)
+        return resolution
+
+    @staticmethod
+    def _classify_prior_turn(request: NormalizedStaffRequest) -> StaffClassification | None:
+        """The intent of the question that triggered the disambiguation, so
+        "What's blocking Alex?" → "the one in Design" answers blockers."""
+
+        prior_question = next(
+            (item["content"] for item in reversed(request.history) if item["role"] == "user"),
+            None,
+        )
+        if not prior_question:
+            return None
+        prior = classify_staff_request(normalize_staff_request(prior_question))
+        if prior is not None and prior.request_type in STUDENT_REQUIRED_REQUEST_TYPES:
+            return prior
+        return None
 
     async def _bind_identity_arguments(
         self,
@@ -455,9 +668,15 @@ class StaffAssistantPipeline:
                 if resolution.student_id is None:
                     continue
                 arguments["studentId"] = resolution.student_id
-            if call.tool == "searchStudents" and not arguments.get("query"):
+            if (
+                call.tool == "searchStudents"
+                and not arguments.get("query")
+                and not arguments.get("externalRef")
+            ):
                 if request.candidate_student_name:
                     arguments["query"] = request.candidate_student_name
+                elif request.reference_token:
+                    arguments["externalRef"] = request.reference_token
                 else:
                     continue
             if call.tool == "getWorkItemDetail":
@@ -645,27 +864,92 @@ def _classification_dict(
     }
 
 
+def _search_items(search: Mapping[str, Any] | None) -> list[JsonDict]:
+    if not search:
+        return []
+    return [dict(item) for item in search.get("items", []) if isinstance(item, dict)]
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _looks_like_candidate_selection(
+    request: NormalizedStaffRequest, explicit_name: str | None
+) -> bool:
+    if _SELECTION_PHRASE.search(request.text):
+        return True
+    # "The one in Civil Engineering." extracts "Civil Engineering" as if it
+    # were a name; a follow-up whose "name" appears after a selection opener
+    # is a pick, not a person.
+    return explicit_name is not None and bool(
+        re.search(
+            rf"\b(?:one|that|the)\s+(?:in|from|with)\s+{re.escape(explicit_name)}",
+            request.text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _candidate_line(item: Mapping[str, Any]) -> str:
+    ref = str(item.get("externalRef") or "").strip()
+    ref_part = f"ID {ref} — " if ref else ""
+    return (
+        f"{item.get('name')} — {ref_part}{item.get('programName')}, class of "
+        f"{item.get('classYear')}"
+    )
+
+
 def _not_found_answer(name: str | None = None) -> ComposedStaffAnswer:
     who = f" matching “{name}”" if name else ""
     message = (
         f"I couldn't find a student{who} in your institution. A full name "
-        "usually works best; I can also search by program."
+        "usually works best; I can also look up a student ID or search by "
+        "program."
     )
     return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+
+
+def _unknown_reference_answer(token: str) -> ComposedStaffAnswer:
+    message = (
+        f"“{token}” doesn't match any student ID or work-item key in your "
+        "institution. If it's a student, a full name works too."
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+
+
+def _fuzzy_suggestion_answer(name: str, items: list[JsonDict]) -> ComposedStaffAnswer:
+    from audentra.integrations.assistant.blocks import bullet_list_block
+
+    if not items:
+        return _not_found_answer(name)
+    if len(items) == 1:
+        only = items[0]
+        message = (
+            f"I couldn't find “{name}” exactly — did you mean "
+            f"{_candidate_line(only)}? Say the name or ID and I'll pull the "
+            "record."
+        )
+        return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+    message = (
+        f"I couldn't find “{name}” exactly. Closest matches on the roster — which one do you mean?"
+    )
+    block = bullet_list_block(
+        [{"text": _candidate_line(item)} for item in items[:8]],
+        title="Closest matches",
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message), block])
 
 
 def _disambiguation_answer(name: str, items: list[JsonDict]) -> ComposedStaffAnswer:
     from audentra.integrations.assistant.blocks import bullet_list_block
 
+    shown = items[:8]
     message = f"I found {len(items)} students matching “{name}” — which one do you mean?"
+    if len(items) > len(shown):
+        message += f" Showing the first {len(shown)}; an ID narrows it fastest."
     block = bullet_list_block(
-        [
-            {
-                "text": f"{item.get('name')} — {item.get('programName')}, class of "
-                f"{item.get('classYear')}"
-            }
-            for item in items[:8]
-        ],
+        [{"text": _candidate_line(item)} for item in shown],
         title="Matches",
     )
     return ComposedStaffAnswer(message=message, blocks=[text_block(message), block])
@@ -732,4 +1016,12 @@ def _cohort_arguments(tool: str, classification: StaffClassification) -> JsonDic
             "filter": dict(classification.cohort_filter or {}),
             "groupBy": classification.cohort_group_by or "offer_status",
         }
+    if (
+        tool == "getStaffWorkQueue"
+        and classification.reference is not None
+        and classification.reference.startswith("topic:")
+    ):
+        # "transcript items in the Action Center" — the topic came from the
+        # staff member's own words via the deterministic classifier.
+        return {"topic": classification.reference.removeprefix("topic:")}
     return {}

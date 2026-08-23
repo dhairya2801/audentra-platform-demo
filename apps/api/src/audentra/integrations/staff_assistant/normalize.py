@@ -21,6 +21,13 @@ DEFAULT_HISTORY_LIMIT = 6
 _UUID_PATTERN = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE
 )
+# One shared shape for human-pasted keys: student external references
+# (registrar/SIS ids such as SYN-000123) and staff work-item keys (ENR-104,
+# DOC-8194D568) both look like PREFIX-SUFFIX. Which kind a token actually is
+# can only be decided against the database, so normalization extracts the
+# token and the pipeline resolves it — student external reference first,
+# work item second.
+_REFERENCE_TOKEN = re.compile(r"\b([A-Z]{2,6}-[A-Z0-9][A-Z0-9._-]{0,12})\b")
 _WORK_ITEM_KEY = re.compile(r"\b([A-Z]{2,6}-\d{1,6})\b")
 
 # Words that start sentences or commands and must never be read as a name.
@@ -200,8 +207,11 @@ _ACTION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"\b(?:update|change|edit|set|mark|waive|clear|complete|close|resolve"
             r"|reopen|cancel)\b.{0,48}\b(?:record|requirement|status|preference|deposit"
-            r"|hold|blocker|item|task|inquiry|case|document)\b"
-            r"|\b(?:approve|reject)\b.{0,32}\b(?:document|transcript|upload|it|this)\b",
+            r"|hold|blocker|item|task|inquiry|case|document|transcript|upload"
+            r"|immuni[sz]ation)\b"
+            r"|\b(?:approve|reject)\b.{0,32}\b(?:document|transcript|upload|it|this)\b"
+            r"|\bmark\b.{0,40}\bas (?:accepted|rejected|complete[d]?|waived|paid"
+            r"|resolved|done)\b",
             re.IGNORECASE,
         ),
     ),
@@ -234,6 +244,9 @@ class NormalizedStaffRequest:
     uses_pronoun_referent: bool
     candidate_student_name: str | None
     candidate_student_id: str | None
+    # A PREFIX-SUFFIX token that may be a student external reference OR a
+    # work-item key; the pipeline resolves which against the database.
+    reference_token: str | None
     work_item_key: str | None
     action_kind: str | None
     is_draft_request: bool
@@ -274,6 +287,7 @@ def normalize_staff_request(
         uses_pronoun_referent=uses_pronoun,
         candidate_student_name=extract_candidate_name(text),
         candidate_student_id=_extract_uuid(text),
+        reference_token=_extract_reference_token(text),
         work_item_key=_extract_work_item_key(text),
         action_kind=action_kind,
         is_draft_request=is_draft,
@@ -301,6 +315,17 @@ def extract_candidate_name(text: str) -> str | None:
     single = re.search(r"\b(?:about|for|on|regarding|student)\s+([A-Z][a-z]{2,})\b", text)
     if single and single.group(1).lower() not in _NAME_STOPWORDS:
         return single.group(1)
+    # A lookup verb followed by one capitalized word is a name too ("Pull up
+    # Quillfeather.") — surname-only lookups are normal staff shorthand, and
+    # the roster search decides how many students it matches.
+    verb_led = re.search(
+        # The verb may open the sentence ("Pull up ..."), so it matches
+        # case-insensitively; the (?-i:) group keeps the name capitalized.
+        r"\b(?i:pull up|look ?up|open|find|show me|search for)\s+([A-Z][a-z]{2,})\s*[.!?]?$",
+        text,
+    )
+    if verb_led and verb_led.group(1).lower() not in _NAME_STOPWORDS:
+        return verb_led.group(1)
     return None
 
 
@@ -311,6 +336,11 @@ def _is_referred_single_name(text: str, word: str) -> bool:
 def _extract_uuid(text: str) -> str | None:
     match = _UUID_PATTERN.search(text)
     return match.group(0).lower() if match else None
+
+
+def _extract_reference_token(text: str) -> str | None:
+    match = _REFERENCE_TOKEN.search(text)
+    return match.group(1) if match else None
 
 
 def _extract_work_item_key(text: str) -> str | None:

@@ -47,6 +47,7 @@ STAFF_TOOL_NAMES = (
     "getInquiryThread",
     "getPlaybooks",
     "getActionRules",
+    "getMailboxMessages",
 )
 
 # Source-of-truth classification, mirroring the student catalog's discipline.
@@ -77,12 +78,16 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getInquiryThread": "operational_state",
     "getPlaybooks": "institution_knowledge",
     "getActionRules": "institution_knowledge",
+    "getMailboxMessages": "operational_state",
 }
 
 STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
     "searchStudents": (
-        "Search the canonical student roster by name and/or program. Returns "
-        "concise summaries with requirement progress."
+        "Search the canonical student roster by name, student ID (external "
+        "reference), and/or program. Returns concise summaries with the "
+        "student ID and requirement progress; when no exact name matches, "
+        "close-spelling suggestions are returned marked matchQuality=fuzzy "
+        "and must be confirmed, never silently chosen."
     ),
     "findStudents": (
         "Find the students matching a cohort filter and report how many match "
@@ -160,9 +165,11 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Rule-based signals, not risk scores or probabilities."
     ),
     "getStaffWorkQueue": (
-        "Read the staff work queue in canonical order (priority, then due "
-        "date), with optional ownership, component, status, and due-window "
-        "filters, plus counts."
+        "Read the staff work queue — the SAME source of truth the Staff "
+        "Portal's Action Center renders — in canonical order (priority, then "
+        "due date), with optional ownership, component, status, due-window, "
+        "and topic (title keyword) filters, plus counts. Authoritative for "
+        "what is in the Action Center and in which order."
     ),
     "getWorkItemDetail": (
         "Read one work item's full detail: state, interactions, recorded "
@@ -176,6 +183,12 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "written by staff — not system-enforced policy."
     ),
     "getActionRules": "Read the configured staff automation rules.",
+    "getMailboxMessages": (
+        "Read up to 25 messages from the authenticated staff member's authorized "
+        "seven-day mailbox cache. Every mailbox grant is rechecked. Results are "
+        "ranked by explicit urgent/time-sensitive language, then matched student, "
+        "then recency; this is not a predictive priority score."
+    ),
 }
 
 STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
@@ -201,6 +214,7 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "getInquiryThread": "inquiry_thread",
     "getPlaybooks": "staff_guidance",
     "getActionRules": "action_rules",
+    "getMailboxMessages": "authorized_mailboxes",
 }
 
 # Tools whose primary argument is the resolved student referent. The pipeline
@@ -233,7 +247,8 @@ _INQUIRY_STATUSES = ("new", "open", "waiting_on_student", "resolved", "archived"
 #   kind: "uuid" | "text" | "int" | "enum" | "key"
 STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
     "searchStudents": {
-        "query": {"kind": "text", "max_length": 120},
+        "query": {"kind": "text", "max_length": 120, "optional": True},
+        "externalRef": {"kind": "text", "max_length": 64, "optional": True},
         "program": {"kind": "text", "max_length": 120, "optional": True},
         "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
     },
@@ -272,6 +287,7 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
         "component": {"kind": "text", "max_length": 120, "optional": True},
         "status": {"kind": "enum", "values": _QUEUE_STATUSES, "optional": True},
         "dueWindow": {"kind": "enum", "values": _QUEUE_DUE_WINDOWS, "optional": True},
+        "topic": {"kind": "text", "max_length": 80, "optional": True},
     },
     "getWorkItemDetail": {"workItemId": {"kind": "uuid"}},
     "getInquiries": {
@@ -280,6 +296,10 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
     "getInquiryThread": {"inquiryId": {"kind": "uuid"}},
     "getPlaybooks": {},
     "getActionRules": {},
+    "getMailboxMessages": {
+        "query": {"kind": "text", "max_length": 500, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
 }
 
 

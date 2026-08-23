@@ -105,10 +105,12 @@ Current backend technology:
 - framework-neutral application/domain layers suitable for reuse from other
   Python entry points.
 
-Blocking production constraint: the only implemented identity composition is
-`AUTH_MODE=demo`. Setting `AUDENTRA_ENV=production` fails closed until an
-institutional identity adapter is implemented; the presence of local Keycloak
-does not remove that gate.
+Two identity compositions exist. `AUTH_MODE=demo` is development/test-only and
+fails closed in production. `AUTH_MODE=oidc` is a Google/Microsoft
+authorization-code flow with PKCE for existing students in one
+server-configured tenant. It is intentionally a student-only proof; credential
+authentication and staff authentication are unavailable in that mode, and
+staff/leader/VP federation remains unimplemented.
 
 ### 3.3 Background worker
 
@@ -165,13 +167,15 @@ complete.
 
 ### 3.6 Identity provider
 
-Authentication is isolated behind an application port so an OIDC adapter can be
-introduced without changing domain use cases.
+Authentication is isolated behind application ports so identity adapters do
+not change domain use cases.
 
-- Current implementation: explicit demo identity adapter
-- Local integration target: Keycloak
-- Production: institutional OIDC/SAML federation or an approved identity
-  platform
+- Development/test: explicit demo identity adapter
+- Student proof: Google and Microsoft OIDC with PKCE, tenant-scoped federated
+  identities, and hashed opaque sessions for existing accounts
+- Not implemented: staff, leader, and VP federation; institution-wide
+  provisioning and approved production identity operations
+- Local Keycloak remains an integration target, not the active OIDC adapter
 
 The identity provider proves who the user is. VV remains responsible for tenant
 membership, role assignment, student ownership, staff assignment, and delegated

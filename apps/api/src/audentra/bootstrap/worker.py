@@ -7,9 +7,11 @@ from dataclasses import dataclass, replace
 import httpx
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from audentra.core.ports import UnavailableBrowserAuthService
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRepositoryConfig
 from audentra.infrastructure.postgres.platform_repository import PostgresPlatformRepository
+from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
 from audentra.infrastructure.storage import ObjectStorage, create_object_storage
 from audentra.infrastructure.worker.action_center_enrichment import ActionCenterEnrichmentRunner
 from audentra.infrastructure.worker.agentic_scheduler import AgenticWorkflowScheduler
@@ -22,6 +24,7 @@ from audentra.infrastructure.worker.document_commands import (
 from audentra.infrastructure.worker.document_review_projector import DocumentReviewProjector
 from audentra.infrastructure.worker.factory import build_event_dispatcher
 from audentra.infrastructure.worker.service import WorkerService
+from audentra.infrastructure.worker.staff_email import StaffEmailEventRunner
 from audentra.integrations.ai.gateway import StudentAIGateway
 from audentra.integrations.ai.provider import CompletionClient
 
@@ -111,10 +114,19 @@ async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResour
             app_name=settings.ai.app_name,
             worker_id=f"{settings.worker.worker_id}:call-transcription",
         )
+        staff_email = StaffEmailEventRunner(
+            PostgresStaffEmailService(
+                engine,
+                http_client,
+                settings.institutional_oauth,
+                UnavailableBrowserAuthService(),
+            )
+        )
         dispatcher = build_event_dispatcher(
             projector,
             document_runner,
             document_review_projector,
+            staff_email,
         )
         worker = WorkerService(
             outbox,

@@ -44,25 +44,6 @@ class PostgresTenantRepository:
     def _table(self, name: str) -> str:
         return f"{self._schema}.{name}"
 
-    async def get_public_by_slug(self, slug: str) -> dict[str, object]:
-        async with self._engine.connect() as connection:
-            result = await connection.execute(
-                text(
-                    f"""
-                    SELECT tenant.slug, configuration.*
-                    FROM {self._table("tenant")} tenant
-                    JOIN {self._table("tenant_portal_configuration")} configuration
-                      ON configuration.tenant_id=tenant.id
-                    WHERE tenant.slug=:slug AND tenant.status='active'
-                    """
-                ),
-                {"slug": slug},
-            )
-            row = result.mappings().first()
-        if row is None:
-            raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-        return _configuration(cast(Mapping[str, Any], row))
-
     async def get_active_by_id(self, tenant_id: str) -> dict[str, object]:
         """Resolve an active tenant for authenticated/internal ID-only requests."""
 

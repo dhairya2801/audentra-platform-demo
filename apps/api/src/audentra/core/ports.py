@@ -59,6 +59,18 @@ class StaffSession:
 
 
 @dataclass(frozen=True, slots=True)
+class DelegateSession:
+    context: AuthContext
+    full_name: str
+    relationship: str
+    email: str
+    student_preferred_name: str
+    student_name: str
+    token: str | None = None
+    expires_at_epoch: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceCall:
     operation: str
     auth: AuthContext | None
@@ -114,7 +126,14 @@ class BrowserAuthService(Protocol):
     ) -> CredentialStudentSession | None: ...
 
     async def sign_up_student(
-        self, *, tenant_id: str, tenant_slug: str | None, email: str, phone: str, password: str
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        phone: str,
+        legal_name: str | None,
+        password: str,
     ) -> CredentialStudentSession: ...
 
     async def sign_in_student(
@@ -141,9 +160,34 @@ class BrowserAuthService(Protocol):
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str
     ) -> StaffSession: ...
 
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
+    ) -> StaffSession: ...
+
     async def sign_out_staff(self, token: str | None) -> None: ...
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None: ...
+
+
+@runtime_checkable
+class DelegateBrowserAuthService(Protocol):
+    async def exchange_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession: ...
+
+    async def resolve_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession | None: ...
+
+    async def sign_out_delegate(self, token: str | None) -> None: ...
 
 
 class UnavailableBrowserAuthService:
@@ -161,7 +205,14 @@ class UnavailableBrowserAuthService:
         return None
 
     async def sign_up_student(
-        self, *, tenant_id: str, tenant_slug: str | None, email: str, phone: str, password: str
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str | None,
+        email: str,
+        phone: str,
+        legal_name: str | None,
+        password: str,
     ) -> CredentialStudentSession:
         self._raise()
 
@@ -171,6 +222,19 @@ class UnavailableBrowserAuthService:
         self._raise()
 
     async def sign_out_student(self, token: str | None) -> None:
+        return None
+
+    async def exchange_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession:
+        self._raise()
+
+    async def resolve_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession | None:
+        return None
+
+    async def sign_out_delegate(self, token: str | None) -> None:
         return None
 
     async def resolve_staff(
@@ -191,6 +255,19 @@ class UnavailableBrowserAuthService:
 
     async def sign_in_staff(
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str
+    ) -> StaffSession:
+        self._raise()
+
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
     ) -> StaffSession:
         self._raise()
 
