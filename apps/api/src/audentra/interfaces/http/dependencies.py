@@ -108,8 +108,6 @@ async def get_auth_context(request: Request) -> AuthContext:
         # an unrelated student-cookie requirement.
         require_worker_token(request, request.headers.get("x-vv-worker-token"))
     elif is_staff_route:
-        if settings.auth_mode == "oidc":
-            raise UnauthorizedError("Staff authentication is not enabled for student SSO")
         staff_token = request.cookies.get("vv_staff_session")
         if staff_token is not None:
             staff_session = await auth_service.resolve_staff(
@@ -119,6 +117,15 @@ async def get_auth_context(request: Request) -> AuthContext:
             )
             if staff_session is None:
                 raise UnauthorizedError("The staff session is invalid or has expired")
+            # `AUTH_MODE=oidc` governs student sign-in.  Staff federation can
+            # be configured independently, so do not reject a valid staff
+            # session solely because students use institutional sign-in.  Old
+            # password-backed staff sessions still cannot cross that boundary.
+            if (
+                settings.auth_mode == "oidc"
+                and staff_session.context.authentication_method == "credentials"
+            ):
+                raise UnauthorizedError("The staff session must use institutional sign-in")
             return staff_session.context
         if settings.browser_auth_required:
             raise UnauthorizedError("Staff authentication is required")

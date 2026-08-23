@@ -30,6 +30,7 @@ from audentra.core.oidc import (
 from audentra.core.ports import (
     CredentialStudentSession,
     ServiceCall,
+    StaffSession,
     UnavailableBrowserAuthService,
 )
 from audentra.infrastructure.postgres import oidc_repository
@@ -45,6 +46,8 @@ from audentra.interfaces.http.config import HttpSettings
 TENANT_ID = "00000000-0000-7000-8000-000000000001"
 STUDENT_ID = "00000000-0000-7000-8000-000000000101"
 SESSION_TOKEN = "opaque-student-session-token-from-oidc"  # noqa: S105
+OLD_STAFF_SESSION_TOKEN = "old-local-staff-session"  # noqa: S105
+FEDERATED_STAFF_SESSION_TOKEN = "federated-staff-session-token"  # noqa: S105
 BINDING_COOKIE = "browser-binding-value-long-enough-for-oidc"
 SECURE_BINDING_COOKIE_NAME = "__Host-vv_oidc_binding"
 
@@ -94,6 +97,37 @@ class SessionBrowserAuth(UnavailableBrowserAuthService):
             phone="+15551230001",
             email_verified=True,
             phone_verified=False,
+        )
+
+    async def resolve_staff(
+        self,
+        token: str,
+        tenant_id: str,
+        tenant_slug: str | None,
+    ) -> StaffSession | None:
+        if tenant_id != TENANT_ID or tenant_slug != "aster":
+            return None
+        if token == OLD_STAFF_SESSION_TOKEN:
+            authentication_method = "credentials"
+            identity_provider = None
+        elif token == FEDERATED_STAFF_SESSION_TOKEN:
+            authentication_method = "oidc"
+            identity_provider = "microsoft"
+        else:
+            return None
+        return StaffSession(
+            context=AuthContext(
+                tenant_id=TENANT_ID,
+                student_id=STUDENT_ID,
+                actor_id="00000000-0000-7000-8000-000000000201",
+                actor_type="staff",
+                authentication_method=authentication_method,
+                identity_provider=identity_provider,
+                tenant_slug="aster",
+            ),
+            name="Morgan Staff",
+            email="morgan.staff@example.edu",
+            component="enrollment",
         )
 
 
@@ -787,7 +821,7 @@ async def test_oidc_mode_disables_credentials_but_keeps_session_logout() -> None
     assert browser_auth.signed_out_tokens == ["active-oidc-session-token"]
 
 
-async def test_oidc_mode_rejects_old_student_and_staff_credential_sessions() -> None:
+async def test_oidc_mode_rejects_old_credentials_but_allows_federated_staff_session() -> None:
     app = _app(
         FakeOidcAuth(),
         browser_auth=CredentialSessionBrowserAuth(),
@@ -803,11 +837,16 @@ async def test_oidc_mode_rejects_old_student_and_staff_credential_sessions() -> 
         )
         staff = await client.get(
             "/v1/staff/workspace",
-            headers={"Cookie": "vv_staff_session=old-local-staff-session"},
+            headers={"Cookie": f"vv_staff_session={OLD_STAFF_SESSION_TOKEN}"},
+        )
+        federated_staff = await client.get(
+            "/v1/staff/workspace",
+            headers={"Cookie": f"vv_staff_session={FEDERATED_STAFF_SESSION_TOKEN}"},
         )
 
     assert student.status_code == 401
     assert staff.status_code == 401
+    assert federated_staff.status_code == 200
 
 
 async def test_development_auth_adapter_fails_closed_when_flows_are_disabled() -> None:
