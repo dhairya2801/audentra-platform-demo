@@ -70,6 +70,19 @@ def test_oauth_migration_binds_state_to_expected_tenant() -> None:
     assert "consumed_at timestamptz" in migration
 
 
+def test_email_intent_migration_binds_interactions_to_the_same_tenant_student() -> None:
+    migration = (
+        __import__("pathlib").Path(__file__).parents[1]
+        / "migrations"
+        / "0040_staff_sso_and_email.sql"
+    ).read_text(encoding="utf-8")
+    assert "student_tenant_id_key UNIQUE (tenant_id, id)" in migration
+    assert "staff_interaction_tenant_student_id_key UNIQUE (tenant_id, id, student_id)" in migration
+    assert "FOREIGN KEY (tenant_id, interaction_id, student_id)" in migration
+    assert "REFERENCES staff_interaction(tenant_id, id, student_id)" in migration
+    assert "CHECK (interaction_id IS NULL OR student_id IS NOT NULL)" in migration
+
+
 def test_edward_routes_inbox_reads_without_turning_them_into_send_actions() -> None:
     classification = classify_staff_request(
         normalize_staff_request("Read my inbox and prioritize the top 10 emails")

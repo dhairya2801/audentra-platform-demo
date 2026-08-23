@@ -43,6 +43,8 @@ _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _ENCODED_SEPARATOR_RE = re.compile(r"%(?:2f|5c|25)", re.IGNORECASE)
 _GOOGLE_ISSUERS = {"https://accounts.google.com", "accounts.google.com"}
 _MICROSOFT_CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+_RECONNECT_REQUIRED_ERROR = "MAILBOX_RECONNECT_REQUIRED"
+_TOKEN_ACQUISITION_ERROR = "TOKEN_ACQUISITION_FAILED"  # noqa: S105 - public error code
 
 
 class _TextExtractor(HTMLParser):
@@ -589,12 +591,18 @@ class PostgresStaffEmailService:
                 "EMAIL_RECIPIENT_INVALID",
                 "Choose exactly one canonical student or authorized message reply target",
             )
+        mailbox_uuid = _uuid(mailbox_id, "mailboxId")
+        student_uuid = _uuid(student_id, "studentId") if student_id is not None else None
+        reply_uuid = _uuid(reply_id, "replyToMessageId") if reply_id is not None else None
+        interaction_uuid = (
+            _uuid(interaction_id, "interactionId") if interaction_id is not None else None
+        )
         async with self._engine.begin() as connection:
             mailbox = await self._authorized_mailbox(
-                connection, auth, mailbox_id, permission="send", lock=True
+                connection, auth, str(mailbox_uuid), permission="send", lock=True
             )
             recipient: str
-            if student_id is not None:
+            if student_uuid is not None:
                 recipient_value = await connection.scalar(
                     text(
                         """
@@ -604,7 +612,7 @@ class PostgresStaffEmailService:
                           AND account.status='active'
                         """
                     ),
-                    {"tenant_id": UUID(auth.tenant_id), "student_id": UUID(student_id)},
+                    {"tenant_id": UUID(auth.tenant_id), "student_id": student_uuid},
                 )
                 if recipient_value is None:
                     raise NotFoundError(
@@ -626,7 +634,7 @@ class PostgresStaffEmailService:
                             {
                                 "tenant_id": UUID(auth.tenant_id),
                                 "mailbox_id": mailbox["id"],
-                                "message_id": UUID(cast(str, reply_id)),
+                                "message_id": reply_uuid,
                             },
                         )
                     )
@@ -642,7 +650,21 @@ class PostgresStaffEmailService:
                         "This message does not contain a replyable sender address",
                     )
                 linked_student_id = reply["linked_student_id"]
-                student_id = str(linked_student_id) if linked_student_id is not None else None
+                student_uuid = (
+                    UUID(str(linked_student_id)) if linked_student_id is not None else None
+                )
+            if interaction_uuid is not None:
+                if student_uuid is None:
+                    raise BadRequestError(
+                        "EMAIL_INTERACTION_STUDENT_REQUIRED",
+                        "An interaction can only be linked to a known student recipient",
+                    )
+                await self._authorized_interaction(
+                    connection,
+                    auth,
+                    interaction_uuid,
+                    student_uuid,
+                )
             intent_id = uuid4()
             digest = hashlib.sha256(
                 json.dumps(
@@ -677,9 +699,9 @@ class PostgresStaffEmailService:
                     "tenant_id": UUID(auth.tenant_id),
                     "mailbox_id": mailbox["id"],
                     "staff_id": UUID(auth.actor_id),
-                    "student_id": UUID(student_id) if student_id else None,
-                    "interaction_id": UUID(interaction_id) if interaction_id else None,
-                    "reply_id": UUID(reply_id) if reply_id else None,
+                    "student_id": student_uuid,
+                    "interaction_id": interaction_uuid,
+                    "reply_id": reply_uuid,
                     "recipients": json.dumps([recipient]),
                     "subject": subject,
                     "body": body,
@@ -692,7 +714,7 @@ class PostgresStaffEmailService:
             "id": str(intent_id),
             "version": 1,
             "status": "pending_confirmation",
-            "mailboxId": mailbox_id,
+            "mailboxId": str(mailbox["id"]),
             "sender": str(mailbox["address_normalized"]),
             "recipients": [recipient],
             "subject": subject,
@@ -723,7 +745,15 @@ class PostgresStaffEmailService:
                 raise ConflictError("EMAIL_INTENT_CHANGED", "The reviewed email content changed")
             if int(str(row["version"])) != expected_version:
                 raise ConflictError("VERSION_CONFLICT", "The send intent changed")
-            if str(row["status"]) not in {"pending_confirmation", "queued"}:
+            status = str(row["status"])
+            if (
+                status == "failed"
+                and str(row.get("last_error_code") or "") == _RECONNECT_REQUIRED_ERROR
+            ):
+                # The provider call never began: after a successful reconnect the
+                # reviewed, unexpired intent can safely be placed back on the queue.
+                pass
+            elif status not in {"pending_confirmation", "queued"}:
                 raise ConflictError(
                     "EMAIL_INTENT_NOT_CONFIRMABLE", "This email cannot be confirmed"
                 )
@@ -740,6 +770,7 @@ class PostgresStaffEmailService:
                     SET status='queued', confirmed_by_staff_id=:staff_id,
                         confirmed_at=COALESCE(confirmed_at, NOW()),
                         idempotency_key=COALESCE(idempotency_key, :idempotency_key),
+                        last_error_code=NULL, last_error_message=NULL,
                         updated_at=NOW()
                     WHERE tenant_id=:tenant_id AND id=:id
                     """
@@ -842,39 +873,52 @@ class PostgresStaffEmailService:
             if str(row["status"]) == "sending":
                 # An earlier attempt became ambiguous. Never blindly resend.
                 return
-            await connection.execute(
+        intent = dict(row)
+        try:
+            access_token = await self._access_token(intent)
+        except ConflictError as error:
+            if error.code == _RECONNECT_REQUIRED_ERROR:
+                await self._mark_intent_failed(
+                    tenant_id,
+                    intent_id,
+                    code=_RECONNECT_REQUIRED_ERROR,
+                    message=error.message,
+                    expected_status="queued",
+                )
+                return
+            await self._mark_intent_retryable(tenant_id, intent_id, error)
+            raise
+        except Exception as error:
+            # No provider send was attempted, so the transactional outbox can
+            # safely retry this intent with its original idempotency boundary.
+            await self._mark_intent_retryable(tenant_id, intent_id, error)
+            raise
+        async with self._engine.begin() as connection:
+            claimed = await connection.execute(
                 text(
                     """
                     UPDATE staff_email_send_intent
                     SET status='sending', updated_at=NOW()
-                    WHERE tenant_id=:tenant_id AND id=:intent_id
+                    WHERE tenant_id=:tenant_id AND id=:intent_id AND status='queued'
                     """
                 ),
                 {"tenant_id": UUID(tenant_id), "intent_id": UUID(intent_id)},
             )
-        intent = dict(row)
+            if claimed.rowcount != 1:
+                return
         try:
-            access_token = await self._access_token(intent)
             provider_message_id = await self._send_provider_message(intent, access_token)
         except Exception as error:
-            # Delivery may have reached the provider before a network failure.
-            # Keep the attempt non-retryable until a human/provider reconciliation.
-            async with self._engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE staff_email_send_intent
-                        SET status='failed', last_error_code='AMBIGUOUS_PROVIDER_FAILURE',
-                            last_error_message=:message, updated_at=NOW()
-                        WHERE tenant_id=:tenant_id AND id=:intent_id
-                        """
-                    ),
-                    {
-                        "message": str(error)[:1000],
-                        "tenant_id": UUID(tenant_id),
-                        "intent_id": UUID(intent_id),
-                    },
-                )
+            # Once the provider-send boundary has been crossed, a transport or
+            # provider failure may still represent a delivered email. Do not retry
+            # automatically or allow confirmation to resend it.
+            await self._mark_intent_failed(
+                tenant_id,
+                intent_id,
+                code="AMBIGUOUS_PROVIDER_FAILURE",
+                message=str(error),
+                expected_status="sending",
+            )
             return
         async with self._engine.begin() as connection:
             await connection.execute(
@@ -1444,9 +1488,17 @@ class PostgresStaffEmailService:
                 "scope": " ".join(cast(Sequence[str], mailbox["granted_scopes"])),
             }
         response = await self._client.post(url, data=data)
-        if response.status_code >= 400:
+        if _token_refresh_requires_reconnect(response):
             await self._mark_reconnect(str(mailbox["authorization_id"]))
-            raise ConflictError("MAILBOX_RECONNECT_REQUIRED", "Reconnect the mailbox to continue")
+            raise ConflictError(_RECONNECT_REQUIRED_ERROR, "Reconnect the mailbox to continue")
+        if response.status_code >= 400:
+            # Provider outages and misconfigured token clients are safe to retry:
+            # the email provider has not received a send request at this point.
+            raise ApiError(
+                502,
+                "PROVIDER_TOKEN_UNAVAILABLE",
+                "The mailbox token could not be refreshed",
+            )
         payload = response.json()
         token = payload.get("access_token")
         if not isinstance(token, str) or not token:
@@ -1471,6 +1523,120 @@ class PostgresStaffEmailService:
                     },
                 )
         return token
+
+    async def _authorized_interaction(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        interaction_id: UUID,
+        student_id: UUID,
+    ) -> None:
+        """Bind an outbound email to the active staff member's tenant work context.
+
+        Staff Action Center permissions are tenant-wide today, so there is no
+        separate per-work-item ACL to check here.  The active staff identity and
+        mailbox grant are checked by ``_authorized_mailbox``; this query then
+        ensures the optional interaction belongs to the same tenant and student
+        recipient rather than accepting an arbitrary globally-addressable UUID.
+        """
+
+        self._require_staff(auth)
+        result = await connection.execute(
+            text(
+                """
+                SELECT interaction.id
+                FROM staff_interaction interaction
+                JOIN staff_work_item work_item
+                  ON work_item.tenant_id=interaction.tenant_id
+                 AND work_item.id=interaction.work_item_id
+                 AND work_item.student_id=interaction.student_id
+                JOIN staff_member member
+                  ON member.tenant_id=interaction.tenant_id
+                 AND member.id=:staff_id
+                 AND member.active=true
+                WHERE interaction.tenant_id=:tenant_id
+                  AND interaction.id=:interaction_id
+                  AND interaction.student_id=:student_id
+                """
+            ),
+            {
+                "tenant_id": UUID(auth.tenant_id),
+                "staff_id": UUID(auth.actor_id),
+                "interaction_id": interaction_id,
+                "student_id": student_id,
+            },
+        )
+        if result.mappings().first() is None:
+            # Do not reveal whether a supplied UUID belongs to another tenant or
+            # another student's work item.
+            raise NotFoundError(
+                "EMAIL_INTERACTION_NOT_FOUND",
+                "The selected interaction is unavailable",
+            )
+
+    async def _mark_intent_retryable(
+        self,
+        tenant_id: str,
+        intent_id: str,
+        error: Exception,
+    ) -> None:
+        """Return an intent to the safe pre-send state before outbox retry."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_email_send_intent
+                    SET status='queued', last_error_code=:code,
+                        last_error_message=:message, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:intent_id AND status='queued'
+                    """
+                ),
+                {
+                    "code": _TOKEN_ACQUISITION_ERROR,
+                    "message": str(error)[:1000],
+                    "tenant_id": UUID(tenant_id),
+                    "intent_id": UUID(intent_id),
+                },
+            )
+
+    async def _mark_intent_failed(
+        self,
+        tenant_id: str,
+        intent_id: str,
+        *,
+        code: str,
+        message: str,
+        expected_status: Literal["queued", "sending"],
+    ) -> None:
+        """Fail an intent only while it remains in the expected delivery phase.
+
+        Token acquisition happens before the intent is claimed for delivery.  A
+        duplicate outbox delivery can therefore discover a reconnect requirement
+        while another worker has already claimed the intent and is sending it.
+        The status compare-and-set protects that in-flight provider call from
+        being made manually re-confirmable.
+        """
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE staff_email_send_intent
+                    SET status='failed', last_error_code=:code,
+                        last_error_message=:message, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:intent_id
+                      AND status=:expected_status
+                    """
+                ),
+                {
+                    "code": code,
+                    "message": message[:1000],
+                    "tenant_id": UUID(tenant_id),
+                    "intent_id": UUID(intent_id),
+                    "expected_status": expected_status,
+                },
+            )
 
     async def _authorized_mailbox(
         self,
@@ -1803,6 +1969,16 @@ def _email(value: str) -> str:
     return normalized
 
 
+def _uuid(value: object, field_name: str) -> UUID:
+    try:
+        return UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise BadRequestError(
+            "EMAIL_IDENTIFIER_INVALID",
+            f"{field_name} must be a valid UUID",
+        ) from error
+
+
 def _identity_display_name(value: object) -> str:
     """Return bounded display-only profile data from a verified ID token."""
 
@@ -1826,9 +2002,24 @@ def _scope_values(value: object) -> list[str]:
 
 def _provider_success(response: httpx.Response) -> None:
     if response.status_code == 401:
-        raise ConflictError("MAILBOX_RECONNECT_REQUIRED", "Reconnect the mailbox to continue")
+        raise ConflictError(_RECONNECT_REQUIRED_ERROR, "Reconnect the mailbox to continue")
     if response.status_code >= 400:
         raise ApiError(502, "MAIL_PROVIDER_FAILED", "The mail provider request failed")
+
+
+def _token_refresh_requires_reconnect(response: httpx.Response) -> bool:
+    """Return true only for user-grant failures, not transient token outages."""
+
+    if response.status_code not in {400, 401}:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.status_code == 401
+    if not isinstance(payload, Mapping):
+        return response.status_code == 401
+    error = str(payload.get("error") or "").strip().lower()
+    return error in {"invalid_grant", "invalid_token", "interaction_required", "consent_required"}
 
 
 def _safe_text(value: str) -> str:
@@ -1944,6 +2135,13 @@ def _send_intent_response(row: Mapping[str, object]) -> dict[str, object]:
     recipients = row.get("recipient_addresses")
     if isinstance(recipients, str):
         recipients = json.loads(recipients)
+    error_code = row.get("last_error_code")
+    error_message = row.get("last_error_message")
+    error = (
+        {"code": str(error_code), "message": str(error_message)}
+        if error_code is not None and error_message is not None
+        else None
+    )
     return {
         "id": str(row["id"]),
         "version": int(str(row["version"])),
@@ -1956,7 +2154,7 @@ def _send_intent_response(row: Mapping[str, object]) -> dict[str, object]:
         "contentSha256": str(row["content_sha256"]),
         "expiresAt": _iso(row["expires_at"]),
         "sentAt": _iso(row.get("sent_at")),
-        "error": row.get("last_error_message"),
+        "error": error,
     }
 
 

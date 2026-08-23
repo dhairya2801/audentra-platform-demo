@@ -22,6 +22,7 @@ from audentra.infrastructure.voice import (
     VoiceSessionServiceProtocol,
 )
 
+from .access_logging import install_access_log_redaction
 from .auth_routes import auth_router
 from .config import HttpSettings
 from .error_handlers import install_error_handlers
@@ -51,6 +52,7 @@ def create_app(
 ) -> FastAPI:
     """Build an isolated API instance with injected application behavior."""
 
+    install_access_log_redaction()
     app = FastAPI(
         title="Audentra Platform API",
         version="0.1.0",

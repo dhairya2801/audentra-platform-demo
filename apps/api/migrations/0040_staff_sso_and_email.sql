@@ -3,6 +3,16 @@
 -- migration stores only tenant policy, opaque/encrypted credentials, cursors,
 -- and auditable delivery state.
 
+-- A send intent may reference globally-addressable IDs, but it must never be
+-- able to mix tenants or attach a student's email to another student's
+-- interaction. These composite keys make that invariant durable rather than
+-- relying only on the HTTP boundary.
+ALTER TABLE student
+  ADD CONSTRAINT student_tenant_id_key UNIQUE (tenant_id, id);
+
+ALTER TABLE staff_interaction
+  ADD CONSTRAINT staff_interaction_tenant_student_id_key UNIQUE (tenant_id, id, student_id);
+
 CREATE TABLE tenant_identity_provider (
   tenant_id uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
   provider varchar(16) NOT NULL CHECK (provider IN ('google', 'microsoft')),
@@ -210,8 +220,8 @@ CREATE TABLE staff_email_send_intent (
   mailbox_id uuid NOT NULL REFERENCES staff_mailbox(id),
   created_by_staff_id uuid NOT NULL REFERENCES staff_member(id),
   confirmed_by_staff_id uuid REFERENCES staff_member(id),
-  student_id uuid REFERENCES student(id),
-  interaction_id uuid REFERENCES staff_interaction(id),
+  student_id uuid,
+  interaction_id uuid,
   reply_to_message_id uuid REFERENCES staff_mail_message_cache(id),
   recipient_addresses jsonb NOT NULL CHECK (jsonb_typeof(recipient_addresses) = 'array'),
   subject text NOT NULL CHECK (char_length(subject) BETWEEN 1 AND 998),
@@ -234,6 +244,12 @@ CREATE TABLE staff_email_send_intent (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, idempotency_key),
+  CONSTRAINT staff_email_send_intent_student_tenant_fk
+    FOREIGN KEY (tenant_id, student_id) REFERENCES student(tenant_id, id),
+  CONSTRAINT staff_email_send_intent_interaction_student_fk
+    FOREIGN KEY (tenant_id, interaction_id, student_id)
+      REFERENCES staff_interaction(tenant_id, id, student_id),
+  CHECK (interaction_id IS NULL OR student_id IS NOT NULL),
   CHECK (expires_at > created_at)
 );
 

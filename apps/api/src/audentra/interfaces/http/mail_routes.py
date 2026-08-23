@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Body, Path, Query, Request, Response
 from fastapi.responses import RedirectResponse
@@ -34,10 +35,10 @@ class MailSearchRequest(MailRequest):
 
 
 class CreateSendIntentRequest(MailRequest):
-    mailboxId: NonEmpty
-    studentId: str | None = None
-    replyToMessageId: str | None = None
-    interactionId: str | None = None
+    mailboxId: UUID
+    studentId: UUID | None = None
+    replyToMessageId: UUID | None = None
+    interactionId: UUID | None = None
     subject: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=998)]
     body: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100_000)]
 

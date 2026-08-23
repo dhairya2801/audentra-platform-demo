@@ -40,6 +40,7 @@ from audentra.infrastructure.postgres.staff_email_service import (
     _safe_text,
     _scope_values,
     _send_intent_response,
+    _token_refresh_requires_reconnect,
 )
 from audentra.interfaces.http import mail_routes
 from audentra.interfaces.http.config import HttpSettings
@@ -64,6 +65,7 @@ from audentra.interfaces.http.mail_routes import (
 TENANT_ID = "00000000-0000-7000-8000-000000000001"
 STAFF_ID = "00000000-0000-7000-8000-000000000901"
 STUDENT_ID = "00000000-0000-7000-8000-000000000101"
+OTHER_STUDENT_ID = "00000000-0000-7000-8000-000000000102"
 MAILBOX_ID = "00000000-0000-7000-8000-000000000801"
 AUTHORIZATION_ID = "00000000-0000-7000-8000-000000000802"
 INTENT_ID = "00000000-0000-7000-8000-000000000803"
@@ -76,10 +78,14 @@ pytestmark = pytest.mark.anyio
 
 class FakeResult:
     def __init__(
-        self, rows: list[Mapping[str, object]] | None = None, scalar: object = None
+        self,
+        rows: list[Mapping[str, object]] | None = None,
+        scalar: object = None,
+        rowcount: int = 1,
     ) -> None:
         self.rows = rows or []
         self.value = scalar
+        self.rowcount = rowcount
 
     def mappings(self) -> FakeResult:
         return self
@@ -101,14 +107,30 @@ class FakeResult:
 class FakeConnection:
     def __init__(self) -> None:
         self.queries: list[str] = []
+        self.parameters: list[Mapping[str, object]] = []
         self.missing: set[str] = set()
         self.intent_status = "pending_confirmation"
+        self.intent_error_code: str | None = None
+        self.interaction_student_id = UUID(STUDENT_ID)
         self.password_hash = "invalid"  # noqa: S105
         self.microsoft_tenant_id = TENANT_ID
 
     async def execute(self, statement: object, _params: object = None) -> FakeResult:
         sql = str(statement)
         self.queries.append(sql)
+        if isinstance(_params, Mapping):
+            self.parameters.append(dict(_params))
+        if (
+            "UPDATE staff_email_send_intent" in sql
+            and "SET status='failed'" in sql
+            and isinstance(_params, Mapping)
+            and "expected_status" in _params
+        ):
+            if self.intent_status != _params["expected_status"]:
+                return FakeResult(rowcount=0)
+            self.intent_status = "failed"
+            self.intent_error_code = str(_params["code"])
+            return FakeResult(rowcount=1)
         if "SELECT id, slug FROM tenant WHERE slug" in sql:
             return self._row("tenant", {"id": UUID(TENANT_ID), "slug": "harvard"})
         if "SELECT s.id AS student_id" in sql:
@@ -260,6 +282,11 @@ class FakeConnection:
                 "reply",
                 {"sender_address": "student@harvard.edu", "linked_student_id": UUID(STUDENT_ID)},
             )
+        if "FROM staff_interaction interaction" in sql:
+            parameters = cast(Mapping[str, object], _params or {})
+            if parameters.get("student_id") != self.interaction_student_id:
+                return FakeResult()
+            return self._row("interaction", {"id": UUID(INTERACTION_ID)})
         if "SELECT intent.*, mailbox.address_normalized" in sql:
             return self._row("intent", self.intent_row())
         if "SELECT mailbox.*, authorization.provider_tenant" in sql:
@@ -275,6 +302,8 @@ class FakeConnection:
     async def scalar(self, statement: object, _params: object = None) -> object:
         sql = str(statement)
         self.queries.append(sql)
+        if isinstance(_params, Mapping):
+            self.parameters.append(dict(_params))
         if "SELECT email_normalized FROM staff_member" in sql:
             return None if "staff_email" in self.missing else "staff@harvard.edu"
         if "SELECT account.email_normalized" in sql:
@@ -345,6 +374,7 @@ class FakeConnection:
             "status": self.intent_status,
             "expires_at": NOW + timedelta(minutes=20),
             "sent_at": None,
+            "last_error_code": self.intent_error_code,
             "last_error_message": None,
             "idempotency_key": "request-1",
         }
@@ -692,6 +722,55 @@ async def test_shared_mailbox_policy_and_cached_reply_target_are_enforced(
         await client.aclose()
 
 
+async def test_send_intent_binds_interaction_to_tenant_student_and_active_staff_context() -> None:
+    service, engine, _auth, client = await make_service()
+    try:
+        with pytest.raises(BadRequestError) as invalid_identifier:
+            await service.create_send_intent(
+                staff_context(),
+                {
+                    "mailboxId": MAILBOX_ID,
+                    "studentId": "not-a-uuid",
+                    "subject": "Advising follow-up",
+                    "body": "Please review the next step.",
+                },
+            )
+        assert invalid_identifier.value.code == "EMAIL_IDENTIFIER_INVALID"
+
+        engine.connection.missing.add("interaction")
+        with pytest.raises(NotFoundError) as unbound_interaction:
+            await service.create_send_intent(
+                staff_context(),
+                {
+                    "mailboxId": MAILBOX_ID,
+                    "studentId": STUDENT_ID,
+                    "interactionId": INTERACTION_ID,
+                    "subject": "Advising follow-up",
+                    "body": "Please review the next step.",
+                },
+            )
+        assert unbound_interaction.value.code == "EMAIL_INTERACTION_NOT_FOUND"
+        engine.connection.missing.remove("interaction")
+        with pytest.raises(NotFoundError) as wrong_student_interaction:
+            await service.create_send_intent(
+                staff_context(),
+                {
+                    "mailboxId": MAILBOX_ID,
+                    "studentId": OTHER_STUDENT_ID,
+                    "interactionId": INTERACTION_ID,
+                    "subject": "Advising follow-up",
+                    "body": "Please review the next step.",
+                },
+            )
+        assert wrong_student_interaction.value.code == "EMAIL_INTERACTION_NOT_FOUND"
+        assert not any(
+            "INSERT INTO staff_email_send_intent" in query
+            for query in engine.connection.queries
+        )
+    finally:
+        await client.aclose()
+
+
 async def test_worker_sync_and_delivery_are_idempotent_and_record_communications(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -713,9 +792,82 @@ async def test_worker_sync_and_delivery_are_idempotent_and_record_communications
         engine.connection.intent_status = "queued"
         monkeypatch.setattr(service, "_send_provider_message", fail_send)
         await service._deliver_send_intent(TENANT_ID, INTENT_ID)
-        assert any("AMBIGUOUS_PROVIDER_FAILURE" in query for query in engine.connection.queries)
+        assert any(
+            values.get("code") == "AMBIGUOUS_PROVIDER_FAILURE"
+            and values.get("expected_status") == "sending"
+            for values in engine.connection.parameters
+        )
         with pytest.raises(ValueError):
             await service.handle_mail_event("unknown.event", TENANT_ID, INTENT_ID)
+    finally:
+        await client.aclose()
+
+
+async def test_worker_retries_token_failures_and_requires_reconnect_without_resending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, _auth, client = await make_service()
+    try:
+        async def token_outage(*_args: object) -> str:
+            raise httpx.ConnectError("token endpoint unavailable")
+
+        monkeypatch.setattr(service, "_access_token", token_outage)
+        with pytest.raises(httpx.ConnectError):
+            await service._deliver_send_intent(TENANT_ID, INTENT_ID)
+        assert any(
+            values.get("code") == "TOKEN_ACQUISITION_FAILED"
+            for values in engine.connection.parameters
+        )
+        assert not any(
+            values.get("code") == "AMBIGUOUS_PROVIDER_FAILURE"
+            for values in engine.connection.parameters
+        )
+
+        async def reconnect_required(*_args: object) -> str:
+            raise ConflictError("MAILBOX_RECONNECT_REQUIRED", "Reconnect the mailbox to continue")
+
+        monkeypatch.setattr(service, "_access_token", reconnect_required)
+        await service._deliver_send_intent(TENANT_ID, INTENT_ID)
+        assert any(
+            values.get("code") == "MAILBOX_RECONNECT_REQUIRED"
+            and values.get("expected_status") == "queued"
+            for values in engine.connection.parameters
+        )
+
+        engine.connection.intent_status = "failed"
+        engine.connection.intent_error_code = "MAILBOX_RECONNECT_REQUIRED"
+        await service.confirm_send_intent(staff_context(), INTENT_ID, 1, "digest", "request-1")
+        assert any(
+            "last_error_code=NULL" in query for query in engine.connection.queries
+        )
+    finally:
+        await client.aclose()
+
+
+async def test_reconnect_failure_does_not_overwrite_an_intent_claimed_by_another_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, engine, _auth, client = await make_service()
+    try:
+        engine.connection.intent_status = "queued"
+
+        async def reconnect_after_other_worker_claim(_intent: Mapping[str, object]) -> str:
+            # Simulate a duplicate outbox handler: it loaded the queued intent,
+            # then another worker claimed it and crossed the provider-send boundary.
+            engine.connection.intent_status = "sending"
+            raise ConflictError("MAILBOX_RECONNECT_REQUIRED", "Reconnect the mailbox to continue")
+
+        monkeypatch.setattr(service, "_access_token", reconnect_after_other_worker_claim)
+        await service._deliver_send_intent(TENANT_ID, INTENT_ID)
+
+        # The reconnect path is allowed to fail only a still-queued intent.  It
+        # must not make an in-flight provider send manually re-confirmable.
+        assert engine.connection.intent_status == "sending"
+        assert any(
+            values.get("code") == "MAILBOX_RECONNECT_REQUIRED"
+            and values.get("expected_status") == "queued"
+            for values in engine.connection.parameters
+        )
     finally:
         await client.aclose()
 
@@ -830,6 +982,14 @@ def test_mail_helpers_cover_sanitization_serialization_and_errors() -> None:
     assert isinstance(public["receivedAt"], str)
     intent = _send_intent_response(FakeConnection().intent_row())
     assert intent["recipients"] == ["student@harvard.edu"]
+    assert intent["error"] is None
+    failed_row = FakeConnection().intent_row()
+    failed_row["last_error_code"] = "MAILBOX_RECONNECT_REQUIRED"
+    failed_row["last_error_message"] = "Reconnect the mailbox to continue"
+    assert _send_intent_response(failed_row)["error"] == {
+        "code": "MAILBOX_RECONNECT_REQUIRED",
+        "message": "Reconnect the mailbox to continue",
+    }
     assert _iso(None) is None
 
     _provider_success(httpx.Response(200))
@@ -837,6 +997,12 @@ def test_mail_helpers_cover_sanitization_serialization_and_errors() -> None:
         _provider_success(httpx.Response(401))
     with pytest.raises(ApiError):
         _provider_success(httpx.Response(500))
+    assert _token_refresh_requires_reconnect(
+        httpx.Response(400, json={"error": "invalid_grant"})
+    )
+    assert not _token_refresh_requires_reconnect(
+        httpx.Response(503, json={"error": "server_error"})
+    )
 
 
 async def test_service_validation_and_encryption_fail_closed() -> None:
