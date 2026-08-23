@@ -764,8 +764,7 @@ async def test_send_intent_binds_interaction_to_tenant_student_and_active_staff_
             )
         assert wrong_student_interaction.value.code == "EMAIL_INTERACTION_NOT_FOUND"
         assert not any(
-            "INSERT INTO staff_email_send_intent" in query
-            for query in engine.connection.queries
+            "INSERT INTO staff_email_send_intent" in query for query in engine.connection.queries
         )
     finally:
         await client.aclose()
@@ -808,6 +807,7 @@ async def test_worker_retries_token_failures_and_requires_reconnect_without_rese
 ) -> None:
     service, engine, _auth, client = await make_service()
     try:
+
         async def token_outage(*_args: object) -> str:
             raise httpx.ConnectError("token endpoint unavailable")
 
@@ -837,9 +837,7 @@ async def test_worker_retries_token_failures_and_requires_reconnect_without_rese
         engine.connection.intent_status = "failed"
         engine.connection.intent_error_code = "MAILBOX_RECONNECT_REQUIRED"
         await service.confirm_send_intent(staff_context(), INTENT_ID, 1, "digest", "request-1")
-        assert any(
-            "last_error_code=NULL" in query for query in engine.connection.queries
-        )
+        assert any("last_error_code=NULL" in query for query in engine.connection.queries)
     finally:
         await client.aclose()
 
@@ -997,9 +995,7 @@ def test_mail_helpers_cover_sanitization_serialization_and_errors() -> None:
         _provider_success(httpx.Response(401))
     with pytest.raises(ApiError):
         _provider_success(httpx.Response(500))
-    assert _token_refresh_requires_reconnect(
-        httpx.Response(400, json={"error": "invalid_grant"})
-    )
+    assert _token_refresh_requires_reconnect(httpx.Response(400, json={"error": "invalid_grant"}))
     assert not _token_refresh_requires_reconnect(
         httpx.Response(503, json={"error": "server_error"})
     )
