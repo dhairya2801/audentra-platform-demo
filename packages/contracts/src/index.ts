@@ -1235,6 +1235,18 @@ export interface StaffStudentRecord {
   operation?: StaffStudentOperation | null;
 }
 
+export type StudentSsoProviderId = "google" | "microsoft";
+
+export interface StudentSsoProvider {
+  id: StudentSsoProviderId;
+  label: string;
+}
+
+export interface StudentSsoConfiguration {
+  providers: StudentSsoProvider[];
+  passwordEnabled: boolean;
+}
+
 export interface StaffSession {
   authenticated: true;
   mode: "credentials";

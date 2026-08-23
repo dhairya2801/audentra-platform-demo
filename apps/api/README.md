@@ -101,11 +101,13 @@ rather than baking them into the image or committing a populated `.env`.
 
 ### Production authentication guard
 
-Only `AUTH_MODE=demo` exists today, and the composition root intentionally rejects it when
-`AUDENTRA_ENV=production`. Therefore this build is suitable for local/private preview environments
-but must not be exposed as a production service until a real identity adapter is implemented and
-selected. The failure is deliberate and prevents demo identity headers from becoming production
-authentication.
+`AUTH_MODE=demo` is limited to development/test and is rejected when
+`AUDENTRA_ENV=production`. `AUTH_MODE=oidc` implements a Google/Microsoft OIDC authorization-code
+flow with PKCE for existing students in one server-configured tenant. It is a student-only proof:
+credential authentication and staff authentication fail closed while it is selected, and
+staff/leader/VP federation is not yet implemented. Follow
+[`docs/runbooks/student-sso-local.md`](../../docs/runbooks/student-sso-local.md) before enabling it,
+including its hosted-edge and callback-log requirements.
 
 ### Rollback
 
@@ -132,7 +134,7 @@ These changes are intentional:
 | `WORKER_HEALTH_PORT` | Removed; the Python worker does not expose an HTTP health port |
 | `DOCUMENT_PYTHON_BIN` | Removed; document processing runs directly in this Python process |
 | `OPENROUTER_STORE_RESPONSES` | Removed; provider diagnostics use the durable repository journal |
-| `OIDC_ISSUER_URL` | Not active until the production identity adapter is implemented |
+| `OIDC_ISSUER_URL` | Not consumed; use the fixed Google/Microsoft provider settings documented in the student SSO runbook |
 | `SMTP_HOST`, `SMTP_PORT` | Not consumed by the current API/worker composition |
 
 The Python relational seed is an integrity-checked snapshot of a clean legacy Nest seed run: 264
