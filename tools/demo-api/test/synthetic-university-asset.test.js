@@ -18,8 +18,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
 
+import {
+  GZIP_OS_BYTE_OFFSET,
+  GZIP_OS_UNKNOWN,
+  gzipCanonicalJson,
+} from "../src/synthetic-university/archive.js";
 import {
   DEFAULT_NOW,
   generateUniverse,
@@ -51,6 +55,7 @@ describe("packaged synthetic university archive", () => {
     const digest = createHash("sha256").update(archive).digest("hex");
     assert.equal(digest, constant(constants, "ASSET_SHA256"));
     assert.equal(String(archive.length), constant(constants, "ASSET_SIZE_BYTES"));
+    assert.equal(archive[GZIP_OS_BYTE_OFFSET], GZIP_OS_UNKNOWN);
   });
 
   it("is byte-identical to a fresh export from the recorded inputs", () => {
@@ -60,7 +65,7 @@ describe("packaged synthetic university archive", () => {
 
     const universe = generateUniverse({ seed, studentCount, now: DEFAULT_NOW });
     assert.deepEqual(validateUniverse(universe), []);
-    const rebuilt = gzipSync(Buffer.from(JSON.stringify(universe), "utf8"), { level: 9 });
+    const rebuilt = gzipCanonicalJson(universe);
 
     assert.equal(
       createHash("sha256").update(rebuilt).digest("hex"),

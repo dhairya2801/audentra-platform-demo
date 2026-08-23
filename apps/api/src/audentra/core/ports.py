@@ -141,6 +141,18 @@ class BrowserAuthService(Protocol):
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str
     ) -> StaffSession: ...
 
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
+    ) -> StaffSession: ...
+
     async def sign_out_staff(self, token: str | None) -> None: ...
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None: ...
@@ -191,6 +203,19 @@ class UnavailableBrowserAuthService:
 
     async def sign_in_staff(
         self, *, tenant_id: str, tenant_slug: str | None, email: str, password: str
+    ) -> StaffSession:
+        self._raise()
+
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
     ) -> StaffSession:
         self._raise()
 

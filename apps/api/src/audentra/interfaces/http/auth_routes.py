@@ -143,7 +143,7 @@ def _credential_response(session: CredentialStudentSession) -> dict[str, Any]:
 def _staff_response(session: StaffSession) -> dict[str, Any]:
     return {
         "authenticated": True,
-        "mode": "credentials",
+        "mode": session.context.authentication_method,
         "actorType": "staff",
         "staff": {
             "id": session.context.actor_id,
@@ -151,10 +151,7 @@ def _staff_response(session: StaffSession) -> dict[str, Any]:
             "email": session.email,
             "component": session.component,
         },
-        "notice": (
-            "Authenticated local staff session. Institutional deployments should replace this "
-            "adapter with university SSO while preserving the same role boundary."
-        ),
+        "notice": "Authenticated tenant-scoped staff session.",
     }
 
 

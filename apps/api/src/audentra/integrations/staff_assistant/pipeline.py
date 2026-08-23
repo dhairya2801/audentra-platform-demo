@@ -72,6 +72,9 @@ _SKIP_REWRITE = frozenset(
         "draft_email",
         "draft_sms",
         "draft_call_points",
+        # Mailbox content stays inside the platform's deterministic composer;
+        # it is never forwarded to a configured third-party rewrite model.
+        "mailbox_read",
         # Membership is a yes/no honesty statement ("X is / is not in the
         # Action Center"); a rewrite could only soften or invert it.
         "student_action_center",

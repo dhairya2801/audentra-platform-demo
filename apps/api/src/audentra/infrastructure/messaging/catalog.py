@@ -12,6 +12,7 @@ HandlerKey = Literal[
     "document_reservation_recovery",
     "document_extraction",
     "document_review_routing",
+    "staff_email",
 ]
 
 
@@ -52,6 +53,8 @@ ALL_EMITTED_EVENT_NAMES = frozenset(
         "staff.core_play_updated.v1",
         "staff.interaction_completed.v1",
         "staff.interaction_started.v1",
+        "staff.mailbox_connected.v1",
+        "staff.email_send_queued.v1",
         "staff.knowledge_card_created.v1",
         "staff.knowledge_card_updated.v1",
         "staff.work_comment_created.v1",
@@ -137,6 +140,14 @@ EVENT_CATALOG = MappingProxyType(
         "document.stored_for_review.v1": EventDisposition(
             kind="handler",
             handler_key="document_review_routing",
+        ),
+        "staff.mailbox_connected.v1": EventDisposition(
+            kind="handler",
+            handler_key="staff_email",
+        ),
+        "staff.email_send_queued.v1": EventDisposition(
+            kind="handler",
+            handler_key="staff_email",
         ),
     }
 )

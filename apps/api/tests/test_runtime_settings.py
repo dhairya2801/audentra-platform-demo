@@ -47,6 +47,27 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert not hasattr(settings.http_settings(), "tenant_slug_ids")
 
 
+def test_personal_microsoft_account_test_mode_is_local_only(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {"MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS": "true"},
+        package_root=tmp_path,
+    )
+    assert settings.institutional_oauth.microsoft_allow_personal_accounts is True
+
+    with pytest.raises(ValueError, match="only in development or test"):
+        RuntimeSettings.from_environment(
+            {
+                "AUDENTRA_ENV": "preview",
+                "DATABASE_URL": "postgresql://example/preview",
+                "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+                "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+                "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
+                "MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS": "true",
+            },
+            package_root=tmp_path,
+        )
+
+
 def test_student_oidc_settings_preserve_provider_order_and_tenant_boundaries(
     tmp_path: Path,
 ) -> None:

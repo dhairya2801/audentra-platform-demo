@@ -47,6 +47,7 @@ STAFF_TOOL_NAMES = (
     "getInquiryThread",
     "getPlaybooks",
     "getActionRules",
+    "getMailboxMessages",
 )
 
 # Source-of-truth classification, mirroring the student catalog's discipline.
@@ -77,6 +78,7 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getInquiryThread": "operational_state",
     "getPlaybooks": "institution_knowledge",
     "getActionRules": "institution_knowledge",
+    "getMailboxMessages": "operational_state",
 }
 
 STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
@@ -181,6 +183,12 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "written by staff — not system-enforced policy."
     ),
     "getActionRules": "Read the configured staff automation rules.",
+    "getMailboxMessages": (
+        "Read up to 25 messages from the authenticated staff member's authorized "
+        "seven-day mailbox cache. Every mailbox grant is rechecked. Results are "
+        "ranked by explicit urgent/time-sensitive language, then matched student, "
+        "then recency; this is not a predictive priority score."
+    ),
 }
 
 STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
@@ -206,6 +214,7 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "getInquiryThread": "inquiry_thread",
     "getPlaybooks": "staff_guidance",
     "getActionRules": "action_rules",
+    "getMailboxMessages": "authorized_mailboxes",
 }
 
 # Tools whose primary argument is the resolved student referent. The pipeline
@@ -287,6 +296,10 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
     "getInquiryThread": {"inquiryId": {"kind": "uuid"}},
     "getPlaybooks": {},
     "getActionRules": {},
+    "getMailboxMessages": {
+        "query": {"kind": "text", "max_length": 500, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
 }
 
 

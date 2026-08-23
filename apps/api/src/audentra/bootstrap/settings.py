@@ -54,6 +54,25 @@ class WorkerSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class InstitutionalOAuthSettings:
+    api_public_url: str
+    portal_origin: str
+    google_client_id: str
+    google_client_secret: str
+    microsoft_client_id: str
+    microsoft_client_secret: str
+    microsoft_allow_personal_accounts: bool
+    token_encryption_key: str
+
+    def provider_configured(self, provider: str) -> bool:
+        if provider == "google":
+            return bool(self.google_client_id and self.google_client_secret)
+        if provider == "microsoft":
+            return bool(self.microsoft_client_id and self.microsoft_client_secret)
+        return False
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     """One immutable settings snapshot; no business code reads the environment directly."""
 
@@ -76,6 +95,7 @@ class RuntimeSettings:
     object_storage: StorageSettings
     ai: GatewaySettings
     worker: WorkerSettings
+    institutional_oauth: InstitutionalOAuthSettings
     voice: VoiceSettings | None
     onboarding_template_dir: Path
     assistant_trace_debug_enabled: bool = False
@@ -151,6 +171,13 @@ class RuntimeSettings:
         )
         if app_environment == "production" and e2e_malicious_provider_enabled:
             raise ValueError("EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED is prohibited in production")
+        microsoft_allow_personal_accounts = _boolean(
+            values.get("MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS"), False
+        )
+        if microsoft_allow_personal_accounts and app_environment not in {"development", "test"}:
+            raise ValueError(
+                "MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS is allowed only in development or test"
+            )
         assistant_trace_debug_enabled = _boolean(
             values.get("ASSISTANT_TRACE_DEBUG_ENABLED"),
             app_environment in {"development", "test"},
@@ -172,6 +199,10 @@ class RuntimeSettings:
             )
 
         voice = _voice_settings(values, deployed_environment=deployed_environment)
+        api_public_url = (
+            values.get("API_PUBLIC_URL", f"http://localhost:{port}").strip().rstrip("/")
+        )
+        _http_url(api_public_url, "API_PUBLIC_URL")
 
         oidc = _oidc_settings(values, environment=app_environment, auth_mode=auth_mode)
         configured_oidc_tenant = (
@@ -302,6 +333,16 @@ class RuntimeSettings:
                 max_retry_ms=_bounded_int(
                     values, ("WORKER_MAX_RETRY_MS",), 300_000, 1_000, 86_400_000
                 ),
+            ),
+            institutional_oauth=InstitutionalOAuthSettings(
+                api_public_url=api_public_url,
+                portal_origin=origins[0],
+                google_client_id=values.get("GOOGLE_OAUTH_CLIENT_ID", "").strip(),
+                google_client_secret=values.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip(),
+                microsoft_client_id=values.get("MICROSOFT_OAUTH_CLIENT_ID", "").strip(),
+                microsoft_client_secret=values.get("MICROSOFT_OAUTH_CLIENT_SECRET", "").strip(),
+                microsoft_allow_personal_accounts=microsoft_allow_personal_accounts,
+                token_encryption_key=values.get("MAIL_TOKEN_ENCRYPTION_KEY", "").strip(),
             ),
             voice=voice,
             onboarding_template_dir=template_dir,

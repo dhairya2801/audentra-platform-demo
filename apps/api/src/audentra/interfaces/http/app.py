@@ -23,9 +23,11 @@ from audentra.infrastructure.voice import (
     VoiceSessionServiceProtocol,
 )
 
+from .access_logging import install_access_log_redaction
 from .auth_routes import auth_router
 from .config import HttpSettings
 from .error_handlers import install_error_handlers
+from .mail_routes import mail_router
 from .middleware import OidcCallbackQueryRedactionMiddleware, RequestContextMiddleware
 from .routes import router
 
@@ -52,6 +54,7 @@ def create_app(
 ) -> FastAPI:
     """Build an isolated API instance with injected application behavior."""
 
+    install_access_log_redaction()
     app = FastAPI(
         title="Audentra Platform API",
         version="0.1.0",
@@ -63,9 +66,11 @@ def create_app(
     app.state.platform_service = service or UnavailablePlatformService()
     app.state.browser_auth_service = auth_service or UnavailableBrowserAuthService()
     app.state.oidc_auth_service = oidc_auth_service or UnavailableOidcAuthService()
+    app.state.staff_email_service = None
     app.state.voice_session_service = voice_service or UnavailableVoiceSessionService()
 
     app.include_router(auth_router)
+    app.include_router(mail_router)
     app.include_router(router)
     install_error_handlers(app)
     # The Lab's execution-mode header is only ever accepted where the control
@@ -80,7 +85,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=list(app.state.http_settings.web_origins),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=allowed_headers,
         expose_headers=["X-Request-Id", "X-Correlation-Id", "X-Trace-Id"],
         max_age=600,
