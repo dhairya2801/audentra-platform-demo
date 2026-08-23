@@ -69,9 +69,13 @@ class SessionBrowserAuth(UnavailableBrowserAuthService):
     def __init__(self) -> None:
         self.resolved_tokens: list[str] = []
         self.signed_out_tokens: list[str | None] = []
+        self.signed_out_staff_tokens: list[str | None] = []
 
     async def sign_out_student(self, token: str | None) -> None:
         self.signed_out_tokens.append(token)
+
+    async def sign_out_staff(self, token: str | None) -> None:
+        self.signed_out_staff_tokens.append(token)
 
     async def resolve_student(
         self,
@@ -821,6 +825,32 @@ async def test_oidc_mode_disables_credentials_but_keeps_session_logout() -> None
     assert sign_out.status_code == 200
     assert sign_out.json() == {"authenticated": False, "mode": "oidc"}
     assert browser_auth.signed_out_tokens == ["active-oidc-session-token"]
+
+
+async def test_oidc_mode_allows_federated_staff_session_logout() -> None:
+    browser_auth = SessionBrowserAuth()
+    app = _app(
+        FakeOidcAuth(),
+        browser_auth=browser_auth,
+        environment="preview",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="https://testserver",
+    ) as client:
+        sign_out = await client.post(
+            "/v1/auth/staff/sign-out",
+            headers={"Cookie": f"vv_staff_session={FEDERATED_STAFF_SESSION_TOKEN}"},
+        )
+
+    assert sign_out.status_code == 200
+    assert sign_out.json() == {
+        "authenticated": False,
+        "mode": "credentials",
+        "actorType": "staff",
+    }
+    assert browser_auth.signed_out_staff_tokens == [FEDERATED_STAFF_SESSION_TOKEN]
 
 
 async def test_oidc_mode_rejects_old_credentials_but_allows_federated_staff_session() -> None:

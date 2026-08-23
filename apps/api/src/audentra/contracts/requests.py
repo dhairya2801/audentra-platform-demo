@@ -55,6 +55,20 @@ HousingResidenceCode = Annotated[
 DocumentCategory = Literal[
     "identity", "residency", "transcript", "financial_aid", "health", "consent", "other"
 ]
+FerpaPortalScope = Literal[
+    "dashboard",
+    "enrollment",
+    "financials",
+    "classrooms",
+    "campus_life",
+    "edward",
+    "documents",
+    "messages",
+    "appointments",
+    "payments",
+    "profile",
+    "help",
+]
 
 
 def _ensure_email(value: str) -> str:
@@ -256,9 +270,23 @@ class DemoStudentSignInRequest(StrictRequest):
 class StudentSignUpRequest(StrictRequest):
     email: StrictStr
     phone: PhoneE164
+    # Optional for existing API clients, required by the account-creation UI.
+    # Retaining the compatibility default avoids breaking institution SSO
+    # adapters that create the person record independently.
+    legal_name: NameText | None = None
     password: Annotated[StrictStr, StringConstraints(min_length=12, max_length=128)]
 
     _normalize_email_value = field_validator("email", mode="before")(_normalize_email)
+
+    @field_validator("legal_name")
+    @classmethod
+    def _legal_name_has_given_and_family_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(unicodedata.normalize("NFKC", value).split())
+        if len(normalized.split(" ")) < 2:
+            raise ValueError("must include both a given name and family name")
+        return normalized
 
     @field_validator("password")
     @classmethod
@@ -349,6 +377,15 @@ class OnboardingEmergencyContactRequest(StrictRequest):
     full_name: NameText
     relationship: Literal["parent", "guardian", "partner", "sibling", "relative", "friend", "other"]
     mobile_phone: PhoneE164
+    # Emergency contacts do not receive portal access automatically.  An email
+    # is collected only so a parent/guardian can later be selected, reviewed,
+    # and explicitly authorized in FERPA.
+    email: StrictStr | None = None
+
+    @field_validator("email")
+    @classmethod
+    def _validate_optional_email(cls, value: str | None) -> str | None:
+        return None if value is None else _ensure_email(value)
 
 
 class OnboardingFamilyPermissionRequest(StrictRequest):
@@ -360,6 +397,84 @@ class OnboardingFamilyPermissionRequest(StrictRequest):
     expires: Literal["end_first_year", "end_enrollment", "registrar_date"]
 
     _validate_email = field_validator("email")(_ensure_email)
+
+
+class FerpaDelegateRequest(StrictRequest):
+    id: UUID | None = None
+    full_name: NameText
+    relationship: Literal["parent", "guardian", "partner", "sponsor", "relative", "other"]
+    email: StrictStr
+    scopes: list[FerpaPortalScope] = Field(min_length=1, max_length=12)
+
+    _validate_email = field_validator("email")(_ensure_email)
+
+    @field_validator("scopes")
+    @classmethod
+    def _unique_scopes(cls, value: list[FerpaPortalScope]) -> list[FerpaPortalScope]:
+        if len(value) != len(set(value)):
+            raise ValueError("must not contain duplicate portal scopes")
+        return value
+
+
+class FerpaSignatureRequest(StrictRequest):
+    accepted: Literal[True]
+    signer_name: NameText
+    signature_method: Literal["typed", "drawn"] = "typed"
+    signature_image_data: (
+        Annotated[
+            StrictStr,
+            StringConstraints(min_length=32, max_length=1_500_000),
+        ]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _drawn_signature_has_image(self) -> "FerpaSignatureRequest":
+        if self.signature_method == "drawn" and not self.signature_image_data:
+            raise ValueError("signatureImageData is required for a drawn signature")
+        if self.signature_method == "typed" and self.signature_image_data is not None:
+            raise ValueError("signatureImageData is only accepted for a drawn signature")
+        return self
+
+
+class FerpaAccessRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+    access_decision: Literal["grant", "no_access"]
+    delegates: list[FerpaDelegateRequest] = Field(max_length=4)
+
+    @model_validator(mode="after")
+    def _valid_access_decision(self) -> "FerpaAccessRequest":
+        if self.access_decision == "grant" and not self.delegates:
+            raise ValueError("at least one delegate is required when granting access")
+        if self.access_decision == "no_access" and self.delegates:
+            raise ValueError("delegates must be empty when accessDecision is no_access")
+        emails = [delegate.email.strip().lower() for delegate in self.delegates]
+        if len(emails) != len(set(emails)):
+            raise ValueError("delegate email addresses must be unique")
+        return self
+
+
+class CompleteFerpaAuthorizationRequest(FerpaAccessRequest):
+    signature: FerpaSignatureRequest | None = None
+
+
+class UpdateFerpaAccessRequest(FerpaAccessRequest):
+    pass
+
+
+class FerpaLinkCommandRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+
+
+class ExchangeDelegateLinkRequest(StrictRequest):
+    token: Annotated[
+        StrictStr,
+        StringConstraints(
+            min_length=32,
+            max_length=256,
+            pattern=r"^[A-Za-z0-9_-]+$",
+        ),
+    ]
 
 
 class StudentOnboardingDataRequest(StrictRequest):

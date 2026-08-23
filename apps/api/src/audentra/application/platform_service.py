@@ -219,6 +219,52 @@ class InMemoryPlatformService:
             return self.store.get_requirement(
                 auth, self._path(call, "id", "requirement_id", "requirementId")
             )
+        if operation == "student.list_requirement_appointments":
+            requirement = self.store.get_requirement(
+                auth, self._path(call, "id", "requirement_id", "requirementId")
+            )
+            self._require_scheduling_requirement(requirement, mutation=False)
+            appointments = self.store.get_appointments(auth)
+            items = [
+                item
+                for item in appointments["items"]
+                if item.get("status") in {"scheduled", "rescheduled"}
+            ]
+            return {"items": items, "total": len(items)}
+        if operation == "student.create_requirement_appointment":
+            requirement = self.store.get_requirement(
+                auth, self._path(call, "id", "requirement_id", "requirementId")
+            )
+            self._require_scheduling_requirement(requirement, mutation=True)
+            return self.store.create_appointment(
+                auth, self._without_idempotency(payload), self._idempotency_key(payload)
+            )
+        if operation == "student.update_requirement_profile":
+            requirement = self.store.get_requirement(
+                auth, self._path(call, "id", "requirement_id", "requirementId")
+            )
+            if (
+                requirement.get("flowKind") != "enrollment"
+                or requirement.get("code") != "profile_verification"
+                or requirement.get("interactionType") != "form"
+            ):
+                raise ApiError(
+                    409,
+                    "REQUIREMENT_PROFILE_UPDATE_REQUIRED",
+                    "Profile changes here require the active enrollment profile task",
+                )
+            if requirement.get("status") not in {
+                "ready",
+                "help_requested",
+                "in_progress",
+                "rejected",
+            }:
+                raise ApiError(
+                    409,
+                    "STUDENT_REQUIREMENT_NOT_ACTIONABLE",
+                    "This profile requirement cannot accept changes now",
+                )
+            return self.store.update_profile(auth, payload)
         if operation == "student.list_messages":
             return self.store.get_messages(auth)
         if operation == "student.mark_message_read":
@@ -356,6 +402,26 @@ class InMemoryPlatformService:
             if isinstance(value, str) and 8 <= len(value) <= 128:
                 return value
         raise BadRequestError("IDEMPOTENCY_KEY_REQUIRED", "The Idempotency-Key header is required")
+
+    @staticmethod
+    def _require_scheduling_requirement(requirement: Mapping[str, Any], *, mutation: bool) -> None:
+        if requirement.get("interactionType") != "scheduling":
+            raise ApiError(
+                409,
+                "REQUIREMENT_SCHEDULING_REQUIRED",
+                "Appointments can be managed here only for a scheduling requirement",
+            )
+        if mutation and requirement.get("status") not in {
+            "ready",
+            "help_requested",
+            "in_progress",
+            "rejected",
+        }:
+            raise ApiError(
+                409,
+                "STUDENT_REQUIREMENT_NOT_ACTIONABLE",
+                "This scheduling requirement cannot accept an appointment now",
+            )
 
     @staticmethod
     def _without_idempotency(payload: Mapping[str, Any]) -> dict[str, Any]:

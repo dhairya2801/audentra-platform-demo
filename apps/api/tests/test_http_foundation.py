@@ -298,13 +298,14 @@ async def test_cors_preflight_allows_worker_token_without_portal_id_header(
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "X-VV-Worker-Token",
+            "Access-Control-Request-Headers": "X-Audentra-Session-Mode, X-VV-Worker-Token",
         },
     )
 
     assert response.status_code == 200
     allowed = response.headers["access-control-allow-headers"].lower()
     assert "x-tenant-slug" not in allowed
+    assert "x-audentra-session-mode" in allowed
     assert "x-vv-worker-token" in allowed
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 

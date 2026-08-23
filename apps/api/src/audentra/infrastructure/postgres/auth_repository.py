@@ -16,13 +16,24 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from audentra.core.auth import AuthContext
+from audentra.core.auth import (
+    LEGACY_PORTAL_SCOPE_ALIASES,
+    LEGACY_PORTAL_SCOPES,
+    AuthContext,
+    PortalScope,
+)
 from audentra.core.errors import ApiError, ConflictError, UnauthorizedError
-from audentra.core.ports import CredentialStudentSession, DemoStudentSession, StaffSession
+from audentra.core.ports import (
+    CredentialStudentSession,
+    DelegateSession,
+    DemoStudentSession,
+    StaffSession,
+)
 from audentra.infrastructure.seeding.relational import reset_relational_data
 
 _STUDENT_SESSION_LIFETIME = timedelta(days=7)
 _STAFF_SESSION_LIFETIME = timedelta(hours=8)
+_DELEGATE_SESSION_LIFETIME = timedelta(hours=12)
 _MAXIMUM_SESSIONS = 5
 _PASSWORD_N = 2**14
 _PASSWORD_R = 8
@@ -215,6 +226,7 @@ class PostgresDevelopmentAuth:
         tenant_slug: str | None,
         email: str,
         phone: str,
+        legal_name: str | None,
         password: str,
     ) -> CredentialStudentSession:
         self._require_development_flows()
@@ -318,6 +330,7 @@ class PostgresDevelopmentAuth:
                     offer_id=offer_id,
                     email=normalized_email,
                     phone=phone,
+                    legal_name=legal_name,
                     password_hash=password_hash,
                     template=dict(template),
                 )
@@ -441,6 +454,172 @@ class PostgresDevelopmentAuth:
                 text(
                     """
                     UPDATE auth_session SET revoked_at=COALESCE(revoked_at, NOW())
+                    WHERE token_hash=:token_hash
+                    """
+                ),
+                {"token_hash": token_hash},
+            )
+
+    async def exchange_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession:
+        link_hash = _session_token_hash(token)
+        if link_hash is None:
+            raise UnauthorizedError("The parent or guardian link is invalid or revoked")
+        session_token = secrets.token_urlsafe(48)
+        session_hash = _required_session_token_hash(session_token)
+        expires_at = datetime.now(UTC) + _DELEGATE_SESSION_LIFETIME
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT delegate.id, delegate.student_id, delegate.full_name,
+                           delegate.relationship, delegate.email_normalized,
+                           delegate.scopes,
+                           COALESCE(profile.preferred_name, person.preferred_name,
+                                    person.first_name) AS student_preferred_name,
+                           person.first_name || ' ' || person.last_name AS student_name
+                    FROM ferpa_delegate_link link
+                    JOIN ferpa_delegate delegate ON delegate.id=link.delegate_id
+                    JOIN ferpa_authorization ferpa_auth
+                      ON ferpa_auth.id=delegate.authorization_id
+                     AND ferpa_auth.tenant_id=delegate.tenant_id
+                    JOIN student ON student.id=delegate.student_id
+                     AND student.tenant_id=delegate.tenant_id
+                    JOIN person ON person.id=student.person_id
+                     AND person.tenant_id=student.tenant_id
+                    LEFT JOIN student_profile profile
+                      ON profile.student_id=student.id AND profile.tenant_id=student.tenant_id
+                    WHERE link.token_hash=:token_hash AND link.tenant_id=:tenant_id
+                      AND link.status='active' AND link.revoked_at IS NULL
+                      AND delegate.active=true AND NOT delegate.legacy_review_required
+                      AND cardinality(delegate.scopes)>0
+                      AND ferpa_auth.status='completed'
+                      AND ferpa_auth.access_decision='grant'
+                    FOR UPDATE OF link, delegate, ferpa_auth
+                    """
+                ),
+                {"token_hash": link_hash, "tenant_id": UUID(tenant_id)},
+            )
+            row = result.mappings().first()
+            if row is None:
+                raise UnauthorizedError("The parent or guardian link is invalid or revoked")
+            await connection.execute(
+                text(
+                    """
+                    UPDATE ferpa_delegate_link SET last_used_at=NOW(), updated_at=NOW()
+                    WHERE delegate_id=:delegate_id
+                    """
+                ),
+                {"delegate_id": row["id"]},
+            )
+            await connection.execute(
+                text(
+                    """
+                    UPDATE ferpa_delegate_session SET revoked_at=NOW()
+                    WHERE id IN (
+                      SELECT id FROM ferpa_delegate_session
+                      WHERE delegate_id=:delegate_id AND revoked_at IS NULL
+                        AND expires_at>NOW()
+                      ORDER BY created_at DESC OFFSET :keep_count
+                    )
+                    """
+                ),
+                {"delegate_id": row["id"], "keep_count": _MAXIMUM_SESSIONS - 1},
+            )
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO ferpa_delegate_session (
+                      id, tenant_id, delegate_id, token_hash, expires_at
+                    ) VALUES (:id, :tenant_id, :delegate_id, :token_hash, :expires_at)
+                    """
+                ),
+                {
+                    "id": uuid4(),
+                    "tenant_id": UUID(tenant_id),
+                    "delegate_id": row["id"],
+                    "token_hash": session_hash,
+                    "expires_at": expires_at,
+                },
+            )
+        return _delegate_session(
+            dict(row),
+            tenant_id,
+            tenant_slug,
+            token=session_token,
+            expires_at_epoch=int(expires_at.timestamp()),
+        )
+
+    async def resolve_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession | None:
+        token_hash = _session_token_hash(token)
+        if token_hash is None:
+            return None
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT delegate.id, delegate.student_id, delegate.full_name,
+                           delegate.relationship, delegate.email_normalized,
+                           delegate.scopes, session.expires_at,
+                           COALESCE(profile.preferred_name, person.preferred_name,
+                                    person.first_name) AS student_preferred_name,
+                           person.first_name || ' ' || person.last_name AS student_name
+                    FROM ferpa_delegate_session session
+                    JOIN ferpa_delegate delegate ON delegate.id=session.delegate_id
+                     AND delegate.tenant_id=session.tenant_id
+                    JOIN ferpa_authorization ferpa_auth
+                      ON ferpa_auth.id=delegate.authorization_id
+                     AND ferpa_auth.tenant_id=delegate.tenant_id
+                    JOIN ferpa_delegate_link link ON link.delegate_id=delegate.id
+                     AND link.tenant_id=delegate.tenant_id
+                    JOIN student ON student.id=delegate.student_id
+                     AND student.tenant_id=delegate.tenant_id
+                    JOIN person ON person.id=student.person_id
+                     AND person.tenant_id=student.tenant_id
+                    LEFT JOIN student_profile profile
+                      ON profile.student_id=student.id AND profile.tenant_id=student.tenant_id
+                    WHERE session.token_hash=:token_hash AND session.tenant_id=:tenant_id
+                      AND session.revoked_at IS NULL AND session.expires_at>NOW()
+                      AND delegate.active=true AND NOT delegate.legacy_review_required
+                      AND cardinality(delegate.scopes)>0
+                      AND ferpa_auth.status='completed'
+                      AND ferpa_auth.access_decision='grant'
+                      AND link.status='active' AND link.revoked_at IS NULL
+                    """
+                ),
+                {"token_hash": token_hash, "tenant_id": UUID(tenant_id)},
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            await connection.execute(
+                text(
+                    """
+                    UPDATE ferpa_delegate_session SET last_seen_at=NOW()
+                    WHERE token_hash=:token_hash
+                    """
+                ),
+                {"token_hash": token_hash},
+            )
+        return _delegate_session(
+            dict(row),
+            tenant_id,
+            tenant_slug,
+            expires_at_epoch=int(row["expires_at"].timestamp()),
+        )
+
+    async def sign_out_delegate(self, token: str | None) -> None:
+        token_hash = _session_token_hash(token)
+        if token_hash is None:
+            return
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE ferpa_delegate_session SET revoked_at=COALESCE(revoked_at,NOW())
                     WHERE token_hash=:token_hash
                     """
                 ),
@@ -863,6 +1042,7 @@ class PostgresDevelopmentAuth:
         offer_id: UUID,
         email: str,
         phone: str,
+        legal_name: str | None,
         password_hash: str,
         template: Mapping[str, Any],
     ) -> None:
@@ -874,6 +1054,7 @@ class PostgresDevelopmentAuth:
             "offer_id": offer_id,
             "email": email,
             "phone": phone,
+            **_new_student_identity(legal_name),
             "password_hash": password_hash,
             "program_id": template["program_id"],
             "academic_term_id": template["academic_term_id"],
@@ -887,7 +1068,7 @@ class PostgresDevelopmentAuth:
         for statement in (
             """
             INSERT INTO person (id, tenant_id, preferred_name, first_name, last_name)
-            VALUES (:person_id, :tenant_id, NULL, 'Student', 'Account')
+            VALUES (:person_id, :tenant_id, :preferred_name, :first_name, :last_name)
             """,
             """
             INSERT INTO student (id, tenant_id, person_id, class_year)
@@ -905,12 +1086,22 @@ class PostgresDevelopmentAuth:
             """
             INSERT INTO student_onboarding (
               tenant_id, student_id, status, current_step, completed_steps, payload, version
-            ) VALUES (:tenant_id, :student_id, 'in_progress', 'offer', '{}', '{}'::jsonb, 1)
+            ) VALUES (
+              :tenant_id, :student_id, 'in_progress', 'offer', '{}',
+              jsonb_build_object(
+                'firstName', CAST(:first_name AS text),
+                'lastName', CAST(:last_name AS text),
+                'preferredName', CAST(:preferred_name AS text),
+                'personalEmail', CAST(:email AS text),
+                'mobilePhone', CAST(:phone AS text)
+              ),
+              1
+            )
             """,
             """
             INSERT INTO student_profile (
-              tenant_id, student_id, preferred_name, communication_preference, version
-            ) VALUES (:tenant_id, :student_id, 'Student', 'email', 1)
+              tenant_id, student_id, preferred_name, mobile_phone, communication_preference, version
+            ) VALUES (:tenant_id, :student_id, :preferred_name, :phone, 'email', 1)
             """,
             """
             INSERT INTO credential_account (
@@ -1130,8 +1321,69 @@ def _credential_session(
     )
 
 
+def _delegate_session(
+    row: Mapping[str, Any],
+    tenant_id: str,
+    tenant_slug: str | None,
+    *,
+    token: str | None = None,
+    expires_at_epoch: int | None = None,
+) -> DelegateSession:
+    raw_scopes = [str(scope) for scope in row["scopes"]]
+    if not raw_scopes or any(scope not in LEGACY_PORTAL_SCOPES for scope in raw_scopes):
+        raise UnauthorizedError("The parent or guardian access scopes are invalid")
+    scopes = frozenset(
+        LEGACY_PORTAL_SCOPE_ALIASES.get(scope, cast(PortalScope, scope)) for scope in raw_scopes
+    )
+    return DelegateSession(
+        context=AuthContext(
+            tenant_id=tenant_id,
+            student_id=str(row["student_id"]),
+            actor_id=str(row["id"]),
+            actor_type="delegate",
+            authentication_method="delegate_link",
+            tenant_slug=tenant_slug,
+            delegate_scopes=scopes,
+            delegate_relationship=str(row["relationship"]),
+            delegate_name=str(row["full_name"]),
+            subject_student_name=str(row["student_name"]),
+        ),
+        full_name=str(row["full_name"]),
+        relationship=str(row["relationship"]),
+        email=str(row["email_normalized"]),
+        student_preferred_name=str(row["student_preferred_name"]),
+        student_name=str(row["student_name"]),
+        token=token,
+        expires_at_epoch=expires_at_epoch,
+    )
+
+
 def _normalize_email(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip().lower()
+
+
+def _new_student_identity(legal_name: str | None) -> dict[str, str]:
+    """Create the initial canonical identity without relying on onboarding JS.
+
+    Existing API clients may still omit legalName while their institution SSO
+    creates the person record elsewhere, so retain the harmless historical
+    placeholder only for that compatibility path.  The portal's account form
+    always supplies both legal-name parts.
+    """
+
+    normalized = " ".join(unicodedata.normalize("NFKC", legal_name or "").split())
+    if not normalized:
+        return {
+            "first_name": "Student",
+            "last_name": "Account",
+            "preferred_name": "Student",
+        }
+    given_name, family_name = normalized.split(" ", 1)
+    return {
+        "first_name": given_name,
+        "last_name": family_name,
+        "preferred_name": given_name,
+    }
 
 
 def _federated_display_name(value: str, fallback_email: str) -> str:

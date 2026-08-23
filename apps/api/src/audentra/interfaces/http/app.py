@@ -26,6 +26,7 @@ from audentra.infrastructure.voice import (
 from .access_logging import install_access_log_redaction
 from .auth_routes import auth_router
 from .config import HttpSettings
+from .dependencies import PORTAL_SESSION_MODE_HEADER
 from .error_handlers import install_error_handlers
 from .mail_routes import mail_router
 from .middleware import OidcCallbackQueryRedactionMiddleware, RequestContextMiddleware
@@ -41,6 +42,7 @@ ALLOWED_HEADERS = [
     "X-Demo-Actor-Id",
     "X-Demo-Actor-Type",
     "X-VV-Worker-Token",
+    PORTAL_SESSION_MODE_HEADER,
 ]
 
 

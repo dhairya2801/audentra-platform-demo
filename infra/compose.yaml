@@ -36,6 +36,7 @@ x-runtime-environment: &runtime-environment
   MAX_DOCUMENT_BYTES: ${MAX_DOCUMENT_BYTES:-10485760}
   ONBOARDING_DOCUMENT_TEMPLATE_DIR: /workspace/apps/api/assets/onboarding
   DOCUMENT_WORKER_TOKEN: ${DOCUMENT_WORKER_TOKEN:-local-development-document-worker-token}
+  FERPA_DELEGATE_LINK_SECRET: ${FERPA_DELEGATE_LINK_SECRET:-local-development-ferpa-delegate-link-secret-v1}
   API_INTERNAL_URL: http://api:4000
   DEMO_TENANT_ID: ${DEMO_TENANT_ID:-00000000-0000-7000-8000-000000000001}
   DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101

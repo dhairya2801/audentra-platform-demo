@@ -18,6 +18,7 @@ from audentra.core.ports import (
 )
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.postgres.auth_repository import PostgresDevelopmentAuth
+from audentra.infrastructure.postgres.ferpa_repository import PostgresFerpaRepository
 from audentra.infrastructure.postgres.managed_configuration_repository import (
     PostgresManagedConfigurationRepository,
 )
@@ -113,11 +114,13 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 tenant=tenant,
                 staff_assistant=PostgresStaffAssistantRepository(engine),
                 morning_brew=PostgresMorningBrewRepository(engine),
+                ferpa=PostgresFerpaRepository(engine, portal),
             ),
             storage,
             ai,
             PostgresSignedDocumentGenerator(settings.onboarding_template_dir),
             settings.document_worker_token,
+            ferpa_link_secret=settings.ferpa_delegate_link_secret,
         )
         auth_service = PostgresDevelopmentAuth(
             engine,

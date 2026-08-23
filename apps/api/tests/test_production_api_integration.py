@@ -219,6 +219,11 @@ def test_real_production_composition_executes_core_mutations_idempotently() -> N
             assert contextual_upload.status_code == 201, contextual_upload.text
             assert contextual_upload.json()["requirementId"] == transcript_requirement["id"]
             assert contextual_upload.json()["category"] == "transcript"
+            contextual_content = await client.get(
+                f"/v1/student/documents/{contextual_upload.json()['id']}/content"
+            )
+            assert contextual_content.status_code == 200, contextual_content.text
+            assert contextual_content.content == source_pdf
 
             processed = await client.post(
                 f"/v1/student/internal/document-extractions/{document_id}",

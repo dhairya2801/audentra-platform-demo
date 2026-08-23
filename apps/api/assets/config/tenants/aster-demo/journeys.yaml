@@ -52,24 +52,24 @@ flows:
         points: 15
       - id: emergency_contacts
         student_step: emergency_contacts
-        title: Add emergency contacts
-        description: Provide at least one contact the university may reach in an emergency.
+        title: Add parent, guardian & emergency contacts
+        description: Provide people the university may reach in an emergency. Include an email for any parent or guardian you may later select for FERPA portal access.
         task_type: form
         owner: Student Services
         required: true
         points: 20
       - id: family_permissions
         student_step: family_permissions
-        title: Choose family permissions
-        description: Decide whether designated supporters may receive enrollment information.
-        task_type: form
+        title: FERPA release and parent access
+        description: Sign your FERPA release and choose exactly which portal pages each parent or guardian may access.
+        task_type: ferpa
         owner: Registrar
-        required: false
+        required: true
         points: 15
       - id: review_and_sign
         student_step: review_and_sign
         title: Review and sign
-        description: Review your answers and sign the enrollment and privacy acknowledgements.
+        description: Review your answers and sign the enrollment acknowledgment.
         task_type: signature
         owner: Registrar
         required: true

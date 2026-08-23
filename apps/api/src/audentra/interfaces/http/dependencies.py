@@ -9,9 +9,15 @@ from uuid import UUID
 from fastapi import Depends, Header, Request
 
 from audentra.core.auth import AuthContext
+from audentra.core.delegate_authorization import authorize_delegate_route
 from audentra.core.errors import ApiError, BadRequestError, UnauthorizedError
 from audentra.core.oidc import OidcAuthService
-from audentra.core.ports import BrowserAuthService, PlatformService, ServiceCall
+from audentra.core.ports import (
+    BrowserAuthService,
+    DelegateBrowserAuthService,
+    PlatformService,
+    ServiceCall,
+)
 from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
 from audentra.infrastructure.voice import VoiceSessionServiceProtocol
 
@@ -19,6 +25,13 @@ from .config import HttpSettings
 from .demo_identity import DEMO_STUDENT_COOKIE, read_demo_student_cookie
 
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+
+# This header only chooses between two independently authenticated browser
+# sessions.  It never grants access on its own: the selected HTTP-only cookie
+# is still resolved and authorized below.  Keeping the choice per tab prevents
+# a parent-link tab from changing the identity used by an already-open student
+# portal tab on the same origin.
+PORTAL_SESSION_MODE_HEADER = "x-audentra-session-mode"
 
 
 def get_settings(request: Request) -> HttpSettings:
@@ -140,6 +153,30 @@ async def get_auth_context(request: Request) -> AuthContext:
         if request.headers.get("x-demo-actor-type") != "staff":
             raise UnauthorizedError("Staff routes require the development staff identity header")
     else:
+        requested_mode = request.headers.get(PORTAL_SESSION_MODE_HEADER, "").strip().lower()
+        if requested_mode == "delegate":
+            delegate_token = request.cookies.get("vv_delegate_session")
+            if delegate_token is None:
+                raise UnauthorizedError("The parent or guardian session is invalid or has expired")
+            delegate_session = await cast(
+                DelegateBrowserAuthService, auth_service
+            ).resolve_delegate(
+                delegate_token,
+                tenant_id,
+                tenant_slug,
+            )
+            if delegate_session is None:
+                raise UnauthorizedError("The parent or guardian session is invalid or has expired")
+            authorize_delegate_route(
+                delegate_session.context,
+                request.method,
+                request.url.path,
+            )
+            return delegate_session.context
+
+        # Student is the deliberate safe default.  A delegate cookie may be
+        # present because another tab opened a secure link, but it must never
+        # take over ordinary student requests merely by existing.
         credential_token = request.cookies.get("vv_session")
         if credential_token is not None:
             student_session = await auth_service.resolve_student(
