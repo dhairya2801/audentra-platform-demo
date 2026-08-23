@@ -66,6 +66,7 @@ _ROUTE_POLICIES = (
     _policy(r"^/v1/student/requirements(?:/[^/]+)?$", "enrollment"),
     _policy(
         r"^/v1/student/requirements/[^/]+/responses$",
+        "enrollment",
         methods=("POST",),
     ),
     _policy(r"^/v1/student/messages(?:/[^/]+/read)?$", "messages"),
@@ -82,7 +83,11 @@ _ROUTE_POLICIES = (
         "enrollment",
         methods=("POST",),
     ),
-    _policy(r"^/v1/student/documents/[^/]+/profile-photo$", "documents", "profile"),
+    _policy(
+        r"^/v1/student/documents/[^/]+/profile-photo$",
+        "documents",
+        "profile",
+    ),
     _policy(
         r"^/v1/student/documents$",
         "documents",

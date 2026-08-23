@@ -5,9 +5,10 @@ from collections.abc import AsyncIterator
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from audentra.core.auth import AuthContext
+from audentra.core.auth import AuthContext, PortalScope
 from audentra.core.errors import ApiError, NotFoundError, UnauthorizedError
 from audentra.core.ports import (
+    BinaryPayload,
     CredentialStudentSession,
     DelegateSession,
     DemoStudentSession,
@@ -44,6 +45,16 @@ class FakePlatformService:
             if tenant_id is None:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
             return {"tenantId": tenant_id, "slug": "aster"}
+        if call.operation in {
+            "student.get_document_content",
+            "student.get_document_profile_photo",
+        }:
+            return BinaryPayload(
+                data=b"document-content",
+                media_type="application/pdf",
+                file_name="document.pdf",
+                cache_control="private, no-store",
+            )
         return {"operation": call.operation}
 
 
@@ -56,6 +67,7 @@ class FakeBrowserAuthService:
         self.staff_revoked = False
         self.staff_sign_up_input: dict[str, str | None] | None = None
         self.demo_reference: str | None = None
+        self.delegate_scopes: frozenset[PortalScope] = frozenset({"dashboard"})
 
     def student_context(self, method: str = "credentials") -> AuthContext:
         return AuthContext(
@@ -240,7 +252,7 @@ class FakeBrowserAuthService:
                 actor_type="delegate",
                 authentication_method="delegate_link",
                 tenant_slug="aster",
-                delegate_scopes=frozenset({"dashboard"}),
+                delegate_scopes=self.delegate_scopes,
                 delegate_relationship="parent",
                 delegate_name="Robin Parent",
                 subject_student_name="Alex Student",
@@ -510,6 +522,53 @@ async def test_parent_link_uses_a_tab_selected_cookie_without_clobbering_student
     # explicitly selects delegate mode becomes the parent session.
     assert bootstrap_calls[-2].auth is not None
     assert bootstrap_calls[-2].auth.actor_type == "student"
+
+
+async def test_delegate_binary_requests_require_the_explicit_delegate_session_mode(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    """A portal blob fetch can select the delegate session without cookie ambiguity."""
+
+    auth_service.delegate_scopes = frozenset({"documents"})
+    document_id = "00000000-0000-7000-8000-000000000301"
+    await client.post(
+        "/v1/auth/sign-in",
+        json={"email": "student@example.com", "password": "Browser-student-123"},
+    )
+    await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+
+    default_response = await client.get(f"/v1/student/documents/{document_id}/content")
+    delegate_content = await client.get(
+        f"/v1/student/documents/{document_id}/content",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+    delegate_photo = await client.get(
+        f"/v1/student/documents/{document_id}/profile-photo",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert [
+        response.status_code for response in (default_response, delegate_content, delegate_photo)
+    ] == [
+        200,
+        200,
+        200,
+    ]
+    binary_calls = [
+        call
+        for call in platform_service.calls
+        if call.operation in {"student.get_document_content", "student.get_document_profile_photo"}
+    ]
+    assert [call.auth.actor_type if call.auth is not None else None for call in binary_calls] == [
+        "student",
+        "delegate",
+        "delegate",
+    ]
 
 
 @pytest.mark.parametrize(

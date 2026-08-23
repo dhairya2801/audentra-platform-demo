@@ -105,7 +105,7 @@ def test_delegate_policy_is_default_deny_and_ferpa_is_always_student_controlled(
             "POST",
             f"/v1/student/requirements/{REQUIREMENT_ID}/appointments",
         ),
-        ("profile", "POST", f"/v1/student/requirements/{REQUIREMENT_ID}/responses"),
+        ("enrollment", "POST", f"/v1/student/requirements/{REQUIREMENT_ID}/responses"),
     ),
 )
 def test_delegate_policy_allows_reviewed_cross_page_dependencies(
@@ -144,6 +144,38 @@ def test_dashboard_dependency_scope_does_not_authorize_cross_page_mutations(
 ) -> None:
     with pytest.raises(ApiError) as error:
         authorize_delegate_route(_delegate_auth("dashboard"), method, path)
+    assert error.value.code == "DELEGATE_SCOPE_REQUIRED"
+
+
+@pytest.mark.parametrize("scope", ("dashboard", "profile", "documents"))
+def test_requirement_response_requires_enrollment_scope(scope: str) -> None:
+    with pytest.raises(ApiError) as error:
+        authorize_delegate_route(
+            _delegate_auth(scope),
+            "POST",
+            f"/v1/student/requirements/{REQUIREMENT_ID}/responses",
+        )
+
+    assert error.value.code == "DELEGATE_SCOPE_REQUIRED"
+
+
+@pytest.mark.parametrize("scope", ("documents", "profile"))
+def test_profile_photo_allows_documents_or_profile_scope(scope: str) -> None:
+    authorize_delegate_route(
+        _delegate_auth(scope),
+        "GET",
+        f"/v1/student/documents/{REQUIREMENT_ID}/profile-photo",
+    )
+
+
+def test_profile_photo_denies_enrollment_only_scope() -> None:
+    with pytest.raises(ApiError) as error:
+        authorize_delegate_route(
+            _delegate_auth("enrollment"),
+            "GET",
+            f"/v1/student/documents/{REQUIREMENT_ID}/profile-photo",
+        )
+
     assert error.value.code == "DELEGATE_SCOPE_REQUIRED"
 
 
