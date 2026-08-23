@@ -486,6 +486,7 @@ async def test_parent_link_uses_a_tab_selected_cookie_without_clobbering_student
         "/v1/student/bootstrap",
         headers={"X-Audentra-Session-Mode": "student"},
     )
+    default_student_request = await client.get("/v1/student/bootstrap")
     parent_request = await client.get(
         "/v1/student/bootstrap",
         headers={"X-Audentra-Session-Mode": "delegate"},
@@ -496,14 +497,74 @@ async def test_parent_link_uses_a_tab_selected_cookie_without_clobbering_student
     assert "vv_delegate_session=" in parent_exchange.headers["set-cookie"]
     assert "vv_session=signed-out" not in parent_exchange.headers["set-cookie"]
     assert student_request.status_code == 200
+    assert default_student_request.status_code == 200
     assert parent_request.status_code == 200
     bootstrap_calls = [
         call for call in platform_service.calls if call.operation == "student.get_bootstrap"
     ]
-    assert bootstrap_calls[-2].auth is not None
-    assert bootstrap_calls[-2].auth.actor_type == "student"
+    assert bootstrap_calls[-3].auth is not None
+    assert bootstrap_calls[-3].auth.actor_type == "student"
     assert bootstrap_calls[-1].auth is not None
     assert bootstrap_calls[-1].auth.actor_type == "delegate"
+    # A parent-link cookie can coexist in the browser, but only the tab that
+    # explicitly selects delegate mode becomes the parent session.
+    assert bootstrap_calls[-2].auth is not None
+    assert bootstrap_calls[-2].auth.actor_type == "student"
+
+
+@pytest.mark.parametrize(
+    "delegate_token",
+    [None, "invalid-delegate-session-token"],
+    ids=["missing-cookie", "invalid-cookie"],
+)
+async def test_delegate_mode_requires_a_valid_delegate_cookie(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+    delegate_token: str | None,
+) -> None:
+    if delegate_token is not None:
+        client.cookies.set("vv_delegate_session", delegate_token)
+
+    response = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+    assert not any(call.operation == "student.get_bootstrap" for call in platform_service.calls)
+
+
+async def test_delegate_session_is_scoped_and_cannot_control_ferpa(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+) -> None:
+    exchange = await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+    session = await client.get("/v1/auth/delegate/session")
+    profile = await client.get(
+        "/v1/student/profile",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+    ferpa = await client.get(
+        "/v1/student/ferpa-authorizations/current",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert exchange.status_code == 200
+    assert session.status_code == 200
+    assert session.json()["mode"] == "delegate"
+    assert session.json()["delegate"]["scopes"] == ["dashboard"]
+    assert profile.status_code == 403
+    assert profile.json()["error"]["code"] == "DELEGATE_SCOPE_REQUIRED"
+    assert ferpa.status_code == 403
+    assert ferpa.json()["error"]["code"] == "FERPA_STUDENT_CONTROL_REQUIRED"
+    assert not any(
+        call.operation in {"student.get_profile", "student.get_ferpa_authorization"}
+        for call in platform_service.calls
+    )
 
 
 async def test_invalid_credentials_use_one_non_enumerating_message(client: AsyncClient) -> None:

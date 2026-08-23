@@ -5,6 +5,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, cast
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from audentra.contracts.requests import CompleteFerpaAuthorizationRequest
@@ -26,6 +27,7 @@ from audentra.infrastructure.postgres.postgres_service import (
     PostgresSignedDocumentGenerator,
 )
 from audentra.infrastructure.storage.s3 import ObjectNotFoundError
+from audentra.interfaces.http.app import create_app
 
 TENANT_ID = "00000000-0000-7000-8000-000000000001"
 STUDENT_ID = "00000000-0000-7000-8000-000000000101"
@@ -335,6 +337,114 @@ class _RecordingRepository:
             return self.responses.get(name, {})
 
         return record
+
+
+class _FerpaHttpService:
+    def __init__(self) -> None:
+        self.calls: list[ServiceCall] = []
+
+    async def dispatch(self, call: ServiceCall) -> object:
+        self.calls.append(call)
+        if call.operation == "public.get_tenant_bootstrap":
+            return {"tenantId": TENANT_ID, "slug": "aster"}
+        return {"operation": call.operation}
+
+
+@pytest.mark.anyio
+async def test_ferpa_http_routes_dispatch_student_controlled_commands() -> None:
+    service = _FerpaHttpService()
+    headers = {
+        "X-Demo-Tenant-Id": TENANT_ID,
+        "X-Demo-Student-Id": STUDENT_ID,
+        "X-Demo-Actor-Id": STUDENT_ACTOR_ID,
+    }
+    transport = ASGITransport(app=create_app(service=service))
+
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        current = await client.get("/v1/student/ferpa-authorizations/current", headers=headers)
+        complete = await client.post(
+            f"/v1/student/requirements/{REQUIREMENT_ID}/ferpa/complete",
+            headers={**headers, "Idempotency-Key": "ferpa-complete-route-0001"},
+            json={
+                "expectedVersion": 1,
+                "accessDecision": "no_access",
+                "delegates": [],
+                "signature": {
+                    "accepted": True,
+                    "signerName": "Aster Student",
+                    "signatureMethod": "typed",
+                },
+            },
+        )
+        access = await client.patch(
+            f"/v1/student/ferpa-authorizations/{AUTHORIZATION_ID}/access",
+            headers=headers,
+            json={
+                "expectedVersion": 2,
+                "accessDecision": "grant",
+                "delegates": [
+                    {
+                        "id": DELEGATE_ID,
+                        "fullName": "Aster Parent",
+                        "relationship": "parent",
+                        "email": "parent@example.test",
+                        "scopes": ["dashboard", "enrollment"],
+                    }
+                ],
+            },
+        )
+        link = await client.post(
+            f"/v1/student/ferpa-authorizations/{AUTHORIZATION_ID}/delegates/{DELEGATE_ID}/link",
+            headers={**headers, "Idempotency-Key": "ferpa-link-route-0001"},
+            json={"expectedVersion": 3},
+        )
+        revoke = await client.post(
+            f"/v1/student/ferpa-authorizations/{AUTHORIZATION_ID}/delegates/{DELEGATE_ID}/link/revoke",
+            headers=headers,
+            json={"expectedVersion": 4},
+        )
+
+    assert [response.status_code for response in (current, complete, access, link, revoke)] == [
+        200,
+        200,
+        200,
+        200,
+        200,
+    ]
+    calls = [call for call in service.calls if call.operation != "public.get_tenant_bootstrap"]
+    assert [call.operation for call in calls] == [
+        "student.get_ferpa_authorization",
+        "student.complete_ferpa_authorization",
+        "student.update_ferpa_access",
+        "student.issue_ferpa_delegate_link",
+        "student.revoke_ferpa_delegate_link",
+    ]
+    assert all(
+        call.auth is not None
+        and call.auth.tenant_id == TENANT_ID
+        and call.auth.student_id == STUDENT_ID
+        and call.auth.actor_id == STUDENT_ACTOR_ID
+        and call.auth.actor_type == "student"
+        for call in calls
+    )
+    assert calls[1].path_params == {"requirementId": REQUIREMENT_ID}
+    assert calls[1].idempotency_key == "ferpa-complete-route-0001"
+    assert calls[2].path_params == {"authorizationId": AUTHORIZATION_ID}
+    assert calls[2].payload["delegates"] == [
+        {
+            "id": DELEGATE_ID,
+            "fullName": "Aster Parent",
+            "relationship": "parent",
+            "email": "parent@example.test",
+            "scopes": ["dashboard", "enrollment"],
+        }
+    ]
+    assert calls[3].path_params == {
+        "authorizationId": AUTHORIZATION_ID,
+        "delegateId": DELEGATE_ID,
+    }
+    assert calls[3].idempotency_key == "ferpa-link-route-0001"
+    assert calls[4].path_params == calls[3].path_params
 
 
 class _Storage:
