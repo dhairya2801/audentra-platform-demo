@@ -179,6 +179,28 @@ async def test_public_tenant_bootstrap_uses_server_configuration(
     assert removed_slug_route.status_code == 404
 
 
+async def test_public_tenant_bootstrap_uses_oidc_tenant_configuration(
+    service: FakePlatformService,
+) -> None:
+    app = create_app(
+        service=service,
+        settings=HttpSettings(
+            auth_mode="oidc",
+            demo_tenant_id="00000000-0000-7000-8000-000000000001",
+            oidc_tenant_id=HARVARD_TENANT_ID,
+        ),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as oidc_client:
+        response = await oidc_client.get("/v1/tenant/bootstrap")
+
+    assert response.status_code == 200
+    assert response.json() == {"tenantId": HARVARD_TENANT_ID, "slug": "harvard"}
+    assert service.calls[-1].path_params == {"tenantId": HARVARD_TENANT_ID}
+
+
 async def test_staff_tenant_patch_is_authorized_validated_and_dispatched(
     client: AsyncClient, service: FakePlatformService
 ) -> None:

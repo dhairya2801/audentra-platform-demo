@@ -50,16 +50,27 @@ class PostgresDevelopmentAuth:
         *,
         environment: str,
         staff_invitation_code: str,
+        development_flows_enabled: bool = True,
     ) -> None:
-        if environment not in {"development", "preview", "test"}:
+        if environment not in {"development", "preview", "test"} and development_flows_enabled:
             raise ValueError("The development authentication adapter is disabled in production")
-        if not staff_invitation_code:
+        if development_flows_enabled and not staff_invitation_code:
             raise ValueError("A private staff invitation code is required")
         self._engine = engine
         self._environment = environment
         self._staff_invitation_code = staff_invitation_code
+        self._development_flows_enabled = development_flows_enabled
+
+    def _require_development_flows(self) -> None:
+        if not self._development_flows_enabled:
+            raise ApiError(
+                404,
+                "DEVELOPMENT_AUTH_DISABLED",
+                "Development authentication is not available",
+            )
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
+        self._require_development_flows()
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -102,6 +113,7 @@ class PostgresDevelopmentAuth:
         tenant that has not opted into demo identities has none.
         """
 
+        self._require_development_flows()
         candidate = reference.strip()
         if not candidate or len(candidate) > 64:
             raise ApiError(
@@ -171,7 +183,8 @@ class PostgresDevelopmentAuth:
                            account.email_normalized, account.phone_e164,
                            account.email_verified_at, account.phone_verified_at,
                            student.person_id, onboarding.status AS onboarding_status,
-                           profile.preferred_name, session.expires_at
+                           profile.preferred_name, session.expires_at,
+                           session.authentication_method, session.identity_provider
                     FROM auth_session session
                     JOIN credential_account account ON account.id=session.account_id
                     JOIN student ON student.id=account.student_id
@@ -216,6 +229,7 @@ class PostgresDevelopmentAuth:
         legal_name: str | None,
         password: str,
     ) -> CredentialStudentSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         password_hash = await asyncio.to_thread(_hash_password, password)
         now = datetime.now(UTC)
@@ -358,6 +372,7 @@ class PostgresDevelopmentAuth:
         email: str,
         password: str,
     ) -> CredentialStudentSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -623,18 +638,18 @@ class PostgresDevelopmentAuth:
                     """
                     SELECT member.id, member.display_name,
                            member.email_normalized, member.component,
-                           session.expires_at
+                           session.expires_at, session.authentication_method
                     FROM staff_auth_session session
-                    JOIN staff_credential_account account
-                      ON account.id=session.account_id
                     JOIN staff_member member
-                      ON member.id=account.staff_member_id
-                     AND member.tenant_id=account.tenant_id
+                      ON member.id=session.staff_member_id
+                     AND member.tenant_id=session.tenant_id
+                    LEFT JOIN staff_credential_account account
+                      ON account.id=session.account_id
                     WHERE session.token_hash=:token_hash
                       AND session.revoked_at IS NULL
                       AND session.expires_at>NOW()
-                      AND account.status='active'
-                      AND account.tenant_id=:tenant_id
+                      AND session.tenant_id=:tenant_id
+                      AND (session.account_id IS NULL OR account.status='active')
                       AND member.active=true
                     """
                 ),
@@ -664,6 +679,7 @@ class PostgresDevelopmentAuth:
         password: str,
         institution_access_code: str,
     ) -> StaffSession:
+        self._require_development_flows()
         invitation_matches = secrets.compare_digest(
             hashlib.sha256(institution_access_code.encode("utf-8")).digest(),
             hashlib.sha256(self._staff_invitation_code.encode("utf-8")).digest(),
@@ -737,6 +753,8 @@ class PostgresDevelopmentAuth:
                 await self._insert_staff_session(
                     connection,
                     account_id=account_id,
+                    tenant_id=UUID(tenant_id),
+                    staff_member_id=UUID(str(row["id"])),
                     session_id=uuid4(),
                     token_hash=token_hash,
                     expires_at=expires_at,
@@ -762,6 +780,7 @@ class PostgresDevelopmentAuth:
         email: str,
         password: str,
     ) -> StaffSession:
+        self._require_development_flows()
         normalized_email = _normalize_email(email)
         async with self._engine.begin() as connection:
             result = await connection.execute(
@@ -816,12 +835,173 @@ class PostgresDevelopmentAuth:
             await self._insert_staff_session(
                 connection,
                 account_id=UUID(str(row["account_id"])),
+                tenant_id=UUID(tenant_id),
+                staff_member_id=UUID(str(row["id"])),
                 session_id=uuid4(),
                 token_hash=token_hash,
                 expires_at=expires_at,
             )
         return await self._staff_session(
             dict(row),
+            tenant_id,
+            tenant_slug,
+            token=token,
+            expires_at_epoch=int(expires_at.timestamp()),
+        )
+
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
+    ) -> StaffSession:
+        if provider not in {"google", "microsoft"}:
+            raise UnauthorizedError("The institutional identity provider is not supported")
+        normalized_email = _normalize_email(email)
+        resolved_display_name = _federated_display_name(display_name, normalized_email)
+        expires_at = datetime.now(UTC) + _STAFF_SESSION_LIFETIME
+        token = secrets.token_urlsafe(32)
+        token_hash = _required_session_token_hash(token)
+        async with self._engine.begin() as connection:
+            member_result = await connection.execute(
+                text(
+                    """
+                    SELECT id, display_name, email_normalized, component
+                    FROM staff_member
+                    WHERE tenant_id=:tenant_id AND email_normalized=:email AND active=true
+                    FOR UPDATE
+                    """
+                ),
+                {"tenant_id": UUID(tenant_id), "email": normalized_email},
+            )
+            row = member_result.mappings().first()
+            if row is None:
+                grant_result = await connection.execute(
+                    text(
+                        """
+                        SELECT id, component, provider_subject, provider_tenant
+                        FROM staff_sso_provisioning_grant
+                        WHERE tenant_id=:tenant_id AND provider=:provider
+                          AND email_normalized=:email AND active=true
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "tenant_id": UUID(tenant_id),
+                        "provider": provider,
+                        "email": normalized_email,
+                    },
+                )
+                grant = grant_result.mappings().first()
+                if grant is None:
+                    raise UnauthorizedError(
+                        "This institutional identity is not provisioned as active staff"
+                    )
+                bound_subject = grant["provider_subject"]
+                bound_tenant = grant["provider_tenant"]
+                if (
+                    bound_subject is not None
+                    and not secrets.compare_digest(str(bound_subject), provider_subject)
+                ) or (
+                    bound_tenant is not None
+                    and not secrets.compare_digest(
+                        str(bound_tenant).lower(), provider_tenant.lower()
+                    )
+                ):
+                    raise UnauthorizedError(
+                        "This staff provisioning approval is linked to another "
+                        "institutional identity"
+                    )
+                created_member = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO staff_member (
+                          id, tenant_id, display_name, email_normalized, component, active
+                        ) VALUES (
+                          :id, :tenant_id, :display_name, :email, :component, true
+                        )
+                        RETURNING id, display_name, email_normalized, component
+                        """
+                    ),
+                    {
+                        "id": uuid4(),
+                        "tenant_id": UUID(tenant_id),
+                        "display_name": resolved_display_name,
+                        "email": normalized_email,
+                        "component": str(grant["component"]),
+                    },
+                )
+                row = created_member.mappings().first()
+                if row is None:
+                    raise RuntimeError("The staff provisioning insert returned no record")
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE staff_sso_provisioning_grant
+                        SET provider_subject=COALESCE(provider_subject, :provider_subject),
+                            provider_tenant=COALESCE(provider_tenant, :provider_tenant),
+                            claimed_at=COALESCE(claimed_at, NOW()),
+                            updated_at=NOW()
+                        WHERE id=:id
+                        """
+                    ),
+                    {
+                        "id": grant["id"],
+                        "provider_subject": provider_subject,
+                        "provider_tenant": provider_tenant,
+                    },
+                )
+            identity_result = await connection.execute(
+                text(
+                    """
+                    INSERT INTO staff_federated_identity (
+                      id, tenant_id, staff_member_id, provider, provider_subject,
+                      provider_tenant, email_normalized, last_signed_in_at
+                    ) VALUES (
+                      :id, :tenant_id, :staff_member_id, :provider, :provider_subject,
+                      :provider_tenant, :email, NOW()
+                    )
+                    ON CONFLICT (tenant_id, staff_member_id, provider) DO UPDATE
+                    SET last_signed_in_at=NOW(), updated_at=NOW()
+                    WHERE staff_federated_identity.provider_subject=:provider_subject
+                      AND staff_federated_identity.provider_tenant=:provider_tenant
+                      AND staff_federated_identity.email_normalized=:email
+                    RETURNING id
+                    """
+                ),
+                {
+                    "id": uuid4(),
+                    "tenant_id": UUID(tenant_id),
+                    "staff_member_id": row["id"],
+                    "provider": provider,
+                    "provider_subject": provider_subject,
+                    "provider_tenant": provider_tenant,
+                    "email": normalized_email,
+                },
+            )
+            identity_id = identity_result.scalar_one_or_none()
+            if identity_id is None:
+                raise UnauthorizedError(
+                    "This staff account is already linked to a different institutional identity"
+                )
+            await self._insert_staff_session(
+                connection,
+                account_id=None,
+                federated_identity_id=UUID(str(identity_id)),
+                authentication_method=provider,
+                tenant_id=UUID(tenant_id),
+                staff_member_id=UUID(str(row["id"])),
+                session_id=uuid4(),
+                token_hash=token_hash,
+                expires_at=expires_at,
+            )
+        return await self._staff_session(
+            {**dict(row), "authentication_method": provider},
             tenant_id,
             tenant_slug,
             token=token,
@@ -844,6 +1024,7 @@ class PostgresDevelopmentAuth:
             )
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None:
+        self._require_development_flows()
         await reset_relational_data(
             self._engine,
             environment=self._environment,
@@ -1036,7 +1217,7 @@ class PostgresDevelopmentAuth:
                 student_id=str(student_id),
                 actor_id=str(row["id"]),
                 actor_type="staff",
-                authentication_method="credentials",
+                authentication_method=str(row.get("authentication_method") or "credentials"),  # type: ignore[arg-type]
                 tenant_slug=tenant_slug,
             ),
             name=str(row["display_name"]),
@@ -1050,10 +1231,14 @@ class PostgresDevelopmentAuth:
         self,
         connection: AsyncConnection,
         *,
-        account_id: UUID,
+        account_id: UUID | None,
+        tenant_id: UUID,
+        staff_member_id: UUID,
         session_id: UUID,
         token_hash: str,
         expires_at: datetime,
+        authentication_method: str = "credentials",
+        federated_identity_id: UUID | None = None,
     ) -> None:
         await connection.execute(
             text(
@@ -1061,24 +1246,38 @@ class PostgresDevelopmentAuth:
                 UPDATE staff_auth_session SET revoked_at=NOW()
                 WHERE id IN (
                   SELECT id FROM staff_auth_session
-                  WHERE account_id=:account_id AND revoked_at IS NULL AND expires_at>NOW()
+                  WHERE tenant_id=:tenant_id AND staff_member_id=:staff_member_id
+                    AND revoked_at IS NULL AND expires_at>NOW()
                   ORDER BY created_at DESC
                   OFFSET :keep_count
                 )
                 """
             ),
-            {"account_id": account_id, "keep_count": _MAXIMUM_SESSIONS - 1},
+            {
+                "tenant_id": tenant_id,
+                "staff_member_id": staff_member_id,
+                "keep_count": _MAXIMUM_SESSIONS - 1,
+            },
         )
         await connection.execute(
             text(
                 """
-                INSERT INTO staff_auth_session (id, account_id, token_hash, expires_at)
-                VALUES (:id, :account_id, :token_hash, :expires_at)
+                INSERT INTO staff_auth_session (
+                  id, account_id, tenant_id, staff_member_id, authentication_method,
+                  federated_identity_id, token_hash, expires_at
+                ) VALUES (
+                  :id, :account_id, :tenant_id, :staff_member_id, :authentication_method,
+                  :federated_identity_id, :token_hash, :expires_at
+                )
                 """
             ),
             {
                 "id": session_id,
                 "account_id": account_id,
+                "tenant_id": tenant_id,
+                "staff_member_id": staff_member_id,
+                "authentication_method": authentication_method,
+                "federated_identity_id": federated_identity_id,
                 "token_hash": token_hash,
                 "expires_at": expires_at,
             },
@@ -1094,13 +1293,18 @@ def _credential_session(
     expires_at_epoch: int | None = None,
 ) -> CredentialStudentSession:
     preferred = row.get("preferred_name")
+    authentication_method = str(row.get("authentication_method") or "credentials")
+    identity_provider = row.get("identity_provider")
     return CredentialStudentSession(
         context=AuthContext(
             tenant_id=tenant_id,
             student_id=str(row["student_id"]),
             actor_id=str(row["person_id"]),
             actor_type="student",
-            authentication_method="credentials",
+            authentication_method=("oidc" if authentication_method == "oidc" else "credentials"),
+            identity_provider=(
+                cast(Any, str(identity_provider)) if identity_provider is not None else None
+            ),
             tenant_slug=tenant_slug,
         ),
         preferred_name=(
@@ -1180,6 +1384,11 @@ def _new_student_identity(legal_name: str | None) -> dict[str, str]:
         "last_name": family_name,
         "preferred_name": given_name,
     }
+
+
+def _federated_display_name(value: str, fallback_email: str) -> str:
+    normalized = " ".join(unicodedata.normalize("NFKC", value).split())[:160]
+    return normalized or fallback_email
 
 
 def _demo_session(

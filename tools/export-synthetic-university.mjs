@@ -25,8 +25,8 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gzipSync } from "node:zlib";
 
+import { gzipCanonicalJson } from "./demo-api/src/synthetic-university/archive.js";
 import {
   DEFAULT_NOW,
   DEFAULT_SEED,
@@ -108,7 +108,7 @@ function pythonString(value) {
 
 function renderConstants({ digest, seed, studentCount, counts, archiveBytes }) {
   const countLines = COUNTED_COLLECTIONS.map(
-    (name) => `    ${pythonString(name)}: ${pythonInteger(counts[name])},`,
+    (name) => `        ${pythonString(name)}: ${pythonInteger(counts[name])},`,
   ).join("\n");
   return `"""Integrity constants for the packaged synthetic-university archive.
 
@@ -178,7 +178,7 @@ async function main() {
 
   // Level 9 keeps the checked-in archive small; the digest covers the exact
   // bytes, so the compression level is part of the reproducible output.
-  const archive = gzipSync(Buffer.from(JSON.stringify(universe), "utf8"), { level: 9 });
+  const archive = gzipCanonicalJson(universe);
   const digest = createHash("sha256").update(archive).digest("hex");
 
   await mkdir(dirname(ARCHIVE_PATH), { recursive: true });

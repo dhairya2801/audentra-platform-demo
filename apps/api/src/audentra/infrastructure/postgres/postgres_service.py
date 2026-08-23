@@ -2568,6 +2568,11 @@ class PostgresPlatformService:
                 ),
                 "guidance": lambda: assistant.get_staff_guidance(auth),
                 "action_rules": lambda: staff.get_action_rules(auth),
+                "mailbox_messages": (
+                    lambda query="", limit=10: assistant.get_authorized_mailbox_messages(
+                        auth, query=query, limit=limit
+                    )
+                ),
             },
             staff_member_id=auth.actor_id,
         )

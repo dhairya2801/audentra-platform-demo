@@ -42,8 +42,10 @@ EXPECTED_EVENTS = {
     "staff.core_play_updated.v1",
     "staff.interaction_completed.v1",
     "staff.interaction_started.v1",
+    "staff.email_send_queued.v1",
     "staff.knowledge_card_created.v1",
     "staff.knowledge_card_updated.v1",
+    "staff.mailbox_connected.v1",
     "staff.work_comment_created.v1",
     "staff.work_item_auto_resolved_by_document.v1",
     "staff.work_item_created.v1",
@@ -83,7 +85,7 @@ def _event(event_name: str) -> DomainEventEnvelope:
 def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
     assert ALL_EMITTED_EVENT_NAMES == EXPECTED_EVENTS
     assert set(EVENT_CATALOG) == EXPECTED_EVENTS
-    assert sum(item.kind == "handler" for item in EVENT_CATALOG.values()) == 5
+    assert sum(item.kind == "handler" for item in EVENT_CATALOG.values()) == 7
     assert all(
         item.handler_key is not None if item.kind == "handler" else item.reason
         for item in EVENT_CATALOG.values()

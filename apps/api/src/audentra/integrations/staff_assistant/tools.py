@@ -766,6 +766,18 @@ async def _tool_action_rules(
     return {"items": items, "total": len(items)}
 
 
+async def _tool_mailbox_messages(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    result = await _primitive(
+        host,
+        "mailbox_messages",
+        query=str(arguments.get("query") or ""),
+        limit=int(arguments.get("limit") or 10),
+    )
+    return dict(result)
+
+
 _TOOL_IMPLEMENTATIONS: Mapping[
     str, Callable[[StaffAssistantToolHost, JsonDict, datetime], Awaitable[JsonDict]]
 ] = {
@@ -791,6 +803,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getInquiryThread": _tool_inquiry_thread,
     "getPlaybooks": _tool_playbooks,
     "getActionRules": _tool_action_rules,
+    "getMailboxMessages": _tool_mailbox_messages,
 }
 
 

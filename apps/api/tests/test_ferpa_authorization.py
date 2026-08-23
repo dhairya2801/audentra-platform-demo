@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine, Mapping
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
@@ -16,6 +17,17 @@ from audentra.core.ports import FileUpload, ServiceCall
 from audentra.infrastructure.postgres.auth_repository import _delegate_session
 from audentra.infrastructure.postgres.ferpa_repository import (
     PostgresFerpaRepository,
+    _canonical_delegate_scopes,
+    _completion_request_hash,
+    _iso,
+    _json,
+    _list,
+    _mapping,
+    _normalize_access,
+    _nullable_iso,
+    _positive_version,
+    _timestamp,
+    _uuid,
     reconcile_completed_ferpa_requirements,
 )
 from audentra.infrastructure.postgres.managed_configuration_repository import (
@@ -57,6 +69,196 @@ def _delegate_auth(*scopes: str) -> AuthContext:
         delegate_relationship="parent",
         delegate_name="Aster Parent",
         subject_student_name="Aster Student",
+    )
+
+
+def _valid_delegate(**updates: object) -> dict[str, object]:
+    delegate: dict[str, object] = {
+        "fullName": "Aster Parent",
+        "relationship": "parent",
+        "email": "parent@example.test",
+        "scopes": ["dashboard"],
+    }
+    delegate.update(updates)
+    return delegate
+
+
+def test_ferpa_value_helpers_normalize_canonical_values() -> None:
+    payload = {"accessDecision": "grant", "delegates": [_valid_delegate()]}
+
+    assert _json({"name": "Aster", "enabled": True}) == '{"name":"Aster","enabled":true}'
+    assert _mapping('{"name":"Aster"}') == {"name": "Aster"}
+    assert _mapping(["not", "a", "mapping"]) == {}
+    assert _list(("dashboard", "documents")) == ["dashboard", "documents"]
+    assert _list("dashboard") == []
+    assert _canonical_delegate_scopes(["onboarding", "dashboard", "onboarding"]) == [
+        "enrollment",
+        "dashboard",
+    ]
+    assert _uuid(STUDENT_ID).hex == STUDENT_ID.replace("-", "")
+    with pytest.raises(ApiError) as invalid_identifier:
+        _uuid("not-a-uuid")
+    assert invalid_identifier.value.code == "VALIDATION_ERROR"
+
+    timestamp = _timestamp("2026-08-23T12:34:56Z")
+    assert timestamp == datetime(2026, 8, 23, 12, 34, 56, tzinfo=UTC)
+    assert _iso(timestamp) == "2026-08-23T12:34:56.000Z"
+    assert _nullable_iso(None) is None
+    assert _nullable_iso(timestamp) == "2026-08-23T12:34:56.000Z"
+    assert _positive_version(2) == 2
+    for invalid_version in (0, True, "2"):
+        with pytest.raises(ApiError) as invalid_version_error:
+            _positive_version(invalid_version)
+        assert invalid_version_error.value.code == "VALIDATION_ERROR"
+
+    assert _completion_request_hash(_student_auth(), payload) == _completion_request_hash(
+        _student_auth(),
+        payload,
+    )
+    assert _completion_request_hash(_student_auth(), payload) != _completion_request_hash(
+        _student_auth(),
+        {"accessDecision": "no_access", "delegates": []},
+    )
+
+
+def test_normalize_access_canonicalizes_a_valid_delegate() -> None:
+    decision, delegates = _normalize_access(
+        {
+            "accessDecision": "grant",
+            "delegates": [
+                _valid_delegate(
+                    id=DELEGATE_ID,
+                    fullName="  Aster Parent  ",
+                    email="PARENT@EXAMPLE.TEST ",
+                    scopes=["dashboard", "documents"],
+                )
+            ],
+        },
+        allow_ids=True,
+    )
+
+    assert decision == "grant"
+    assert delegates == [
+        {
+            "id": DELEGATE_ID,
+            "fullName": "Aster Parent",
+            "relationship": "parent",
+            "email": "parent@example.test",
+            "scopes": ["dashboard", "documents"],
+            "displayOrder": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "allow_ids", "code"),
+    (
+        ({"accessDecision": "invalid", "delegates": []}, True, "INVALID_FERPA_ACCESS_DECISION"),
+        ({"accessDecision": "grant", "delegates": "not-a-list"}, True, "INVALID_FERPA_DELEGATES"),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate()] * 5},
+            True,
+            "FERPA_DELEGATE_LIMIT",
+        ),
+        ({"accessDecision": "grant", "delegates": []}, True, "FERPA_DELEGATE_REQUIRED"),
+        (
+            {"accessDecision": "no_access", "delegates": [_valid_delegate()]},
+            True,
+            "FERPA_NO_ACCESS_DELEGATES",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": ["not-a-mapping"]},
+            True,
+            "INVALID_FERPA_DELEGATES",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(fullName="")]},
+            True,
+            "INVALID_FERPA_DELEGATE_NAME",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(relationship="student")]},
+            True,
+            "INVALID_FERPA_DELEGATE_RELATIONSHIP",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(email="invalid-email")]},
+            True,
+            "INVALID_FERPA_DELEGATE_EMAIL",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(scopes=[])]},
+            True,
+            "INVALID_FERPA_DELEGATE_SCOPES",
+        ),
+        (
+            {
+                "accessDecision": "grant",
+                "delegates": [_valid_delegate(scopes=["dashboard", "dashboard"])],
+            },
+            True,
+            "INVALID_FERPA_DELEGATE_SCOPES",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(scopes=["unknown"])]},
+            True,
+            "INVALID_FERPA_DELEGATE_SCOPES",
+        ),
+        (
+            {"accessDecision": "grant", "delegates": [_valid_delegate(id=DELEGATE_ID)]},
+            False,
+            "INVALID_FERPA_DELEGATE_ID",
+        ),
+    ),
+)
+def test_normalize_access_rejects_invalid_decisions_and_delegates(
+    payload: Mapping[str, object],
+    allow_ids: bool,
+    code: str,
+) -> None:
+    with pytest.raises(ApiError) as error:
+        _normalize_access(payload, allow_ids=allow_ids)
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("row_updates", "expected_code"),
+    (
+        ({"authorization_version": 2}, "VERSION_CONFLICT"),
+        ({"authorization_status": "completed"}, "FERPA_ALREADY_COMPLETED"),
+        ({"requirement_status": "blocked"}, "FERPA_REQUIREMENT_NOT_ACTIONABLE"),
+        (
+            {"input_config": {"signatureProvider": "docusign"}},
+            "DOCUSIGN_EXECUTION_NOT_CONFIGURED",
+        ),
+    ),
+)
+def test_completion_row_validation_fails_closed_for_stale_or_unavailable_tasks(
+    row_updates: Mapping[str, object],
+    expected_code: str,
+) -> None:
+    row: dict[str, object] = {
+        "authorization_version": 1,
+        "authorization_status": "incomplete",
+        "requirement_status": "ready",
+        "input_config": {},
+    }
+    row.update(row_updates)
+
+    with pytest.raises(ApiError) as error:
+        PostgresFerpaRepository._validate_completion_row(row, 1)
+    assert error.value.code == expected_code
+
+
+def test_completion_row_validation_accepts_a_current_actionable_task() -> None:
+    PostgresFerpaRepository._validate_completion_row(
+        {
+            "authorization_version": 1,
+            "authorization_status": "incomplete",
+            "requirement_status": "ready",
+            "input_config": {},
+        },
+        1,
     )
 
 
@@ -287,6 +489,101 @@ class _Result:
 
     def first(self) -> dict[str, object] | None:
         return self.rows[0] if self.rows else None
+
+
+class _AuthorizationProjectionConnection:
+    async def execute(
+        self,
+        statement: object,
+        _parameters: Mapping[str, object] | None = None,
+    ) -> _Result:
+        sql = " ".join(str(statement).split())
+        if "FROM ferpa_signed_document" in sql:
+            return _Result(
+                [
+                    {
+                        "id": "00000000-0000-7000-8000-000000000701",
+                        "title": "FERPA Release",
+                        "file_name": "ferpa-release.pdf",
+                        "signer_name": "Aster Student",
+                        "signature_method": "typed",
+                        "signed_at": "2026-08-23T12:00:00Z",
+                    }
+                ]
+            )
+        assert "FROM ferpa_delegate delegate" in sql
+        return _Result(
+            [
+                {
+                    "id": DELEGATE_ID,
+                    "full_name": "Aster Parent",
+                    "relationship": "parent",
+                    "email_normalized": "parent@example.test",
+                    "scopes": ["onboarding", "dashboard"],
+                    "legacy_review_required": True,
+                    "link_status": "active",
+                    "issued_at": "2026-08-23T12:01:00Z",
+                    "rotated_at": None,
+                    "last_used_at": None,
+                    "link_updated_at": "2026-08-23T12:02:00Z",
+                    "updated_at": "2026-08-23T12:03:00Z",
+                }
+            ]
+        )
+
+
+def test_authorization_projection_preserves_signed_evidence_and_canonical_scopes() -> None:
+    repository = PostgresFerpaRepository(cast(Any, None))
+    authorization = asyncio.run(
+        repository._map_authorization(
+            cast(Any, _AuthorizationProjectionConnection()),
+            _student_auth(),
+            {
+                "authorization_id": AUTHORIZATION_ID,
+                "requirement_id": REQUIREMENT_ID,
+                "requirement_version": 3,
+                "flow_kind": "enrollment",
+                "authorization_status": "completed",
+                "access_decision": "grant",
+                "authorization_version": 4,
+                "completed_at": "2026-08-23T12:00:00Z",
+                "updated_at": "2026-08-23T12:03:00Z",
+                "input_config": {"signatureProvider": "built_in"},
+            },
+        )
+    )
+
+    assert authorization["document"] == {
+        "status": "signed",
+        "signedDocumentId": "00000000-0000-7000-8000-000000000701",
+        "title": "FERPA Release",
+        "fileName": "ferpa-release.pdf",
+        "signedAt": "2026-08-23T12:00:00.000Z",
+        "signerName": "Aster Student",
+        "signatureMethod": "typed",
+    }
+    assert authorization["delegates"] == [
+        {
+            "id": DELEGATE_ID,
+            "fullName": "Aster Parent",
+            "relationship": "parent",
+            "email": "parent@example.test",
+            "scopes": ["enrollment", "dashboard"],
+            "legacyReviewRequired": True,
+            "link": {
+                "status": "active",
+                "issuedAt": "2026-08-23T12:01:00.000Z",
+                "rotatedAt": None,
+                "lastUsedAt": None,
+                "updatedAt": "2026-08-23T12:02:00.000Z",
+            },
+        }
+    ]
+    assert authorization["capabilities"] == {
+        "canSign": False,
+        "canManageAccess": True,
+        "canManageLinks": True,
+    }
 
 
 class _DelegateSyncConnection:

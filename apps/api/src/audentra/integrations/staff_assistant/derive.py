@@ -51,6 +51,8 @@ class StaffDerivedState:
     inquiry_thread: JsonDict | None = None
     guidance: JsonDict | None = None
     action_rules: list[JsonDict] = field(default_factory=list)
+    mailbox_messages: list[JsonDict] = field(default_factory=list)
+    mailbox_ranking_method: str | None = None
     # Derived communication signals.
     awaiting_reply: bool | None = None
     last_outbound: JsonDict | None = None
@@ -175,6 +177,11 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     rules = reads.get("getActionRules")
     if rules:
         state.action_rules = [dict(item) for item in _items(rules)]
+
+    mailbox = reads.get("getMailboxMessages")
+    if mailbox:
+        state.mailbox_messages = [dict(item) for item in _items(mailbox)]
+        state.mailbox_ranking_method = str(mailbox.get("rankingMethod") or "") or None
 
     return state
 

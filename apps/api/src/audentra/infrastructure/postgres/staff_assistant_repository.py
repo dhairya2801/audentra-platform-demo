@@ -1066,6 +1066,152 @@ class PostgresStaffAssistantRepository:
     # Institutional guidance (pure read — no default seeding)
     # ------------------------------------------------------------------
 
+    async def get_authorized_mailbox_messages(
+        self,
+        auth: AuthContext,
+        *,
+        query: str = "",
+        limit: int = 10,
+    ) -> JsonDict:
+        """Read the caller's seven-day mailbox cache through the same ACL as the portal."""
+
+        _require_staff(auth)
+        normalized_query = query.strip()[:500]
+        bounded_limit = max(1, min(int(limit or 10), 25))
+        cache = self._table("staff_mail_message_cache")
+        mailbox = self._table("staff_mailbox")
+        authorization = self._table("staff_mail_authorization")
+        grant = self._table("staff_mailbox_grant")
+        member = self._table("staff_member")
+        student = self._table("student")
+        person = self._table("person")
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(
+                            f"""
+                        SELECT cache.id, cache.mailbox_id,
+                               mailbox.address_normalized AS mailbox_address,
+                               cache.sender_address, cache.recipient_addresses,
+                               cache.subject, cache.body_text, cache.received_at,
+                               cache.linked_student_id,
+                               CASE
+                                 WHEN cache.subject ~* '(urgent|deadline|overdue|required)'
+                                   OR cache.body_text ~* '(urgent|deadline|overdue|required)'
+                                 THEN 2
+                                 WHEN cache.linked_student_id IS NOT NULL THEN 1
+                                 ELSE 0
+                               END AS priority_score,
+                               COALESCE(profile.preferred_name, person.preferred_name,
+                                        person.first_name) AS student_preferred_name,
+                               person.first_name AS student_first_name,
+                               person.last_name AS student_last_name
+                        FROM {cache} cache
+                        JOIN {mailbox} mailbox
+                          ON mailbox.tenant_id=cache.tenant_id
+                         AND mailbox.id=cache.mailbox_id
+                        JOIN {authorization} authorization
+                          ON authorization.tenant_id=mailbox.tenant_id
+                         AND authorization.id=mailbox.authorization_id
+                        JOIN {member} member
+                          ON member.tenant_id=cache.tenant_id AND member.id=:staff_id
+                        LEFT JOIN {student} student
+                          ON student.tenant_id=cache.tenant_id
+                         AND student.id=cache.linked_student_id
+                        LEFT JOIN {person} person ON person.id=student.person_id
+                        LEFT JOIN {self._table("student_profile")} profile
+                          ON profile.tenant_id=student.tenant_id
+                         AND profile.student_id=student.id
+                        WHERE cache.tenant_id=:tenant_id AND cache.expires_at>NOW()
+                          AND mailbox.status='active' AND authorization.status='active'
+                          AND member.active=true
+                          AND EXISTS (
+                            SELECT 1 FROM {grant} mailbox_grant
+                            WHERE mailbox_grant.tenant_id=cache.tenant_id
+                              AND mailbox_grant.mailbox_id=cache.mailbox_id
+                              AND mailbox_grant.can_read=true
+                              AND (
+                                mailbox_grant.principal_type='all_staff'
+                                OR (
+                                  mailbox_grant.principal_type='staff'
+                                  AND mailbox_grant.staff_member_id=:staff_id
+                                )
+                                OR (
+                                  mailbox_grant.principal_type='component'
+                                  AND mailbox_grant.component=member.component
+                                )
+                              )
+                          )
+                          AND (
+                            :query=''
+                            OR COALESCE(cache.subject, '') ILIKE :query_pattern
+                            OR COALESCE(cache.body_text, '') ILIKE :query_pattern
+                            OR cache.sender_address ILIKE :query_pattern
+                          )
+                        ORDER BY priority_score DESC, cache.received_at DESC, cache.id
+                        LIMIT :limit
+                        """
+                        ),
+                        {
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "staff_id": _uuid(auth.actor_id),
+                            "query": normalized_query,
+                            "query_pattern": f"%{_escape_like(normalized_query)}%",
+                            "limit": bounded_limit,
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        items = []
+        for row in rows:
+            recipients = row["recipient_addresses"]
+            if isinstance(recipients, str):
+                recipients = json.loads(recipients)
+            student_name = " ".join(
+                part
+                for part in (
+                    str(row["student_first_name"] or ""),
+                    str(row["student_last_name"] or ""),
+                )
+                if part
+            )
+            score = int(row["priority_score"] or 0)
+            items.append(
+                {
+                    "id": str(row["id"]),
+                    "mailboxId": str(row["mailbox_id"]),
+                    "mailboxAddress": str(row["mailbox_address"]),
+                    "sender": str(row["sender_address"]),
+                    "recipients": list(recipients or []),
+                    "subject": row["subject"],
+                    "body": row["body_text"],
+                    "receivedAt": _iso(row["received_at"]),
+                    "linkedStudentId": (
+                        str(row["linked_student_id"])
+                        if row["linked_student_id"] is not None
+                        else None
+                    ),
+                    "linkedStudentName": student_name or None,
+                    "priorityScore": score,
+                    "priorityReasons": (
+                        ["urgent_or_time_sensitive_language"]
+                        if score == 2
+                        else ["matched_student"]
+                        if score == 1
+                        else []
+                    ),
+                }
+            )
+        return {
+            "items": items,
+            "total": len(items),
+            "cacheWindowDays": 7,
+            "rankingMethod": "deterministic_keywords_then_student_match_then_recency",
+        }
+
     async def get_staff_guidance(self, auth: AuthContext) -> JsonDict:
         """Staff-authored core plays and knowledge cards, without the
         default-seeding write that the workspace read performs."""

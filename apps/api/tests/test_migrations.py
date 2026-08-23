@@ -248,3 +248,34 @@ def test_assistant_message_hardening_binds_messages_to_conversation_owner() -> N
     assert "FOREIGN KEY (conversation_id, tenant_id, student_id)" in migration
     assert "REFERENCES assistant_conversation(id, tenant_id, student_id)" in migration
     assert "ON DELETE CASCADE" in migration
+
+
+def test_student_oidc_migration_is_tenant_scoped_one_time_and_token_free() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0040_student_oidc_identity.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE oidc_authorization_transaction" in migration
+    assert "tenant_id uuid NOT NULL REFERENCES tenant(id)" in migration
+    assert "provider IN ('google', 'microsoft')" in migration
+    assert "state_hash char(64) NOT NULL UNIQUE" in migration
+    assert "binding_hash char(64) NOT NULL" in migration
+    assert "nonce_hash char(64) NOT NULL" in migration
+    assert "consumed_at timestamptz" in migration
+    assert "WHERE consumed_at IS NULL" in migration
+
+    assert "CREATE TABLE federated_identity" in migration
+    assert "FOREIGN KEY (tenant_id, credential_account_id)" in migration
+    assert "REFERENCES credential_account(tenant_id, id) ON DELETE CASCADE" in migration
+    assert "UNIQUE (tenant_id, provider, issuer, subject)" in migration
+    assert "UNIQUE (tenant_id, credential_account_id, provider)" in migration
+
+    assert "ADD COLUMN authentication_method" in migration
+    assert "authentication_method IN ('credentials', 'oidc')" in migration
+    assert "ADD COLUMN identity_provider" in migration
+    assert "identity_provider IN ('google', 'microsoft')" in migration
+    assert "auth_session_identity_method_check" in migration
+
+    lowered = migration.lower()
+    assert "access_token" not in lowered
+    assert "refresh_token" not in lowered

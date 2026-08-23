@@ -111,6 +111,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "inquiries": ("getInquiries",),
     "playbook_lookup": ("getPlaybooks",),
     "action_rules": ("getActionRules",),
+    "mailbox_read": ("getMailboxMessages",),
     "general_question": (),
     "unsupported_or_out_of_scope": (),
 }
@@ -129,6 +130,7 @@ _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "getStudentsNeedingAttention": ("limit",),
     "getStaffWorkQueue": ("ownership", "component", "status", "dueWindow", "topic"),
     "getInquiries": ("status",),
+    "getMailboxMessages": ("query", "limit"),
 }
 
 # The verifying read for blocker codes the first round can surface. One

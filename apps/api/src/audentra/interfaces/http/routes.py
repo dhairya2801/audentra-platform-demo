@@ -459,11 +459,19 @@ async def get_portal_media(
 
 @router.get("/v1/tenant/bootstrap", status_code=200, response_model=None)
 async def get_tenant_bootstrap(request: Request, service: ServiceDependency) -> object:
+    settings = get_settings(request)
+    tenant_id = settings.oidc_tenant_id if settings.auth_mode == "oidc" else settings.demo_tenant_id
+    if tenant_id is None:
+        raise ApiError(
+            503,
+            "OIDC_TENANT_NOT_CONFIGURED",
+            "The institutional sign-in tenant is not configured",
+        )
     return await _dispatch(
         service=service,
         request=request,
         operation="public.get_tenant_bootstrap",
-        path_params={"tenantId": get_settings(request).demo_tenant_id},
+        path_params={"tenantId": tenant_id},
     )
 
 

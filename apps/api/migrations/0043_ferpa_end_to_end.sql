@@ -382,7 +382,7 @@ SELECT gen_random_uuid(), ferpa_auth.tenant_id, ferpa_auth.id,
            WHERE delegate.authorization_id=ferpa_auth.id AND delegate.active
          ),'[]'::jsonb)
        ),
-       'migration-0040-legacy-backfill'
+       'migration-0043-legacy-backfill'
 FROM ferpa_authorization ferpa_auth
 JOIN student_requirement requirement
   ON requirement.id=ferpa_auth.requirement_id
@@ -553,7 +553,7 @@ SELECT gen_random_uuid(), ferpa_auth.tenant_id, ferpa_auth.id,
            WHERE delegate.authorization_id=ferpa_auth.id AND delegate.active
          ),'[]'::jsonb)
        ),
-       'migration-0040-legacy-backfill'
+       'migration-0043-legacy-backfill'
 FROM ferpa_authorization ferpa_auth
 JOIN student_requirement requirement
   ON requirement.id=ferpa_auth.requirement_id
