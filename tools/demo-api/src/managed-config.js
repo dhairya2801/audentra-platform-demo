@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { load, dump } from "js-yaml";
+import { CORE_SCHEMA, load, dump } from "js-yaml";
 import {
   badRequest,
   conflict,
@@ -73,11 +73,14 @@ function configurationFileName(tenantSlug, kind) {
 
 function yamlText(value) {
   return dump(value, {
+    // Configuration files intentionally use YAML 1.2 core scalar rules. The
+    // prior noCompatMode setting had the same intent: values such as "yes" and
+    // "on" are ordinary strings rather than YAML 1.1 booleans.
+    schema: CORE_SCHEMA,
     noRefs: true,
     lineWidth: 100,
-    noCompatMode: true,
     sortKeys: false,
-    quotingType: '"',
+    quoteStyle: "double",
   });
 }
 
@@ -366,9 +369,20 @@ export function managedConfigurationSummary(configuration) {
 }
 
 function parseYamlDocument(kind, yaml) {
+  // js-yaml v4 returned undefined for an empty stream, which then followed
+  // this module's ordinary "root must be an object" validation. Keep that
+  // deliberate public error when upgrading to v5, where load() throws first.
+  if (typeof yaml === "string" && isEmptyYamlDocument(yaml)) {
+    throw badRequest(
+      "INVALID_CONFIGURATION_YAML",
+      "The YAML root must be an object",
+    );
+  }
+
   let document;
   try {
-    document = typeof yaml === "string" ? load(yaml) : yaml;
+    document =
+      typeof yaml === "string" ? load(yaml, { schema: CORE_SCHEMA }) : yaml;
   } catch (error) {
     throw badRequest(
       "INVALID_CONFIGURATION_YAML",
@@ -397,6 +411,20 @@ function parseYamlDocument(kind, yaml) {
   if (kind === "campus_life") validateCampusDocument(document);
   if (kind === "academics") validateAcademicDocument(document);
   return document;
+}
+
+function isEmptyYamlDocument(yaml) {
+  return yaml
+    .split(/\r?\n/)
+    .every((line) => {
+      const trimmed = line.trim();
+      return (
+        !trimmed ||
+        trimmed.startsWith("#") ||
+        trimmed === "---" ||
+        trimmed === "..."
+      );
+    });
 }
 
 function validateJourneyDocument(document) {
