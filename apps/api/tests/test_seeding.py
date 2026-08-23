@@ -164,7 +164,7 @@ def test_packaged_tenant_configurations_match_seeded_workflow_inventory() -> Non
         )
         assert {task["id"] for task in flows["enrollment"]["tasks"]} == (expected_requirement_codes)
         assert sum(len(flow["tasks"]) for flow in flows.values()) == 16
-        assert len(materialized_journey_tasks(journeys)) == 8
+        assert len(materialized_journey_tasks(journeys)) == 9
 
         assert academics["tenant"] == tenant_slug
         assert academics["configuration"] == "academics"

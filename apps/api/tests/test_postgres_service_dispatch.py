@@ -34,6 +34,19 @@ STAFF_AUTH = AuthContext(
     actor_id="10000000-0000-7000-8000-000000000901",
     actor_type="staff",
 )
+DELEGATE_AUTH = AuthContext(
+    tenant_id=AUTH.tenant_id,
+    student_id=AUTH.student_id,
+    actor_id="10000000-0000-7000-8000-000000000601",
+    actor_type="delegate",
+    authentication_method="delegate_link",
+    delegate_scopes=frozenset({"enrollment"}),
+    delegate_relationship="parent",
+    delegate_name="Aster Parent",
+    subject_student_name="Aster Student",
+)
+FERPA_AUTHORIZATION_ID = "20000000-0000-7000-8000-000000000501"
+FERPA_DELEGATE_ID = "20000000-0000-7000-8000-000000000601"
 
 
 @dataclass(frozen=True)
@@ -163,10 +176,16 @@ class RecordingAI:
 class RecordingSignedDocuments:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.ferpa_calls: list[dict[str, object]] = []
+        self.ferpa_document: dict[str, object] = {}
 
     async def ensure(self, **kwargs: object) -> int:
         self.calls.append(dict(kwargs))
         return 1
+
+    async def create_ferpa(self, **kwargs: object) -> dict[str, object]:
+        self.ferpa_calls.append(dict(kwargs))
+        return self.ferpa_document
 
 
 @dataclass
@@ -200,6 +219,13 @@ def _rig() -> ServiceRig:
         "worker-secret",
     )
     return ServiceRig(service, platform, portal, staff, storage, ai, signed)
+
+
+def _ferpa_rig() -> tuple[ServiceRig, RecordingRepository]:
+    rig = _rig()
+    ferpa = RecordingRepository()
+    object.__setattr__(rig.service.repository, "ferpa", cast(Any, ferpa))
+    return rig, ferpa
 
 
 def _call(
@@ -487,6 +513,7 @@ def test_dispatch_routes_every_direct_operation_with_auth_and_contract_arguments
     expected_result: dict[str, object] = {"method": method}
     if operation == "student.get_bootstrap":
         expected_result["experienceUpdates"] = []
+        expected_result["actor"] = {"type": "student"}
     assert result == expected_result
     if payload and operation != "activity.ingest_batch":
         assert payload in routed.args or any(value in routed.args for value in payload.values())
@@ -520,6 +547,261 @@ def test_dispatch_defers_a_grouped_student_experience_update_bundle() -> None:
     routed = managed.calls[0]
     assert routed.name == "defer_student_updates"
     assert routed.args == (AUTH, payload, "request-1")
+
+
+def test_ferpa_current_and_existing_signed_completion_dispatch_to_repository() -> None:
+    rig, ferpa = _ferpa_rig()
+    current = {"id": FERPA_AUTHORIZATION_ID, "status": "ready", "version": 4}
+    payload = {
+        "expectedVersion": 4,
+        "accessDecision": "no_access",
+        "delegates": [],
+    }
+    completed = {"authorization": {"id": FERPA_AUTHORIZATION_ID, "status": "completed"}}
+    ferpa.responses.update(
+        {
+            "get_current": current,
+            "preflight_completion": {
+                "authorization": current,
+                "hasSignedEvidence": True,
+            },
+            "complete": completed,
+        }
+    )
+
+    current_result = asyncio.run(rig.service.dispatch(_call("student.get_ferpa_authorization")))
+    completed_result = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "student.complete_ferpa_authorization",
+                path={"requirementId": "family_permissions"},
+                payload=payload,
+                key="ferpa-complete-1",
+            )
+        )
+    )
+
+    assert current_result == {"authorization": current}
+    assert completed_result == completed
+    current_call = next(call for call in ferpa.calls if call.name == "get_current")
+    assert current_call.args == (AUTH,)
+    preflight = next(call for call in ferpa.calls if call.name == "preflight_completion")
+    assert preflight.args == (AUTH, "family_permissions", payload, "ferpa-complete-1")
+    completed_call = next(call for call in ferpa.calls if call.name == "complete")
+    assert completed_call.args == (
+        AUTH,
+        "family_permissions",
+        payload,
+        None,
+        "ferpa-complete-1",
+        "request-1",
+    )
+    assert rig.signed.ferpa_calls == []
+
+
+def test_ferpa_completion_stores_reserved_signed_evidence_before_completing() -> None:
+    rig, ferpa = _ferpa_rig()
+    reservation_id = "20000000-0000-7000-8000-000000000701"
+    payload = {
+        "expectedVersion": 4,
+        "accessDecision": "no_access",
+        "delegates": [],
+        "signature": {
+            "accepted": True,
+            "signerName": "Aster Student",
+            "signatureMethod": "typed",
+        },
+    }
+    reservation = {
+        "id": reservation_id,
+        "documentId": "20000000-0000-7000-8000-000000000702",
+        "storageKey": "tenant/student/signed-ferpa/release.pdf",
+    }
+    signed_document = {
+        "id": reservation["documentId"],
+        "storageKey": reservation["storageKey"],
+        "sha256": "a" * 64,
+        "sizeBytes": 1024,
+    }
+    rig.signed.ferpa_document = signed_document
+    ferpa.responses.update(
+        {
+            "preflight_completion": {
+                "authorization": {"id": FERPA_AUTHORIZATION_ID},
+                "hasSignedEvidence": False,
+                "signingReservation": reservation,
+            },
+            "claim_signing_reservation": reservation,
+            "mark_signing_reservation_stored": reservation,
+            "complete": {"authorization": {"status": "completed"}},
+        }
+    )
+
+    result = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "student.complete_ferpa_authorization",
+                path={"requirementId": "family_permissions"},
+                payload=payload,
+                key="ferpa-complete-2",
+            )
+        )
+    )
+
+    assert result == {"authorization": {"status": "completed"}}
+    assert rig.signed.ferpa_calls == [
+        {
+            "auth": AUTH,
+            "authorization": {"id": FERPA_AUTHORIZATION_ID},
+            "signature": payload["signature"],
+            "reservation": reservation,
+            "storage": rig.storage,
+        }
+    ]
+    claim = next(call for call in ferpa.calls if call.name == "claim_signing_reservation")
+    assert claim.args == (AUTH, reservation_id)
+    stored = next(call for call in ferpa.calls if call.name == "mark_signing_reservation_stored")
+    assert stored.args == (AUTH, reservation_id, signed_document)
+    completed = next(call for call in ferpa.calls if call.name == "complete")
+    assert completed.args == (
+        AUTH,
+        "family_permissions",
+        payload,
+        signed_document,
+        "ferpa-complete-2",
+        "request-1",
+    )
+
+
+def test_ferpa_access_and_delegate_link_commands_preserve_concurrency_arguments() -> None:
+    rig, ferpa = _ferpa_rig()
+    access_payload = {
+        "expectedVersion": 4,
+        "accessDecision": "grant",
+        "delegates": [
+            {
+                "id": FERPA_DELEGATE_ID,
+                "fullName": "Aster Parent",
+                "relationship": "parent",
+                "email": "parent@example.test",
+                "scopes": ["dashboard", "enrollment"],
+            }
+        ],
+    }
+
+    def issue_link(*_args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "delegateId": FERPA_DELEGATE_ID,
+            "status": "active",
+            "token": kwargs["token"],
+        }
+
+    ferpa.responses.update(
+        {
+            "update_access": {"authorization": {"version": 5}},
+            "issue_link": issue_link,
+            "revoke_link": {"authorization": {"version": 7}},
+        }
+    )
+
+    updated = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "student.update_ferpa_access",
+                path={"authorizationId": FERPA_AUTHORIZATION_ID},
+                payload=access_payload,
+            )
+        )
+    )
+    issued = cast(
+        dict[str, object],
+        asyncio.run(
+            rig.service.dispatch(
+                _call(
+                    "student.issue_ferpa_delegate_link",
+                    path={
+                        "authorizationId": FERPA_AUTHORIZATION_ID,
+                        "delegateId": FERPA_DELEGATE_ID,
+                    },
+                    payload={"expectedVersion": 5},
+                    key="ferpa-link-1",
+                )
+            )
+        ),
+    )
+    revoked = asyncio.run(
+        rig.service.dispatch(
+            _call(
+                "student.revoke_ferpa_delegate_link",
+                path={
+                    "authorizationId": FERPA_AUTHORIZATION_ID,
+                    "delegateId": FERPA_DELEGATE_ID,
+                },
+                payload={"expectedVersion": 6},
+            )
+        )
+    )
+
+    assert updated == {"authorization": {"version": 5}}
+    assert revoked == {"authorization": {"version": 7}}
+    update = next(call for call in ferpa.calls if call.name == "update_access")
+    assert update.args == (AUTH, FERPA_AUTHORIZATION_ID, access_payload, "request-1")
+    issue = next(call for call in ferpa.calls if call.name == "issue_link")
+    assert issue.args == (AUTH, FERPA_AUTHORIZATION_ID, FERPA_DELEGATE_ID)
+    assert issue.kwargs["expected_version"] == 5
+    assert issue.kwargs["idempotency_key"] == "ferpa-link-1"
+    assert issue.kwargs["request_id"] == "request-1"
+    assert issued["token"] == issue.kwargs["token"]
+    assert issued["url"] == f"/delegate#token={issued['token']}"
+    revoke = next(call for call in ferpa.calls if call.name == "revoke_link")
+    assert revoke.args == (AUTH, FERPA_AUTHORIZATION_ID, FERPA_DELEGATE_ID)
+    assert revoke.kwargs == {"expected_version": 6, "request_id": "request-1"}
+
+
+def test_delegate_ferpa_projection_is_read_only_and_specialized_submission_is_rejected() -> None:
+    rig, ferpa = _ferpa_rig()
+    rig.portal.responses["get_student_onboarding"] = {
+        "status": "completed",
+        "data": {
+            "personalEmail": "student@example.test",
+            "familyPermissions": {"accessDecision": "grant"},
+            "signatureFullName": "Aster Student",
+            "signatureMethod": "typed",
+            "signatureImageData": "data:image/png;base64,signature",
+            "signatureConsent": True,
+            "signedDocumentIds": ["ferpa-release"],
+        },
+    }
+    ferpa.responses.update(
+        {
+            "get_current": {"status": "completed"},
+            "requirement_context": {
+                "interactionType": "ferpa",
+                "flowKind": "enrollment",
+            },
+        }
+    )
+
+    onboarding = cast(
+        dict[str, Any],
+        asyncio.run(rig.service.dispatch(_call("student.get_onboarding", auth=DELEGATE_AUTH))),
+    )
+
+    assert onboarding["data"] == {"personalEmail": "student@example.test"}
+    assert onboarding["ferpa"] == {"status": "completed", "studentManaged": True}
+    with pytest.raises(ApiError) as error:
+        asyncio.run(
+            rig.service.dispatch(
+                _call(
+                    "student.submit_requirement_response",
+                    auth=DELEGATE_AUTH,
+                    path={"requirementId": "family_permissions"},
+                    payload={"response": {"accessDecision": "grant"}},
+                )
+            )
+        )
+    assert error.value.code == "FERPA_STUDENT_CONTROL_REQUIRED"
+    assert not any(call.name == "submit_student_requirement_response" for call in rig.portal.calls)
 
 
 def test_document_upload_persists_original_before_claiming_processing() -> None:

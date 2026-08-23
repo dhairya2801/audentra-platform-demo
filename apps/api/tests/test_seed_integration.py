@@ -184,13 +184,13 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                 assert tenant["students"] == 14
                 assert tenant["staff"] == 3
                 assert tenant["active_journeys"] == 1
-                assert tenant["requirement_definitions"] == 8
+                assert tenant["requirement_definitions"] == 9
                 assert tenant["ai_operations"] == 9
                 # Both primary offers remain offered until the acceptance
                 # exercised below, so the ten accepted funnel students own
                 # the materialized journeys at this point.
                 assert tenant["journeys"] == 10, tenant_id
-                assert tenant["requirements"] == 80, tenant_id
+                assert tenant["requirements"] == 90, tenant_id
                 assert tenant["action_rules"] == 1
 
             harvard_auth = AuthContext(
@@ -226,7 +226,7 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
                         "student_id": HARVARD_STUDENT_ID,
                     },
                 )
-            assert harvard_requirement_count == 8
+            assert harvard_requirement_count == 9
 
             # Publishing a new requirement-definition version must not make
             # the deterministic demo requirement IDs collide on the next seed pass.
@@ -330,7 +330,7 @@ def test_relational_seed_is_rerunnable_against_postgres() -> None:
             }
             assert all(row["status"] == "completed" for row in completed_rows)
             assert all(row["offer_status"] == "accepted" for row in completed_rows)
-            assert all(row["requirement_count"] == 8 for row in completed_rows)
+            assert all(row["requirement_count"] == 9 for row in completed_rows)
 
             # Keep the shared local demo database ready for the onboarding walkthrough.
             await reset_relational_data(

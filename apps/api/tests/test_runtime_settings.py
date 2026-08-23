@@ -10,6 +10,24 @@ from audentra.bootstrap.settings import (
 from audentra.infrastructure.storage import GcsStorageSettings, S3StorageSettings
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+FERPA_LINK_SECRET = "test-ferpa-delegate-link-secret-at-least-32-bytes"  # noqa: S105
+OIDC_AUDENTRA_TENANT_ID = "00000000-0000-7000-8000-000000000001"
+ENTRA_TENANT_ID = "11111111-2222-4333-8444-555555555555"
+
+
+def _student_oidc_environment() -> dict[str, str]:
+    return {
+        "AUTH_MODE": "oidc",
+        "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
+        "OIDC_AUDENTRA_TENANT_ID": OIDC_AUDENTRA_TENANT_ID,
+        "OIDC_PUBLIC_BASE_URL": "http://localhost:4000",
+        "OIDC_PORTAL_BASE_URL": "http://localhost:3000",
+        "GOOGLE_OIDC_CLIENT_ID": "google-student-client",
+        "GOOGLE_OIDC_CLIENT_SECRET": "google-test-value",
+        "MICROSOFT_OIDC_CLIENT_ID": "microsoft-student-client",
+        "MICROSOFT_OIDC_CLIENT_SECRET": "microsoft-test-value",
+        "MICROSOFT_OIDC_TENANT_ID": ENTRA_TENANT_ID,
+    }
 
 
 def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
@@ -29,6 +47,162 @@ def test_development_settings_preserve_legacy_defaults(tmp_path: Path) -> None:
     assert settings.ai.openrouter_document_model == "qwen/qwen3.7-flash"
     assert settings.onboarding_template_dir == tmp_path / "assets" / "onboarding"
     assert not hasattr(settings.http_settings(), "tenant_slug_ids")
+
+
+def test_personal_microsoft_account_test_mode_is_local_only(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        {"MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS": "true"},
+        package_root=tmp_path,
+    )
+    assert settings.institutional_oauth.microsoft_allow_personal_accounts is True
+
+    with pytest.raises(ValueError, match="only in development or test"):
+        RuntimeSettings.from_environment(
+            {
+                "AUDENTRA_ENV": "preview",
+                "DATABASE_URL": "postgresql://example/preview",
+                "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+                "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+                "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
+                "MICROSOFT_OAUTH_ALLOW_PERSONAL_ACCOUNTS": "true",
+            },
+            package_root=tmp_path,
+        )
+
+
+def test_student_oidc_settings_preserve_provider_order_and_tenant_boundaries(
+    tmp_path: Path,
+) -> None:
+    settings = RuntimeSettings.from_environment(_student_oidc_environment(), package_root=tmp_path)
+
+    assert settings.oidc is not None
+    assert [provider.id for provider in settings.oidc.providers] == ["google", "microsoft"]
+    assert [provider.label for provider in settings.oidc.providers] == ["Google", "Microsoft"]
+    assert settings.oidc.callback_base_url == "http://localhost:4000"
+    assert settings.oidc.portal_base_url == "http://localhost:3000"
+    assert settings.oidc_tenant_id == OIDC_AUDENTRA_TENANT_ID
+    assert settings.http_settings().oidc_tenant_id == OIDC_AUDENTRA_TENANT_ID
+    assert settings.oidc.providers[0].tenant_id is None
+    assert settings.oidc.providers[1].tenant_id == ENTRA_TENANT_ID
+    settings.assert_api_deployable()
+
+
+def test_demo_mode_ignores_populated_oidc_provider_configuration(tmp_path: Path) -> None:
+    values = _student_oidc_environment()
+    values["AUTH_MODE"] = "demo"
+    values["OIDC_AUDENTRA_TENANT_ID"] = "ignored-while-oidc-is-disabled"
+
+    settings = RuntimeSettings.from_environment(values, package_root=tmp_path)
+
+    assert settings.auth_mode == "demo"
+    assert settings.oidc is None
+    assert settings.oidc_tenant_id is None
+    assert settings.http_settings().oidc_portal_base_url == ""
+    assert len(settings.staff_invitation_code) >= 16
+
+
+@pytest.mark.parametrize(
+    ("provider_values", "message"),
+    [
+        (
+            {"GOOGLE_OIDC_CLIENT_ID": "google-student-client"},
+            "GOOGLE_OIDC_CLIENT_ID and GOOGLE_OIDC_CLIENT_SECRET must both be set",
+        ),
+        (
+            {
+                "MICROSOFT_OIDC_CLIENT_ID": "microsoft-student-client",
+                "MICROSOFT_OIDC_CLIENT_SECRET": "microsoft-test-value",
+            },
+            "MICROSOFT_OIDC_CLIENT_ID, MICROSOFT_OIDC_CLIENT_SECRET, and ",
+        ),
+        ({}, "AUTH_MODE=oidc requires at least one configured OIDC provider"),
+    ],
+)
+def test_student_oidc_provider_configuration_fails_closed(
+    provider_values: dict[str, str], message: str, tmp_path: Path
+) -> None:
+    values = {
+        "AUTH_MODE": "oidc",
+        "OIDC_AUDENTRA_TENANT_ID": OIDC_AUDENTRA_TENANT_ID,
+        "OIDC_PUBLIC_BASE_URL": "http://localhost:4000",
+        "OIDC_PORTAL_BASE_URL": "http://localhost:3000",
+        **provider_values,
+    }
+
+    with pytest.raises(ValueError, match=message):
+        RuntimeSettings.from_environment(values, package_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("OIDC_PUBLIC_BASE_URL", "http://api.example"),
+        ("OIDC_PORTAL_BASE_URL", "https://portal.example/sign-in"),
+    ],
+)
+def test_deployed_student_oidc_requires_exact_https_origins(
+    variable: str, value: str, tmp_path: Path
+) -> None:
+    values = _student_oidc_environment()
+    values.update(
+        {
+            "AUDENTRA_ENV": "preview",
+            "OIDC_PUBLIC_BASE_URL": "https://api.example",
+            "OIDC_PORTAL_BASE_URL": "https://portal.example",
+            variable: value,
+        }
+    )
+
+    with pytest.raises(ValueError, match=f"{variable} must be an exact HTTPS origin"):
+        RuntimeSettings.from_environment(values, package_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://:443",
+        "https://example.com:not-a-port",
+        "https://example.com:65536",
+        "https://example.com:0",
+        "https://example.com:",
+        "https://example..com",
+        "https://exa mple.com",
+        "https://[::1",
+    ],
+)
+def test_student_oidc_rejects_malformed_origin_authorities(value: str, tmp_path: Path) -> None:
+    values = _student_oidc_environment()
+    values.update(
+        {
+            "AUDENTRA_ENV": "preview",
+            "OIDC_PUBLIC_BASE_URL": value,
+            "OIDC_PORTAL_BASE_URL": "https://portal.example",
+        }
+    )
+
+    with pytest.raises(ValueError, match="OIDC_PUBLIC_BASE_URL must be an exact HTTPS origin"):
+        RuntimeSettings.from_environment(values, package_root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("tenant_id", "message"),
+    [
+        (None, "AUTH_MODE=oidc requires OIDC_AUDENTRA_TENANT_ID"),
+        ("not-a-uuid", "OIDC_AUDENTRA_TENANT_ID must be a tenant UUID"),
+    ],
+)
+def test_student_oidc_requires_a_valid_audentra_tenant_uuid(
+    tenant_id: str | None, message: str, tmp_path: Path
+) -> None:
+    values = _student_oidc_environment()
+    if tenant_id is None:
+        values.pop("OIDC_AUDENTRA_TENANT_ID")
+    else:
+        values["OIDC_AUDENTRA_TENANT_ID"] = tenant_id
+
+    with pytest.raises(ValueError, match=message):
+        RuntimeSettings.from_environment(values, package_root=tmp_path)
 
 
 def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: Path) -> None:
@@ -66,6 +240,7 @@ def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: P
                 **complete,
                 "AUDENTRA_ENV": "preview",
                 "BROWSER_AUTH_REQUIRED": "true",
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "VV_STAFF_INVITATION_CODE": "a-long-enough-invitation-code",
                 "LIVEKIT_URL": "ws://livekit.internal:7880",
             },
@@ -126,6 +301,7 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
             "AUDENTRA_ENV": "preview",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
             "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
         },
@@ -145,6 +321,7 @@ def test_gcs_storage_uses_application_default_credentials(tmp_path: Path) -> Non
             "AUDENTRA_ENV": "preview",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
             "OBJECT_STORAGE_PROVIDER": "gcs",
             "OBJECT_STORAGE_BUCKET": "audentra-preview-documents",
@@ -167,6 +344,7 @@ def test_preview_requires_a_private_staff_invitation_code(tmp_path: Path) -> Non
                 "AUDENTRA_ENV": "preview",
                 "DATABASE_URL": "postgresql://example/preview",
                 "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
             },
             package_root=tmp_path,
@@ -215,6 +393,7 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
             "AUDENTRA_ENV": "production",
             "DATABASE_URL": "postgresql://example/prod",
             "DOCUMENT_WORKER_TOKEN": "x" * 40,
+            "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
             "OBJECT_STORAGE_SECRET_KEY": "external-secret",
             "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
         },
@@ -230,6 +409,7 @@ def test_production_requires_external_secrets_and_rejects_demo_auth(tmp_path: Pa
                 "AUDENTRA_ENV": "production",
                 "DATABASE_URL": "postgresql://example/prod",
                 "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "external-secret",
                 "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
                 "SESSION_COOKIE_SAMESITE": "none",
@@ -245,6 +425,7 @@ def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Pa
                 "AUDENTRA_ENV": "production",
                 "DATABASE_URL": "postgresql://example/prod",
                 "DOCUMENT_WORKER_TOKEN": "x" * 40,
+                "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "OBJECT_STORAGE_SECRET_KEY": "external-secret",
                 "VV_STAFF_INVITATION_CODE": "production-private-staff-code",
                 "EDWARD_E2E_MALICIOUS_PROVIDER_ENABLED": "true",

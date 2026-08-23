@@ -1,0 +1,7 @@
+services:
+  migrate:
+    image: audentra-platform-ferpa-e2e:local
+  seed:
+    image: audentra-platform-ferpa-e2e:local
+  api:
+    image: audentra-platform-ferpa-e2e:local

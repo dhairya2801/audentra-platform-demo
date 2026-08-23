@@ -18,6 +18,9 @@ from audentra.infrastructure.db.migrations import (
 
 pytestmark = pytest.mark.integration
 
+ASTER_TENANT_ID = "00000000-0000-7000-8000-000000000001"
+HARVARD_TENANT_ID = "00000000-0000-7000-8000-000000000002"
+
 
 def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
     database_url = os.getenv("AUDENTRA_TEST_DATABASE_URL")
@@ -54,7 +57,6 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 reset = await client.post(
                     "/v1/auth/demo/start-guided-onboarding",
                     json={},
-                    headers={"X-Tenant-Slug": "aster"},
                 )
                 assert reset.status_code == 200, reset.text
                 verification_engine = create_database_engine(database_url)
@@ -72,20 +74,19 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                     await verification_engine.dispose()
                 aster = await client.get(
                     "/v1/student/bootstrap",
-                    headers={"X-Tenant-Slug": "aster"},
                 )
                 assert aster.status_code == 200, aster.text
                 assert aster.json()["initialRoute"] == "/onboarding"
 
                 harvard = await client.get(
                     "/v1/student/bootstrap",
-                    headers={"X-Tenant-Slug": "harvard"},
+                    headers={"X-Demo-Tenant-Id": HARVARD_TENANT_ID},
                 )
                 assert harvard.status_code == 200, harvard.text
                 assert harvard.json()["student"]["id"].startswith("80000000-")
                 campus = await client.get(
                     "/v1/student/campus-life",
-                    headers={"X-Tenant-Slug": "harvard"},
+                    headers={"X-Demo-Tenant-Id": HARVARD_TENANT_ID},
                 )
                 assert campus.status_code == 200, campus.text
 
@@ -95,7 +96,6 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://integration.test",
-                headers={"X-Tenant-Slug": "aster"},
             ) as credential_client:
                 signup = await credential_client.post(
                     "/v1/auth/sign-up",
@@ -140,7 +140,6 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://integration.test",
-                headers={"X-Tenant-Slug": "aster"},
             ) as staff_client:
                 unclaimed_staff = await staff_client.post(
                     "/v1/auth/staff/sign-in",
@@ -176,7 +175,7 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 aster_session_in_harvard = await staff_client.get(
                     "/v1/staff/workspace",
                     headers={
-                        "X-Tenant-Slug": "harvard",
+                        "X-Demo-Tenant-Id": HARVARD_TENANT_ID,
                         "X-Demo-Actor-Type": "staff",
                     },
                 )
@@ -217,7 +216,7 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://integration.test",
-                headers={"X-Tenant-Slug": "harvard"},
+                headers={"X-Demo-Tenant-Id": HARVARD_TENANT_ID},
             ) as harvard_staff_client:
                 aster_identity_in_harvard = await harvard_staff_client.post(
                     "/v1/auth/staff/sign-up",
@@ -255,7 +254,7 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 harvard_session_in_aster = await harvard_staff_client.get(
                     "/v1/staff/workspace",
                     headers={
-                        "X-Tenant-Slug": "aster",
+                        "X-Demo-Tenant-Id": ASTER_TENANT_ID,
                         "X-Demo-Actor-Type": "staff",
                     },
                 )
@@ -265,7 +264,6 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
             async with httpx.AsyncClient(
                 transport=transport,
                 base_url="http://integration.test",
-                headers={"X-Tenant-Slug": "aster"},
             ) as completed_client:
                 completed = await completed_client.post(
                     "/v1/auth/demo/start-guided-onboarding",
@@ -277,17 +275,17 @@ def test_real_postgres_browser_auth_and_deterministic_reset() -> None:
                 assert bootstrap.json()["initialRoute"] == "/dashboard"
                 requirements = await completed_client.get("/v1/student/requirements")
                 assert requirements.status_code == 200, requirements.text
-                assert len(requirements.json()["items"]) == 8
+                assert len(requirements.json()["items"]) == 9
 
                 harvard = await completed_client.get(
                     "/v1/student/bootstrap",
-                    headers={"X-Tenant-Slug": "harvard"},
+                    headers={"X-Demo-Tenant-Id": HARVARD_TENANT_ID},
                 )
                 assert harvard.status_code == 200, harvard.text
                 assert harvard.json()["initialRoute"] == "/dashboard"
                 harvard_financials = await completed_client.get(
                     "/v1/student/financials",
-                    headers={"X-Tenant-Slug": "harvard"},
+                    headers={"X-Demo-Tenant-Id": HARVARD_TENANT_ID},
                 )
                 assert harvard_financials.status_code == 200, harvard_financials.text
 

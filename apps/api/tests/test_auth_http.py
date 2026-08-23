@@ -5,10 +5,12 @@ from collections.abc import AsyncIterator
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from audentra.core.auth import AuthContext
+from audentra.core.auth import AuthContext, PortalScope
 from audentra.core.errors import ApiError, NotFoundError, UnauthorizedError
 from audentra.core.ports import (
+    BinaryPayload,
     CredentialStudentSession,
+    DelegateSession,
     DemoStudentSession,
     ServiceCall,
     StaffSession,
@@ -21,6 +23,8 @@ STUDENT_ID = "00000000-0000-7000-8000-000000000101"
 ACTOR_ID = "00000000-0000-7000-8000-000000000100"
 STAFF_ID = "00000000-0000-7000-8000-000000000901"
 STUDENT_TOKEN = "student-session-token-that-is-long-enough"  # noqa: S105
+DELEGATE_TOKEN = "delegate-session-token-that-is-long-enough"  # noqa: S105
+DELEGATE_LINK_TOKEN = "delegate-link-token-that-is-long-enough"  # noqa: S105
 STAFF_TOKEN = "staff-session-token-that-is-long-enough"  # noqa: S105
 WRONG_PASSWORD = "wrong-password"  # noqa: S105
 STAFF_PASSWORD = "Individual-staff-password-2027"  # noqa: S105
@@ -36,19 +40,21 @@ class FakePlatformService:
     async def dispatch(self, call: ServiceCall) -> object:
         self.calls.append(call)
         if call.operation == "public.get_tenant_bootstrap":
-            tenant_ids = {"aster": TENANT_ID}
-            requested_slug = call.path_params.get("slug")
             requested_id = call.path_params.get("tenantId")
-            tenant_id = (
-                tenant_ids.get(str(requested_slug))
-                if requested_slug is not None
-                else str(requested_id)
-                if requested_id == TENANT_ID
-                else None
-            )
+            tenant_id = str(requested_id) if requested_id == TENANT_ID else None
             if tenant_id is None:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
-            return {"tenantId": tenant_id, "slug": str(requested_slug or "aster")}
+            return {"tenantId": tenant_id, "slug": "aster"}
+        if call.operation in {
+            "student.get_document_content",
+            "student.get_document_profile_photo",
+        }:
+            return BinaryPayload(
+                data=b"document-content",
+                media_type="application/pdf",
+                file_name="document.pdf",
+                cache_control="private, no-store",
+            )
         return {"operation": call.operation}
 
 
@@ -57,9 +63,11 @@ class FakeBrowserAuthService:
         self.reset_completed: bool | None = None
         self.sign_up_input: dict[str, str | None] | None = None
         self.student_revoked = False
+        self.delegate_revoked = False
         self.staff_revoked = False
         self.staff_sign_up_input: dict[str, str | None] | None = None
         self.demo_reference: str | None = None
+        self.delegate_scopes: frozenset[PortalScope] = frozenset({"dashboard"})
 
     def student_context(self, method: str = "credentials") -> AuthContext:
         return AuthContext(
@@ -104,6 +112,7 @@ class FakeBrowserAuthService:
         tenant_slug: str | None,
         email: str,
         phone: str,
+        legal_name: str | None,
         password: str,
     ) -> CredentialStudentSession:
         self.sign_up_input = {
@@ -111,6 +120,7 @@ class FakeBrowserAuthService:
             "tenant_slug": tenant_slug,
             "email": email,
             "phone": phone,
+            "legal_name": legal_name,
             "password": password,
         }
         return self._credential_session(email=email, phone=phone)
@@ -131,6 +141,28 @@ class FakeBrowserAuthService:
         assert token in {None, STUDENT_TOKEN}
         self.student_revoked = True
 
+    async def exchange_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug in {None, "aster"}
+        if token != DELEGATE_LINK_TOKEN:
+            raise UnauthorizedError("The parent or guardian link is invalid or expired")
+        return self._delegate_session()
+
+    async def resolve_delegate(
+        self, token: str, tenant_id: str, tenant_slug: str | None
+    ) -> DelegateSession | None:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug in {None, "aster"}
+        if self.delegate_revoked or token != DELEGATE_TOKEN:
+            return None
+        return self._delegate_session()
+
+    async def sign_out_delegate(self, token: str | None) -> None:
+        assert token in {None, DELEGATE_TOKEN}
+        self.delegate_revoked = True
+
     async def resolve_staff(
         self, token: str, tenant_id: str, tenant_slug: str | None
     ) -> StaffSession | None:
@@ -148,6 +180,25 @@ class FakeBrowserAuthService:
     ) -> StaffSession:
         if password != STAFF_PASSWORD:
             raise UnauthorizedError("Email or password is incorrect")
+        return self._staff_session(email=email)
+
+    async def sign_in_staff_federated(
+        self,
+        *,
+        tenant_id: str,
+        tenant_slug: str,
+        provider: str,
+        provider_subject: str,
+        provider_tenant: str,
+        email: str,
+        display_name: str,
+    ) -> StaffSession:
+        assert tenant_id == TENANT_ID
+        assert tenant_slug == "aster"
+        assert provider in {"google", "microsoft"}
+        assert provider_subject
+        assert provider_tenant
+        assert isinstance(display_name, str)
         return self._staff_session(email=email)
 
     async def sign_up_staff(
@@ -208,6 +259,29 @@ class FakeBrowserAuthService:
             email=email,
             component="Admissions",
             token=STAFF_TOKEN,
+            expires_at_epoch=4_102_444_800,
+        )
+
+    def _delegate_session(self) -> DelegateSession:
+        return DelegateSession(
+            context=AuthContext(
+                tenant_id=TENANT_ID,
+                student_id=STUDENT_ID,
+                actor_id="00000000-0000-7000-8000-000000000201",
+                actor_type="delegate",
+                authentication_method="delegate_link",
+                tenant_slug="aster",
+                delegate_scopes=self.delegate_scopes,
+                delegate_relationship="parent",
+                delegate_name="Robin Parent",
+                subject_student_name="Alex Student",
+            ),
+            full_name="Robin Parent",
+            relationship="parent",
+            email="robin.parent@example.com",
+            student_preferred_name="Alex",
+            student_name="Alex Student",
+            token=DELEGATE_TOKEN,
             expires_at_epoch=4_102_444_800,
         )
 
@@ -392,6 +466,7 @@ async def test_signup_normalizes_email_and_issues_an_http_only_credential_cookie
         "/v1/auth/sign-up",
         json={
             "email": "  BROWSER.STUDENT@EXAMPLE.COM  ",
+            "legalName": "Maya Chen",
             "phone": "+15551230001",
             "password": "Browser-student-123",
         },
@@ -401,8 +476,173 @@ async def test_signup_normalizes_email_and_issues_an_http_only_credential_cookie
     assert response.json()["student"]["email"] == "browser.student@example.com"
     assert auth_service.sign_up_input is not None
     assert auth_service.sign_up_input["email"] == "browser.student@example.com"
+    assert auth_service.sign_up_input["legal_name"] == "Maya Chen"
     assert f"vv_session={STUDENT_TOKEN}" in response.headers["set-cookie"]
     assert "HttpOnly" in response.headers["set-cookie"]
+
+
+async def test_signup_accepts_contact_details_before_legal_name_is_collected(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    response = await client.post(
+        "/v1/auth/sign-up",
+        json={
+            "email": "new.student@example.com",
+            "phone": "+15551230002",
+            "password": "Browser-student-123",
+        },
+    )
+
+    assert response.status_code == 201
+    assert auth_service.sign_up_input is not None
+    assert auth_service.sign_up_input["legal_name"] is None
+
+
+async def test_parent_link_uses_a_tab_selected_cookie_without_clobbering_student(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+) -> None:
+    """Both HTTP-only sessions may coexist; the request selects one safely."""
+
+    student_sign_in = await client.post(
+        "/v1/auth/sign-in",
+        json={"email": "student@example.com", "password": "Browser-student-123"},
+    )
+    parent_exchange = await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+    student_request = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "student"},
+    )
+    default_student_request = await client.get("/v1/student/bootstrap")
+    parent_request = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert student_sign_in.status_code == 200
+    assert parent_exchange.status_code == 200
+    assert "vv_delegate_session=" in parent_exchange.headers["set-cookie"]
+    assert "vv_session=signed-out" not in parent_exchange.headers["set-cookie"]
+    assert student_request.status_code == 200
+    assert default_student_request.status_code == 200
+    assert parent_request.status_code == 200
+    bootstrap_calls = [
+        call for call in platform_service.calls if call.operation == "student.get_bootstrap"
+    ]
+    assert bootstrap_calls[-3].auth is not None
+    assert bootstrap_calls[-3].auth.actor_type == "student"
+    assert bootstrap_calls[-1].auth is not None
+    assert bootstrap_calls[-1].auth.actor_type == "delegate"
+    # A parent-link cookie can coexist in the browser, but only the tab that
+    # explicitly selects delegate mode becomes the parent session.
+    assert bootstrap_calls[-2].auth is not None
+    assert bootstrap_calls[-2].auth.actor_type == "student"
+
+
+async def test_delegate_binary_requests_require_the_explicit_delegate_session_mode(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    """A portal blob fetch can select the delegate session without cookie ambiguity."""
+
+    auth_service.delegate_scopes = frozenset({"documents"})
+    document_id = "00000000-0000-7000-8000-000000000301"
+    await client.post(
+        "/v1/auth/sign-in",
+        json={"email": "student@example.com", "password": "Browser-student-123"},
+    )
+    await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+
+    default_response = await client.get(f"/v1/student/documents/{document_id}/content")
+    delegate_content = await client.get(
+        f"/v1/student/documents/{document_id}/content",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+    delegate_photo = await client.get(
+        f"/v1/student/documents/{document_id}/profile-photo",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert [
+        response.status_code for response in (default_response, delegate_content, delegate_photo)
+    ] == [
+        200,
+        200,
+        200,
+    ]
+    binary_calls = [
+        call
+        for call in platform_service.calls
+        if call.operation in {"student.get_document_content", "student.get_document_profile_photo"}
+    ]
+    assert [call.auth.actor_type if call.auth is not None else None for call in binary_calls] == [
+        "student",
+        "delegate",
+        "delegate",
+    ]
+
+
+@pytest.mark.parametrize(
+    "delegate_token",
+    [None, "invalid-delegate-session-token"],
+    ids=["missing-cookie", "invalid-cookie"],
+)
+async def test_delegate_mode_requires_a_valid_delegate_cookie(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+    delegate_token: str | None,
+) -> None:
+    if delegate_token is not None:
+        client.cookies.set("vv_delegate_session", delegate_token)
+
+    response = await client.get(
+        "/v1/student/bootstrap",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+    assert not any(call.operation == "student.get_bootstrap" for call in platform_service.calls)
+
+
+async def test_delegate_session_is_scoped_and_cannot_control_ferpa(
+    client: AsyncClient,
+    platform_service: FakePlatformService,
+) -> None:
+    exchange = await client.post(
+        "/v1/auth/delegate/exchange",
+        json={"token": DELEGATE_LINK_TOKEN},
+    )
+    session = await client.get("/v1/auth/delegate/session")
+    profile = await client.get(
+        "/v1/student/profile",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+    ferpa = await client.get(
+        "/v1/student/ferpa-authorizations/current",
+        headers={"X-Audentra-Session-Mode": "delegate"},
+    )
+
+    assert exchange.status_code == 200
+    assert session.status_code == 200
+    assert session.json()["mode"] == "delegate"
+    assert session.json()["delegate"]["scopes"] == ["dashboard"]
+    assert profile.status_code == 403
+    assert profile.json()["error"]["code"] == "DELEGATE_SCOPE_REQUIRED"
+    assert ferpa.status_code == 403
+    assert ferpa.json()["error"]["code"] == "FERPA_STUDENT_CONTROL_REQUIRED"
+    assert not any(
+        call.operation in {"student.get_profile", "student.get_ferpa_authorization"}
+        for call in platform_service.calls
+    )
 
 
 async def test_invalid_credentials_use_one_non_enumerating_message(client: AsyncClient) -> None:
@@ -522,7 +762,7 @@ async def test_guided_reset_validates_tenant_before_mutating_fixture(
 ) -> None:
     response = await client.post(
         "/v1/auth/demo/start-guided-onboarding",
-        headers={"X-Tenant-Slug": "unknown"},
+        headers={"X-Demo-Tenant-Id": "00000000-0000-7000-8000-000000000099"},
         json={"completedOnboarding": False},
     )
 

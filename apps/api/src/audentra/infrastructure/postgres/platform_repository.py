@@ -796,7 +796,7 @@ class PostgresPlatformRepository:
                     ) VALUES (
                       :id, :tenant_id, :actor_type, :actor_id, :student_id,
                       :audit_action, 'admission_offer', :offer_id,
-                      'student_self_service', :request_id, :request_id,
+                      :authorization_basis, :request_id, :request_id,
                       CAST(:metadata AS jsonb), :accepted_at, :accepted_at
                     )
                     """
@@ -812,6 +812,9 @@ class PostgresPlatformRepository:
                         "admission_offer.journey_repaired"
                         if offer_already_accepted
                         else "admission_offer.accepted"
+                    ),
+                    "authorization_basis": (
+                        "ferpa_delegation" if auth.is_delegate else "student_self_service"
                     ),
                     "request_id": request_id,
                     "metadata": _json(
@@ -966,6 +969,8 @@ class PostgresPlatformRepository:
         source_key: str,
         properties: Mapping[str, object],
     ) -> int:
+        if auth.is_delegate:
+            return 0
         rule_result = await connection.execute(
             text(
                 f"""
