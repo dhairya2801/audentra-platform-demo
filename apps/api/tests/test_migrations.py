@@ -279,3 +279,26 @@ def test_student_oidc_migration_is_tenant_scoped_one_time_and_token_free() -> No
     lowered = migration.lower()
     assert "access_token" not in lowered
     assert "refresh_token" not in lowered
+
+
+def test_edward_feedback_migration_binds_response_trace_and_actor_ownership() -> None:
+    migration = (
+        Path(__file__).resolve().parents[1] / "migrations" / "0047_edward_response_feedback.sql"
+    ).read_text(encoding="utf-8")
+
+    assert "CREATE TABLE assistant_turn_trace" in migration
+    assert "trace_payload jsonb NOT NULL" in migration
+    assert "CREATE TABLE edward_response_feedback" in migration
+    assert "rating IN ('positive', 'negative')" in migration
+    assert "rating IS NOT NULL OR written_feedback IS NOT NULL" in migration
+    assert "FOREIGN KEY (student_assistant_message_id, tenant_id, student_id)" in migration
+    assert "FOREIGN KEY (staff_assistant_message_id, tenant_id, staff_member_id)" in migration
+    assert (
+        "FOREIGN KEY (trace_id, tenant_id, student_id, student_assistant_message_id)" in migration
+    )
+    assert (
+        "FOREIGN KEY (trace_id, tenant_id, staff_member_id, staff_assistant_message_id)"
+        in migration
+    )
+    assert "edward_response_feedback_student_response_uidx" in migration
+    assert "edward_response_feedback_staff_response_uidx" in migration

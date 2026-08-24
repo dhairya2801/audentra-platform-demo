@@ -2570,6 +2570,46 @@ export interface AssistantConversationMessagesResponse {
   messages: AssistantConversationMessage[];
 }
 
+/** One mutable response-scoped feedback record shared by Student/Staff Edward. */
+export type EdwardFeedbackRating = "positive" | "negative";
+
+export interface EdwardFeedbackInput {
+  /** The request/trace id returned with this exact assistant message. */
+  traceId: string;
+  /** Omit to preserve the current rating; null clears it when written feedback remains. */
+  rating?: EdwardFeedbackRating | null;
+  /** Omit to preserve the current comment; null clears it when a rating remains. */
+  writtenFeedback?: string | null;
+}
+
+export interface EdwardResponseFeedback {
+  id: string;
+  assistantKind: "student" | "staff";
+  tenantId: string;
+  actorType: "student" | "staff";
+  actorId: string;
+  actorName: string | null;
+  referencedStudentId: string | null;
+  referencedStudentName: string | null;
+  conversationId: string;
+  userMessageId: string;
+  assistantMessageId: string;
+  traceId: string;
+  question: string;
+  response: string;
+  rating: EdwardFeedbackRating | null;
+  writtenFeedback: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EdwardFeedbackListResponse {
+  items: EdwardResponseFeedback[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 /* ---------------------------------------------------------------------------
  * Staff Edward — read-only staff assistant and its durable transcript.
  *

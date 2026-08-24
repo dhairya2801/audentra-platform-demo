@@ -734,6 +734,33 @@ class AskStaffEdwardRequest(StrictRequest):
     ) = None
 
 
+class EdwardFeedbackRequest(StrictRequest):
+    """A partial update to the one feedback record for an Edward response."""
+
+    trace_id: Annotated[
+        StrictStr,
+        StringConstraints(
+            min_length=1,
+            max_length=128,
+            pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        ),
+    ]
+    rating: Literal["positive", "negative"] | None = None
+    written_feedback: (
+        Annotated[
+            StrictStr,
+            StringConstraints(strip_whitespace=True, min_length=1, max_length=4_000),
+        ]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def _has_feedback_change(self) -> "EdwardFeedbackRequest":
+        if not ({"rating", "written_feedback"} & self.model_fields_set):
+            raise ValueError("rating or writtenFeedback is required")
+        return self
+
+
 class CreateAssistantVoiceSessionRequest(StrictRequest):
     conversation_id: UUID
     page_context: AssistantPageContextRequest

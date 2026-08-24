@@ -18,6 +18,9 @@ from audentra.core.ports import (
 )
 from audentra.infrastructure.db.engine import create_database_engine
 from audentra.infrastructure.postgres.auth_repository import PostgresDevelopmentAuth
+from audentra.infrastructure.postgres.edward_feedback_repository import (
+    PostgresEdwardFeedbackRepository,
+)
 from audentra.infrastructure.postgres.ferpa_repository import PostgresFerpaRepository
 from audentra.infrastructure.postgres.managed_configuration_repository import (
     PostgresManagedConfigurationRepository,
@@ -115,6 +118,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 staff_assistant=PostgresStaffAssistantRepository(engine),
                 morning_brew=PostgresMorningBrewRepository(engine),
                 ferpa=PostgresFerpaRepository(engine, portal),
+                edward_feedback=PostgresEdwardFeedbackRepository(engine),
             ),
             storage,
             ai,

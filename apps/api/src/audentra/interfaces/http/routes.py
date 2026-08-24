@@ -4,7 +4,8 @@ import asyncio
 import json
 import time
 from collections.abc import Mapping
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Path, Query, Request, Response
@@ -37,6 +38,7 @@ from audentra.contracts.requests import (
     DecideStudentExperienceUpdateRequest,
     DeferStudentExperienceUpdatesRequest,
     DraftStaffManagedConfigurationRequest,
+    EdwardFeedbackRequest,
     FerpaLinkCommandRequest,
     PreviewStaffEdwardRequest,
     RecordStaffCommunicationRequest,
@@ -1315,6 +1317,28 @@ async def ask_edward(
     )
 
 
+@router.patch(
+    "/v1/student/assistant/messages/{id}/feedback",
+    status_code=200,
+    response_model=None,
+)
+async def submit_student_edward_feedback(
+    assistant_message_id: Annotated[UUID, Path(alias="id")],
+    body: EdwardFeedbackRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.submit_edward_feedback",
+        auth=auth,
+        path_params={"assistantMessageId": _uuid(assistant_message_id)},
+        payload=body.public_payload(),
+    )
+
+
 def _require_assistant_trace_debug(request: Request) -> None:
     if not request.app.state.http_settings.assistant_trace_debug_enabled:
         raise ApiError(404, "NOT_FOUND", "Not found")
@@ -1344,17 +1368,77 @@ async def list_assistant_traces(
 async def get_assistant_trace(
     trace_id: Annotated[str, Path(alias="traceId", max_length=128)],
     request: Request,
+    service: ServiceDependency,
     _worker_token: WorkerTokenDependency,
 ) -> object:
     _require_assistant_trace_debug(request)
     trace = get_assistant_trace_recorder().get(trace_id)
     if trace is None:
+        try:
+            durable = await _dispatch(
+                service=service,
+                request=request,
+                operation="internal.get_assistant_trace",
+                path_params={"traceId": trace_id},
+            )
+        except ApiError as error:
+            if error.code not in {
+                "PLATFORM_OPERATION_NOT_IMPLEMENTED",
+                "PLATFORM_SERVICE_UNAVAILABLE",
+            }:
+                raise
+            durable = None
+        trace = durable if isinstance(durable, dict) else None
+    if trace is None:
         raise ApiError(
             404,
             "ASSISTANT_TRACE_NOT_FOUND",
-            "No assistant trace with that ID is held in this process buffer",
+            "No assistant trace with that ID is available",
         )
     return trace
+
+
+@router.get(
+    "/internal/assistant/feedback",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def list_assistant_feedback(
+    request: Request,
+    service: ServiceDependency,
+    _worker_token: WorkerTokenDependency,
+    assistant_kind: Annotated[
+        Literal["student", "staff"] | None,
+        Query(alias="assistantKind"),
+    ] = None,
+    rating: Annotated[
+        Literal["positive", "negative", "unrated"] | None,
+        Query(),
+    ] = None,
+    has_written: Annotated[bool | None, Query(alias="hasWritten")] = None,
+    date_from: Annotated[datetime | None, Query(alias="from")] = None,
+    date_to: Annotated[datetime | None, Query(alias="to")] = None,
+    search: Annotated[str | None, Query(max_length=200)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> object:
+    _require_assistant_trace_debug(request)
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="internal.list_assistant_feedback",
+        payload={
+            "assistantKind": assistant_kind,
+            "rating": rating,
+            "hasWritten": has_written,
+            "from": date_from.isoformat() if date_from is not None else None,
+            "to": date_to.isoformat() if date_to is not None else None,
+            "search": search,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
 
 
 @router.get(
@@ -2359,6 +2443,28 @@ async def ask_staff_edward(
         auth=auth,
         payload=body.public_payload(),
         assistant_execution=_assistant_execution_mode(request),
+    )
+
+
+@router.patch(
+    "/v1/staff/assistant/messages/{id}/feedback",
+    status_code=200,
+    response_model=None,
+)
+async def submit_staff_edward_feedback(
+    assistant_message_id: Annotated[UUID, Path(alias="id")],
+    body: EdwardFeedbackRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.submit_edward_feedback",
+        auth=auth,
+        path_params={"assistantMessageId": _uuid(assistant_message_id)},
+        payload=body.public_payload(),
     )
 
 

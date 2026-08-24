@@ -79,6 +79,7 @@ from audentra.integrations.staff_assistant.pipeline import (
 from audentra.integrations.staff_assistant.safety import guarded_staff_response
 from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
+from .edward_feedback_repository import PostgresEdwardFeedbackRepository
 from .ferpa_repository import PostgresFerpaRepository
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
 from .morning_brew_repository import PostgresMorningBrewRepository
@@ -341,6 +342,7 @@ class PostgresRepositoryBundle:
     staff_assistant: PostgresStaffAssistantRepository | None = None
     morning_brew: PostgresMorningBrewRepository | None = None
     ferpa: PostgresFerpaRepository | None = None
+    edward_feedback: PostgresEdwardFeedbackRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -589,6 +591,24 @@ class PostgresPlatformService:
                     503, "TENANT_CONFIGURATION_UNAVAILABLE", "Tenant configuration is unavailable"
                 )
             return await tenant.get_active_by_id(self._path(call, "tenantId"))
+        if operation == "internal.get_assistant_trace":
+            feedback = self.repository.edward_feedback
+            if feedback is None:
+                return None
+            return await feedback.get_trace(self._path(call, "traceId"))
+        if operation == "internal.list_assistant_feedback":
+            feedback = self._feedback_repo()
+            filters = dict(call.payload)
+            return await feedback.list_feedback(
+                assistant_kind=cast(str | None, filters.get("assistantKind")),
+                rating=cast(str | None, filters.get("rating")),
+                has_written=cast(bool | None, filters.get("hasWritten")),
+                date_from=cast(str | None, filters.get("from")),
+                date_to=cast(str | None, filters.get("to")),
+                search=cast(str | None, filters.get("search")),
+                limit=int(filters.get("limit") or 50),
+                offset=int(filters.get("offset") or 0),
+            )
 
         auth = self._auth(call)
         payload = dict(call.payload)
@@ -996,6 +1016,15 @@ class PostgresPlatformService:
             return await self._ask_edward(
                 auth, payload, call.request_id, execution=call.assistant_execution
             )
+        if operation == "student.submit_edward_feedback":
+            trace_id = str(payload.get("traceId") or "")
+            return await self._feedback_repo().submit_student_feedback(
+                auth,
+                assistant_message_id=self._path(call, "assistantMessageId", "id"),
+                trace_id=trace_id,
+                payload=payload,
+                trace_payload=get_assistant_trace_recorder().get(trace_id),
+            )
         if operation == "student.create_assistant_conversation":
             page = _assistant_page_context(payload.get("pageContext"))
             if auth.is_delegate:
@@ -1265,6 +1294,15 @@ class PostgresPlatformService:
             return await self._ask_staff_edward(
                 auth, payload, call.request_id, execution=call.assistant_execution
             )
+        if operation == "staff.submit_edward_feedback":
+            trace_id = str(payload.get("traceId") or "")
+            return await self._feedback_repo().submit_staff_feedback(
+                auth,
+                assistant_message_id=self._path(call, "assistantMessageId", "id"),
+                trace_id=trace_id,
+                payload=payload,
+                trace_payload=get_assistant_trace_recorder().get(trace_id),
+            )
         if operation == "staff.create_assistant_conversation":
             return await self._staff_assistant_repo().create_conversation(auth)
         if operation == "staff.get_assistant_conversation_messages":
@@ -1477,6 +1515,36 @@ class PostgresPlatformService:
         ).encode("utf-8")
         digest = hmac.new(self.ferpa_link_secret.encode("utf-8"), material, hashlib.sha256).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    def _feedback_repo(self) -> PostgresEdwardFeedbackRepository:
+        if self.repository.edward_feedback is None:
+            raise ApiError(
+                503,
+                "EDWARD_FEEDBACK_UNAVAILABLE",
+                "Edward feedback is not configured on this host",
+            )
+        return self.repository.edward_feedback
+
+    async def _record_assistant_trace(self, trace: AssistantTurnTrace) -> None:
+        """Record once, then durably store the same sanitized trace payload."""
+
+        try:
+            payload = trace.to_dict()
+        except Exception:  # pragma: no cover - same defensive boundary as the recorder
+            get_assistant_trace_recorder().record(trace)
+            return
+        get_assistant_trace_recorder().record_payload(payload)
+        if self.repository.edward_feedback is None:
+            return
+        try:
+            await self.repository.edward_feedback.save_trace(payload)
+        except Exception:
+            # Observability persistence must never turn a valid Edward answer
+            # into a failed chat request. Feedback submission can still create
+            # a minimal trace from the immutable transcript pair later.
+            LOGGER.exception(
+                "assistant durable trace persistence failed trace_id=%s", trace.trace_id
+            )
 
     async def _managed_configuration(self, auth: AuthContext, kind: str) -> JsonDict:
         if self.repository.managed is None:
@@ -2224,7 +2292,7 @@ class PostgresPlatformService:
             if replay is not None:
                 trace.path = "idempotent_replay"
                 trace.final_message = str(replay.get("message") or "")
-                get_assistant_trace_recorder().record(trace)
+                await self._record_assistant_trace(trace)
                 return replay
 
         guarded = guarded_response(message)
@@ -2310,7 +2378,7 @@ class PostgresPlatformService:
             trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
         response["requestId"] = request_id
         trace.final_message = trace.final_message or str(response.get("message") or "")
-        get_assistant_trace_recorder().record(trace)
+        await self._record_assistant_trace(trace)
         return response
 
     async def _edward_action_authority(
@@ -2624,7 +2692,7 @@ class PostgresPlatformService:
             if replay is not None:
                 trace.path = "idempotent_replay"
                 trace.final_message = str(replay.get("message") or "")
-                get_assistant_trace_recorder().record(trace)
+                await self._record_assistant_trace(trace)
                 return replay
 
         guarded = guarded_staff_response(message)
@@ -2710,7 +2778,7 @@ class PostgresPlatformService:
             trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
         response["requestId"] = request_id
         trace.final_message = trace.final_message or str(response.get("message") or "")
-        get_assistant_trace_recorder().record(trace)
+        await self._record_assistant_trace(trace)
         return response
 
     def _staff_assistant_planner(

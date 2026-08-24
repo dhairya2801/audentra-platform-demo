@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -160,6 +161,7 @@ class InMemoryPlatformStore:
         self.assistant_messages: list[dict[str, Any]] = []
         self.staff_assistant_conversations: dict[str, dict[str, Any]] = {}
         self.staff_assistant_messages: list[dict[str, Any]] = []
+        self.edward_feedback: list[dict[str, Any]] = []
         self.profile: dict[str, Any] = {
             "studentId": DEMO_IDS["student_id"],
             "preferredName": "Alex",
@@ -2135,4 +2137,165 @@ class InMemoryPlatformStore:
             "conversationId": conversation_id,
             "userMessageId": user_id,
             "assistantMessageId": assistant_id,
+        }
+
+    # -- Response-scoped Edward feedback (in-memory API/eval twin) ---------
+
+    def submit_edward_feedback(
+        self,
+        auth: AuthContext,
+        *,
+        assistant_kind: str,
+        assistant_message_id: str,
+        trace_id: str,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        if assistant_kind == "student":
+            self.authorize(auth)
+            messages = self.assistant_messages
+        else:
+            self.require_staff(auth)
+            messages = [
+                item
+                for item in self.staff_assistant_messages
+                if item.get("staffMemberId") == auth.actor_id
+            ]
+        assistant = next(
+            (
+                item
+                for item in messages
+                if item["id"] == assistant_message_id
+                and item["role"] == "assistant"
+                and item.get("requestId") == trace_id
+            ),
+            None,
+        )
+        if assistant is None:
+            raise NotFoundError(
+                "EDWARD_RESPONSE_NOT_FOUND",
+                "That Edward response is not available in this conversation",
+            )
+        question = next(
+            (
+                item
+                for item in messages
+                if item["conversationId"] == assistant["conversationId"]
+                and item["role"] == "user"
+                and item.get("requestId") == trace_id
+            ),
+            None,
+        )
+        if question is None:
+            raise NotFoundError(
+                "EDWARD_RESPONSE_NOT_FOUND",
+                "The question for that Edward response is not available",
+            )
+        existing = next(
+            (
+                item
+                for item in self.edward_feedback
+                if item["assistantKind"] == assistant_kind
+                and item["assistantMessageId"] == assistant_message_id
+            ),
+            None,
+        )
+        rating = (
+            payload.get("rating")
+            if "rating" in payload
+            else (existing.get("rating") if existing else None)
+        )
+        written = (
+            str(payload.get("writtenFeedback") or "").strip() or None
+            if "writtenFeedback" in payload
+            else (existing.get("writtenFeedback") if existing else None)
+        )
+        if rating is None and written is None:
+            raise BadRequestError(
+                "EDWARD_FEEDBACK_EMPTY", "Choose a rating or provide written feedback"
+            )
+        now = _now()
+        if existing is None:
+            existing = {
+                "id": str(uuid4()),
+                "assistantKind": assistant_kind,
+                "tenantId": auth.tenant_id,
+                "actorType": auth.actor_type,
+                "actorId": auth.student_id if assistant_kind == "student" else auth.actor_id,
+                "actorName": (
+                    str(self.profile.get("preferredName") or "Student")
+                    if assistant_kind == "student"
+                    else "Dev Staff"
+                ),
+                "referencedStudentId": assistant.get("referencedStudentId"),
+                "referencedStudentName": None,
+                "conversationId": assistant["conversationId"],
+                "userMessageId": question["id"],
+                "assistantMessageId": assistant["id"],
+                "traceId": trace_id,
+                "question": question["content"],
+                "response": assistant["content"],
+                "rating": rating,
+                "writtenFeedback": written,
+                "createdAt": now,
+                "updatedAt": now,
+            }
+            self.edward_feedback.append(existing)
+        else:
+            existing["rating"] = rating
+            existing["writtenFeedback"] = written
+            existing["updatedAt"] = now
+        return _clone(existing)
+
+    def list_edward_feedback(self, filters: Mapping[str, Any]) -> dict[str, Any]:
+        items = list(self.edward_feedback)
+        assistant_kind = filters.get("assistantKind")
+        if assistant_kind:
+            items = [item for item in items if item["assistantKind"] == assistant_kind]
+        rating = filters.get("rating")
+        if rating == "unrated":
+            items = [item for item in items if item.get("rating") is None]
+        elif rating:
+            items = [item for item in items if item.get("rating") == rating]
+        has_written = filters.get("hasWritten")
+        if has_written is not None:
+            items = [
+                item
+                for item in items
+                if (item.get("writtenFeedback") is not None) is bool(has_written)
+            ]
+        date_from = str(filters.get("from") or "")
+        if date_from:
+            boundary = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+            items = [
+                item
+                for item in items
+                if datetime.fromisoformat(str(item["createdAt"]).replace("Z", "+00:00")) >= boundary
+            ]
+        date_to = str(filters.get("to") or "")
+        if date_to:
+            boundary = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+            items = [
+                item
+                for item in items
+                if datetime.fromisoformat(str(item["createdAt"]).replace("Z", "+00:00")) <= boundary
+            ]
+        search = str(filters.get("search") or "").strip().casefold()
+        if search:
+            items = [
+                item
+                for item in items
+                if search
+                in " ".join(
+                    str(item.get(key) or "")
+                    for key in ("question", "response", "writtenFeedback", "actorName")
+                ).casefold()
+            ]
+        items.sort(key=lambda item: (item["createdAt"], item["id"]), reverse=True)
+        offset = max(0, int(filters.get("offset") or 0))
+        limit = max(1, min(int(filters.get("limit") or 50), 200))
+        return {
+            "items": _clone(items[offset : offset + limit]),
+            "total": len(items),
+            "limit": limit,
+            "offset": offset,
         }

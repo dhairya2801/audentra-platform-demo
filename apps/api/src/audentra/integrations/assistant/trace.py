@@ -16,10 +16,11 @@ Boundaries:
   are truncated, and value keys that commonly carry contact or credential
   material are redacted. Provider credentials never appear because tools and
   model calls never receive them.
-- Traces are held in a bounded in-process ring buffer for the developer debug
-  endpoint and emitted as one structured JSON log line per turn. Durable
-  provider-call telemetry remains `ai_provider_response_attempt`; durable
-  conversation state remains `assistant_conversation`/`assistant_message`.
+- Traces are held in a bounded in-process ring buffer, emitted as structured
+  logs, and the hosting service stores this same sanitized representation in
+  `assistant_turn_trace` for feedback drill-down after the buffer rolls over.
+  Durable provider-call telemetry remains `ai_provider_response_attempt`;
+  durable conversation state remains the assistant conversation/message tables.
 """
 
 from __future__ import annotations
@@ -288,12 +289,18 @@ class AssistantTraceRecorder:
         except Exception:  # pragma: no cover - defensive
             logger.exception("assistant trace serialization failed")
             return
+        self.record_payload(payload)
+
+    def record_payload(self, payload: Mapping[str, Any]) -> None:
+        """Record an already serialized trace for durable-store parity."""
+
+        owned_payload = dict(payload)
         with self._lock:
-            self._traces.append(payload)
+            self._traces.append(owned_payload)
         try:
             logger.info(
                 "assistant_turn %s",
-                json.dumps(payload, ensure_ascii=False, default=str),
+                json.dumps(owned_payload, ensure_ascii=False, default=str),
             )
         except Exception:  # pragma: no cover - defensive
             logger.exception("assistant trace logging failed")

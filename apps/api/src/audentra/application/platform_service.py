@@ -170,6 +170,10 @@ class InMemoryPlatformService:
             if requested_id and requested_id != DEMO_IDS["tenant_id"]:
                 raise NotFoundError("TENANT_NOT_FOUND", "The tenant was not found")
             return dict(DEMO_TENANT_BOOTSTRAP)
+        if operation == "internal.get_assistant_trace":
+            return get_assistant_trace_recorder().get(self._path(call, "traceId", "trace_id"))
+        if operation == "internal.list_assistant_feedback":
+            return self.store.list_edward_feedback(call.payload)
 
         auth = self._auth(call)
         payload = dict(call.payload)
@@ -314,6 +318,14 @@ class InMemoryPlatformService:
             return await self._ask_edward(
                 auth, payload, call.request_id, execution=call.assistant_execution
             )
+        if operation == "student.submit_edward_feedback":
+            return self.store.submit_edward_feedback(
+                auth,
+                assistant_kind="student",
+                assistant_message_id=self._path(call, "assistantMessageId", "id"),
+                trace_id=str(payload.get("traceId") or ""),
+                payload=payload,
+            )
         if operation == "student.create_assistant_conversation":
             self.store.authorize(auth)
             return self.store.create_assistant_conversation(auth, payload.get("pageContext"))
@@ -347,6 +359,14 @@ class InMemoryPlatformService:
         if operation == "staff.ask_edward":
             return await self._ask_staff_edward(
                 auth, payload, call.request_id, execution=call.assistant_execution
+            )
+        if operation == "staff.submit_edward_feedback":
+            return self.store.submit_edward_feedback(
+                auth,
+                assistant_kind="staff",
+                assistant_message_id=self._path(call, "assistantMessageId", "id"),
+                trace_id=str(payload.get("traceId") or ""),
+                payload=payload,
             )
         if operation == "staff.create_assistant_conversation":
             return self.store.create_staff_assistant_conversation(auth)
