@@ -57,6 +57,7 @@ REQUEST_TYPES = (
     "appointments",
     "academic_plan",
     "campus_life",
+    "portal_navigation",
     "messages_unread",
     "conversational_ack",
     "assistant_identity",
@@ -72,6 +73,10 @@ class Classification:
     source: str = "deterministic"
     requirement_reference: str | None = None
     additional_request_types: tuple[str, ...] = field(default_factory=tuple)
+    # The student asserted the requirement does not apply to them. Orthogonal
+    # to the intent: they can claim it about a document, a deposit, or the
+    # checklist as a whole, and the answer must address the claim either way.
+    claims_waiver: bool = False
 
 
 _GREETING_ONLY = re.compile(
@@ -101,6 +106,27 @@ _IDENTITY_QUESTION = re.compile(
     r"(?:real person|real|human|person|bot|ai|robot)"
     r"|am i (?:talking|chatting|speaking) (?:to|with) a (?:human|person|bot|robot|machine)"
     r"|is this a (?:real person|human|bot)",
+    re.IGNORECASE,
+)
+
+# Assignment outcomes, not the housing *step*: "can I pick housing?" stays in
+# the housing branch, which answers it from the record.
+_HOUSING_ASSIGNMENT_QUESTION = re.compile(
+    r"\b(?:will|do|did|am|have) i (?:get|be assigned|receive|end up)\b[^?]{0,40}"
+    r"\b(?:dorm|room|hall|housing|residence|first choice)\b"
+    r"|\bwhich (?:room|dorm|hall|building)\b"
+    r"|\bwho (?:is|will be|'s) my roommate\b|\bmy roommate\b"
+    r"|\broom (?:assignment|number|allocation)\b"
+    r"|\b(?:get|chances? of getting) my first choice\b",
+    re.IGNORECASE,
+)
+
+# The student asserts a requirement does not apply to them. The answer must
+# address the *claim* — whether a waiver is recorded — not only restate the
+# status, which reads as ignoring what they said.
+_WAIVER_CLAIM = re.compile(
+    r"\b(?:waived|waiver|exempt(?:ed|ion)?|excused|doesn'?t apply|does not apply"
+    r"|not required for me|don'?t (?:need|have) to (?:do|submit|send))\b",
     re.IGNORECASE,
 )
 
@@ -274,7 +300,100 @@ _MULTI_DOMAIN_OPERATOR = re.compile(
 )
 
 
+# --- portal navigation ------------------------------------------------------
+#
+# "Where do I upload this?" is a product-help question, not a status question.
+# Answering it with the requirement's status ("your transcript has not been
+# submitted") is technically true and completely unhelpful: the student asked
+# where to go. Every destination comes from `links.py`, whose routes are the
+# portal's real ones, so no answer can invent a page.
+
+_NAVIGATION_QUESTION = re.compile(
+    r"\bwhere (?:do|can|should|would) i\b|\bwhere is\b|\bwhere are\b|\bwhere'?s\b"
+    r"|\bwhere in the (?:portal|site|app)\b|\bwhich page\b|\bwhat page\b"
+    r"|\bhow (?:do|can) i (?:get to|find|see|reach|access|open|navigate to)\b"
+    r"|\bhow do i (?:upload|submit|pay|book|check)\b"
+    r"|\btake me to\b|\bshow me where\b",
+    re.IGNORECASE,
+)
+# The destination each navigation question is about. Ordered: the first match
+# wins, so the most specific noun decides.
+_NAVIGATION_TARGETS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("payments", re.compile(r"\bpay\b|\bpayment\b|\bdeposit\b|\bbill\b", re.I)),
+    (
+        "documents",
+        re.compile(
+            r"\bupload\b|\bdocuments?\b|\btranscripts?\b|\bimmuni[sz]\w*\b"
+            r"|\bidentity\b|\bresidency\b|\bfiles?\b|\bhealth record\b",
+            re.I,
+        ),
+    ),
+    (
+        "financials",
+        re.compile(
+            r"\bfinancials?\b|\bbalance\b|\bowe\b|\bcharges?\b|\baid\b|\bfafsa\b|\bscholarship\b|\baward\b",
+            re.I,
+        ),
+    ),
+    ("appointments", re.compile(r"\bappointments?\b|\badvising\b|\bmeeting\b|\bbook\b", re.I)),
+    ("messages", re.compile(r"\bmessages?\b|\binbox\b|\bnotifications?\b", re.I)),
+    ("campus_life", re.compile(r"\bclubs?\b|\bevents?\b|\bcampus life\b|\bsocieties\b", re.I)),
+    ("classrooms", re.compile(r"\bcourses?\b|\bclasses\b|\bclassrooms?\b|\bschedule\b", re.I)),
+    (
+        "profile",
+        re.compile(r"\bprofile\b|\bmy (?:details|information)\b|\bcontact details\b", re.I),
+    ),
+    (
+        "help",
+        re.compile(
+            r"\bhelp\b|\bsupport\b|\badvisor\b|\bcounsel\w*\b|\breal person\b|\bsomeone\b", re.I
+        ),
+    ),
+    (
+        "enrollment",
+        re.compile(
+            r"\bchecklist\b|\brequirements?\b|\benrollment\b|\bsteps?\b|\bto[- ]?do\b", re.I
+        ),
+    ),
+    ("housing", re.compile(r"\bhousing\b|\bdorm\w*\b|\bresidence\b|\broom\b", re.I)),
+    ("dashboard", re.compile(r"\bdashboard\b|\bhome\b|\boverview\b", re.I)),
+)
+
+
+def navigation_target(text: str) -> str | None:
+    for target, pattern in _NAVIGATION_TARGETS:
+        if pattern.search(text):
+            return target
+    return None
+
+
 def classify(request: NormalizedRequest) -> Classification | None:
+    classification = _classify(request)
+    if (
+        classification is not None
+        and _WAIVER_CLAIM.search(request.comparable_text)
+        and classification.request_type
+        in {
+            "missing_documents",
+            "document_status",
+            "remaining_steps",
+            "onboarding_status",
+            "holds_and_blockers",
+            "deposit_status",
+        }
+    ):
+        return Classification(
+            classification.request_type,
+            classification.confidence,
+            source=classification.source,
+            requirement_reference=classification.requirement_reference,
+            additional_request_types=classification.additional_request_types,
+            claims_waiver=True,
+        )
+    return classification
+
+
+def _classify(request: NormalizedRequest) -> Classification | None:
     text = request.comparable_text
 
     if _IDENTITY_QUESTION.search(text):
@@ -321,9 +440,28 @@ def classify(request: NormalizedRequest) -> Classification | None:
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="sensitive_financial_data"
         )
+
+    # "Where do I upload my immunization record?" — product help. Settled
+    # before the domain branches, which would otherwise answer the status of
+    # the noun and never say where to go. The status still comes along: the
+    # selected read is the destination's own, so the answer is "here is the
+    # page, and here is what it currently shows you".
+    navigation = navigation_target(text) if _NAVIGATION_QUESTION.search(text) else None
+    if navigation is not None:
+        return Classification("portal_navigation", 0.96, requirement_reference=navigation)
     if _COURSE_GRADE_QUESTION.search(text):
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="course_grades_unavailable"
+        )
+
+    # Housing *assignment* outcomes — which room, which building, who the
+    # roommate is, whether a preference will be granted — are decided by a
+    # system Audentra does not hold. The housing branch would otherwise answer
+    # with the preference step's status, which reads as an answer to a
+    # question it never addressed.
+    if _HOUSING_ASSIGNMENT_QUESTION.search(text):
+        return Classification(
+            "unsupported_or_out_of_scope", 1, requirement_reference="housing_assignment_unavailable"
         )
 
     # Institutional policy questions are settled before the domain branches so
@@ -487,7 +625,14 @@ def classify(request: NormalizedRequest) -> Classification | None:
         if re.search(
             r"(?:accept|accepted|declin).{0,24}(?:award|grant|loan|aid)"
             r"|(?:award|grant|loan|aid|scholarship)s?\b.{0,32}(?:have i )?accepted"
-            r"|have i accepted",
+            r"|have i accepted"
+            # "Which of my awards still needs me to do something?" is about the
+            # awards, not about the aid *documents* the missing-documents
+            # branch would otherwise answer with.
+            r"|(?:which|what|any).{0,24}(?:award|grant|loan|scholarship)s?\b.{0,40}"
+            r"(?:need|require|waiting on|action|do something|to do)"
+            r"|(?:award|grant|loan|scholarship)s?\b.{0,24}(?:need|require)s?\b.{0,24}"
+            r"(?:me|action|response|a decision)",
             text,
         ):
             return Classification("aid_award_acceptance_status", 1)

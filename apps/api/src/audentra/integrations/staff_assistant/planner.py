@@ -107,6 +107,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getPlaybooks",
     ),
     "work_queue": ("getStaffWorkQueue",),
+    # The briefing is the portal's own start-of-day read; the queue rides
+    # along so "what should I start with" has concrete cases to name.
+    "daily_briefing": ("getMorningBriefing", "getStaffWorkQueue"),
     "work_item_detail": ("getWorkItemDetail",),
     "inquiries": ("getInquiries",),
     "playbook_lookup": ("getPlaybooks",),

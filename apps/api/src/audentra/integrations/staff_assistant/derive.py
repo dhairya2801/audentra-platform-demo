@@ -46,6 +46,7 @@ class StaffDerivedState:
     # Operational reads.
     attention: JsonDict | None = None
     queue: JsonDict | None = None
+    briefing: JsonDict | None = None
     work_item: JsonDict | None = None
     inquiries: list[JsonDict] = field(default_factory=list)
     inquiry_thread: JsonDict | None = None
@@ -157,6 +158,10 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     queue = reads.get("getStaffWorkQueue")
     if queue:
         state.queue = dict(queue)
+
+    briefing = reads.get("getMorningBriefing")
+    if briefing:
+        state.briefing = dict(briefing)
 
     work_item = reads.get("getWorkItemDetail")
     if work_item:

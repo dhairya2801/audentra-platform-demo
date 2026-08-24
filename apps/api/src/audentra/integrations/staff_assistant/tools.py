@@ -634,6 +634,69 @@ async def _tool_attention(
     return dict(await _primitive(host, "attention", limit=int(arguments.get("limit") or 15)))
 
 
+async def _tool_morning_briefing(
+    host: StaffAssistantToolHost, _arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    """Today's Morning Brew, bounded to what an answer can actually use.
+
+    The payload the Staff Portal renders is large (every metric carries its
+    cohort definition and per-window frames); the assistant needs the
+    headline, the counts, what moved, the ranked attention themes, the work
+    summary, and — importantly — the briefing's own list of metrics the
+    platform does not hold, so an honest "not tracked" survives into the
+    answer.
+    """
+
+    brew = await _primitive(host, "morning_brew")
+    synthesis = _mapping(brew.get("synthesis"))
+    population = _mapping(brew.get("population"))
+    coverage = _mapping(brew.get("coverage"))
+    return {
+        "generatedAt": brew.get("generatedAt"),
+        "window": _mapping(brew.get("window")).get("label"),
+        "headline": synthesis.get("headline"),
+        "bullets": [str(item) for item in _sequence(synthesis.get("bullets"))][:6],
+        "population": {
+            "students": population.get("students"),
+            "cohorts": dict(_mapping(population.get("cohorts"))),
+        },
+        "attention": [
+            {
+                "title": _mapping(item).get("title"),
+                "count": _mapping(item).get("count"),
+                "severity": _mapping(item).get("severity"),
+                "detail": _mapping(item).get("detail"),
+            }
+            for item in _sequence(brew.get("attention"))[:5]
+        ],
+        "changes": [
+            {
+                "label": _mapping(item).get("label"),
+                "value": _mapping(item).get("value"),
+            }
+            for item in _sequence(brew.get("changes"))[:6]
+        ],
+        "priorities": [
+            {
+                "title": _mapping(item).get("title"),
+                "detail": _mapping(item).get("detail"),
+            }
+            for item in _sequence(brew.get("priorities"))[:5]
+        ],
+        "staffWork": dict(_mapping(brew.get("staffWork"))),
+        "requests": {
+            key: value for key, value in _mapping(brew.get("requests")).items() if key != "items"
+        },
+        "unsupported": [
+            {
+                "metric": _mapping(item).get("metric"),
+                "reason": _mapping(item).get("reason"),
+            }
+            for item in _sequence(coverage.get("unsupported"))[:6]
+        ],
+    }
+
+
 async def _tool_work_queue(
     host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
 ) -> JsonDict:
@@ -798,6 +861,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getStudentOwnership": _tool_student_ownership,
     "getStudentsNeedingAttention": _tool_attention,
     "getStaffWorkQueue": _tool_work_queue,
+    "getMorningBriefing": _tool_morning_briefing,
     "getWorkItemDetail": _tool_work_item_detail,
     "getInquiries": _tool_inquiries,
     "getInquiryThread": _tool_inquiry_thread,

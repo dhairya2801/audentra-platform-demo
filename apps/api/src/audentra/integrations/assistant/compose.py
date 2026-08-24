@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from audentra.domain.student_state import requirement_gate_code
 from audentra.integrations.assistant import links
 from audentra.integrations.assistant.blocks import (
     bullet_list_block,
@@ -99,6 +100,7 @@ def compose_deterministic(
     request_type = classification.request_type
     composer = _COMPOSERS.get(request_type, _compose_general)
     answer = composer(classification, state, preferred_name)
+    _answer_waiver_claim(answer, classification, state)
     for extra in classification.additional_request_types:
         extra_answer = _COMPOSERS.get(extra, _compose_general)(
             classification, state, preferred_name
@@ -113,6 +115,40 @@ def compose_deterministic(
         answer.message = f"{answer.message} {note}"
     answer.message = answer.message.strip()[:1_200]
     return answer
+
+
+def _answer_waiver_claim(
+    answer: ComposedAnswer, classification: Classification, state: DerivedState
+) -> None:
+    """Address "I thought that was waived" as a claim, not just a status.
+
+    A waiver is a recorded status (`waived`), so whether one exists is a fact
+    the checklist read already answers. Restating the requirement's status
+    without saying "no waiver is recorded" reads as not having heard the
+    student.
+    """
+
+    if not classification.claims_waiver:
+        return
+    if "getOnboardingChecklist" not in state.available_reads:
+        return
+    waived = [
+        str(step.get("title"))
+        for step in state.completed_steps
+        if str(step.get("status") or "") in {"waived", "not_applicable"}
+    ]
+    sentence = (
+        f"On the waiver question: {_sentence_list(waived)} "
+        f"{'is' if len(waived) == 1 else 'are'} recorded as waived — nothing else is."
+        if waived
+        else "On the waiver question: no waiver or exemption is recorded on your "
+        "account, so these are all still required."
+    )
+    if sentence not in answer.message:
+        answer.message = f"{answer.message} {sentence}".strip()
+        answer.evidence_texts.append(
+            "Recorded waivers: " + (", ".join(waived) if waived else "none")
+        )
 
 
 def build_evidence_bundle(state: DerivedState) -> list[str]:
@@ -560,6 +596,30 @@ def _compose_capabilities(
     return ComposedAnswer(message=_CAPABILITY_MESSAGE, blocks=[text_block(_CAPABILITY_MESSAGE)])
 
 
+def step_action_row(step: JsonDict) -> JsonDict:
+    """One checklist step as an action row.
+
+    A step whose payment is already processing is not the student's move.
+    Rendering it as a plain "Pay the enrollment deposit" row — directly under
+    a sentence saying no new payment is needed — is how a next-steps list
+    invites a second payment.
+    """
+
+    title = str(step.get("title"))
+    pending = bool(step.get("processingPending"))
+    return {
+        "text": (
+            f"{title} (a payment is already pending — no action needed)" if pending else title
+        ),
+        "href": step.get("href"),
+        "owner": "university" if pending else "student",
+    }
+
+
+def step_label(step: JsonDict) -> str:
+    return str(step_action_row(step)["text"])
+
+
 def _compose_next_action(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
@@ -581,7 +641,7 @@ def _compose_next_action(
     for step in state.remaining_steps[:3]:
         if state.priority and step.get("title") == state.priority.get("title"):
             continue
-        steps.append({"text": str(step.get("title")), "href": step.get("href"), "owner": "student"})
+        steps.append(step_action_row(step))
     message = f"Your next step: {state.priority['title']}. {state.priority['reason']}"
     return ComposedAnswer(
         message=message,
@@ -625,12 +685,6 @@ def _compose_checklist(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
 
-    def step_label(step: JsonDict) -> str:
-        title = str(step.get("title"))
-        if step.get("processingPending"):
-            return f"{title} (a payment is already pending — no action needed)"
-        return title
-
     # The list itself renders once, below; the prose answers the question and
     # surfaces what changes how the student should read that list.
     pending = [step for step in state.remaining_steps if step.get("processingPending")]
@@ -658,19 +712,19 @@ def _compose_checklist(
             )
         message += " Here's the list, in order:"
     block = next_steps_block(
-        [
-            {
-                "text": step_label(step),
-                "href": step.get("href"),
-                "owner": "university" if step.get("processingPending") else "student",
-            }
-            for step in state.remaining_steps[:6]
-        ],
+        [step_action_row(step) for step in state.remaining_steps[:6]],
         title="Still to do",
     )
     return ComposedAnswer(
         message=message, blocks=[text_block(message), block], evidence_texts=evidence
     )
+
+
+def _join_document_nouns(items: list[JsonDict]) -> str:
+    nouns = [_document_noun(str(item.get("title") or "")) for item in items]
+    if len(nouns) == 1:
+        return nouns[0]
+    return ", ".join(nouns[:-1]) + " and " + nouns[-1]
 
 
 def _compose_documents(
@@ -704,31 +758,51 @@ def _compose_documents(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
     if classification.request_type == "missing_documents":
-        if not state.missing_documents:
+        # A returned upload is the student's move as much as one that was
+        # never sent — and it is the one they are most likely to think is
+        # done. Counting only never-submitted documents silently drops it.
+        returned = [item for item in states if item["submissionState"] == "needs_resubmission"]
+        outstanding = [*state.missing_documents, *returned]
+        if not outstanding:
             message = "Every required document is in — nothing is waiting on an upload from you."
             return ComposedAnswer(
                 message=message, blocks=[text_block(message)], evidence_texts=evidence
             )
-        if len(state.missing_documents) == 1:
-            message = (
-                "One document still needs to be uploaded: your "
-                f"{_document_noun(state.missing_documents[0]['title'])}."
+        sentences: list[str] = []
+        if returned:
+            sentences.append(
+                f"Yes — your {_join_document_nouns(returned)} "
+                f"{'was' if len(returned) == 1 else 'were'} returned and "
+                f"{'needs' if len(returned) == 1 else 'need'} a fresh upload."
             )
-        else:
-            message = (
-                f"{_count(len(state.missing_documents), 'document')} still need to be "
-                "uploaded — each step below opens the right page:"
-            )
+        if state.missing_documents:
+            if len(state.missing_documents) == 1 and not returned:
+                sentences.append(
+                    "One document still needs to be uploaded: your "
+                    f"{_document_noun(state.missing_documents[0]['title'])}."
+                )
+            else:
+                sentences.append(
+                    f"{_count(len(state.missing_documents), 'document')} "
+                    f"{'has' if len(state.missing_documents) == 1 else 'have'} not been "
+                    "sent at all: "
+                    f"{_join_document_nouns(state.missing_documents)}."
+                )
+        message = " ".join(sentences) + " Each step below opens the right page:"
         block = next_steps_block(
             [
                 {
-                    "text": f"Upload your {_document_noun(item['title'])}",
+                    "text": (
+                        f"Re-upload your {_document_noun(item['title'])}"
+                        if item["submissionState"] == "needs_resubmission"
+                        else f"Upload your {_document_noun(item['title'])}"
+                    ),
                     "href": item.get("href"),
                     "owner": "student",
                 }
-                for item in state.missing_documents
+                for item in outstanding
             ],
-            title="Missing documents",
+            title="Documents waiting on you",
         )
         return ComposedAnswer(
             message=message, blocks=[text_block(message), block], evidence_texts=evidence
@@ -859,6 +933,26 @@ def _compose_holds(
             f"{_count(len(state.derived_blockers), 'item')} blocking progress."
             f"{split} Each one below shows what clears it:"
         )
+    # "Which of my requirements are blocking and which aren't?" is a real
+    # question, and an answer that lists only the blocking set leaves the
+    # student thinking the rest is done. Name the open-but-not-blocking steps.
+    # Match on the canonical gate code, not on the title: the deposit blocker
+    # is titled "Enrollment deposit not posted" while its checklist step is
+    # "Pay the enrollment deposit", so a title comparison lists the same gate
+    # as both blocking and not blocking.
+    blocking_codes = {str(item.get("code") or "") for item in blocking}
+    non_blocking = [
+        str(step.get("title"))
+        for step in state.remaining_steps
+        if requirement_gate_code(step.get("code")) not in blocking_codes
+    ]
+    if non_blocking:
+        listed = _sentence_list(non_blocking[:3])
+        verb = "is" if len(non_blocking[:3]) == 1 else "are"
+        message = (
+            f"{message} Separately, {listed} {verb} still open but not blocking anything else."
+        )
+        evidence.append("Open but not blocking: " + ", ".join(non_blocking[:3]) + ".")
     block = next_steps_block(
         [
             {
@@ -1517,10 +1611,16 @@ def _compose_enrollment_state(
             f"{_count(len(state.remaining_steps), 'checklist item is', 'checklist items are')} "
             f"still open{named}."
         )
+    elif "getOnboardingChecklist" in state.available_reads:
+        parts.append("Every checklist item is complete.")
+    else:
+        # The checklist was not read this turn. Saying so is the difference
+        # between "nothing is outstanding" and "I did not look".
+        parts.append("I haven't checked your open checklist items in this answer.")
     next_action = journey.get("nextAction") or {}
     message = " ".join(parts) or "I could not summarise your enrollment position."
     blocks = [text_block(message)]
-    if next_action.get("label"):
+    if next_action.get("label") and not _is_pending_deposit_action(next_action, state):
         blocks.append(
             next_steps_block(
                 [
@@ -1534,6 +1634,23 @@ def _compose_enrollment_state(
             )
         )
     return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _is_pending_deposit_action(action: Mapping[str, Any], state: DerivedState) -> bool:
+    """Is this next-step row the deposit, while a payment is already pending?
+
+    The dashboard's next action is computed from requirement status, which does
+    not know a payment is in flight. Offering "Pay your enrollment deposit"
+    beside "your payment is processing — no new payment is needed" invites the
+    student to pay twice.
+    """
+
+    deposit = deposit_state(state)
+    if not deposit or not deposit.get("pending"):
+        return False
+    label = str(action.get("label") or "").lower()
+    href = str(action.get("href") or "").lower()
+    return "deposit" in label or "deposit" in href or href.startswith("/payments")
 
 
 def _compose_personal_information(
@@ -1716,6 +1833,13 @@ def _compose_unsupported(
             "I can't share another person's contact details. I can help with your "
             "own record, or point you to the right office."
         )
+    elif reference == "housing_assignment_unavailable":
+        message = (
+            "I can't tell you that — Audentra doesn't hold room assignments, "
+            "building allocations, or roommate matching, and there's no model "
+            "here that predicts them. What I can show you is your housing "
+            "step: whether it's open to you, and what has to clear first."
+        )
     elif reference and reference.endswith("write_unavailable"):
         destination, href = _WRITE_DESTINATIONS.get(
             reference, ("the matching portal page", links.ENROLLMENT)
@@ -1858,6 +1982,124 @@ def _compose_campus_life(
     return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
 
 
+# Destination → (human label, route, the derived state worth stating there).
+# Routes come from `links`, which mirrors the portal's real app router, so a
+# navigation answer can never invent a page.
+_NAVIGATION_PAGES: dict[str, tuple[str, str]] = {
+    "payments": ("the Payments page", links.PAYMENTS),
+    "documents": ("the Documents page", links.DOCUMENTS),
+    "financials": ("the Financials page", links.FINANCIALS),
+    "appointments": ("the Appointments page", links.APPOINTMENTS),
+    "messages": ("the Messages page", links.MESSAGES),
+    "campus_life": ("the Campus life page", links.CAMPUS_LIFE),
+    "classrooms": ("the Classrooms page", links.CLASSROOMS),
+    "profile": ("the Profile page", links.PROFILE),
+    "help": ("the Help page", links.HELP),
+    "enrollment": ("the Enrollment page", links.ENROLLMENT),
+    "housing": ("the Enrollment page", links.ENROLLMENT),
+    "dashboard": ("the Dashboard", links.DASHBOARD),
+}
+
+# What each destination is for, so the answer says why that page and not just
+# which one.
+_NAVIGATION_PURPOSE: dict[str, str] = {
+    "payments": "make and review payments, including the enrollment deposit",
+    "documents": "upload a required document and see what happened to each upload",
+    "financials": "see your balance, aid awards, and what you owe",
+    "appointments": "see and book advising appointments",
+    "messages": "read messages from the university",
+    "campus_life": "browse clubs and campus events",
+    "classrooms": "see your courses",
+    "profile": "review the details on your record",
+    "help": "reach enrollment support",
+    "enrollment": "see your full enrollment checklist and open each step",
+    "housing": "open the housing step on your checklist",
+    "dashboard": "see the summary of where you are",
+}
+
+
+def _compose_portal_navigation(
+    classification: Classification,
+    state: DerivedState,
+    preferred_name: str | None,
+) -> ComposedAnswer:
+    """Answer a "where do I …" question with the real page, plus its state.
+
+    The destination is a route from `links`; the second sentence reports what
+    that page currently holds for this student, so the answer is directions
+    *and* status rather than either alone.
+    """
+
+    target = classification.requirement_reference or "enrollment"
+    label, href = _NAVIGATION_PAGES.get(target, ("the Enrollment page", links.ENROLLMENT))
+    purpose = _NAVIGATION_PURPOSE.get(target, "continue your enrollment")
+    evidence = [f"Portal destination for this request: {label} ({href}) — {purpose}."]
+    sentences = [f"You'll find that on {label} — that's where you {purpose}."]
+
+    detail = _navigation_detail(target, state)
+    if detail is not None:
+        sentences.append(detail)
+        evidence.append(f"Current state on that page: {detail}")
+
+    message = " ".join(sentences)
+    blocks: list[JsonDict] = [text_block(message)]
+    blocks.append(
+        {
+            "type": "actions",
+            "items": [{"text": f"Open {label.removeprefix('the ')}", "href": href}],
+        }
+    )
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _navigation_detail(target: str, state: DerivedState) -> str | None:
+    """One grounded sentence about what the destination currently shows."""
+
+    if target in {"documents"}:
+        outstanding = [
+            document["title"]
+            for document in state.document_states
+            if document["submissionState"] in {"not_submitted", "needs_resubmission"}
+        ]
+        if outstanding:
+            return "Right now it's waiting on " + _sentence_list(outstanding) + "."
+        return "Everything it's waiting on has been submitted."
+    if target in {"payments", "financials"}:
+        deposit = deposit_state(state)
+        if not deposit or not deposit.get("known"):
+            return None
+        if deposit.get("paid"):
+            return "Your enrollment deposit is already posted there."
+        if deposit.get("pending"):
+            return "Your deposit payment is recorded there and still processing."
+        return "Your enrollment deposit is still outstanding there."
+    if target in {"enrollment", "housing"}:
+        open_steps = [str(step.get("title")) for step in state.remaining_steps]
+        if open_steps:
+            return f"It has {len(open_steps)} step(s) still open, starting with {open_steps[0]}."
+        return "Every step on it is complete."
+    if target == "appointments" and state.appointments is not None:
+        upcoming = [
+            item
+            for item in state.appointments.get("items", [])
+            if str(_mapping(item).get("status")) == "scheduled"
+        ]
+        if upcoming:
+            return f"You have {len(upcoming)} scheduled appointment(s) listed there."
+        return "You have nothing scheduled there yet."
+    if target == "messages" and state.messages is not None:
+        unread = state.messages.get("unreadCount")
+        if isinstance(unread, int):
+            return f"You have {unread} unread message(s) there."
+    return None
+
+
+def _sentence_list(values: list[str]) -> str:
+    if len(values) == 1:
+        return values[0]
+    return ", ".join(values[:-1]) + " and " + values[-1]
+
+
 def _compose_messages(
     _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
@@ -1901,6 +2143,7 @@ def _compose_general(
 
 
 _COMPOSERS = {
+    "portal_navigation": _compose_portal_navigation,
     "greeting": _compose_greeting,
     "capability_overview": _compose_capabilities,
     "general_help": _compose_next_action,

@@ -227,6 +227,10 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "aid_next_action": ("getFinancialAidStatus",),
     "aid_support": ("getFinancialAidStatus", "getFinancialAidSupportOptions"),
     "housing_status": ("getStudentHousingStatus",),
+    # Navigation answers name a page *and* what it currently shows, so the
+    # destination's own read comes along. The checklist is the shared
+    # fallback: every destination has a checklist step behind it.
+    "portal_navigation": ("getOnboardingChecklist",),
     "housing_options": ("getHousingOptions",),
     "housing_remaining_steps": ("getStudentHousingStatus",),
     "housing_next_action": ("getStudentHousingStatus", "getStudentDeadlines"),
@@ -281,7 +285,10 @@ _REQUIRED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "academic_plan": ("getAcademicPlan",),
     "campus_life": ("getCampusLife",),
     "messages_unread": ("getStudentMessages",),
-    "enrollment_state": ("getEnrollmentState",),
+    # The enrollment projection carries admission and completion percent but
+    # not the open checklist items. Reading it alone leaves a silence about
+    # outstanding work that a rewrite will fill with "nothing outstanding".
+    "enrollment_state": ("getEnrollmentState", "getOnboardingChecklist"),
     "personal_information": ("getOnboardingResponses",),
     "academic_standing": ("getAcademicStanding",),
     "support_requests": ("getStudentSupportRequests",),
