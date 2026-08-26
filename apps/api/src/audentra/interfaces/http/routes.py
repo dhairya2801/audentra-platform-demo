@@ -2171,10 +2171,47 @@ async def preview_staff_edward(
 
 @router.get("/v1/staff/action-center", status_code=200, response_model=None)
 async def get_action_center(
-    request: Request, service: ServiceDependency, auth: AuthDependency
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    status: Annotated[str | None, Query(max_length=24)] = None,
+    priority: Annotated[str | None, Query(max_length=16)] = None,
+    component: Annotated[str | None, Query(max_length=120)] = None,
+    assignee: Annotated[str | None, Query(max_length=64)] = None,
+    search: Annotated[str | None, Query(max_length=120)] = None,
+    due: Annotated[str | None, Query(max_length=16)] = None,
+    stale: Annotated[str | None, Query(max_length=8)] = None,
+    owner_risk: Annotated[str | None, Query(alias="ownerRisk", max_length=8)] = None,
+    escalated: Annotated[str | None, Query(max_length=8)] = None,
+    sort: Annotated[str | None, Query(max_length=16)] = None,
+    limit: Annotated[str | None, Query(max_length=6)] = None,
+    offset: Annotated[str | None, Query(max_length=8)] = None,
 ) -> object:
+    """One bounded page of the board. Defaults to open work, 50 items."""
+
     return await _dispatch(
-        service=service, request=request, operation="staff.get_action_center", auth=auth
+        service=service,
+        request=request,
+        operation="staff.get_action_center",
+        auth=auth,
+        query_params={
+            key: value
+            for key, value in {
+                "status": status,
+                "priority": priority,
+                "component": component,
+                "assignee": assignee,
+                "search": search,
+                "due": due,
+                "stale": stale,
+                "ownerRisk": owner_risk,
+                "escalated": escalated,
+                "sort": sort,
+                "limit": limit,
+                "offset": offset,
+            }.items()
+            if value is not None
+        },
     )
 
 

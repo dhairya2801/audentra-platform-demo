@@ -67,6 +67,7 @@ REQUEST_TYPE_SCOPE: Mapping[str, str] = {
     "cohort_aggregate": COHORT_SCOPE,
     "attention_ranking": RANKING_SCOPE,
     "work_queue": QUEUE_SCOPE,
+    "staff_workload": QUEUE_SCOPE,
     "work_item_detail": QUEUE_SCOPE,
     "daily_briefing": QUEUE_SCOPE,
     "inquiries": QUEUE_SCOPE,

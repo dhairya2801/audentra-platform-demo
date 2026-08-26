@@ -520,12 +520,27 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
     if queue:
         counts = _m(queue.get("counts"))
         lines.append(
-            f"Work queue counts: {counts.get('todo', 0)} to do, "
+            f"Work queue counts (whole board): {counts.get('open', 0)} open — "
+            f"{counts.get('todo', 0)} to do, "
             f"{counts.get('inProgress', 0)} in progress, "
             f"{counts.get('followUpRequired', 0)} follow-up required, "
-            f"{counts.get('blocked', 0)} blocked, {counts.get('urgent', 0)} urgent, "
-            f"{counts.get('escalated', 0)} escalated"
+            f"{counts.get('blocked', 0)} blocked; {counts.get('urgent', 0)} urgent, "
+            f"{counts.get('escalated', 0)} escalated, {counts.get('overdue', 0)} overdue, "
+            f"{counts.get('unassigned', 0)} unassigned, {counts.get('stale', 0)} stale, "
+            f"{counts.get('ownerRisk', 0)} owned by someone departed, on leave or away"
         )
+        filters = {
+            key: value
+            for key, value in _m(queue.get("filters")).items()
+            if value not in (None, "", "all")
+        }
+        if filters:
+            page = _m(queue.get("page"))
+            lines.append(
+                f"Queue read with filters {filters}: {queue.get('filteredOpen', 0)} open items "
+                f"match in total across {queue.get('distinctOpenStudents', 0)} students; the "
+                f"page below lists the first {page.get('returned', 0)}"
+            )
         for item in queue.get("items", [])[:12]:
             student_ref = _m(item.get("student"))
             assignee = _m(item.get("assignee"))
@@ -536,6 +551,65 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
                 + (f", assignee {assignee.get('name')}" if assignee else ", unassigned")
                 + (", escalated" if item.get("escalated") else "")
             )
+        for component in queue.get("byComponent", [])[:12]:
+            row = _m(component)
+            lines.append(
+                f"Component {row.get('component')}: {row.get('open', 0)} open, "
+                f"{row.get('overdue', 0)} overdue, {row.get('unassigned', 0)} unassigned, "
+                f"{row.get('stale', 0)} stale, {row.get('ownerRisk', 0)} owned by someone "
+                "departed, on leave or away"
+            )
+        for owner in queue.get("byOwner", [])[:12]:
+            row = _m(owner)
+            status = row.get("employmentStatus")
+            away = row.get("awayUntil")
+            note = (
+                f" ({status.replace('_', ' ')})"
+                if status and status != "active"
+                else (f" (away until {str(away)[:10]})" if away else "")
+            )
+            lines.append(
+                f"Owner {row.get('name')}{note}: {row.get('open', 0)} open, "
+                f"{row.get('overdue', 0)} overdue, {row.get('stale', 0)} stale in progress"
+            )
+    for person in state.staff_members[:5]:
+        lines.append(_staff_member_sentence(person))
+    briefing = state.briefing
+    capacity = _m((briefing or {}).get("staffCapacity"))
+    if capacity.get("available"):
+        summary = _m(capacity.get("summary"))
+        lines.append(
+            f"Staff capacity: {summary.get('staff', 0)} staff, {summary.get('onLeave', 0)} on "
+            f"leave, {summary.get('departed', 0)} departed, {summary.get('awayNow', 0)} away "
+            f"today, {summary.get('overCap', 0)} over caseload cap, "
+            f"{summary.get('spareCapacity', 0)} with spare capacity, "
+            f"{summary.get('itemsOwnedByUnavailable', 0)} open items owned by someone "
+            f"unavailable, {summary.get('staleItems', 0)} stale in-progress items, "
+            f"{summary.get('depositedWithoutAdviser', 0)} deposited students without an adviser"
+        )
+        for signal in capacity.get("signals", [])[:10]:
+            row = _m(signal)
+            lines.append(
+                f"Staff signal ({row.get('severity')}): {row.get('title')} — "
+                f"{row.get('detail')} Suggested: {row.get('action')}"
+            )
+    elif briefing is not None and "staffCapacity" in briefing:
+        lines.append("Staff capacity (caseload, leave, availability) is not readable here.")
+    if state.inquiry_counts:
+        counts = state.inquiry_counts
+        oldest = state.oldest_awaiting_reply
+        lines.append(
+            f"Student requests: {counts.get('active', 0)} active, "
+            f"{counts.get('awaitingFirstReply', 0)} awaiting a first reply "
+            f"({counts.get('awaitingOver24h', 0)} for more than 24 hours), "
+            f"{counts.get('unassigned', 0)} unassigned"
+            + (
+                f"; oldest awaiting a reply: {oldest.get('student')} — {oldest.get('subject')} "
+                f"(opened {str(oldest.get('createdAt'))[:16]})"
+                if oldest
+                else ""
+            )
+        )
     work_item = state.work_item
     if work_item:
         item = _m(work_item.get("workItem"))
@@ -1950,6 +2024,209 @@ def _compose_work_queue(
     )
 
 
+def _staff_member_sentence(person: JsonDict) -> str:
+    caseload = _m(person.get("caseload"))
+    work = _m(person.get("work"))
+    availability = _m(person.get("availability"))
+    status = str(person.get("employmentStatus") or "active")
+    if status == "on_leave":
+        state = f"on leave until {str(person.get('leaveUntil') or 'an unknown date')[:10]}"
+    elif status == "departed":
+        state = f"departed {str(person.get('endedAt') or '')[:10]}".strip()
+    elif person.get("awayUntil"):
+        state = (
+            f"active but {person.get('awayKind') or 'away'} until "
+            f"{str(person.get('awayUntil'))[:10]}"
+        )
+    else:
+        state = "active"
+    advisees = int(caseload.get("primaryAdvisees") or 0)
+    cap = caseload.get("cap")
+    caseload_text = (
+        f"{advisees} primary advisees" + (f" against a cap of {cap}" if cap else "")
+        if advisees or cap
+        else "no primary advisees"
+    )
+    slots = availability.get("openSlotsNext14Days")
+    slot_text = (
+        f"{slots} open slots in the next 14 days"
+        + (
+            f", next {str(availability.get('nextOpenSlotAt'))[:16]}"
+            if availability.get("nextOpenSlotAt")
+            else ""
+        )
+        if slots is not None
+        else "no bookable calendar"
+    )
+    return (
+        f"Staff member {person.get('name')} ({person.get('title') or 'staff'}, "
+        f"{person.get('component')}): {state}; {caseload_text}; "
+        f"{work.get('open', 0)} open items ({work.get('overdue', 0)} overdue, "
+        f"{work.get('staleInProgress', 0)} stale in progress, "
+        f"{work.get('appointmentsAwaitingOutcome', 0)} appointments awaiting an outcome); "
+        f"{slot_text}."
+    )
+
+
+def _compose_staff_workload(
+    _classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    """People and offices: who is behind, who is absent, where capacity is.
+
+    Built from the briefing's staff-capacity signals and the queue's per-owner
+    rollup — the same rules the Morning Brew shows, never a per-person score.
+    """
+
+    evidence = build_staff_evidence_bundle(state)
+    capacity = _m((state.briefing or {}).get("staffCapacity"))
+    owners = [_m(row) for row in _m(state.queue).get("byOwner", [])]
+    blocks: list[JsonDict] = []
+    sentences: list[str] = []
+    if state.staff_members:
+        # A named person comes first; the tenant-wide picture follows.
+        sentences.extend(_staff_member_sentence(person) for person in state.staff_members[:3])
+        queue_items = open_work_items(state)
+        if queue_items:
+            first = queue_items[0]
+            matching = int(_m(state.queue).get("filteredOpen") or len(queue_items))
+            sentences.append(
+                f"{_count(matching, 'matching open item')} in their queue; first up "
+                f"{first.get('key')}: {first.get('title')}."
+            )
+            blocks.append(
+                table_block(
+                    [
+                        {"key": "key", "label": "Key"},
+                        {"key": "title", "label": "Task"},
+                        {"key": "status", "label": "Status"},
+                        {"key": "due", "label": "Due"},
+                        {"key": "stale", "label": "Stale"},
+                    ],
+                    [
+                        {
+                            "key": str(item.get("key", "")),
+                            "title": str(item.get("title", ""))[:60],
+                            "status": str(item.get("status", "")).replace("_", " "),
+                            "due": str(item.get("dueAt") or "")[:10],
+                            "stale": (
+                                f"{_m(item.get('signals')).get('staleDays')}d"
+                                if _m(item.get("signals")).get("stale")
+                                else ""
+                            ),
+                        }
+                        for item in queue_items[:10]
+                    ],
+                    caption="Their open items (canonical order)",
+                )
+            )
+    if capacity.get("available") and not state.staff_members:
+        summary = _m(capacity.get("summary"))
+        sentences.append(
+            f"{_count(int(summary.get('staff', 0)), 'staff member')}: "
+            f"{summary.get('onLeave', 0)} on leave, {summary.get('departed', 0)} departed, "
+            f"{summary.get('awayNow', 0)} away today, {summary.get('overCap', 0)} over "
+            f"caseload cap, {summary.get('spareCapacity', 0)} with spare capacity."
+        )
+        signals = [_m(item) for item in capacity.get("signals", [])]
+        if signals:
+            lead = signals[0]
+            sentences.append(f"Most severe: {lead.get('title')} — {lead.get('detail')}")
+            blocks.append(
+                bullet_list_block(
+                    [
+                        {
+                            "text": f"[{item.get('severity')}] {item.get('title')}: "
+                            f"{item.get('detail')} → {item.get('action')}"
+                        }
+                        for item in signals[:10]
+                    ],
+                    title="Staff and capacity signals",
+                )
+            )
+    elif state.briefing is not None:
+        sentences.append(
+            "Caseload, leave and availability are not readable on this deployment; "
+            "the queue's per-owner totals are below."
+        )
+    components = [_m(row) for row in _m(state.queue).get("byComponent", [])]
+    if components and not state.staff_members:
+        behind = max(components, key=lambda row: int(row.get("overdue") or 0))
+        most_unassigned = max(components, key=lambda row: int(row.get("unassigned") or 0))
+        sentences.append(
+            f"By office, {behind.get('component')} has the most overdue work "
+            f"({behind.get('overdue', 0)} of {behind.get('open', 0)} open)"
+            + (
+                f" and {most_unassigned.get('component')} the most unassigned "
+                f"({most_unassigned.get('unassigned', 0)})."
+                if int(most_unassigned.get("unassigned") or 0)
+                else "."
+            )
+        )
+        blocks.append(
+            table_block(
+                [
+                    {"key": "component", "label": "Office"},
+                    {"key": "open", "label": "Open"},
+                    {"key": "overdue", "label": "Overdue"},
+                    {"key": "unassigned", "label": "Unassigned"},
+                    {"key": "stale", "label": "Stale"},
+                    {"key": "risk", "label": "Owner unavailable"},
+                ],
+                [
+                    {
+                        "component": str(row.get("component")),
+                        "open": str(row.get("open", 0)),
+                        "overdue": str(row.get("overdue", 0)),
+                        "unassigned": str(row.get("unassigned", 0)),
+                        "stale": str(row.get("stale", 0)),
+                        "risk": str(row.get("ownerRisk", 0)),
+                    }
+                    for row in components[:12]
+                ],
+                caption="Open work by office (most open first)",
+            )
+        )
+    named = [row for row in owners if row.get("name") and row.get("name") != "Unassigned"]
+    if named and not state.staff_members:
+        top = named[0]
+        sentences.append(
+            f"By open work, {top.get('name')} carries the most: {top.get('open', 0)} open, "
+            f"{top.get('overdue', 0)} overdue."
+        )
+        blocks.append(
+            table_block(
+                [
+                    {"key": "owner", "label": "Owner"},
+                    {"key": "state", "label": "Status"},
+                    {"key": "open", "label": "Open"},
+                    {"key": "overdue", "label": "Overdue"},
+                    {"key": "stale", "label": "Stale"},
+                ],
+                [
+                    {
+                        "owner": str(row.get("name")),
+                        "state": str(row.get("employmentStatus") or "active").replace("_", " ")
+                        + (" · away" if row.get("awayUntil") else ""),
+                        "open": str(row.get("open", 0)),
+                        "overdue": str(row.get("overdue", 0)),
+                        "stale": str(row.get("stale", 0)),
+                    }
+                    for row in named[:12]
+                ],
+                caption="Open work by owner (most open first)",
+            )
+        )
+    if not sentences:
+        message = "I couldn't read the staff workload just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    message = " ".join(sentences)
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), *blocks], evidence_texts=evidence
+    )
+
+
 def _describe_queue_filters(active: dict[str, Any]) -> str:
     labels = {
         "ownership": "ownership",
@@ -2102,9 +2379,30 @@ def _compose_inquiries(
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    new_count = sum(1 for item in inquiries if str(item.get("status")) == "new")
+    counts = state.inquiry_counts or {}
+    new_count = int(
+        counts.get("awaitingFirstReply")
+        or sum(1 for item in inquiries if str(item.get("status")) == "new")
+    )
     waiting = sum(1 for item in inquiries if str(item.get("status")) == "waiting_on_student")
-    message = f"{len(inquiries)} inquiry(ies): {new_count} new, {waiting} waiting on the student."
+    if counts:
+        oldest = state.oldest_awaiting_reply
+        message = (
+            f"{_count(int(counts.get('active', len(inquiries))), 'active student request')}: "
+            f"{new_count} awaiting a first reply"
+            f" ({counts.get('awaitingOver24h', 0)} for more than 24 hours), "
+            f"{counts.get('unassigned', 0)} unassigned."
+            + (
+                f" The oldest still waiting is {oldest.get('student')} — "
+                f"{oldest.get('subject')} (opened {str(oldest.get('createdAt'))[:10]})."
+                if oldest
+                else ""
+            )
+        )
+    else:
+        message = (
+            f"{len(inquiries)} inquiry(ies): {new_count} new, {waiting} waiting on the student."
+        )
     block = bullet_list_block(
         [
             {
@@ -2421,6 +2719,7 @@ _COMPOSERS = {
     "attention_ranking": _compose_attention,
     "recommendation": _compose_recommendation,
     "work_queue": _compose_work_queue,
+    "staff_workload": _compose_staff_workload,
     "daily_briefing": _compose_daily_briefing,
     "work_item_detail": _compose_work_item_detail,
     "inquiries": _compose_inquiries,

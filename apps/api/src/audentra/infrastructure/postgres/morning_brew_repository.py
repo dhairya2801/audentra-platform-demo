@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from sqlalchemy import text
@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError
+from audentra.domain.engagement import activity_feed_covers_population
 from audentra.domain.morning_brew import BREW_WINDOW_HOURS, BrewCohort
 from audentra.domain.student_cohort import DUE_SOON_HORIZON_DAYS
 from audentra.infrastructure.postgres.cohort_sql import (
@@ -46,6 +47,10 @@ _DEADLINE_SAMPLE_LIMIT = 12
 _REQUEST_LIMIT = 12
 
 
+class CapacityReader(Protocol):
+    async def staff_capacity_snapshot(self, auth: AuthContext) -> JsonDict: ...
+
+
 class PostgresMorningBrewRepository:
     """Read-only aggregate reads for the staff Morning Brew briefing."""
 
@@ -55,6 +60,7 @@ class PostgresMorningBrewRepository:
         *,
         schema: str = "public",
         clock: Callable[[], datetime] | None = None,
+        capacity: CapacityReader | None = None,
     ) -> None:
         if not SQL_IDENTIFIER.fullmatch(schema):
             raise ValueError("schema is not a safe PostgreSQL identifier")
@@ -62,6 +68,19 @@ class PostgresMorningBrewRepository:
         self._schema = schema
         self._clock = clock or (lambda: datetime.now(UTC))
         self._cohort_sql = CohortSql(schema)
+        self._capacity = capacity
+
+    async def staff_capacity(self, auth: AuthContext) -> JsonDict | None:
+        """People, load and availability — the advising repository's read.
+
+        None when the deployment has no advising repository: the briefing then
+        says the staff dimension is unavailable rather than showing zeros.
+        """
+
+        _require_staff(auth)
+        if self._capacity is None:
+            return None
+        return await self._capacity.staff_capacity_snapshot(auth)
 
     def _table(self, name: str) -> str:
         return f"{self._schema}.{name}"
@@ -181,6 +200,12 @@ class PostgresMorningBrewRepository:
               WHERE item.tenant_id = :tenant_id
                 AND item.status IN ({closed})
                 AND item.updated_at >= :since
+              UNION ALL
+              SELECT 'work_items_escalated', log.occurred_at
+              FROM {self._table("staff_work_log")} AS log
+              WHERE log.tenant_id = :tenant_id
+                AND log.action = 'escalated'
+                AND log.occurred_at >= :since
               UNION ALL
               SELECT 'attention_flags', candidate.created_at
               FROM {self._table("intervention_candidate")} AS candidate
@@ -575,7 +600,16 @@ class PostgresMorningBrewRepository:
 
         _require_staff(auth)
         sql = f"""
-            SELECT COUNT(*)::integer AS snapshots, MAX(projected_at) AS projected_at
+            SELECT COUNT(*)::integer AS snapshots, MAX(projected_at) AS projected_at,
+              (SELECT COUNT(*)::integer FROM {self._table("activity_event")} AS event
+                WHERE event.tenant_id = :tenant_id
+                  AND event.occurred_at >= NOW() - INTERVAL '30 days') AS activity_events,
+              (SELECT COUNT(DISTINCT event.student_id)::integer
+                FROM {self._table("activity_event")} AS event
+                WHERE event.tenant_id = :tenant_id
+                  AND event.occurred_at >= NOW() - INTERVAL '30 days') AS active_students,
+              (SELECT COUNT(*)::integer FROM {self._table("student")} AS roster
+                WHERE roster.tenant_id = :tenant_id) AS roster_size
             FROM {self._table("student_engagement_snapshot")}
             WHERE tenant_id = :tenant_id
         """
@@ -586,10 +620,17 @@ class PostgresMorningBrewRepository:
                 .first()
             )
         snapshots = int(row["snapshots"]) if row else 0
+        activity_events = int(row["activity_events"]) if row else 0
+        active_students = int(row["active_students"]) if row else 0
+        roster_size = int(row["roster_size"]) if row else 0
         return {
             "available": snapshots > 0,
             "snapshots": snapshots,
             "lastProjectedAt": _optional_iso(row["projected_at"]) if row else None,
+            # Inactivity is only meaningful where the feed covers the population.
+            "activityEvents30d": activity_events,
+            "activeStudents30d": active_students,
+            "activitySignal": activity_feed_covers_population(active_students, roster_size),
         }
 
 

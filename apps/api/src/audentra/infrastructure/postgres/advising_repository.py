@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.domain.action_center import AWAY_TIME_OFF_KINDS
 from audentra.domain.scheduling import (
     APPOINTMENT_TYPES,
     ASSIGNMENT_ROLE_FOR_TYPE,
@@ -1215,6 +1216,222 @@ class PostgresAdvisingRepository:
             _map_appointment(dict(row), include_student=True) for row in result.mappings().all()
         ]
 
+    async def staff_capacity_snapshot(self, auth: AuthContext) -> JsonDict:
+        """Every person's load and availability, for the Morning Brew.
+
+        Tenant-wide (not the caller's subtree): the briefing is an operations
+        read, and the on-leave adviser in another office is exactly the kind of
+        thing it exists to surface. Slots are derived for student-facing people
+        over the next 14 days from the same pattern/absence/appointment inputs
+        the booking rules use.
+        """
+
+        _require_staff(auth)
+        now = self._clock()
+        tenant_id = auth.tenant_id
+        away_kinds = ", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT {_STAFF_COLUMNS},
+                      (SELECT COUNT(*) FROM student_staff_assignment a
+                        WHERE a.tenant_id=m.tenant_id AND a.staff_member_id=m.id
+                          AND a.role='primary_advisor' AND a.ended_at IS NULL) AS advisees,
+                      (SELECT COUNT(*) FROM staff_work_item w
+                        WHERE w.tenant_id=m.tenant_id AND w.assignee_id=m.id
+                          AND w.status NOT IN ('done','cancelled')) AS open_items,
+                      (SELECT COUNT(*) FROM staff_work_item w
+                        WHERE w.tenant_id=m.tenant_id AND w.assignee_id=m.id
+                          AND w.status NOT IN ('done','cancelled')
+                          AND w.due_at IS NOT NULL AND w.due_at < :now) AS overdue_items,
+                      (SELECT COUNT(*) FROM staff_work_item w
+                        WHERE w.tenant_id=m.tenant_id AND w.assignee_id=m.id
+                          AND w.status NOT IN ('done','cancelled')
+                          AND w.priority='urgent') AS urgent_items,
+                      (SELECT COUNT(*) FROM staff_work_item w
+                        WHERE w.tenant_id=m.tenant_id AND w.assignee_id=m.id
+                          AND w.status='in_progress' AND w.updated_at < :stale_before)
+                        AS stale_items,
+                      (SELECT COUNT(*) FROM student_appointment ap
+                        WHERE ap.tenant_id=m.tenant_id AND ap.staff_member_id=m.id
+                          AND ap.status='scheduled' AND ap.starts_at < :outcome_before)
+                        AS awaiting_outcome,
+                      away.ends_at AS away_until, away.kind AS away_kind
+                    FROM staff_member m
+                    LEFT JOIN LATERAL (
+                      SELECT off.ends_at, off.kind
+                      FROM staff_time_off off
+                      WHERE off.tenant_id=m.tenant_id AND off.staff_member_id=m.id
+                        AND off.kind IN ({away_kinds})
+                        AND off.starts_at <= :now AND off.ends_at > :now
+                      ORDER BY off.ends_at DESC
+                      LIMIT 1
+                    ) AS away ON true
+                    WHERE m.tenant_id=:tenant_id
+                    ORDER BY m.display_name, m.id
+                    """
+                ),
+                {
+                    "tenant_id": UUID(tenant_id),
+                    "now": now,
+                    "stale_before": now - STALE_WORK_AFTER,
+                    "outcome_before": now - OUTCOME_GRACE,
+                },
+            )
+            rows = [dict(row) for row in result.mappings().all()]
+            facing = [
+                str(row["id"])
+                for row in rows
+                if bool(row.get("student_facing")) and str(row.get("employment_status")) == "active"
+            ]
+            calendars = await self._calendar_inputs_many(
+                connection, tenant_id, facing, now, now + DEFAULT_LOOKAHEAD
+            )
+            component_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT w.component,
+                      COUNT(*) AS open,
+                      COUNT(*) FILTER (WHERE w.due_at IS NOT NULL AND w.due_at < :now)
+                        AS overdue,
+                      COUNT(*) FILTER (WHERE w.assignee_id IS NULL) AS unassigned,
+                      COUNT(*) FILTER (WHERE w.status='in_progress'
+                                         AND w.updated_at < :stale_before) AS stale,
+                      COUNT(*) FILTER (WHERE w.priority='urgent') AS urgent,
+                      COUNT(*) FILTER (WHERE w.escalated) AS escalated,
+                      COUNT(*) FILTER (WHERE w.assignee_id IS NOT NULL AND (
+                        m.employment_status IN ('departed','on_leave')
+                        OR EXISTS (SELECT 1 FROM staff_time_off off
+                                    WHERE off.tenant_id=w.tenant_id
+                                      AND off.staff_member_id=w.assignee_id
+                                      AND off.kind IN ({away_kinds})
+                                      AND off.starts_at <= :now AND off.ends_at > :now)))
+                        AS owner_risk,
+                      MIN(w.due_at) FILTER (WHERE w.due_at IS NOT NULL AND w.due_at < :now)
+                        AS oldest_overdue_due_at
+                    FROM staff_work_item w
+                    LEFT JOIN staff_member m ON m.id=w.assignee_id AND m.tenant_id=w.tenant_id
+                    WHERE w.tenant_id=:tenant_id AND w.status NOT IN ('done','cancelled')
+                    GROUP BY w.component
+                    ORDER BY overdue DESC, open DESC, w.component
+                    """
+                ),
+                {"tenant_id": UUID(tenant_id), "now": now, "stale_before": now - STALE_WORK_AFTER},
+            )
+            components = [dict(row) for row in component_result.mappings().all()]
+            student_result = await connection.execute(
+                text(
+                    """
+                    WITH accepted AS (
+                      SELECT s.id
+                      FROM student s
+                      WHERE s.tenant_id=:tenant_id
+                        AND EXISTS (SELECT 1 FROM admission_offer o
+                                     WHERE o.tenant_id=s.tenant_id AND o.student_id=s.id
+                                       AND o.status='accepted')
+                    ), unadvised AS (
+                      SELECT accepted.id FROM accepted
+                      WHERE NOT EXISTS (SELECT 1 FROM student_staff_assignment a
+                                         WHERE a.tenant_id=:tenant_id AND a.student_id=accepted.id
+                                           AND a.role='primary_advisor' AND a.ended_at IS NULL)
+                    )
+                    SELECT
+                      (SELECT COUNT(*) FROM unadvised) AS accepted_without_adviser,
+                      (SELECT COUNT(*) FROM unadvised u
+                        WHERE EXISTS (SELECT 1 FROM payment_transaction pay
+                                       WHERE pay.tenant_id=:tenant_id AND pay.student_id=u.id
+                                         AND pay.type='enrollment_deposit'
+                                         AND pay.status='succeeded'))
+                        AS deposited_without_adviser,
+                      (SELECT COUNT(*) FROM student_staff_assignment a
+                         JOIN staff_member m ON m.id=a.staff_member_id AND m.tenant_id=a.tenant_id
+                        WHERE a.tenant_id=:tenant_id AND a.ended_at IS NULL
+                          AND a.role='primary_advisor' AND m.employment_status='departed')
+                        AS with_departed_adviser,
+                      (SELECT COUNT(*) FROM student_staff_assignment a
+                         JOIN staff_member m ON m.id=a.staff_member_id AND m.tenant_id=a.tenant_id
+                        WHERE a.tenant_id=:tenant_id AND a.ended_at IS NULL
+                          AND a.role='primary_advisor' AND m.employment_status='on_leave')
+                        AS with_adviser_on_leave
+                    """
+                ),
+                {"tenant_id": UUID(tenant_id)},
+            )
+            student_row = student_result.mappings().one()
+
+        people: list[JsonDict] = []
+        for row in rows:
+            member_id = str(row["id"])
+            availability: JsonDict | None = None
+            if member_id in calendars:
+                rules, time_off, busy = calendars[member_id]
+                slots = derive_open_slots(
+                    rules=rules,
+                    time_off=time_off,
+                    appointments=busy,
+                    timezone=str(row["timezone"]),
+                    window_start=now,
+                    window_end=now + DEFAULT_LOOKAHEAD,
+                    now=now,
+                )
+                availability = {
+                    "bookable": bool(rules),
+                    "nextOpenSlotAt": _iso(slots[0].starts_at) if slots else None,
+                    "openSlotsNext14Days": len(slots),
+                    "bookedNext14Days": len(busy),
+                }
+            entry = _map_staff_brief(row)
+            away_until = row.get("away_until")
+            entry.update(
+                {
+                    "studentFacing": bool(row.get("student_facing")),
+                    "awayUntil": _iso(away_until) if away_until is not None else None,
+                    "awayKind": str(row["away_kind"]) if row.get("away_kind") else None,
+                    "caseload": {
+                        "primaryAdvisees": int(row["advisees"]),
+                        "cap": row.get("caseload_cap"),
+                    },
+                    "work": {
+                        "open": int(row["open_items"]),
+                        "overdue": int(row["overdue_items"]),
+                        "urgent": int(row["urgent_items"]),
+                        "staleInProgress": int(row["stale_items"]),
+                        "appointmentsAwaitingOutcome": int(row["awaiting_outcome"]),
+                    },
+                    "availability": availability,
+                }
+            )
+            people.append(entry)
+        return {
+            "generatedAt": _iso(now),
+            "people": people,
+            "components": [
+                {
+                    "component": str(row["component"]),
+                    "open": int(row["open"]),
+                    "overdue": int(row["overdue"]),
+                    "unassigned": int(row["unassigned"]),
+                    "stale": int(row["stale"]),
+                    "urgent": int(row["urgent"]),
+                    "escalated": int(row["escalated"]),
+                    "ownerRisk": int(row["owner_risk"]),
+                    "oldestOverdueDays": (
+                        max(0, (now - _as_aware(row["oldest_overdue_due_at"])).days)
+                        if row.get("oldest_overdue_due_at") is not None
+                        else None
+                    ),
+                }
+                for row in components
+            ],
+            "students": {
+                "acceptedWithoutPrimaryAdviser": int(student_row["accepted_without_adviser"]),
+                "depositedWithoutPrimaryAdviser": int(student_row["deposited_without_adviser"]),
+                "withDepartedAdviser": int(student_row["with_departed_adviser"]),
+                "withAdviserOnLeave": int(student_row["with_adviser_on_leave"]),
+            },
+        }
+
     async def _team_rows(
         self, connection: AsyncConnection, tenant_id: str, manager_id: str, now: datetime
     ) -> list[JsonDict]:
@@ -1654,6 +1871,11 @@ def _unbookable_reason(member: Mapping[str, Any], appointment_type: str | None) 
         if not bool(member.get("student_facing", True)):
             return "does_not_offer_type"
     return None
+
+
+def _as_aware(value: Any) -> datetime:
+    moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
 def _map_staff_brief(row: Mapping[str, Any]) -> JsonDict:

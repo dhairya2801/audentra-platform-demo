@@ -47,6 +47,7 @@ STAFF_REQUEST_TYPES = (
     "attention_ranking",
     "recommendation",
     "work_queue",
+    "staff_workload",
     "work_item_detail",
     "inquiries",
     "playbook_lookup",
@@ -104,6 +105,55 @@ class StaffClassification:
 # students <predicate>"). Recognising them deterministically keeps the
 # capability working with no model in the loop, and gives the model planner a
 # correct baseline to improve on rather than invent from.
+
+_STAFF_NOUN = (
+    r"(?:staff(?: members?)?|advis[eo]rs?|counsel(?:l)?ors?|evaluators?|coordinators?|"
+    r"specialists?|colleagues?|team(?: members?)?|people|owners?|assignees?|dsos?|offices?|"
+    r"departments?|components?)"
+)
+_STAFF_WORKLOAD = re.compile(
+    rf"\b(?:which|who|what|how many)\b.{{0,40}}\b{_STAFF_NOUN}\b.{{0,60}}"
+    r"\b(?:most|overdue|behind|overloaded|over(?: their)? cap|caseload|capacity|workload|"
+    r"backlog|stale|on leave|departed|left|away|vacation|available|spare|cover)\b"
+    r"|\b(?:is|are|was)\b \w+(?: \w+)? (?:on leave|away|available|out|off|overloaded|over cap|"
+    r"behind|falling behind|still (?:here|with us|employed|around))\b"
+    r"|\b(?:caseload|capacity|workload|availability) (?:of|for)\b"
+    r"|\bwho (?:owns|has|carries) the most\b|\bwho is (?:behind|falling behind|overloaded)\b"
+    r"|\b(?:staff|advis[eo]r|counsel(?:l)?or) (?:capacity|workload|coverage|availability)\b"
+    rf"|\b(?:on leave|departed|left the university|away this week)\b.{{0,40}}\b{_STAFF_NOUN}\b"
+    rf"|\b{_STAFF_NOUN}\b.{{0,40}}\b(?:on leave|departed|left the university|away this week)\b"
+    r"|\bstudents? (?:does|do|did) \w+(?: \w+)? (?:advise|own|carry|cover|handle|have|manage)\b"
+    r"|\b\w+ \w+'s (?:work items?|tasks?|queue|items?|cases?|board|caseload|advisees|students|"
+    r"calendar|availability|next (?:open|free)|open slots?|workload|backlog)\b"
+    r"|\bnext (?:open|free|available) (?:advising |appointment )?slot\b",
+    re.IGNORECASE,
+)
+_STAFF_STALE_LANGUAGE = re.compile(
+    r"more than a week|for weeks|stale|untouched|not (?:been )?touched|sitting in progress|"
+    r"in progress for|no update|hasn't moved|has not moved",
+    re.IGNORECASE,
+)
+# "How many students does Elena advise?" is about Elena, however it starts.
+_STAFF_PERSON_QUESTION = re.compile(
+    r"\bstudents? (?:does|do|did) \w+(?: \w+)? (?:advise|own|carry|cover|handle|have|manage)\b"
+    r"|\b\w+ \w+'s (?:caseload|advisees|students|calendar|availability|workload|backlog)\b",
+    re.IGNORECASE,
+)
+# "Which students ..." is never a staff question, even when it mentions advisers.
+_COHORT_SUBJECT_ONLY = re.compile(
+    r"^\s*(?:which|how many|list|show|find)\b[^?]{0,30}\b(?:students?|applicants?|admits?)\b",
+    re.IGNORECASE,
+)
+
+_INQUIRY_STATE = re.compile(
+    r"\b(?:student |support |open |unanswered )?(?:requests?|inquir(?:y|ies)|tickets?|"
+    r"conversations?|messages?)\b.{0,60}\b(?:await|waiting|without|no|unanswered|first)"
+    r".{0,24}\b(?:repl(?:y|ies|ied)|respon(?:se|ded)|answer)"
+    r"|\bunanswered (?:student )?(?:requests?|inquir(?:y|ies)|messages?)\b"
+    r"|\b(?:requests?|inquir(?:y|ies)|messages?) (?:are |that are |still |remain )?unanswered\b"
+    r"|\b(?:requests?|inquir(?:y|ies)) (?:past|over|beyond) (?:the )?(?:sla|24 ?h)",
+    re.IGNORECASE,
+)
 
 _COHORT_SUBJECT = re.compile(
     r"\b(?:students?|applicants?|admits?|admitted|cohort|class|population|people|roster"
@@ -713,6 +763,16 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
     if request.action_kind is not None:
         return StaffClassification("action_request", 1, reference=request.action_kind)
 
+    # Questions about *staff* — who is behind, on leave, over cap, or absent —
+    # are answered from the briefing's capacity signals and the queue's
+    # per-owner rollup, never by resolving a staff name against the roster.
+    if _STAFF_WORKLOAD.search(text) and (
+        _STAFF_PERSON_QUESTION.search(text) or not _COHORT_SUBJECT_ONLY.search(text)
+    ):
+        name = request.candidate_student_name or ""
+        flags = "|stale" if _STAFF_STALE_LANGUAGE.search(text) else ""
+        return StaffClassification("staff_workload", 0.96, reference=f"staff:{name}{flags}")
+
     ranking_language = bool(_RANKING_LANGUAGE.search(text))
     for reference, pattern in _UNSUPPORTED_METRICS:
         if pattern.search(text):
@@ -762,6 +822,12 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
     # Cohort questions are settled before the student-referent branches: a
     # question about a *group* must not be answered by resolving one student
     # who happens to match a word in it.
+    # "How many student requests are awaiting a first reply?" is about the
+    # support inbox, not the roster: "student" must not turn it into a cohort
+    # count of every student on the roster.
+    if _INQUIRY_STATE.search(text):
+        return StaffClassification("inquiries", 0.95)
+
     cohort = classify_cohort_question(text)
     if cohort is not None:
         return cohort

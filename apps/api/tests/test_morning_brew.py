@@ -83,6 +83,7 @@ class FakeReader:
         self._sample = sample or []
         self._scan = scan or {"available": False, "snapshots": 0, "lastProjectedAt": None}
         self.sampled_cohorts: list[str] = []
+        self.capacity: JsonDict | None = None
 
     async def count_cohorts(
         self, auth: AuthContext, cohorts: Sequence[BrewCohort]
@@ -116,6 +117,9 @@ class FakeReader:
 
     async def engagement_scan_freshness(self, auth: AuthContext) -> JsonDict:
         return dict(self._scan)
+
+    async def staff_capacity(self, auth: AuthContext) -> JsonDict | None:
+        return self.capacity
 
 
 def brew(reader: FakeReader, auth: AuthContext = STAFF) -> JsonDict:
@@ -491,3 +495,82 @@ def _integers(text: str) -> list[str]:
     if current:
         found.append(current)
     return found
+
+
+# ---------------------------------------------------------------------------
+# The people dimension
+# ---------------------------------------------------------------------------
+
+
+def _capacity_snapshot() -> JsonDict:
+    return {
+        "people": [
+            {
+                "id": "quentin",
+                "name": "Quentin Zephyrine",
+                "title": "Adviser",
+                "component": "Academic Advising",
+                "employmentStatus": "departed",
+                "endedAt": "2026-08-01",
+                "caseload": {"primaryAdvisees": 79, "cap": 160},
+                "work": {"open": 6, "overdue": 4, "staleInProgress": 0},
+                "availability": None,
+            }
+        ],
+        "components": [
+            {
+                "component": "Registrar",
+                "open": 100,
+                "overdue": 60,
+                "unassigned": 0,
+                "stale": 25,
+                "urgent": 0,
+                "escalated": 0,
+                "ownerRisk": 96,
+                "oldestOverdueDays": 22,
+            }
+        ],
+        "students": {
+            "acceptedWithoutPrimaryAdviser": 434,
+            "depositedWithoutPrimaryAdviser": 55,
+            "withDepartedAdviser": 79,
+            "withAdviserOnLeave": 0,
+        },
+    }
+
+
+def test_brew_carries_capacity_priorities_and_a_people_bullet() -> None:
+    reader = populated_reader()
+    reader.capacity = _capacity_snapshot()
+    payload = brew(reader)
+    assert payload["staffCapacity"]["available"] is True
+    assert payload["staffCapacity"]["signals"][0]["kind"] == "departed_with_caseload"
+    priorities = {item["id"]: item for item in payload["priorities"]}
+    assert priorities["ownership-at-risk"]["count"] == 96
+    assert priorities["ownership-at-risk"]["boardQuery"] == {"ownerRisk": True}
+    assert priorities["stale-work"]["count"] == 25
+    assert any("Quentin Zephyrine has left" in b for b in payload["synthesis"]["bullets"])
+    # The synthesis never quotes a number the payload does not carry.
+    assert set(_integers(json.dumps(payload["synthesis"]))) <= set(_integers(json.dumps(payload)))
+
+
+def test_brew_without_capacity_reader_declares_the_gap() -> None:
+    payload = brew(populated_reader())
+    assert payload["staffCapacity"]["available"] is False
+    ids = {item["id"] for item in payload["priorities"]}
+    assert "ownership-at-risk" not in ids and "stale-work" not in ids
+
+
+def test_inactivity_without_an_activity_feed_is_a_coverage_note() -> None:
+    reader = populated_reader(
+        scan={
+            "available": True,
+            "snapshots": 14,
+            "lastProjectedAt": "2026-08-16T10:00:00.000Z",
+            "activityEvents30d": 0,
+            "activeStudents30d": 0,
+            "activitySignal": False,
+        }
+    )
+    payload = brew(reader)
+    assert any("inactivity is unknown" in note for note in payload["coverage"]["notes"])

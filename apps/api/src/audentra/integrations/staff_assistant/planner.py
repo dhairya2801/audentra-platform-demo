@@ -107,6 +107,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getPlaybooks",
     ),
     "work_queue": ("getStaffWorkQueue",),
+    # Staff questions read the briefing's capacity signals plus the queue's
+    # per-owner rollup; a staff name is a queue filter, not a roster lookup.
+    "staff_workload": ("getStaffMember", "getMorningBriefing", "getStaffWorkQueue"),
     # The briefing is the portal's own start-of-day read; the queue rides
     # along so "what should I start with" has concrete cases to name.
     "daily_briefing": ("getMorningBriefing", "getStaffWorkQueue"),
@@ -131,8 +134,19 @@ _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "getStudentCommunicationHistory": ("channel",),
     "getStudentTimeline": ("limit",),
     "getStudentsNeedingAttention": ("limit",),
-    "getStaffWorkQueue": ("ownership", "component", "status", "dueWindow", "topic"),
+    "getStaffWorkQueue": (
+        "ownership",
+        "assigneeName",
+        "component",
+        "status",
+        "dueWindow",
+        "topic",
+        "stale",
+        "ownerRisk",
+        "sort",
+    ),
     "getInquiries": ("status",),
+    "getStaffMember": ("name",),
     "getMailboxMessages": ("query", "limit"),
 }
 

@@ -61,6 +61,7 @@ def compose_staff_workspace(
     managed_content: Mapping[str, Any],
     configurations: Mapping[str, Mapping[str, Any]],
     generated_at: str,
+    personal_items: Sequence[Mapping[str, Any]] | None = None,
 ) -> JsonDict:
     """Build one response exclusively from durable reads and pure projections."""
 
@@ -94,7 +95,8 @@ def compose_staff_workspace(
         for item in personal_students
         if (task_id := cast(Mapping[str, Any], item.get("recommendedAction", {})).get("taskId"))
     }
-    personal_tasks = [item for item in items if str(item.get("id")) in task_ids]
+    task_pool = list(personal_items) if personal_items is not None else items
+    personal_tasks = [item for item in task_pool if str(item.get("id")) in task_ids]
 
     journey_configuration = _configuration(configurations, "journeys")
     campus_configuration = _configuration(configurations, "campus_life")

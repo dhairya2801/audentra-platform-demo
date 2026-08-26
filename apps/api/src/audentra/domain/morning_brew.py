@@ -564,6 +564,20 @@ BREW_DELTAS: tuple[BrewDeltaSpec, ...] = (
         exact=False,
     ),
     BrewDeltaSpec(
+        key="work_items_escalated",
+        topic="student_success",
+        title="Action Center items escalated",
+        singular="item escalated",
+        plural="items escalated",
+        tone="watch",
+        destination="tasks",
+        basis="staff_work_log.occurred_at",
+        basis_note=(
+            "Counts escalation log entries in the window: the SLA sweep or a "
+            "staff member marked the item escalated at that moment."
+        ),
+    ),
+    BrewDeltaSpec(
         key="attention_flags",
         topic="student_success",
         title="Students flagged by the engagement scan",

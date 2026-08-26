@@ -46,9 +46,12 @@ class StaffDerivedState:
     # Operational reads.
     attention: JsonDict | None = None
     queue: JsonDict | None = None
+    staff_members: list[JsonDict] = field(default_factory=list)
     briefing: JsonDict | None = None
     work_item: JsonDict | None = None
     inquiries: list[JsonDict] = field(default_factory=list)
+    inquiry_counts: JsonDict | None = None
+    oldest_awaiting_reply: JsonDict | None = None
     inquiry_thread: JsonDict | None = None
     guidance: JsonDict | None = None
     action_rules: list[JsonDict] = field(default_factory=list)
@@ -159,6 +162,12 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     if queue:
         state.queue = dict(queue)
 
+    staff_lookup = reads.get("getStaffMember")
+    if staff_lookup:
+        state.staff_members = [
+            dict(_mapping(item)) for item in _sequence(staff_lookup.get("matches"))
+        ]
+
     briefing = reads.get("getMorningBriefing")
     if briefing:
         state.briefing = dict(briefing)
@@ -170,6 +179,12 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     inquiries = reads.get("getInquiries")
     if inquiries:
         state.inquiries = [dict(item) for item in _items(inquiries)]
+        counts = inquiries.get("counts")
+        if isinstance(counts, Mapping):
+            state.inquiry_counts = dict(counts)
+        oldest = inquiries.get("oldestAwaitingFirstReply")
+        if isinstance(oldest, Mapping):
+            state.oldest_awaiting_reply = dict(oldest)
 
     thread = reads.get("getInquiryThread")
     if thread:
