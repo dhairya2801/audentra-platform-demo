@@ -15,7 +15,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from audentra.integrations.staff_assistant.normalize import NormalizedStaffRequest
+from audentra.integrations.staff_assistant.entities import EntityResolution
+from audentra.integrations.staff_assistant.normalize import (
+    NormalizedStaffRequest,
+    normalize_staff_request,
+)
 from audentra.integrations.staff_assistant.scope import (
     has_singular_student_reference,
     is_globally_scoped,
@@ -47,15 +51,42 @@ STAFF_REQUEST_TYPES = (
     "attention_ranking",
     "recommendation",
     "work_queue",
-    "staff_workload",
     "work_item_detail",
     "inquiries",
     "playbook_lookup",
     "action_rules",
     "mailbox_read",
     "daily_briefing",
+    # Staff-aware intents: about a colleague, about the signed-in member,
+    # about a team or department, or an aggregate over the queue/inquiries.
+    "staff_profile",
+    "staff_workload",
+    "staff_availability",
+    "staff_caseload",
+    "staff_appointments",
+    "staff_comparison",
+    "my_work",
+    "my_profile",
+    "team_overview",
+    "department_operations",
+    "queue_aggregate",
+    "inquiry_aggregate",
+    "staff_directory",
+    "not_found",
     "general_question",
     "unsupported_or_out_of_scope",
+)
+
+# Intents that cannot be answered without a resolved staff referent.
+STAFF_REQUIRED_REQUEST_TYPES = frozenset(
+    {
+        "staff_profile",
+        "staff_workload",
+        "staff_availability",
+        "staff_caseload",
+        "staff_appointments",
+        "staff_comparison",
+    }
 )
 
 # Intents that cannot be answered without a resolved student referent.
@@ -97,6 +128,10 @@ class StaffClassification:
     # separate guess made later.
     cohort_filter: Mapping[str, Any] | None = None
     cohort_group_by: str | None = None
+    # Filters for an *additional* intent in a compound question, keyed by
+    # request type ("how many items are unassigned and how many inquiries are
+    # awaiting a reply" carries one filter set per clause).
+    additional_filters: Mapping[str, Mapping[str, Any]] | None = None
 
 
 # --- cohort recognition -----------------------------------------------------
@@ -105,55 +140,6 @@ class StaffClassification:
 # students <predicate>"). Recognising them deterministically keeps the
 # capability working with no model in the loop, and gives the model planner a
 # correct baseline to improve on rather than invent from.
-
-_STAFF_NOUN = (
-    r"(?:staff(?: members?)?|advis[eo]rs?|counsel(?:l)?ors?|evaluators?|coordinators?|"
-    r"specialists?|colleagues?|team(?: members?)?|people|owners?|assignees?|dsos?|offices?|"
-    r"departments?|components?)"
-)
-_STAFF_WORKLOAD = re.compile(
-    rf"\b(?:which|who|what|how many)\b.{{0,40}}\b{_STAFF_NOUN}\b.{{0,60}}"
-    r"\b(?:most|overdue|behind|overloaded|over(?: their)? cap|caseload|capacity|workload|"
-    r"backlog|stale|on leave|departed|left|away|vacation|available|spare|cover)\b"
-    r"|\b(?:is|are|was)\b \w+(?: \w+)? (?:on leave|away|available|out|off|overloaded|over cap|"
-    r"behind|falling behind|still (?:here|with us|employed|around))\b"
-    r"|\b(?:caseload|capacity|workload|availability) (?:of|for)\b"
-    r"|\bwho (?:owns|has|carries) the most\b|\bwho is (?:behind|falling behind|overloaded)\b"
-    r"|\b(?:staff|advis[eo]r|counsel(?:l)?or) (?:capacity|workload|coverage|availability)\b"
-    rf"|\b(?:on leave|departed|left the university|away this week)\b.{{0,40}}\b{_STAFF_NOUN}\b"
-    rf"|\b{_STAFF_NOUN}\b.{{0,40}}\b(?:on leave|departed|left the university|away this week)\b"
-    r"|\bstudents? (?:does|do|did) \w+(?: \w+)? (?:advise|own|carry|cover|handle|have|manage)\b"
-    r"|\b\w+ \w+'s (?:work items?|tasks?|queue|items?|cases?|board|caseload|advisees|students|"
-    r"calendar|availability|next (?:open|free)|open slots?|workload|backlog)\b"
-    r"|\bnext (?:open|free|available) (?:advising |appointment )?slot\b",
-    re.IGNORECASE,
-)
-_STAFF_STALE_LANGUAGE = re.compile(
-    r"more than a week|for weeks|stale|untouched|not (?:been )?touched|sitting in progress|"
-    r"in progress for|no update|hasn't moved|has not moved",
-    re.IGNORECASE,
-)
-# "How many students does Elena advise?" is about Elena, however it starts.
-_STAFF_PERSON_QUESTION = re.compile(
-    r"\bstudents? (?:does|do|did) \w+(?: \w+)? (?:advise|own|carry|cover|handle|have|manage)\b"
-    r"|\b\w+ \w+'s (?:caseload|advisees|students|calendar|availability|workload|backlog)\b",
-    re.IGNORECASE,
-)
-# "Which students ..." is never a staff question, even when it mentions advisers.
-_COHORT_SUBJECT_ONLY = re.compile(
-    r"^\s*(?:which|how many|list|show|find)\b[^?]{0,30}\b(?:students?|applicants?|admits?)\b",
-    re.IGNORECASE,
-)
-
-_INQUIRY_STATE = re.compile(
-    r"\b(?:student |support |open |unanswered )?(?:requests?|inquir(?:y|ies)|tickets?|"
-    r"conversations?|messages?)\b.{0,60}\b(?:await|waiting|without|no|unanswered|first)"
-    r".{0,24}\b(?:repl(?:y|ies|ied)|respon(?:se|ded)|answer)"
-    r"|\bunanswered (?:student )?(?:requests?|inquir(?:y|ies)|messages?)\b"
-    r"|\b(?:requests?|inquir(?:y|ies)|messages?) (?:are |that are |still |remain )?unanswered\b"
-    r"|\b(?:requests?|inquir(?:y|ies)) (?:past|over|beyond) (?:the )?(?:sla|24 ?h)",
-    re.IGNORECASE,
-)
 
 _COHORT_SUBJECT = re.compile(
     r"\b(?:students?|applicants?|admits?|admitted|cohort|class|population|people|roster"
@@ -166,7 +152,8 @@ _COHORT_LIST_INTENT = re.compile(
     re.IGNORECASE,
 )
 _COHORT_COUNT_INTENT = re.compile(
-    r"\bhow many\b|\bhow (?:big|large)\b|\bwhat (?:is|'s) the (?:number|count|breakdown"
+    r"^\s*count\b|\bcount (?:the|all|of|up)\b|\bnumber of\b|\btally\b"
+    r"|\bhow many\b|\bhow (?:big|large)\b|\bwhat (?:is|'s) the (?:number|count|breakdown"
     r"|split|size|total)\b"
     r"|\bcount of\b|\bmost common\b|\bbreak\s?down\b|\bdistribution\b"
     r"|\bsplit (?:of|by|the)\b|\bwhat percentage\b|\bwhat share\b"
@@ -209,7 +196,8 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
             r"|\bstill (?:owe|owing|to pay|need to pay)\b"
             r"(?![^.?]{0,32}\b(?:transcript|immuni\w*|document|record|form|worksheet"
             r"|verification|orientation|housing)\b)"
-            r"|\bnon[- ]?depositors?\b|\bundeposited\b",
+            r"|\bnon[- ]?depositors?\b|\bundeposited\b"
+            r"|\b(?:haven'?t|have not|hasn'?t|has not|not|never) deposited\b",
             re.I,
         ),
         {"depositState": "unpaid"},
@@ -218,7 +206,7 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
         re.compile(
             r"\b(?:paid|posted|settled)\b[^.?]{0,20}\bdeposits?\b"
             r"|\bdeposit(?:ed)?s?\b[^.?]{0,16}\b(?:paid|posted)\b"
-            r"|\bdeposited students\b",
+            r"|(?<!not )(?<!never )(?<!n't )\bdeposited\b",
             re.I,
         ),
         {"depositState": "paid"},
@@ -269,6 +257,36 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
             re.I,
         ),
         {"housingState": "blocked"},
+    ),
+    (
+        re.compile(
+            r"\b(?:no|without an?|lack(?:ing)? an?|not (?:been )?assigned an?|don'?t have an?"
+            r"|have no|has no|missing an?) (?:primary |academic |assigned )?advis(?:er|or)s?\b"
+            r"|\bno advis(?:er|or) at all\b|\bunassigned advis(?:er|or)\b|\badvis(?:er|or)less\b"
+            r"|\b(?:don'?t|do not|doesn'?t|does not|without) (?:have )?(?:anyone|anybody|someone"
+            r"|an? advis(?:er|or)) advising\b|\bno ?(?:one|body) advising\b|\bunadvised\b"
+            r"|\bnot (?:yet )?(?:been )?assigned (?:to )?(?:an? )?advis(?:er|or)\b",
+            re.I,
+        ),
+        {"adviserState": "none"},
+    ),
+    (
+        re.compile(
+            r"\badvis(?:er|or)s? (?:who|that) (?:has |have |had )?(?:left|departed|resigned|quit)\b"
+            r"|\badvis(?:er|or)s? (?:who|that) (?:is|are) no longer\b|\bdeparted advis(?:er|or)\b"
+            r"|\badvis(?:er|or)s? (?:who|that) (?:has|have) (?:left|departed)\b"
+            r"|\bformer advis(?:er|or)\b|\badvis(?:er|or) (?:has |who )?left the university\b",
+            re.I,
+        ),
+        {"adviserState": "departed"},
+    ),
+    (
+        re.compile(
+            r"\badvis(?:er|or)s? (?:who|that) (?:is|are) (?:currently |out )?on leave\b"
+            r"|\badvis(?:er|or)s? (?:currently )?on leave\b|\bon[- ]leave advis(?:er|or)\b",
+            re.I,
+        ),
+        {"adviserState": "on_leave"},
     ),
     (re.compile(r"\binternational\b", re.I), {"residencyStatus": "international"}),
     (re.compile(r"\bdomestic\b|\bin[- ]state\b", re.I), {"residencyStatus": "domestic"}),
@@ -371,11 +389,22 @@ def classify_cohort_question(text: str) -> StaffClassification | None:
         # and present it as the answer, which is the worst failure this
         # classifier can produce.
         filters = {"hasOpenWorkItem": True}
+    if not filters and _OPEN_WORK_PHRASE.search(text):
+        filters = {"hasOpenWorkItem": True}
+    if not filters and counting and _UNRECOGNISED_QUALIFIER.search(text):
+        # "How many students <something we did not understand>?" must not
+        # become the roster size. Leave it to the model planner (or an honest
+        # "I couldn't work out that filter") rather than answering 2,576.
+        return None
     group_by = next(
         (dimension for pattern, dimension in _COHORT_GROUP_PHRASES if pattern.search(text)),
         None,
     )
     if counting:
+        if group_by is None and filters.get("adviserState") in {"departed", "on_leave"}:
+            # "students whose adviser has left" — the adviser's name is the
+            # useful breakdown, not the offer status.
+            group_by = "primary_adviser"
         return StaffClassification(
             "cohort_aggregate",
             0.95,
@@ -389,6 +418,17 @@ def classify_cohort_question(text: str) -> StaffClassification | None:
         return None
     return StaffClassification("cohort_search", 0.95, cohort_filter=filters)
 
+
+_OPEN_WORK_PHRASE = re.compile(
+    r"\bopen (?:action center |action |staff )?work\b|\bopen (?:work )?items?\b", re.I
+)
+# A count question whose subject carries a qualifier the predicate table did
+# not recognise: a relative clause or a preposition after "students".
+_UNRECOGNISED_QUALIFIER = re.compile(
+    r"\bstudents?\b\s+(?:who|that|whose|with|without|in|from|assigned|advised|on|under|needing"
+    r"|does|do|did|is|are|has|have)\b",
+    re.I,
+)
 
 _GREETING_ONLY = re.compile(
     r"^(?:hi|hiya|hello|hey|yo|good (?:morning|afternoon|evening)|howdy|greetings)"
@@ -422,6 +462,15 @@ _UNSUPPORTED_METRICS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "recovery_likelihood",
         re.compile(r"\brecovery (?:likelihood|probability|score|chance)\b", re.I),
+    ),
+    (
+        "staff_performance_rating",
+        re.compile(
+            r"\brate\b.{0,40}\bperformance\b|\bperformance (?:rating|score|review|grade)\b"
+            r"|\bout of (?:ten|10|five|5|100)\b|\bsatisfaction (?:score|rating|survey)s?\b"
+            r"|\brank (?:the |our |my )?(?:advis(?:er|or)s|staff|counsel(?:l)?ors|team) by\b",
+            re.I,
+        ),
     ),
     ("risk_score", re.compile(r"\brisk (?:score|band|rating|model)\b|\bpropensity\b", re.I)),
     (
@@ -615,6 +664,39 @@ _OPERATIONAL_CLAUSE_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\bhow many students\b|\bstudents (?:do|does) (?:they|it|these)\b", re.I),
     ),
     ("attention_ranking", re.compile(r"\bwho should i\b|\bneeds? attention\b|\bat risk\b", re.I)),
+    (
+        "inquiry_aggregate",
+        re.compile(
+            r"\binquir(?:y|ies)\b|\b(?:student |support )?requests?\b.{0,24}\b(?:awaiting|reply"
+            r"|unanswered)\b",
+            re.I,
+        ),
+    ),
+    (
+        "queue_aggregate",
+        re.compile(
+            r"\bhow many (?:open |unassigned |urgent |overdue )?(?:work )?(?:items|tasks|cases)\b"
+            r"|\bunassigned\b",
+            re.I,
+        ),
+    ),
+)
+
+
+_STAFF_CLAUSE_INTENTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "staff_caseload",
+        re.compile(r"\badvis(?:e|es|ees?)\b|\bcaseload\b|\bstudents (?:does|do)\b|\bcap\b", re.I),
+    ),
+    (
+        "staff_workload",
+        re.compile(
+            r"\b(?:open |overdue |urgent )?(?:work )?items?\b|\bqueue\b|\bworkload\b|\bbacklog\b",
+            re.I,
+        ),
+    ),
+    ("staff_availability", re.compile(r"\bslots?\b|\bavailab\w*\b|\bbook\w*\b", re.I)),
+    ("staff_appointments", re.compile(r"\bappointments?\b|\bcalendar\b", re.I)),
 )
 
 
@@ -626,6 +708,7 @@ def detect_additional_intents(
     from audentra.integrations.staff_assistant.scope import (
         COHORT_SCOPE,
         QUEUE_SCOPE,
+        STAFF_SCOPE,
         STUDENT_SCOPE,
         scope_of,
     )
@@ -635,6 +718,8 @@ def detect_additional_intents(
         table = _CLAUSE_INTENTS
     elif scope in (COHORT_SCOPE, QUEUE_SCOPE):
         table = _OPERATIONAL_CLAUSE_INTENTS
+    elif scope is STAFF_SCOPE and primary.request_type in STAFF_REQUIRED_REQUEST_TYPES:
+        table = _STAFF_CLAUSE_INTENTS
     else:
         return ()
     text = request.comparable_full_text
@@ -697,10 +782,15 @@ def classify_cohort_refinement(request: NormalizedStaffRequest) -> StaffClassifi
     return None
 
 
-def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassification | None:
-    classification = _classify_primary(request)
+def classify_staff_request(
+    request: NormalizedStaffRequest, entities: EntityResolution | None = None
+) -> StaffClassification | None:
+    classification = _classify_primary(request, entities)
     if classification is None:
         return None
+    if classification.additional_request_types:
+        # The compound classifier already split the clauses.
+        return classification
     additional = detect_additional_intents(request, classification)
     if not additional:
         return classification
@@ -721,10 +811,13 @@ def classify_staff_request(request: NormalizedStaffRequest) -> StaffClassificati
         additional_request_types=additional,
         cohort_filter=cohort_filter,
         cohort_group_by=classification.cohort_group_by,
+        additional_filters=classification.additional_filters,
     )
 
 
-def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | None:
+def _classify_primary(
+    request: NormalizedStaffRequest, entities: EntityResolution | None = None
+) -> StaffClassification | None:
     text = request.comparable_text
     raw = request.text
 
@@ -763,16 +856,6 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
     if request.action_kind is not None:
         return StaffClassification("action_request", 1, reference=request.action_kind)
 
-    # Questions about *staff* — who is behind, on leave, over cap, or absent —
-    # are answered from the briefing's capacity signals and the queue's
-    # per-owner rollup, never by resolving a staff name against the roster.
-    if _STAFF_WORKLOAD.search(text) and (
-        _STAFF_PERSON_QUESTION.search(text) or not _COHORT_SUBJECT_ONLY.search(text)
-    ):
-        name = request.candidate_student_name or ""
-        flags = "|stale" if _STAFF_STALE_LANGUAGE.search(text) else ""
-        return StaffClassification("staff_workload", 0.96, reference=f"staff:{name}{flags}")
-
     ranking_language = bool(_RANKING_LANGUAGE.search(text))
     for reference, pattern in _UNSUPPORTED_METRICS:
         if pattern.search(text):
@@ -783,6 +866,15 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
             if ranking_language and reference in _RANKABLE_METRICS:
                 return StaffClassification("attention_ranking", 0.97, reference=reference)
             return StaffClassification("unsupported_metric", 0.97, reference=reference)
+
+    # Staff-aware routing: a colleague, the signed-in member, a team, a
+    # department, or an aggregate over the queue/inquiries. Settled before the
+    # ranking, Action Center and cohort branches because those branches read
+    # the student roster and the board, which is exactly where a staff
+    # question must never land.
+    staff_scope = _classify_staff_scope(request, entities, text)
+    if staff_scope is not None:
+        return staff_scope
 
     # Ranking / attention questions (never phrased as scores by us).
     if ranking_language:
@@ -822,12 +914,6 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
     # Cohort questions are settled before the student-referent branches: a
     # question about a *group* must not be answered by resolving one student
     # who happens to match a word in it.
-    # "How many student requests are awaiting a first reply?" is about the
-    # support inbox, not the roster: "student" must not turn it into a cohort
-    # count of every student on the roster.
-    if _INQUIRY_STATE.search(text):
-        return StaffClassification("inquiries", 0.95)
-
     cohort = classify_cohort_question(text)
     if cohort is not None:
         return cohort
@@ -928,7 +1014,13 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
 
     if re.search(
         r"\bwho (?:owns?|is assigned|is responsible|is working|handles?)\b|\bownership\b"
-        r"|\bassigned to (?:whom|who)\b|\bwhose (?:case|student)\b|\badvisor\b|\bcaseload\b",
+        r"|\bassigned to (?:whom|who)\b|\bwhose (?:case|student)\b|\badvis[eo]rs?\b|\bcaseload\b"
+        r"|\bcounsel(?:l)?ors?\b|\bdso\b|\bwho (?:is|are) (?:looking after|responsible for"
+        r"|assigned)\b"
+        r"|\bbook(?:ing)? an? (?:advising )?(?:appointment|slot|meeting)\b"
+        r"|\bfind an? (?:advising |open )?slot\b|\bcan(?:'t|not)? (?:\w+ )?(?:book|find|get) an?\b"
+        r"|\badvising slot\b|\blooks? after\b|\bwho (?:handles|is handling|takes care of)\b"
+        r"|\badvising side\b|\bwho (?:supports|works with)\b|\bpoint of contact\b",
         text,
     ):
         return StaffClassification("student_ownership", 0.95)
@@ -986,7 +1078,13 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
     if _HOUSING_ENTITY.search(text):
         return StaffClassification("student_housing", 0.9)
 
-    if re.search(r"\bappointments?\b|\badvising session\b|\bmeeting(?:s)? (?:with|booked)\b", text):
+    if re.search(
+        r"\bappointments?\b|\badvising session\b|\bmeeting(?:s)? (?:with|booked|on)\b"
+        r"|\bwho (?:is|are) \w+(?: \w+)? meeting\b|\bmeeting on\b|\bbooked (?:for|on|with|in)\b"
+        r"|\b(?:see|seeing|meet|meeting) (?:anyone|someone|anybody)\b|\bscheduled to (?:see|meet)\b"
+        r"|\bcoming in\b|\bbooked in\b",
+        text,
+    ):
         return StaffClassification("student_appointments", 0.9)
 
     if has_referent_language and re.search(
@@ -1013,6 +1111,705 @@ def _classify_primary(request: NormalizedStaffRequest) -> StaffClassification | 
         return StaffClassification("student_overview", 0.7)
 
     return None
+
+
+# --- staff scope ---------------------------------------------------------------
+#
+# A question whose subject is a person on staff, the signed-in member, a team
+# or a department. The facet (workload / caseload / availability /
+# appointments / profile) is read from the turn's own words; identity comes
+# from the resolver, never from the classifier.
+
+_FACET_AVAILABILITY = re.compile(
+    r"\bslots?\b|\bavailab\w*\b|\bavailable\b|\bbook(?:able|ed|ing)?\b|\bopen(?:ing)?s? (?:in"
+    r"|on) (?:the|her|his|their)? ?(?:calendar|schedule)\b"
+    r"|\b(?:which|what) days\b|\bhours\b|\bon leave\b|\bvacation\b|\bout (?:this|next) week\b"
+    r"|\bout of (?:the )?office\b|\baway\b|\bfree (?:this|next|tomorrow|today)\b"
+    r"|\bcan (?:a student|students|someone|i) (?:see|book|meet)\b"
+    r"|\bstill here\b|\bstill (?:with|at) (?:the university|us)\b"
+    r"|\banything open\b|\bopenings?\b|\bopen (?:time|times)\b|\bearliest\b|\bsoonest\b"
+    r"|\bget in with\b|\bget in to see\b|\bnext (?:time|opening|availability)\b",
+    re.I,
+)
+_FACET_APPOINTMENTS = re.compile(
+    r"\bappointments?\b|\bcalendar\b|\bmeetings?\b|\bclosed? out\b|\boutcome\b|\bno[- ]shows?\b",
+    re.I,
+)
+_FACET_CASELOAD = re.compile(
+    r"\badvis(?:e|es|ing|ees?)\b|\bcaseload\b|\bcap\b|\bstudents (?:does|do|did|is|are|has|have)\b"
+    r"|\b(?:her|his|their) students\b|\bstudents? (?:assigned|belong)\b|\btake over\b"
+    r"|\btook (?:over|on)\b"
+    r"|\babsorbed\b|\bstill (?:have|has) students\b|\bassigned to (?:him|her|them)\b"
+    r"|\bhow many students\b"
+    r"|\bof [A-Z][a-z]+(?: [A-Z][a-z]+)?'s (?:students|advisees)\b|\bpaid their deposit\b"
+    r"|\bcompleted (?:their )?advising\b",
+    re.I,
+)
+_FACET_WORKLOAD = re.compile(
+    r"\bwork items?\b|\bitems?\b|\btasks?\b|\bcases?\b|\bqueue\b|\bplate\b|\bworkload\b|\bbacklog\b"
+    r"|\boverdue\b|\bin progress\b|\bstale\b|\bopen work\b|\bwork on\b|\bstart with\b"
+    r"|\bwork first\b"
+    r"|\bbehind\b|\bfalling behind\b|\bdoing on\b",
+    re.I,
+)
+_FACET_PROFILE = re.compile(
+    r"\bwho is\b|\btell me about\b|\bmanager\b|\breports? to\b|\bdirect reports?\b|\btitle\b"
+    r"|\brole\b"
+    r"|\bwhat does\b|\bprofile\b|\bpull up\b|\blook ?up\b|\bstatus\b|\bsummar\w*\b|\bworkload\b",
+    re.I,
+)
+_COMPARISON = re.compile(
+    r"\bcompare\b|\bcomparison\b|\bversus\b|\bvs\.?\b|\bwho has (?:more|fewer|the (?:bigger|larger"
+    r"|smaller|heavier|lighter))\b"
+    r"|\b(?:more|fewer|bigger|larger|heavier|lighter) .{0,40}\b(?:than|or)\b|\bside by side\b"
+    r"|\bbetween\b",
+    re.I,
+)
+_TEAM_LANGUAGE = re.compile(
+    r"\bmy (?:team|direct reports|reports|people|advisers|advisors|staff|group|unit)\b"
+    r"|\bwho reports to me\b"
+    r"|\bthe (?:advising|admissions|registrar|housing|financial aid|aid) team\b|\badvising team\b"
+    r"|\b(?:which|what|any|the|all|how many) (?:of (?:my|the|our) )?(?:active |busy "
+    r"|available )?(?:advis(?:er|or)s?|counsel(?:l)?ors?|evaluators?|coordinators?|specialists?"
+    r"|staff members?|team members?|people)\b"
+    r"|\banyone (?:on|in) (?:the|my|our) (?:team|department|office)\b|\bwho on (?:the|my"
+    r"|our) (?:team|department|office)\b"
+    r"|\bthe team'?s?\b|\bteam'?s capacity\b|\bspare capacity\b|\bover (?:their"
+    r"|the) (?:caseload )?cap\b",
+    re.I,
+)
+_DEPARTMENT_OPS = re.compile(
+    r"\bsituation\b|\bdoing\b|\bhow is\b|\bhow'?s\b|\bsummar\w*\b|\bstatus\b|\boverview\b"
+    r"|\bpicture\b"
+    r"|\bwho in\b|\bwho is out\b|\bout this week\b|\bon leave\b|\bdeparted\b|\bstaff\b|\bpeople\b"
+    r"|\bwork in\b"
+    r"|\brisk\b|\bbiggest\b|\bworried\b|\bconcern\w*\b|\bcatch me up\b|\bhow many staff\b|\bteam\b",
+    re.I,
+)
+_QUEUE_COUNT = re.compile(
+    r"\bhow (?:many|much)\b|\bcount\b|\bnumber of\b|\bhow big\b|\btotal\b|\bare there (?:any"
+    r"|still)\b|\bany\b.{0,24}\b(?:left|remaining|open)\b"
+    r"|\bwhich (?:component|department|team|office|staff|person|people|assignee|owner|member)s?\b"
+    r"|\bwho (?:has|have|owns?|holds?)\b"
+    r"|\bmost (?:overdue|unassigned|open|urgent|work|items)\b|\bbreak\s?down\b|\bby (?:component"
+    r"|department|assignee|owner|priority|status)\b",
+    re.I,
+)
+_QUEUE_NOUN = re.compile(
+    r"\b(?:work )?items?\b|\btasks?\b|\bcases?\b|\btickets?\b|\breviews?\b|\bfollow[- ]?ups?\b"
+    r"|\bwork\b"
+    r"|\baction cent(?:er|re)\b|\bqueue\b|\bboard\b|\bbacklog\b",
+    re.I,
+)
+_INQUIRY_NOUN = re.compile(
+    r"\binquir(?:y|ies)\b|\b(?:student |support |help )?requests?\b(?!\s+(?:to|for) )"
+    r"|\bsupport (?:cases?|tickets?|threads?)\b"
+    r"|\bmessages? from students\b|\bunanswered (?:messages?|questions?)\b|\bstudent questions?\b"
+    r"|\bhelp requests?\b|\bwaiting (?:the )?longest\b|\b(?:answer|reply to"
+    r"|respond to) (?:them|him|her)\b"
+    r"|\bwaiting for (?:an answer|a reply|a response|someone)\b|\bwritten (?:in|to us)\b",
+    re.I,
+)
+
+
+_SECOND_ASK = re.compile(r"(?:,|;|\band\b)\s*(?:how many|how much|which|what)\b.*$", re.I)
+
+
+def _queue_filters_from_text(text: str, entities: EntityResolution | None) -> dict[str, Any]:
+    # "How many open items … and how many are overdue?" — the second ask is
+    # answered by the summary's own overdue count; it must not narrow the
+    # first.
+    if re.search(r"\bhow many\b.*(?:,|;|\band\b)\s*how many\b", text, re.I):
+        text = _SECOND_ASK.sub("", text)
+    filters: dict[str, Any] = {}
+    if re.search(
+        r"\bunassigned\b|\bno owner\b|\bnobody owns\b|\bno one owns\b|\bwithout an? (?:owner"
+        r"|assignee)\b|\bunowned\b",
+        text,
+        re.I,
+    ):
+        filters["ownership"] = "unassigned"
+    if re.search(r"\burgent\b", text, re.I):
+        filters["priority"] = "urgent"
+    if re.search(r"\bescalated\b", text, re.I):
+        filters["escalated"] = True
+    if re.search(
+        r"\boverdue\b|\bpast due\b|\bpast (?:their |the )?(?:deadline|sla|due date)\b|\blate\b",
+        text,
+        re.I,
+    ):
+        filters["dueWindow"] = "overdue"
+    elif re.search(r"\bdue today\b|\btoday'?s deadlines?\b", text, re.I):
+        filters["dueWindow"] = "today"
+    elif re.search(
+        r"\bdue (?:this|next) week\b|\bdue in the next (?:seven|7) days\b|\bnext (?:seven"
+        r"|7) days\b|\bthis week\b|\bcoming (?:up|due)\b",
+        text,
+        re.I,
+    ):
+        filters["dueWindow"] = "seven_days"
+    stale = re.search(
+        r"\bin progress\b.{0,60}\b(?:more than|over|longer than|for)\s+(?:a|an|\d+)\s*(week|weeks"
+        r"|day|days|month)\b",
+        text,
+        re.I,
+    )
+    if stale:
+        number = re.search(r"\b(\d+)\b", stale.group(0))
+        unit = stale.group(1).lower()
+        count = int(number.group(1)) if number else 1
+        days = count * (7 if unit.startswith("week") else 30 if unit.startswith("month") else 1)
+        filters["inProgressOverDays"] = days
+    elif re.search(
+        r"\bstale\b|\bno update\b|\bnot (?:been )?(?:touched|updated)\b|\buntouched\b"
+        r"|\bsitting in progress\b",
+        text,
+        re.I,
+    ):
+        filters["stale"] = True
+    if re.search(r"\bdocument reviews?\b", text, re.I):
+        filters["workType"] = "document_review"
+    topic = _queue_topic(text.lower())
+    if topic and not filters.get("workType"):
+        filters["topic"] = topic
+    if re.search(r"\bclosed\b|\bdone\b|\bcompleted\b", text, re.I) and not re.search(
+        r"\bopen\b", text, re.I
+    ):
+        filters["status"] = "closed"
+    if entities is not None and entities.primary_department is not None:
+        filters["component"] = entities.primary_department.name
+    group_by = None
+    if re.search(
+        r"\bwhich (?:component|department|team|office|unit)s?\b|\bby (?:component|department"
+        r"|team)\b|\bper (?:component|department|team)\b|\b(?:component|department|team) (?:has"
+        r"|with) the most\b",
+        text,
+        re.I,
+    ):
+        group_by = "component"
+    elif re.search(
+        r"\bwhich (?:staff|person|people|assignee|owner|member|adviser|advisor|counsel"
+        r"|evaluator)\b|\bwho (?:has|have|owns?|holds?)\b|\bby (?:assignee|owner|staff"
+        r"|person)\b|\bper (?:assignee|owner|staff|person)\b|\bstaff members? (?:with|have|has)\b",
+        text,
+        re.I,
+    ):
+        group_by = "assignee"
+    elif re.search(r"\bby priority\b", text, re.I):
+        group_by = "priority"
+    elif re.search(r"\bby status\b", text, re.I):
+        group_by = "status"
+    if group_by:
+        filters["groupBy"] = group_by
+    return filters
+
+
+def _inquiry_filters_from_text(text: str) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    if re.search(
+        r"\bawaiting\b|\bunanswered\b|\bfirst repl\w*\b|\bnot (?:yet )?(?:been )?(?:answered"
+        r"|replied|responded)\b|\bno (?:reply|response)\b|\bhaven'?t (?:been )?(?:answered|replied"
+        r"|responded)\b|\bwaiting for (?:a|an|our|their first) (?:reply|response"
+        r"|answer)\b|\bnew\b|\bwithout a reply\b|\bstill waiting\b",
+        text,
+        re.I,
+    ):
+        filters["status"] = "awaiting_first_reply"
+    if re.search(r"\bwaiting on (?:the )?students?\b", text, re.I):
+        filters["status"] = "waiting_on_student"
+    if re.search(
+        r"\bunassigned\b|\bnobody assigned\b|\bno one assigned\b|\bno assignee\b"
+        r"|\bwithout an? (?:owner|assignee)\b",
+        text,
+        re.I,
+    ):
+        filters["ownership"] = "unassigned"
+    if re.search(r"\bmine\b|\bmy\b|\bassigned to me\b", text, re.I):
+        filters["ownership"] = "mine"
+    if re.search(r"\burgent\b", text, re.I):
+        filters["priority"] = "urgent"
+    hours = re.search(
+        r"\b(?:more than|over|older than|past)\s+(\d+)\s*(hours?|days?)\b", text, re.I
+    )
+    if hours:
+        n = int(hours.group(1))
+        filters["olderThanHours"] = n * (24 if hours.group(2).lower().startswith("day") else 1)
+    elif re.search(
+        r"\bover a day\b|\bmore than a day\b|\bpast (?:the )?24[- ]hour\b|\b24 ?h\b", text, re.I
+    ):
+        filters["olderThanHours"] = 24
+    if re.search(
+        r"\bmostly about\b|\bby topic\b|\bwhat (?:are|were) .* about\b|\btopics?\b|\bcategories\b",
+        text,
+        re.I,
+    ):
+        filters["groupBy"] = "topic"
+    elif re.search(
+        r"\bby assignee\b|\bwho (?:has|is handling)\b|\bper (?:person|staff)\b", text, re.I
+    ):
+        filters["groupBy"] = "assignee"
+    if re.search(r"\boldest\b|\blongest\b|\bwaiting (?:the )?longest\b", text, re.I):
+        filters["sort"] = "oldest"
+    return filters
+
+
+def _caseload_filters_from_text(text: str) -> dict[str, Any]:
+    filters: dict[str, Any] = {}
+    if re.search(
+        r"\b(?:haven'?t|have not|hasn'?t|has not|not|never|still need to|yet to) (?:yet )?"
+        r"(?:completed|done|had|finished|attended)\b[^.?]{0,20}\badvising\b"
+        r"|\badvising (?:is )?(?:not |in)complete\b|\bwithout (?:an? )?advising\b"
+        r"|\bno advising (?:appointment|meeting)\b",
+        text,
+        re.I,
+    ):
+        filters["advisingStatus"] = "not_completed"
+    if re.search(
+        r"\bno (?:upcoming |advising |future )?(?:appointment|meeting|booking)s?(?: booked"
+        r"| scheduled)?\b"
+        r"|\bnothing (?:booked|scheduled)\b|\bnot (?:yet )?booked\b"
+        r"|\bwithout (?:an? )?(?:upcoming |advising )?(?:appointment|booking)\b"
+        r"|\bno next appointment\b",
+        text,
+        re.I,
+    ):
+        filters["advisingStatus"] = "no_booking"
+    if (
+        re.search(r"\bcompleted (?:their )?advising\b|\badvising (?:is )?complete\b", text, re.I)
+        and "advisingStatus" not in filters
+    ):
+        filters["advisingStatus"] = "completed"
+    if re.search(r"\bmissed\b|\bno[- ]show", text, re.I) and "advisingStatus" not in filters:
+        filters["advisingStatus"] = "missed"
+    if re.search(
+        r"\b(?:haven'?t|have not|hasn'?t|has not|not|no|without|unpaid|owe"
+        r"|owing)\b[^.?]{0,20}\bdeposits?\b"
+        r"|\bdeposits?\b[^.?]{0,16}\b(?:unpaid|outstanding|not paid)\b",
+        text,
+        re.I,
+    ):
+        filters["depositState"] = "unpaid"
+    elif re.search(
+        r"\bpaid (?:their |the )?deposit\b|\bdeposited\b|\bdeposit (?:is )?paid\b", text, re.I
+    ):
+        filters["depositState"] = "paid"
+    if re.search(
+        r"\boverdue (?:staff )?(?:work|items?|tasks?)\b|\bwith overdue\b|\bpast due\b", text, re.I
+    ):
+        filters["withOverdueWork"] = True
+    elif re.search(
+        r"\bopen (?:staff )?(?:work|items?|tasks?)\b|\bin the action cent(?:er|re)\b|\bwith open\b",
+        text,
+        re.I,
+    ):
+        filters["withOpenWork"] = True
+    return filters
+
+
+def _appointment_window_from_text(text: str) -> str | None:
+    if re.search(r"\bclosed? out\b|\boutcome\b|\bnever closed\b", text, re.I):
+        return "awaiting_outcome"
+    if re.search(r"\btoday\b|\bthis morning\b|\bthis afternoon\b", text, re.I):
+        return "today"
+    if re.search(r"\btomorrow\b", text, re.I):
+        return "tomorrow"
+    if re.search(
+        r"\btwo weeks\b|\b2 weeks\b|\bfortnight\b|\b14 days\b|\bnext couple of weeks\b", text, re.I
+    ):
+        return "two_weeks"
+    if re.search(r"\bpast week\b|\blast week\b|\blast (?:seven|7) days\b", text, re.I):
+        return "past_week"
+    if re.search(
+        r"\bthis week\b|\bnext (?:seven|7) days\b|\bnext week\b|\bcoming week\b|\bweek\b",
+        text,
+        re.I,
+    ):
+        return "week"
+    return None
+
+
+_POSSESSIVE_CASELOAD = re.compile(
+    r"[A-Z][a-z]+(?:'s|\u2019s)\s+(?:advisees|students|caseload)\b"
+    r"|\bof [A-Z][a-z]+(?: [A-Z][a-z]+)?(?:'s|\u2019s) (?:advisees|students)\b",
+)
+
+
+def _staff_facet(text: str, staff_count: int = 1) -> str:
+    """Which facet of a staff member the turn asks about."""
+
+    if staff_count >= 2 and _COMPARISON.search(text):
+        return "comparison"
+    if re.search(r"\bcompare\b|\bversus\b|\bvs\.?\b|\bside by side\b", text, re.I):
+        return "comparison"
+    if _POSSESSIVE_CASELOAD.search(text):
+        return "caseload"
+    if _FACET_AVAILABILITY.search(text):
+        return "availability"
+    if _FACET_CASELOAD.search(text):
+        return "caseload"
+    if _FACET_APPOINTMENTS.search(text):
+        return "appointments"
+    if _FACET_WORKLOAD.search(text):
+        return "workload"
+    return "profile"
+
+
+_FACET_REQUEST_TYPE = {
+    "comparison": "staff_comparison",
+    "availability": "staff_availability",
+    "caseload": "staff_caseload",
+    "appointments": "staff_appointments",
+    "workload": "staff_workload",
+    "profile": "staff_profile",
+}
+
+
+_ABSENCE_LANGUAGE = re.compile(
+    r"\baway\b|\bout (?:this|next|of the) (?:week|office)\b|\bon (?:vacation|leave|holiday)\b"
+    r"|\babsent\b|\boff (?:this|next) week\b|\bout sick\b|\bout today\b",
+    re.I,
+)
+
+_OPERATIONAL_ANAPHORA = re.compile(
+    r"\bof (?:those|them|these)\b|\bthose\b|\bthese\b|\bthem\b|\bthat (?:number|count|group|set)\b",
+    re.I,
+)
+
+
+def _inherit_operational_context(
+    request: NormalizedStaffRequest, entities: EntityResolution | None
+) -> StaffClassification | None:
+    """ "How many of those are overdue?" — the cohort is the previous turn's.
+
+    Deterministic: the prior user question is re-classified (no model, no
+    directory reads) and its queue/inquiry filters are carried into this
+    turn, with this turn's own qualifiers layered on top.
+    """
+
+    if not request.history or not _OPERATIONAL_ANAPHORA.search(request.text):
+        return None
+    if entities is not None and (entities.staff or entities.students):
+        return None
+    prior_question = next(
+        (item["content"] for item in reversed(request.history) if item["role"] == "user"),
+        None,
+    )
+    if not prior_question:
+        return None
+    prior_request = normalize_staff_request(prior_question)
+    prior_entities = EntityResolution(
+        text=prior_question,
+        self_reference=bool(re.search(r"\b(?:my|me|i)\b", prior_question, re.I)),
+    )
+    prior = _classify_staff_scope(prior_request, prior_entities, prior_request.comparable_text)
+    if prior is None or prior.request_type not in {
+        "queue_aggregate",
+        "my_work",
+        "inquiry_aggregate",
+        "work_queue",
+    }:
+        return None
+    raw = request.text
+    if prior.request_type == "inquiry_aggregate":
+        filters = dict(prior.cohort_filter or {})
+        filters.update(_inquiry_filters_from_text(raw))
+        return StaffClassification(
+            "inquiry_aggregate",
+            0.9,
+            source="operational_follow_up",
+            reference="inquiries",
+            cohort_filter=filters,
+        )
+    filters = dict(prior.cohort_filter or {})
+    if prior.request_type == "my_work" or prior_entities.self_reference:
+        filters.setdefault("ownership", "mine")
+    filters.pop("groupBy", None)
+    filters.update(_queue_filters_from_text(raw, None))
+    return StaffClassification(
+        "queue_aggregate",
+        0.9,
+        source="operational_follow_up",
+        reference="queue",
+        cohort_filter=filters,
+    )
+
+
+def _classify_staff_scope(
+    request: NormalizedStaffRequest, entities: EntityResolution | None, text: str
+) -> StaffClassification | None:
+    if entities is None:
+        return None
+    inherited = _inherit_operational_context(request, entities)
+    if inherited is not None:
+        return inherited
+    raw = request.text
+    staff = list(entities.staff)
+    department = entities.primary_department
+    explicit_person = bool(
+        staff or entities.students or any(a.reason != "not_found" for a in entities.ambiguities)
+    )
+    staff_ambiguous = any(
+        a.reason in {"several_staff", "staff_and_student"} for a in entities.ambiguities
+    )
+
+    # --- a named colleague ---------------------------------------------------
+    if staff:
+        facet = _staff_facet(raw, len(staff))
+        if (
+            len(staff) >= 2
+            and facet != "comparison"
+            and re.search(r"\bor\b|\band\b|\bthan\b", raw, re.I)
+        ):
+            facet = "comparison"
+        if facet == "comparison" and len(staff) == 1:
+            facet = "profile"
+        filters: dict[str, Any] = {}
+        if facet == "workload":
+            filters = _queue_filters_from_text(raw, None)
+        elif facet == "caseload":
+            filters = _caseload_filters_from_text(raw)
+        elif facet == "appointments":
+            window = _appointment_window_from_text(raw)
+            filters = {"window": window} if window else {}
+        return StaffClassification(
+            _FACET_REQUEST_TYPE[facet],
+            0.96,
+            reference=facet,
+            cohort_filter=filters or None,
+        )
+    if staff_ambiguous and not entities.students:
+        # The resolver could not decide between people; the pipeline asks.
+        facet = _staff_facet(raw)
+        return StaffClassification(_FACET_REQUEST_TYPE[facet], 0.9, reference=facet)
+
+    # --- grouped counts over the whole board ---------------------------------
+    # "Which staff members have the most overdue work?" ranks assignees across
+    # the tenant; it is a queue aggregate, not a question about my team.
+    if (
+        not explicit_person
+        and not entities.self_team
+        and not _ABSENCE_LANGUAGE.search(raw)
+        and _QUEUE_NOUN.search(raw)
+        and re.search(
+            r"\b(?:the )?most\b|\bfewest\b|\bhighest\b|\blowest\b|\bby (?:assignee|owner|staff"
+            r"|component|department|team)\b",
+            raw,
+            re.I,
+        )
+        and re.search(r"\bwhich\b|\bwho\b|\bby\b", raw, re.I)
+        and not re.search(r"\bmy (?:team|direct reports|reports|people)\b", raw, re.I)
+    ):
+        filters = _queue_filters_from_text(raw, entities)
+        if filters.get("groupBy"):
+            return StaffClassification(
+                "queue_aggregate", 0.95, reference="queue", cohort_filter=filters
+            )
+
+    # --- who is away / out / on leave (the directory) --------------------------
+    if (
+        not explicit_person
+        and not department
+        and re.search(
+            r"\bwho\b|\bwhich (?:staff|people|colleagues?|members?)\b|\banyone\b"
+            r"|\bstaff members?\b",
+            raw,
+            re.I,
+        )
+        and _ABSENCE_LANGUAGE.search(raw)
+    ):
+        return StaffClassification("staff_directory", 0.94, reference="absent")
+
+    # --- the signed-in member and their team ---------------------------------
+    if entities.self_team or (_TEAM_LANGUAGE.search(raw) and not explicit_person):
+        if (
+            department is not None
+            and not entities.self_team
+            and not re.search(r"\bteam\b|\badvis(?:er|or)s\b", raw, re.I)
+        ):
+            return StaffClassification("department_operations", 0.93, reference=department.name)
+        return StaffClassification("team_overview", 0.95, reference=_team_focus(raw))
+
+    if entities.self_reference and not explicit_person and not department:
+        if re.search(
+            r"\bwhat should i (?:work on|do|start with|tackle|focus on|prioriti[sz]e)\b"
+            r"|\bwhere (?:do|should) i (?:start|begin)\b"
+            r"|\bwhat(?:'s| is) (?:first|most urgent|top)\b",
+            raw,
+            re.I,
+        ):
+            return StaffClassification("my_work", 0.96, reference="priorities")
+        if re.search(
+            r"\bwho (?:do|should) i report to\b|\bmy (?:manager|boss|supervisor|title|role|job)\b"
+            r"|\bwho reports to me\b|\bwhat(?:'s| is) my role\b"
+            r"|\bhow many (?:people )?report to me\b|\bam i (?:a|the|an)\b",
+            raw,
+            re.I,
+        ):
+            return StaffClassification("my_profile", 0.96, reference="profile")
+        facet = _staff_facet(raw)
+        if facet in {"caseload", "availability", "appointments", "workload"}:
+            filters = {}
+            if facet == "workload":
+                filters = _queue_filters_from_text(raw, None)
+            elif facet == "caseload":
+                filters = _caseload_filters_from_text(raw)
+            elif facet == "appointments":
+                window = _appointment_window_from_text(raw)
+                filters = {"window": window} if window else {}
+            return StaffClassification(
+                "my_work", 0.95, reference=facet, cohort_filter=filters or None
+            )
+        if re.search(
+            r"\bmy (?:plate|desk|day|queue|board|work|items|tasks|caseload|calendar|schedule"
+            r"|advisees|students|appointments|inbox)\b|\bon my plate\b|\bwhat(?:'s"
+            r"| is) on my\b|\bassigned to me\b|\bi have\b|\bdo i have\b|\bam i\b|\bmy (?:overdue"
+            r"|open)\b",
+            raw,
+            re.I,
+        ):
+            return StaffClassification(
+                "my_work", 0.95, reference=facet if facet != "profile" else "workload"
+            )
+
+    # --- compound: items … and inquiries … ---------------------------------------
+    compound = re.match(
+        r"^(?P<first>.*?\bhow many\b.*?)(?:,|;| and)\s*(?P<second>how many\b.*)$", raw, re.I
+    )
+    if compound and not explicit_person:
+        first, second = compound.group("first"), compound.group("second")
+        first_is_queue = bool(_QUEUE_NOUN.search(first)) and not _INQUIRY_NOUN.search(first)
+        second_is_inquiry = bool(_INQUIRY_NOUN.search(second))
+        first_is_inquiry = bool(_INQUIRY_NOUN.search(first))
+        second_is_queue = bool(_QUEUE_NOUN.search(second)) and not second_is_inquiry
+        if first_is_queue and second_is_inquiry:
+            return StaffClassification(
+                "queue_aggregate",
+                0.95,
+                reference="queue",
+                additional_request_types=("inquiry_aggregate",),
+                cohort_filter=_queue_filters_from_text(first, entities),
+                additional_filters={"inquiry_aggregate": _inquiry_filters_from_text(second)},
+            )
+        if first_is_inquiry and second_is_queue:
+            return StaffClassification(
+                "inquiry_aggregate",
+                0.95,
+                reference="inquiries",
+                additional_request_types=("queue_aggregate",),
+                cohort_filter=_inquiry_filters_from_text(first),
+                additional_filters={"queue_aggregate": _queue_filters_from_text(second, entities)},
+            )
+
+    # --- inquiries as an aggregate --------------------------------------------
+    if _INQUIRY_NOUN.search(raw) and (
+        _QUEUE_COUNT.search(raw)
+        or re.search(r"\boldest\b|\blist\b|\bshow\b|\bwhich\b|\bany\b|\bwhat are\b", raw, re.I)
+    ):
+        filters = _inquiry_filters_from_text(raw)
+        return StaffClassification(
+            "inquiry_aggregate", 0.95, reference="inquiries", cohort_filter=filters
+        )
+
+    # --- a department -----------------------------------------------------------
+    if len(entities.departments) >= 2 and not explicit_person and _QUEUE_NOUN.search(raw):
+        filters = _queue_filters_from_text(raw, None)
+        filters.pop("topic", None)
+        filters["groupBy"] = "component"
+        names = "|".join(d.name for d in entities.departments)
+        return StaffClassification(
+            "queue_aggregate", 0.95, reference=f"compare:{names}", cohort_filter=filters
+        )
+    if department is not None and not explicit_person:
+        if re.search(
+            r"\bhow many (?:staff|people|members|advis(?:er|or)s|counsel(?:l)?ors|evaluators"
+            r"|employees)\b"
+            r"|\bwho (?:works|is) in\b|\bwho in\b",
+            raw,
+            re.I,
+        ):
+            return StaffClassification("department_operations", 0.94, reference=department.name)
+        if _QUEUE_COUNT.search(raw) and _QUEUE_NOUN.search(raw):
+            filters = _queue_filters_from_text(raw, entities)
+            return StaffClassification(
+                "queue_aggregate", 0.95, reference=department.name, cohort_filter=filters
+            )
+        if re.search(
+            r"\bunassigned\b|\boverdue\b|\burgent\b|\bshow me\b|\blist\b", raw, re.I
+        ) and _QUEUE_NOUN.search(raw):
+            filters = _queue_filters_from_text(raw, entities)
+            return StaffClassification(
+                "work_queue", 0.93, reference=f"component:{department.name}", cohort_filter=filters
+            )
+        if _DEPARTMENT_OPS.search(raw) or True:
+            return StaffClassification("department_operations", 0.93, reference=department.name)
+
+    # --- "which department should we look at first" ----------------------------
+    if (
+        not explicit_person
+        and re.search(r"\bwhich (?:department|team|office|component|unit)\b", raw, re.I)
+        and re.search(
+            r"\bfirst\b|\bmost\b|\bworst\b|\battention\b|\blook at\b|\bfocus\b|\bstruggl\w*\b"
+            r"|\bbehind\b|\bpriorit\w*\b|\bworr\w*\b",
+            raw,
+            re.I,
+        )
+    ):
+        filters = _queue_filters_from_text(raw, None)
+        filters.setdefault("dueWindow", "overdue")
+        filters["groupBy"] = "component"
+        return StaffClassification("queue_aggregate", 0.9, reference="queue", cohort_filter=filters)
+
+    # --- the queue as an aggregate ---------------------------------------------
+    if (
+        not explicit_person
+        and _QUEUE_NOUN.search(raw)
+        and _QUEUE_COUNT.search(raw)
+        and not re.search(r"\bstudents?\b(?!\s+(?:do they|does it|they cover))", raw, re.I)
+    ):
+        filters = _queue_filters_from_text(raw, entities)
+        return StaffClassification(
+            "queue_aggregate", 0.95, reference="queue", cohort_filter=filters
+        )
+    if not explicit_person and re.search(
+        r"\bhow many (?:open )?(?:work )?items?\b|\bhow (?:many|much) .{0,30}\b(?:unassigned"
+        r"|overdue|urgent|escalated|stale)\b",
+        raw,
+        re.I,
+    ):
+        filters = _queue_filters_from_text(raw, entities)
+        return StaffClassification(
+            "queue_aggregate", 0.95, reference="queue", cohort_filter=filters
+        )
+    return None
+
+
+def _team_focus(text: str) -> str:
+    if re.search(
+        r"\bover (?:their |the )?(?:caseload )?cap\b|\bover[- ]?loaded\b|\bcapacity\b|\bspare\b"
+        r"|\bcaseload\b|\blightest\b|\bleast loaded\b|\bcan take\b",
+        text,
+        re.I,
+    ):
+        return "capacity"
+    if re.search(
+        r"\bslots?\b|\bavailab\w*\b|\bsee (?:someone|a student|tomorrow)\b|\bbook\b|\btomorrow\b",
+        text,
+        re.I,
+    ):
+        return "availability"
+    if re.search(r"\bclosed? out\b|\bappointments?\b|\boutcome\b", text, re.I):
+        return "appointments"
+    if re.search(
+        r"\bon leave\b|\bdeparted\b|\bleft\b|\bout this week\b|\baway\b|\bvacation\b", text, re.I
+    ):
+        return "absence"
+    if re.search(
+        r"\battention\b|\bworried\b|\bbehind\b|\bflag\w*\b|\bconcern\w*\b|\bstruggl\w*\b",
+        text,
+        re.I,
+    ):
+        return "attention"
+    return "overview"
 
 
 def _classify_global_scope(text: str) -> StaffClassification | None:

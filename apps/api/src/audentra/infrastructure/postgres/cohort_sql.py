@@ -377,6 +377,31 @@ class CohortSql:
             exists = self.open_blocking_requirement_exists()
             clauses.append(exists if cohort.has_open_blocking_requirement else f"NOT {exists}")
 
+        assignment = self.table("student_staff_assignment")
+        member = self.table("staff_member")
+        current_adviser = (
+            f"SELECT 1 FROM {assignment} AS adv"
+            f" WHERE adv.tenant_id = student.tenant_id AND adv.student_id = student.id"
+            f"   AND adv.role = 'primary_advisor' AND adv.ended_at IS NULL"
+        )
+        if cohort.primary_adviser_id:
+            params[f"{key}_primary_adviser"] = UUID(cohort.primary_adviser_id)
+            clauses.append(
+                f"EXISTS ({current_adviser} AND adv.staff_member_id = :{key}_primary_adviser)"
+            )
+        if cohort.adviser_state == "none":
+            clauses.append(f"NOT EXISTS ({current_adviser})")
+        elif cohort.adviser_state == "assigned":
+            clauses.append(f"EXISTS ({current_adviser})")
+        elif cohort.adviser_state:
+            params[f"{key}_adviser_state"] = cohort.adviser_state
+            clauses.append(
+                f"EXISTS ({current_adviser}"
+                f" AND EXISTS (SELECT 1 FROM {member} AS am WHERE am.id = adv.staff_member_id"
+                f"   AND am.tenant_id = adv.tenant_id"
+                f"   AND am.employment_status = :{key}_adviser_state))"
+            )
+
         for field_name, column in (
             ("residency_status", "residencyStatus"),
             ("citizenship_status", "citizenshipStatus"),

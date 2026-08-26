@@ -41,6 +41,9 @@ from audentra.infrastructure.postgres.staff_assistant_repository import (
     PostgresStaffAssistantRepository,
 )
 from audentra.infrastructure.postgres.staff_email_service import PostgresStaffEmailService
+from audentra.infrastructure.postgres.staff_operations_repository import (
+    PostgresStaffOperationsRepository,
+)
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
 from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
 from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
@@ -101,6 +104,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
         platform = PostgresPlatformRepository(engine)
         portal = PostgresPortalRepository(engine)
         staff = PostgresStaffRepository(engine, portal)
+        advising = PostgresAdvisingRepository(engine, portal)
         managed = PostgresManagedConfigurationRepository(engine)
         tenant = PostgresTenantRepository(engine)
         prompt_runtime = VersionedPromptRuntime(PostgresPromptRuntimeRepository(engine))
@@ -122,6 +126,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 ferpa=PostgresFerpaRepository(engine, portal),
                 edward_feedback=PostgresEdwardFeedbackRepository(engine),
                 advising=advising,
+                staff_operations=PostgresStaffOperationsRepository(engine, advising),
             ),
             storage,
             ai,

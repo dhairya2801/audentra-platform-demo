@@ -16,6 +16,7 @@ from audentra.domain.action_center import (
     ActionCenterQuery,
     derive_signals,
     evaluate_board,
+    summarize_board,
 )
 from audentra.domain.documents import bounded_document_label, can_retry_extraction
 from audentra.domain.onboarding import (
@@ -1891,6 +1892,37 @@ class InMemoryPlatformStore:
 
         self.require_staff(auth)
         return self._board(auth, query)
+
+    def staff_work_queue_summary(
+        self,
+        auth: AuthContext,
+        query: ActionCenterQuery = DEFAULT_QUERY,
+        *,
+        group_by: str | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        """Counts over the queue with the same vocabulary as the board read."""
+
+        self.require_staff(auth)
+        now = datetime.now(UTC)
+        items = []
+        for raw in self.work_items:
+            item = _clone(raw)
+            item["signals"] = derive_signals(item, now=now, owner_risk=None)
+            items.append(item)
+        summary = summarize_board(
+            items, query, group_by=group_by, limit=limit, now=now, actor_id=auth.actor_id
+        )
+        summary["generatedAt"] = _now()
+        return summary
+
+    def staff_work_item_by_key(self, auth: AuthContext, key: str) -> dict[str, Any]:
+        self.require_staff(auth)
+        needle = key.strip().upper()
+        for item in self.work_items:
+            if str(item.get("key", "")).upper() == needle:
+                return {"id": item["id"], "key": item["key"], "status": item["status"]}
+        return {}
 
     def staff_work_item_detail(self, auth: AuthContext, work_item_id: str) -> dict[str, Any]:
         self.require_staff(auth)

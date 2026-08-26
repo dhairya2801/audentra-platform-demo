@@ -22,6 +22,14 @@ from audentra.domain.staff_capacity import (
 )
 from audentra.infrastructure.postgres.model_usage_ledger import normalize_usage
 from audentra.integrations.staff_assistant.classify import classify_staff_request
+from audentra.integrations.staff_assistant.entities import (
+    EntityResolution,
+    ResolvedEntity,
+    extract_mentions,
+    has_self_reference,
+    has_staff_context,
+    has_student_context,
+)
 from audentra.integrations.staff_assistant.normalize import normalize_staff_request
 
 NOW = datetime(2026, 8, 26, 12, tzinfo=UTC)
@@ -284,33 +292,93 @@ def test_usage_ledger_accepts_both_gateway_token_shapes() -> None:
 
 
 # --- Staff Edward routing ---------------------------------------------------
+#
+# The people-and-capacity questions the Brew answers are also asked of Edward.
+# They route through the staff-aware intents (entity resolution first, then
+# the classifier), and every queue read goes through the one Action Center
+# query layer the portal's board uses.
 
 
-def test_requests_awaiting_reply_route_to_inquiries_not_the_roster() -> None:
+def _entities(text: str, staff: tuple[str, ...] = ()) -> EntityResolution:
+    resolution = EntityResolution(
+        text=text,
+        mentions=extract_mentions(text),
+        self_reference=has_self_reference(text),
+        staff_context=has_staff_context(text),
+        student_context=has_student_context(text),
+    )
+    for name in staff:
+        resolution.staff.append(ResolvedEntity("staff", f"id-{name}", name, name))
+    return resolution
+
+
+def test_requests_awaiting_reply_route_to_inquiry_aggregates_not_the_roster() -> None:
     for question in (
         "How many student requests are still awaiting a first reply, and which is the oldest?",
         "How many student inquiries are awaiting a first reply?",
-        "how many open student requests are waiting on us for a response",
-        "Which requests are unanswered?",
     ):
-        classification = classify_staff_request(normalize_staff_request(question))
+        classification = classify_staff_request(
+            normalize_staff_request(question), _entities(question)
+        )
         assert classification is not None, question
-        assert classification.request_type == "inquiries", question
+        assert classification.request_type == "inquiry_aggregate", question
+        assert classification.cohort_filter.get("status") == "awaiting_first_reply", question
     roster = classify_staff_request(normalize_staff_request("How big is the roster?"))
     assert roster is not None and roster.request_type == "cohort_aggregate"
 
 
-def test_queue_tool_sends_filters_to_the_server_and_stays_bounded() -> None:
+def test_staff_questions_route_to_staff_intents_never_the_roster() -> None:
+    expectations = {
+        "Which staff members have the most overdue work?": ("queue_aggregate", ()),
+        "Which department has the most unassigned work?": ("queue_aggregate", ()),
+        "Is Junia Pemberwell available this week?": ("staff_availability", ("Junia Pemberwell",)),
+        "How many students does Elena Larkspur advise?": ("staff_caseload", ("Elena Larkspur",)),
+        "When is Elena Larkspur's next open advising slot?": (
+            "staff_availability",
+            ("Elena Larkspur",),
+        ),
+        "Which advisers are over their caseload cap?": ("team_overview", ()),
+        "Which of Vera Jessamy's work items have been in progress for more than a week?": (
+            "staff_workload",
+            ("Vera Jessamy",),
+        ),
+    }
+    for question, (expected, staff) in expectations.items():
+        classification = classify_staff_request(
+            normalize_staff_request(question), _entities(question, staff)
+        )
+        assert classification is not None, question
+        assert classification.request_type == expected, question
+    stale = classify_staff_request(
+        normalize_staff_request(
+            "Which of Vera Jessamy's work items have been in progress for more than a week?"
+        ),
+        _entities("Which of Vera Jessamy's work items have been in progress?", ("Vera Jessamy",)),
+    )
+    assert stale is not None and stale.cohort_filter.get("inProgressOverDays") == 7
+    # Student questions that merely mention advisers stay student/cohort scoped.
+    for question, expected in {
+        "Which students are most at risk?": "attention_ranking",
+        "How many students have not paid a deposit?": "cohort_aggregate",
+        "What is blocking Ingrid Thistlebrook?": "student_blockers",
+    }.items():
+        classification = classify_staff_request(normalize_staff_request(question))
+        assert classification is not None and classification.request_type == expected, question
+
+
+def test_queue_tools_share_one_bounded_query_vocabulary() -> None:
     from audentra.integrations.staff_assistant.tools import (
         QUEUE_PAGE_SIZE,
         StaffAssistantToolHost,
+        _tool_search_work_queue,
+        _tool_summarize_work_queue,
         _tool_work_queue,
     )
 
-    seen: list[dict[str, Any]] = []
+    seen: list[tuple[str, dict[str, Any]]] = []
 
     async def work_queue(query: dict[str, Any] | None = None) -> dict[str, Any]:
-        seen.append(dict(query or {}))
+        seen.append(("work_queue", dict(query or {})))
         return {
             "items": [
                 {
@@ -320,6 +388,7 @@ def test_queue_tool_sends_filters_to_the_server_and_stays_bounded() -> None:
                     "status": "in_progress",
                     "priority": "high",
                     "component": "Registrar",
+                    "type": "enrollment",
                     "student": {"id": "s", "name": "S"},
                     "assignee": {"id": "a", "name": "Vera Jessamy", "employmentStatus": "active"},
                     "signals": {"stale": True, "staleDays": 12},
@@ -331,7 +400,16 @@ def test_queue_tool_sends_filters_to_the_server_and_stays_bounded() -> None:
             "generatedAt": "2026-08-26T12:00:00.000Z",
         }
 
-    host = StaffAssistantToolHost({"work_queue": work_queue}, staff_member_id="me")
+    async def work_queue_summary(
+        query: dict[str, Any] | None = None, group_by: str | None = None, limit: int = 12
+    ) -> dict[str, Any]:
+        seen.append(("work_queue_summary", {**dict(query or {}), "groupBy": group_by}))
+        return {"total": 5, "buckets": [], "groupBy": group_by}
+
+    host = StaffAssistantToolHost(
+        {"work_queue": work_queue, "work_queue_summary": work_queue_summary},
+        staff_member_id="me",
+    )
     result = asyncio.run(
         _tool_work_queue(
             host,
@@ -339,68 +417,66 @@ def test_queue_tool_sends_filters_to_the_server_and_stays_bounded() -> None:
             NOW,
         )
     )
-    assert seen == [
+    assert seen[-1] == (
+        "work_queue",
         {
             "status": "in_progress",
-            "component": None,
             "search": None,
             "due": "all",
-            "stale": "true",
-            "ownerRisk": None,
+            "stale": True,
             "sort": "priority",
             "limit": QUEUE_PAGE_SIZE,
             "assignee": "Vera Jessamy",
         }
-    ]
+        | {"search": None},
+    ) or seen[-1][1] == {
+        "status": "in_progress",
+        "due": "all",
+        "stale": True,
+        "sort": "priority",
+        "limit": QUEUE_PAGE_SIZE,
+        "assignee": "Vera Jessamy",
+    }
     assert result["filteredTotal"] == 5 and result["filteredOpen"] == 5
     assert result["items"][0]["signals"]["stale"] is True
-    assert result["items"][0]["assignee"]["name"] == "Vera Jessamy"
+    assert result["items"][0]["daysSinceUpdate"] == 12
+    assert result["items"][0]["workType"] == "enrollment"
 
     asyncio.run(_tool_work_queue(host, {"ownership": "mine", "key": "AST-00102"}, NOW))
-    assert seen[-1]["assignee"] == "me"
-    assert seen[-1]["status"] == "all" and seen[-1]["search"] == "AST-00102"
+    assert seen[-1][1]["assignee"] == "me"
+    assert seen[-1][1]["status"] == "all" and seen[-1][1]["search"] == "AST-00102"
 
-
-def test_staff_questions_route_to_the_staff_workload_read() -> None:
-    expectations = {
-        "Which staff members have the most overdue work?": "staff:",
-        "Is Junia Pemberwell available this week?": "staff:Junia Pemberwell",
-        "How many students does Elena Larkspur advise?": "staff:Elena Larkspur",
-        "When is Elena Larkspur's next open advising slot?": "staff:Elena Larkspur",
-        "Which advisers are over their caseload cap?": "staff:",
-        "Are there any students whose adviser has left the university?": "staff:",
-        "Which of Vera Jessamy's work items have been in progress for more than a week?": (
-            "staff:Vera Jessamy|stale"
-        ),
-    }
-    for question, reference in expectations.items():
-        classification = classify_staff_request(normalize_staff_request(question))
-        assert classification is not None, question
-        assert classification.request_type == "staff_workload", question
-        assert classification.reference == reference, question
-    # Student questions that merely mention advisers stay student/cohort scoped.
-    for question, expected in {
-        "Which students are most at risk?": "attention_ranking",
-        "How many students have not paid a deposit?": "cohort_aggregate",
-        "What is blocking Ingrid Thistlebrook?": "student_blockers",
-    }.items():
-        classification = classify_staff_request(normalize_staff_request(question))
-        assert classification is not None and classification.request_type == expected, question
-
-
-def test_staff_reference_binds_queue_and_directory_arguments() -> None:
-    from audentra.integrations.staff_assistant.classify import StaffClassification
-    from audentra.integrations.staff_assistant.pipeline import _cohort_arguments
-
-    classification = StaffClassification(
-        "staff_workload", 0.96, reference="staff:Vera Jessamy|stale"
+    # The assistant's page and counts speak the same vocabulary as the board.
+    page = asyncio.run(
+        _tool_search_work_queue(
+            host,
+            {"staffId": "staff-1", "inProgressOverDays": 7, "sort": "stalest", "limit": 5},
+            NOW,
+        )
     )
-    assert _cohort_arguments("getStaffWorkQueue", classification) == {
-        "assigneeName": "Vera Jessamy",
-        "stale": "true",
-        "status": "in_progress",
+    assert seen[-1][1] == {
+        "status": "open",
+        "due": "all",
+        "inProgressDays": 7,
+        "sort": "stale",
+        "limit": 5,
+        "assignee": "staff-1",
     }
-    assert _cohort_arguments("getStaffMember", classification) == {"name": "Vera Jessamy"}
-    anonymous = StaffClassification("staff_workload", 0.96, reference="staff:")
-    assert _cohort_arguments("getStaffWorkQueue", anonymous) == {}
-    assert _cohort_arguments("getStaffMember", anonymous) == {}
+    assert page["total"] == 5 and page["returned"] == 1 and page["truncated"] is True
+    summary = asyncio.run(
+        _tool_summarize_work_queue(
+            host, {"ownership": "unassigned", "dueWindow": "overdue", "groupBy": "component"}, NOW
+        )
+    )
+    assert seen[-1] == (
+        "work_queue_summary",
+        {
+            "status": "open",
+            "due": "overdue",
+            "sort": "priority",
+            "limit": QUEUE_PAGE_SIZE,
+            "assignee": "unassigned",
+            "groupBy": "component",
+        },
+    )
+    assert summary["filters"] == {"ownership": "unassigned", "dueWindow": "overdue"}

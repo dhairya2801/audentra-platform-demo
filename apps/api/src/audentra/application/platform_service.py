@@ -900,10 +900,20 @@ class InMemoryPlatformService:
                     "work_queue": lambda query=None: _async_value(
                         store.staff_work_queue(auth, parse_action_center_query(query))
                     ),
+                    "work_queue_summary": lambda query=None, group_by=None, limit=12: _async_value(
+                        store.staff_work_queue_summary(
+                            auth,
+                            parse_action_center_query(query),
+                            group_by=group_by,
+                            limit=limit,
+                        )
+                    ),
+                    "work_item_by_key": lambda key: _async_value(
+                        store.staff_work_item_by_key(auth, key)
+                    ),
                     # The in-memory store has no briefing composer; the tool
                     # reports the read as unavailable rather than inventing one.
                     "morning_brew": _unavailable_primitive("morning_brew"),
-                    "staff_capacity": _unavailable_primitive("staff_capacity"),
                     "work_item_detail": (
                         lambda work_item_id: _async_value(
                             store.staff_work_item_detail(auth, work_item_id)
@@ -996,12 +1006,18 @@ class InMemoryPlatformService:
         from audentra.integrations.staff_assistant.catalog import STAFF_TOOL_DESCRIPTIONS
         from audentra.integrations.staff_assistant.classify import STAFF_REQUEST_TYPES
 
-        async def plan(*, message: str, student_resolved: bool = False) -> Mapping[str, Any] | None:
+        async def plan(
+            *,
+            message: str,
+            student_resolved: bool = False,
+            context: Mapping[str, Any] | None = None,
+        ) -> Mapping[str, Any] | None:
             return await planner(  # type: ignore[no-any-return]
                 message=message,
                 allowed_request_types=STAFF_REQUEST_TYPES,
                 available_tools=STAFF_TOOL_DESCRIPTIONS,
                 student_resolved=student_resolved,
+                context=context,
                 tenant_id=auth.tenant_id,
                 staff_member_id=auth.actor_id,
                 request_id=request_id,

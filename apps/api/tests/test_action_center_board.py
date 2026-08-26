@@ -26,6 +26,7 @@ from audentra.domain.action_center import (
     owner_risk_for,
     parse_action_center_query,
     sort_key,
+    summarize_board,
 )
 from audentra.infrastructure.memory.store import DEMO_IDS, InMemoryPlatformStore
 
@@ -246,6 +247,32 @@ def test_filters_and_sorts(query: ActionCenterQuery, expected: list[str]) -> Non
     assert keys[: len(expected)] == expected
     if query.sort == "priority" and query.status not in ("in_progress",):
         assert keys == expected
+
+
+def test_due_today_is_the_calendar_day_even_when_the_hour_has_passed() -> None:
+    """ "Due today" at 17:00 still includes the item that was due at 09:00; that
+    item is overdue as well. The windows overlap on purpose; only the
+    grouping bucket is exclusive."""
+
+    board = _board()
+    earlier_today = _item("TODAY-PAST", due_days=0)
+    earlier_today["dueAt"] = NOW.replace(hour=9).isoformat()
+    later_today = _item("TODAY-LATER", due_days=0)
+    later_today["dueAt"] = NOW.replace(hour=17).isoformat()
+    for item in (earlier_today, later_today):
+        item["signals"] = derive_signals(item, now=NOW, owner_risk=None)
+    board.extend([earlier_today, later_today])
+    today = evaluate_board(board, ActionCenterQuery(due="today"), now=NOW, actor_id=ME)
+    assert {item["key"] for item in today["items"]} == {"TODAY-PAST", "TODAY-LATER"}
+    overdue = evaluate_board(board, ActionCenterQuery(due="overdue"), now=NOW, actor_id=ME)
+    assert "TODAY-PAST" in {item["key"] for item in overdue["items"]}
+    assert "TODAY-LATER" not in {item["key"] for item in overdue["items"]}
+    summary = summarize_board(
+        board, ActionCenterQuery(), group_by="due_window", limit=10, now=NOW, actor_id=ME
+    )
+    assert summary["dueToday"] == 2
+    buckets = {row["value"]: row["count"] for row in summary["buckets"]}
+    assert buckets["today"] == 1 and buckets["overdue"] == 3
 
 
 def test_all_statuses_puts_closed_items_last() -> None:

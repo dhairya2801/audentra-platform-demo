@@ -30,6 +30,20 @@ STATUS_SCOPES: tuple[str, ...] = ("open", "closed", "all")
 DUE_WINDOWS: tuple[str, ...] = ("all", "overdue", "today", "seven_days", "no_due")
 SORT_ORDERS: tuple[str, ...] = ("priority", "due", "updated", "created", "stale")
 OWNER_RISKS: tuple[str, ...] = ("departed", "on_leave", "away")
+# Groupings a summary can bucket by. The vocabulary is shared by the SQL
+# summary and the in-memory reference implementation.
+QUEUE_GROUP_BY: tuple[str, ...] = (
+    "assignee",
+    "component",
+    "status",
+    "priority",
+    "due_window",
+    "action_type",
+    "work_type",
+    "student",
+)
+MAX_GROUP_LIMIT = 50
+MAX_IN_PROGRESS_DAYS = 3_650
 
 # Work that was started and then not touched for this long is "stale": it is
 # neither moving nor visible as a problem. Shared with the advising desk so a
@@ -57,6 +71,12 @@ class ActionCenterQuery:
     stale: bool | None = None
     owner_risk: bool | None = None
     escalated: bool | None = None
+    action_type: str | None = None
+    work_type: str | None = None
+    student_id: str | None = None
+    # "In progress and untouched for more than N days": the stale rule with
+    # the staff member's own threshold ("for more than a week").
+    in_progress_days: int | None = None
     sort: str = "priority"
     limit: int = DEFAULT_PAGE_LIMIT
     offset: int = 0
@@ -82,6 +102,10 @@ class ActionCenterQuery:
             "stale": self.stale,
             "ownerRisk": self.owner_risk,
             "escalated": self.escalated,
+            "actionType": self.action_type,
+            "workType": self.work_type,
+            "studentId": self.student_id,
+            "inProgressDays": self.in_progress_days,
             "sort": self.sort,
             "limit": self.limit,
             "offset": self.offset,
@@ -167,6 +191,20 @@ def parse_action_center_query(params: Mapping[str, object] | None) -> ActionCent
         stale=_bool(raw.get("stale"), "stale"),
         owner_risk=_bool(raw.get("ownerRisk"), "ownerRisk"),
         escalated=_bool(raw.get("escalated"), "escalated"),
+        action_type=_text(raw.get("actionType"), "actionType", max_length=64),
+        work_type=_text(raw.get("workType"), "workType", max_length=64),
+        student_id=_text(raw.get("studentId"), "studentId", max_length=64),
+        in_progress_days=(
+            _int(
+                raw.get("inProgressDays"),
+                "inProgressDays",
+                default=0,
+                low=1,
+                high=MAX_IN_PROGRESS_DAYS,
+            )
+            if raw.get("inProgressDays") not in (None, "")
+            else None
+        ),
         sort=_choice(raw.get("sort"), "sort", SORT_ORDERS, default="priority"),
         limit=_int(
             raw.get("limit"), "limit", default=DEFAULT_PAGE_LIMIT, low=1, high=MAX_PAGE_LIMIT
@@ -208,6 +246,10 @@ def owner_risk_for(
 
 
 def due_window_for(due_at: object, now: datetime) -> str:
+    """The one bucket an item falls in: overdue wins over today, today over
+    the week. Used for grouping; the ``due`` filter is evaluated separately
+    because "due today" as a filter means the calendar day, past or not."""
+
     due = _parse(due_at)
     if due is None:
         return "no_due"
@@ -219,6 +261,16 @@ def due_window_for(due_at: object, now: datetime) -> str:
     if due < now + timedelta(days=7):
         return "seven_days"
     return "all"
+
+
+def is_due_today(due_at: object, now: datetime) -> bool:
+    """Due on today's calendar date (UTC), whether or not the hour has passed."""
+
+    due = _parse(due_at)
+    if due is None:
+        return False
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return day_start <= due < day_start + timedelta(days=1)
 
 
 def derive_signals(
@@ -300,14 +352,32 @@ def matches_query(
         return False
     if query.search and query.search.lower() not in _search_blob(item):
         return False
-    if query.due != "all" and due_window_for(item.get("dueAt"), now) != query.due:
+    if query.due == "today":
+        if not is_due_today(item.get("dueAt"), now):
+            return False
+    elif query.due != "all" and due_window_for(item.get("dueAt"), now) != query.due:
         return False
     signals = _signals_of(item)
     if query.stale is not None and bool(signals.get("stale")) != query.stale:
         return False
     if query.owner_risk is not None and bool(signals.get("ownerRisk")) != query.owner_risk:
         return False
-    return not (query.escalated is not None and bool(item.get("escalated")) != query.escalated)
+    if query.escalated is not None and bool(item.get("escalated")) != query.escalated:
+        return False
+    if query.action_type and str(item.get("actionType")) != query.action_type:
+        return False
+    if query.work_type and str(item.get("type") or item.get("workType")) != query.work_type:
+        return False
+    student: Mapping[str, Any] = item["student"] if isinstance(item.get("student"), Mapping) else {}
+    if query.student_id and str(student.get("id")) != query.student_id:
+        return False
+    if query.in_progress_days is not None:
+        updated = _parse(item.get("updatedAt"))
+        if str(item.get("status")) != "in_progress" or updated is None:
+            return False
+        if now - updated < timedelta(days=query.in_progress_days):
+            return False
+    return True
 
 
 def _ts(value: object, *, default: float) -> float:
@@ -501,4 +571,125 @@ def evaluate_board(
         "counts": count_board(items).public(),
         "facets": facet_board(items),
         "query": query.public(),
+    }
+
+
+def _bucket_of(item: Mapping[str, Any], group_by: str, now: datetime) -> str:
+    if group_by == "assignee":
+        assignee = item.get("assignee") if isinstance(item.get("assignee"), Mapping) else None
+        return str(assignee.get("name")) if assignee else "Unassigned"
+    if group_by == "component":
+        return str(item.get("component") or "")
+    if group_by == "status":
+        return str(item.get("status") or "")
+    if group_by == "priority":
+        return str(item.get("priority") or "")
+    if group_by == "action_type":
+        return str(item.get("actionType") or "")
+    if group_by == "work_type":
+        return str(item.get("type") or item.get("workType") or "")
+    if group_by == "student":
+        student: Mapping[str, Any] = (
+            item["student"] if isinstance(item.get("student"), Mapping) else {}
+        )
+        return str(student.get("name") or "")
+    window = due_window_for(item.get("dueAt"), now)
+    return "later" if window == "all" else window
+
+
+def summarize_board(
+    items: Iterable[Mapping[str, Any]],
+    query: ActionCenterQuery,
+    *,
+    group_by: str | None,
+    limit: int,
+    now: datetime,
+    actor_id: str | None,
+) -> dict[str, Any]:
+    """Reference counts over the items a query matches, optionally bucketed.
+
+    The shape is the one Staff Edward's ``summarizeWorkQueue`` returns; the
+    PostgreSQL repository computes the same numbers in SQL.
+    """
+
+    if group_by is not None and group_by not in QUEUE_GROUP_BY:
+        raise BadRequestError("INVALID_ACTION_CENTER_QUERY", f"Unknown queue grouping {group_by!r}")
+    matched = [item for item in items if matches_query(item, query, now=now, actor_id=actor_id)]
+    week_end = now + timedelta(days=7)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + timedelta(days=1)
+
+    def due(item: Mapping[str, Any]) -> datetime | None:
+        return _parse(item.get("dueAt"))
+
+    def overdue(item: Mapping[str, Any]) -> bool:
+        moment = due(item)
+        return moment is not None and moment < now
+
+    def stale(item: Mapping[str, Any]) -> bool:
+        updated = _parse(item.get("updatedAt"))
+        return (
+            str(item.get("status")) == "in_progress"
+            and updated is not None
+            and now - updated >= STALE_AFTER
+        )
+
+    def unassigned(item: Mapping[str, Any]) -> bool:
+        return not item.get("assignee")
+
+    statuses = {status: 0 for status in WORK_STATUSES}
+    for item in matched:
+        statuses[str(item.get("status"))] = statuses.get(str(item.get("status")), 0) + 1
+    overdue_dues = [
+        moment for item in matched if (moment := due(item)) is not None and moment < now
+    ]
+    buckets: dict[str, dict[str, int]] = {}
+    if group_by is not None:
+        for item in matched:
+            row = buckets.setdefault(
+                _bucket_of(item, group_by, now),
+                {"count": 0, "overdue": 0, "unassigned": 0, "urgent": 0, "stale": 0},
+            )
+            row["count"] += 1
+            row["overdue"] += int(overdue(item))
+            row["unassigned"] += int(unassigned(item))
+            row["urgent"] += int(str(item.get("priority")) == "urgent")
+            row["stale"] += int(stale(item))
+    ranked = sorted(buckets.items(), key=lambda entry: (-entry[1]["count"], entry[0]))
+    return {
+        "filters": {
+            key: value
+            for key, value in query.public().items()
+            if key not in {"limit", "offset", "sort"} and value not in (None, "", "all")
+        },
+        "total": len(matched),
+        "unassigned": sum(unassigned(item) for item in matched),
+        "urgent": sum(str(item.get("priority")) == "urgent" for item in matched),
+        "urgentOrHigh": sum(str(item.get("priority")) in {"urgent", "high"} for item in matched),
+        "escalated": sum(bool(item.get("escalated")) for item in matched),
+        "overdue": len(overdue_dues),
+        "dueToday": sum(is_due_today(item.get("dueAt"), now) for item in matched),
+        "dueNext7Days": sum(
+            1 for item in matched if (d := due(item)) is not None and now <= d < week_end
+        ),
+        "staleInProgress": sum(stale(item) for item in matched),
+        "byStatus": {
+            "todo": statuses.get("todo", 0),
+            "inProgress": statuses.get("in_progress", 0),
+            "blocked": statuses.get("blocked", 0),
+            "followUpRequired": statuses.get("follow_up_required", 0),
+        },
+        "distinctStudents": len(
+            {
+                str(item["student"]["id"])
+                for item in matched
+                if isinstance(item.get("student"), Mapping) and item["student"].get("id")
+            }
+        ),
+        "oldestDueAt": min(overdue_dues).isoformat() if overdue_dues else None,
+        "groupBy": group_by,
+        "buckets": [
+            {"value": value, **counts}
+            for value, counts in ranked[: max(1, min(limit, MAX_GROUP_LIMIT))]
+        ],
     }

@@ -31,7 +31,9 @@ from audentra.core.errors import (
 from audentra.domain.action_center import (
     AWAY_TIME_OFF_KINDS,
     DEFAULT_QUERY,
+    MAX_GROUP_LIMIT,
     OPEN_WORK_STATUSES,
+    QUEUE_GROUP_BY,
     STALE_AFTER,
     ActionCenterQuery,
     derive_signals,
@@ -239,6 +241,171 @@ class PostgresStaffRepository:
             "generatedAt": _iso_timestamp(now),
         }
 
+    async def summarize_work_queue(
+        self,
+        auth: AuthContext,
+        query: ActionCenterQuery = DEFAULT_QUERY,
+        *,
+        group_by: str | None = None,
+        limit: int = 12,
+    ) -> dict[str, object]:
+        """Counts over the items a query matches, optionally bucketed, in SQL.
+
+        The same filter vocabulary as the board page, so "how many unassigned
+        Registrar items are overdue" and the Action Center's filtered view can
+        never disagree. Never returns items.
+        """
+
+        self._require_staff(auth)
+        if group_by is not None and group_by not in QUEUE_GROUP_BY:
+            raise BadRequestError(
+                "INVALID_ACTION_CENTER_QUERY", f"Unknown queue grouping {group_by!r}"
+            )
+        now = self._clock()
+        where, params = self._board_filters(auth, query, now)
+        params["tenant_id"] = _uuid(auth.tenant_id)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        params["day_start"] = day_start
+        params["day_end"] = day_start + timedelta(days=1)
+        params["week_end"] = now + timedelta(days=7)
+        measures = f"""
+              COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE item.assignee_id IS NULL) AS unassigned,
+              COUNT(*) FILTER (WHERE item.priority = 'urgent') AS urgent,
+              COUNT(*) FILTER (WHERE item.priority IN ('urgent', 'high')) AS urgent_or_high,
+              COUNT(*) FILTER (WHERE item.escalated) AS escalated,
+              COUNT(*) FILTER (WHERE item.due_at IS NOT NULL AND item.due_at < :now) AS overdue,
+              COUNT(*) FILTER (WHERE item.due_at >= :day_start AND item.due_at < :day_end)
+                AS due_today,
+              COUNT(*) FILTER (WHERE item.due_at >= :now AND item.due_at < :week_end)
+                AS due_next_7_days,
+              COUNT(*) FILTER (WHERE {self._stale_sql()}) AS stale_in_progress,
+              COUNT(*) FILTER (WHERE item.status = 'todo') AS todo,
+              COUNT(*) FILTER (WHERE item.status = 'in_progress') AS in_progress,
+              COUNT(*) FILTER (WHERE item.status = 'blocked') AS blocked,
+              COUNT(*) FILTER (WHERE item.status = 'follow_up_required') AS follow_up_required,
+              COUNT(DISTINCT item.student_id) AS distinct_students,
+              MIN(item.due_at) FILTER (WHERE item.due_at < :now) AS oldest_due
+        """
+        bucket_sql = {
+            "assignee": "COALESCE(assignee.display_name, 'Unassigned')",
+            "component": "item.component",
+            "status": "item.status",
+            "priority": "item.priority",
+            "action_type": "item.action_type",
+            "work_type": "item.work_type",
+            "student": "person.first_name || ' ' || person.last_name",
+            "due_window": (
+                "CASE WHEN item.due_at IS NULL THEN 'no_due'"
+                " WHEN item.due_at < :now THEN 'overdue'"
+                " WHEN item.due_at < :day_end THEN 'today'"
+                " WHEN item.due_at < :week_end THEN 'seven_days' ELSE 'later' END"
+            ),
+        }
+        async with self._engine.connect() as connection:
+            totals = (
+                (
+                    await connection.execute(
+                        text(f"SELECT {measures} FROM {self._board_from_sql()} WHERE {where}"),
+                        params,
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            buckets: list[dict[str, object]] = []
+            if group_by is not None:
+                params["group_limit"] = max(1, min(int(limit or 12), MAX_GROUP_LIMIT))
+                bucket_rows = (
+                    (
+                        await connection.execute(
+                            text(
+                                f"""
+                                SELECT {bucket_sql[group_by]} AS bucket, COUNT(*) AS count,
+                                  COUNT(*) FILTER (WHERE item.due_at IS NOT NULL
+                                                     AND item.due_at < :now) AS overdue,
+                                  COUNT(*) FILTER (WHERE item.assignee_id IS NULL) AS unassigned,
+                                  COUNT(*) FILTER (WHERE item.priority = 'urgent') AS urgent,
+                                  COUNT(*) FILTER (WHERE {self._stale_sql()}) AS stale
+                                FROM {self._board_from_sql()}
+                                WHERE {where}
+                                GROUP BY 1
+                                ORDER BY count DESC, bucket
+                                LIMIT :group_limit
+                                """
+                            ),
+                            params,
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                buckets = [dict(row) for row in bucket_rows]
+        oldest_due = totals["oldest_due"]
+        return {
+            "filters": {
+                key: value
+                for key, value in query.public().items()
+                if key not in {"limit", "offset", "sort"} and value not in (None, "", "all")
+            },
+            "total": int(totals["total"]),
+            "unassigned": int(totals["unassigned"]),
+            "urgent": int(totals["urgent"]),
+            "urgentOrHigh": int(totals["urgent_or_high"]),
+            "escalated": int(totals["escalated"]),
+            "overdue": int(totals["overdue"]),
+            "dueToday": int(totals["due_today"]),
+            "dueNext7Days": int(totals["due_next_7_days"]),
+            "staleInProgress": int(totals["stale_in_progress"]),
+            "byStatus": {
+                "todo": int(totals["todo"]),
+                "inProgress": int(totals["in_progress"]),
+                "blocked": int(totals["blocked"]),
+                "followUpRequired": int(totals["follow_up_required"]),
+            },
+            "distinctStudents": int(totals["distinct_students"]),
+            "oldestDueAt": _iso_timestamp(oldest_due) if oldest_due is not None else None,
+            "groupBy": group_by,
+            "buckets": [
+                {
+                    "value": str(row["bucket"]),
+                    "count": int(cast(int, row["count"])),
+                    "overdue": int(cast(int, row["overdue"])),
+                    "unassigned": int(cast(int, row["unassigned"])),
+                    "urgent": int(cast(int, row["urgent"])),
+                    "stale": int(cast(int, row["stale"])),
+                }
+                for row in buckets
+            ],
+            "generatedAt": _iso_timestamp(now),
+        }
+
+    async def find_work_item_by_key(self, auth: AuthContext, key: str) -> dict[str, object]:
+        """The id and status behind a pasted key ("AST-00102"): one indexed row,
+        or an empty mapping when no item carries the key."""
+
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(
+                            f"""
+                            SELECT id, key, status FROM {self._table("staff_work_item")}
+                            WHERE tenant_id = :tenant_id AND UPPER(key) = UPPER(:key)
+                            LIMIT 1
+                            """
+                        ),
+                        {"tenant_id": _uuid(auth.tenant_id), "key": key.strip()},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return {}
+        return {"id": str(row["id"]), "key": str(row["key"]), "status": str(row["status"])}
+
     async def _read_work_item(
         self, auth: AuthContext, work_item_id: str, *, with_history: bool = True
     ) -> dict[str, object] | None:
@@ -327,10 +494,13 @@ class PostgresStaffRepository:
         if query.due == "overdue":
             clauses.append("item.due_at IS NOT NULL AND item.due_at < :now")
         elif query.due == "today":
-            clauses.append("item.due_at >= :now AND item.due_at < :day_end")
-            params["day_end"] = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
-                days=1
-            )
+            # "Due today" is the calendar day, whether or not the hour has
+            # passed: an item due at 09:00 is still due today at 17:00 (and is
+            # also overdue). The windows are not mutually exclusive.
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            clauses.append("item.due_at >= :day_start AND item.due_at < :day_end")
+            params["day_start"] = day_start
+            params["day_end"] = day_start + timedelta(days=1)
         elif query.due == "seven_days":
             clauses.append("item.due_at >= :now AND item.due_at < :week_end")
             params["week_end"] = now + timedelta(days=7)
@@ -343,6 +513,18 @@ class PostgresStaffRepository:
         if query.escalated is not None:
             clauses.append("item.escalated = :escalated")
             params["escalated"] = query.escalated
+        if query.action_type:
+            clauses.append("item.action_type = :action_type")
+            params["action_type"] = query.action_type
+        if query.work_type:
+            clauses.append("item.work_type = :work_type")
+            params["work_type"] = query.work_type
+        if query.student_id:
+            clauses.append("item.student_id = :student_id")
+            params["student_id"] = _uuid(query.student_id)
+        if query.in_progress_days is not None:
+            clauses.append("item.status = 'in_progress' AND item.updated_at < :in_progress_before")
+            params["in_progress_before"] = now - timedelta(days=query.in_progress_days)
         return " AND ".join(clauses), params
 
     @staticmethod
@@ -1527,6 +1709,9 @@ class PostgresStaffRepository:
         self._require_staff(auth)
         if ensure_document_work_items:
             await self._ensure_document_work_items(auth)
+        # One item, its own history: never the whole board. At a realistic
+        # tenant the board read alone exceeds the assistant's tool budget,
+        # and the detail view needs exactly one row of it.
         work_item = await self._read_work_item(auth, work_item_id)
         if work_item is None:
             raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")

@@ -76,13 +76,12 @@ of `inactive`, does not count it toward an intervention, and the Brew's
 - `getStaffWorkQueue` runs its filters server-side on the bounded query
   (page of 25), plus `assigneeName`, `stale`, `ownerRisk`, `sort`, `key`;
   it returns board counts and per-component / per-owner rollups.
-- New `getStaffMember(name)`: status, leave/absence, caseload vs cap, open /
-  overdue / stale work, unclosed appointments, open slots in 14 days.
-- New request type `staff_workload` ("which staff have the most overdue work",
-  "is X on leave", "how many students does X advise", "X's items in progress
-  for more than a week"): reads the briefing's capacity signals, the queue
-  by owner, and the named person — the name is never resolved against the
-  student roster.
+- *Superseded on `integration/mock-university-v1`:* this branch's
+  `getStaffMember(name)` tool and its regex `staff_workload` router were
+  retired in favour of the Staff Edward v2 staff-directory tools
+  (`searchStaff`, `getStaffProfile`, …) and staff-aware intents, which
+  resolve a name against the staff directory before classification. See
+  `docs/changelog/2026-08-26-integration-mock-university-v1.md`.
 - `getInquiries` reports counts over the whole read (active, awaiting first
   reply, over 24 h, unassigned, oldest); "how many student requests are
   awaiting a first reply" routes to inquiries, not to a roster count.

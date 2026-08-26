@@ -1677,6 +1677,12 @@ export interface StaffActionCenterQuery {
   stale?: boolean;
   ownerRisk?: boolean;
   escalated?: boolean;
+  actionType?: StaffActionType;
+  workType?: StaffWorkItemType;
+  /** Only the items of one student. */
+  studentId?: string;
+  /** In progress and untouched for more than this many days. */
+  inProgressDays?: number;
   sort?: StaffActionCenterSort;
   /** 1–200, default 50. */
   limit?: number;
@@ -1749,6 +1755,10 @@ export interface StaffActionCenter {
     stale: boolean | null;
     ownerRisk: boolean | null;
     escalated: boolean | null;
+    actionType: string | null;
+    workType: string | null;
+    studentId: string | null;
+    inProgressDays: number | null;
     sort: StaffActionCenterSort;
     limit: number;
     offset: number;

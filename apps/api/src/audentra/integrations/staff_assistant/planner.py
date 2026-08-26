@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from audentra.integrations.staff_assistant.catalog import (
+    STAFF_SCOPED_TOOLS,
     STAFF_TOOL_NAMES,
     STUDENT_SCOPED_TOOLS,
 )
@@ -69,6 +70,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getStudentRequirements",
         "getStudentBlockers",
         "getStudentDeadlines",
+        "getStudentOwnership",
     ),
     # Cohort work is not student-scoped: these must never wait on a referent.
     "cohort_search": ("findStudents",),
@@ -107,9 +109,6 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getPlaybooks",
     ),
     "work_queue": ("getStaffWorkQueue",),
-    # Staff questions read the briefing's capacity signals plus the queue's
-    # per-owner rollup; a staff name is a queue filter, not a roster lookup.
-    "staff_workload": ("getStaffMember", "getMorningBriefing", "getStaffWorkQueue"),
     # The briefing is the portal's own start-of-day read; the queue rides
     # along so "what should I start with" has concrete cases to name.
     "daily_briefing": ("getMorningBriefing", "getStaffWorkQueue"),
@@ -118,8 +117,33 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "playbook_lookup": ("getPlaybooks",),
     "action_rules": ("getActionRules",),
     "mailbox_read": ("getMailboxMessages",),
+    # Staff-aware intents. The profile rides along with every facet so the
+    # answer can say who the person is (title, status) before the numbers.
+    "staff_profile": ("getStaffProfile",),
+    "staff_workload": ("getStaffProfile", "searchWorkQueue"),
+    "staff_availability": ("getStaffAvailability", "getStaffProfile"),
+    "staff_caseload": ("getStaffProfile", "getStaffCaseload"),
+    "staff_appointments": ("getStaffProfile", "getStaffAppointments"),
+    "staff_comparison": ("compareStaff",),
+    "my_work": ("getStaffProfile", "searchWorkQueue"),
+    "my_profile": ("getStaffProfile",),
+    "team_overview": ("getStaffTeam", "getStaffProfile"),
+    "department_operations": ("getComponentSummary",),
+    "queue_aggregate": ("summarizeWorkQueue",),
+    "inquiry_aggregate": ("summarizeInquiries", "searchInquiries"),
+    "staff_directory": ("searchStaff",),
+    "not_found": (),
     "general_question": (),
     "unsupported_or_out_of_scope": (),
+}
+
+# Facet-specific extras for "my work" and a colleague's workload.
+_FACET_EXTRA_TOOLS: Mapping[str, tuple[str, ...]] = {
+    "appointments": ("getStaffAppointments",),
+    "availability": ("getStaffAvailability",),
+    "caseload": ("getStaffCaseload",),
+    "priorities": ("searchWorkQueue",),
+    "workload": ("searchWorkQueue",),
 }
 
 # Arguments a model plan is permitted to carry per tool. Identity arguments
@@ -146,8 +170,66 @@ _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
         "sort",
     ),
     "getInquiries": ("status",),
-    "getStaffMember": ("name",),
     "getMailboxMessages": ("query", "limit"),
+    "searchStaff": ("query", "component", "role", "absentNow", "limit"),
+    "getStaffCaseload": (
+        "role",
+        "advisingStatus",
+        "depositState",
+        "withOpenWork",
+        "withOverdueWork",
+        "limit",
+    ),
+    "getStaffAppointments": ("window",),
+    "summarizeWorkQueue": (
+        "ownership",
+        "component",
+        "status",
+        "priority",
+        "dueWindow",
+        "topic",
+        "stale",
+        "escalated",
+        "actionType",
+        "workType",
+        "inProgressOverDays",
+        "groupBy",
+        "limit",
+    ),
+    "searchWorkQueue": (
+        "ownership",
+        "component",
+        "status",
+        "priority",
+        "dueWindow",
+        "topic",
+        "stale",
+        "escalated",
+        "actionType",
+        "workType",
+        "inProgressOverDays",
+        "sort",
+        "limit",
+    ),
+    "summarizeInquiries": (
+        "status",
+        "ownership",
+        "priority",
+        "topic",
+        "olderThanHours",
+        "groupBy",
+        "limit",
+    ),
+    "searchInquiries": (
+        "status",
+        "ownership",
+        "priority",
+        "topic",
+        "olderThanHours",
+        "sort",
+        "limit",
+    ),
+    "getComponentSummary": ("component",),
 }
 
 # The verifying read for blocker codes the first round can surface. One
@@ -177,7 +259,10 @@ def select_staff_tools(
         classification.request_type,
         *classification.additional_request_types,
     ):
-        for tool in _SELECTION_RULES.get(request_type, ()):
+        tools = list(_SELECTION_RULES.get(request_type, ()))
+        if request_type in {"my_work", "staff_workload"}:
+            tools.extend(_FACET_EXTRA_TOOLS.get(str(classification.reference or ""), ()))
+        for tool in tools:
             if tool in STUDENT_SCOPED_TOOLS and not student_resolved:
                 continue
             if tool not in selected:
@@ -220,6 +305,7 @@ def validate_staff_model_plan(
     value: Any,
     *,
     student_resolved: bool,
+    staff_resolved: bool = False,
 ) -> tuple[StaffClassification, list[PlannedToolCall]] | None:
     """Validate an untrusted model plan; strip identity args, filter reads."""
 
@@ -251,10 +337,16 @@ def validate_staff_model_plan(
 
     intents = [str(request_type), *[str(item) for item in additional]]
     allowed = {tool for intent in intents for tool in _SELECTION_RULES.get(intent, ())}
+    for intent in intents:
+        if intent in {"my_work", "staff_workload"}:
+            allowed.update(tool for tools in _FACET_EXTRA_TOOLS.values() for tool in tools)
     if request_type not in {"unsupported_or_out_of_scope", "action_request"}:
         if student_resolved:
             allowed.update(STAFF_UNIVERSAL_CONTEXT_TOOLS)
         allowed.add("searchStudents")
+        allowed.add("searchStaff")
+        # Aggregates are safe to combine with any operational intent.
+        allowed.update({"summarizeWorkQueue", "summarizeInquiries"})
 
     calls: list[PlannedToolCall] = []
     seen: set[str] = set()
@@ -267,6 +359,8 @@ def validate_staff_model_plan(
         if tool not in allowed or tool in seen:
             continue
         if tool in STUDENT_SCOPED_TOOLS and not student_resolved:
+            continue
+        if tool in STAFF_SCOPED_TOOLS and not staff_resolved:
             continue
         seen.add(str(tool))
         arguments_raw = raw.get("arguments")
@@ -281,10 +375,12 @@ def validate_staff_model_plan(
         calls.append(PlannedToolCall(tool=str(tool), arguments=arguments))
     if request_type in {"unsupported_or_out_of_scope", "action_request"} and calls:
         return None
+    reference = value.get("facet") if isinstance(value.get("facet"), str) else None
     classification = StaffClassification(
         request_type=str(request_type),
         confidence=float(confidence),
         source="model_plan",
+        reference=reference,
         additional_request_types=tuple(str(item) for item in additional),
     )
     return classification, calls

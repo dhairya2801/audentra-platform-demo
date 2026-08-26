@@ -593,6 +593,24 @@ class PostgresStaffAssistantRepository:
                     f" ORDER BY wi.updated_at DESC LIMIT 1), 'Unassigned')"
                 ),
                 "housing_state": f"{self._housing_bucket_sql()}",
+                "primary_adviser": (
+                    f"COALESCE((SELECT member.display_name FROM"
+                    f" {self._table('student_staff_assignment')} AS adv"
+                    f" JOIN {self._table('staff_member')} AS member"
+                    f"   ON member.id = adv.staff_member_id AND member.tenant_id = adv.tenant_id"
+                    f" WHERE adv.tenant_id = student.tenant_id AND adv.student_id = student.id"
+                    f"   AND adv.role = 'primary_advisor' AND adv.ended_at IS NULL"
+                    f" LIMIT 1), 'No primary adviser')"
+                ),
+                "adviser_state": (
+                    f"COALESCE((SELECT member.employment_status FROM"
+                    f" {self._table('student_staff_assignment')} AS adv"
+                    f" JOIN {self._table('staff_member')} AS member"
+                    f"   ON member.id = adv.staff_member_id AND member.tenant_id = adv.tenant_id"
+                    f" WHERE adv.tenant_id = student.tenant_id AND adv.student_id = student.id"
+                    f"   AND adv.role = 'primary_advisor' AND adv.ended_at IS NULL"
+                    f" LIMIT 1), 'none')"
+                ),
             }
             expression = expressions[group_by]
             group_sql = f"""

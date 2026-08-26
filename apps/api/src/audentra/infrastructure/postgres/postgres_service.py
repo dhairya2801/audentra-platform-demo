@@ -93,6 +93,7 @@ from .morning_brew_repository import PostgresMorningBrewRepository
 from .platform_repository import PostgresPlatformRepository
 from .portal_repository import PostgresPortalRepository
 from .staff_assistant_repository import PostgresStaffAssistantRepository
+from .staff_operations_repository import PostgresStaffOperationsRepository
 from .staff_repository import PostgresStaffRepository
 from .tenant_repository import PostgresTenantRepository
 
@@ -351,6 +352,7 @@ class PostgresRepositoryBundle:
     ferpa: PostgresFerpaRepository | None = None
     edward_feedback: PostgresEdwardFeedbackRepository | None = None
     advising: PostgresAdvisingRepository | None = None
+    staff_operations: PostgresStaffOperationsRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -2741,11 +2743,17 @@ class PostgresPlatformService:
                 "work_queue": lambda query=None: staff.get_work_queue(
                     auth, parse_action_center_query(query)
                 ),
+                # Counts over the same query vocabulary, never a page.
+                "work_queue_summary": lambda query=None, group_by=None, limit=12: (
+                    staff.summarize_work_queue(
+                        auth, parse_action_center_query(query), group_by=group_by, limit=limit
+                    )
+                ),
+                "work_item_by_key": lambda key: staff.find_work_item_by_key(auth, key),
                 # The Staff Portal's own briefing composer — Edward reads the
                 # same briefing the staff member can already see, rather than
                 # recomputing a second, divergent one.
                 "morning_brew": lambda: self._morning_brew_for_assistant(auth),
-                "staff_capacity": lambda: self._advising().staff_capacity_snapshot(auth),
                 "work_item_detail": lambda work_item_id: staff.get_work_item_detail(
                     auth, work_item_id, ensure_document_work_items=False
                 ),
@@ -2760,9 +2768,68 @@ class PostgresPlatformService:
                         auth, query=query, limit=limit
                     )
                 ),
+                **self._staff_operations_primitives(auth),
             },
             staff_member_id=auth.actor_id,
         )
+
+    def _staff_operations_primitives(self, auth: AuthContext) -> dict[str, Any]:
+        """Bounded staff directory / inquiry / department reads.
+
+        Queue reads are not here: they go through the staff repository's
+        Action Center query layer (``work_queue`` / ``work_queue_summary``).
+        Present only when the operations repository is provisioned; the tool
+        layer reports a missing primitive as an honest unavailability.
+        """
+
+        operations = self.repository.staff_operations
+        advising = self.repository.advising
+        if operations is None:
+            return {}
+        primitives: dict[str, Any] = {
+            "staff_profile": lambda staff_member_id: operations.staff_profile(
+                auth, staff_member_id
+            ),
+            "search_staff": lambda **kwargs: operations.search_staff(auth, **kwargs),
+            "list_components": lambda: operations.list_components(auth),
+            "inquiry_summary": lambda filters, group_by=None, limit=10: (
+                operations.summarize_inquiries(
+                    auth, filters=filters, group_by=group_by, limit=limit
+                )
+            ),
+            "inquiry_search": lambda filters, limit=10, sort="oldest": operations.search_inquiries(
+                auth, filters=filters, limit=limit, sort=sort
+            ),
+            "component_summary": lambda component: operations.component_summary(auth, component),
+        }
+        if advising is not None:
+            bound_advising = advising
+
+            async def staff_team(staff_member_id: str) -> Mapping[str, Any] | None:
+                return await bound_advising.team_for(auth, staff_member_id)
+
+            async def staff_caseload(
+                staff_member_id: str, role: str | None = None
+            ) -> Mapping[str, Any] | None:
+                return await bound_advising.caseload_for(auth, staff_member_id, role=role)
+
+            async def staff_appointments(
+                staff_member_id: str,
+                window_from: str | None = None,
+                window_to: str | None = None,
+            ) -> Mapping[str, Any] | None:
+                return await bound_advising.appointments_for(
+                    auth, staff_member_id, window_from=window_from, window_to=window_to
+                )
+
+            primitives.update(
+                {
+                    "staff_team": staff_team,
+                    "staff_caseload": staff_caseload,
+                    "staff_appointments": staff_appointments,
+                }
+            )
+        return primitives
 
     async def _morning_brew_for_assistant(self, auth: AuthContext) -> Mapping[str, Any]:
         """The canonical Morning Brew, or an honest unavailability."""
