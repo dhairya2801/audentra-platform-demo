@@ -28,6 +28,15 @@ from audentra.core.errors import (
     ConflictError,
     NotFoundError,
 )
+from audentra.domain.action_center import (
+    AWAY_TIME_OFF_KINDS,
+    DEFAULT_QUERY,
+    OPEN_WORK_STATUSES,
+    STALE_AFTER,
+    ActionCenterQuery,
+    derive_signals,
+    owner_risk_for,
+)
 from audentra.domain.documents import bounded_document_label
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
@@ -95,70 +104,475 @@ class PostgresStaffRepository:
     def _table(self, name: str) -> str:
         return f"{self._schema}.{name}"
 
-    async def get_action_center(self, auth: AuthContext) -> dict[str, object]:
+    async def get_action_center(
+        self, auth: AuthContext, query: ActionCenterQuery = DEFAULT_QUERY
+    ) -> dict[str, object]:
         self._require_staff(auth)
         await self._ensure_document_work_items(auth)
-        return await self._read_action_center(auth)
+        return await self._read_action_center(auth, query)
 
-    async def get_work_queue(self, auth: AuthContext) -> dict[str, object]:
+    async def get_work_queue(
+        self, auth: AuthContext, query: ActionCenterQuery = DEFAULT_QUERY
+    ) -> dict[str, object]:
         """Read the canonical queue without reconciliation writes."""
 
         self._require_staff(auth)
-        return await self._read_action_center(auth)
+        return await self._read_action_center(auth, query)
 
-    async def _read_action_center(self, auth: AuthContext) -> dict[str, object]:
+    async def _read_action_center(
+        self, auth: AuthContext, query: ActionCenterQuery
+    ) -> dict[str, object]:
+        """One bounded page of the board plus board-wide counts and facets.
+
+        The board is queried, never dumped: the page is limited, filters run in
+        SQL, and history is attached only to the items on the page. Counts and
+        facets are aggregates over the whole board so a client can render the
+        filter bar and the column totals without a second read.
+        """
+
+        now = self._clock()
+        tenant_id = _uuid(auth.tenant_id)
+        where, params = self._board_filters(auth, query, now)
+        params["tenant_id"] = tenant_id
         async with self._engine.connect() as connection:
             member_result = await connection.execute(
+                text(self._board_staff_sql()), {"tenant_id": tenant_id, "now": now}
+            )
+            page_result = await connection.execute(
+                text(
+                    self._board_items_sql(
+                        where=where,
+                        order=self._board_order_sql(query.sort),
+                        limit=True,
+                    )
+                ),
+                {**params, "limit": query.limit, "offset": query.offset},
+            )
+            page_rows = [dict(row) for row in page_result.mappings().all()]
+            total_result = await connection.execute(
                 text(
                     f"""
-                    SELECT id, display_name, email_normalized, component
-                    FROM {self._table("staff_member")}
-                    WHERE tenant_id = :tenant_id AND active = true
-                    ORDER BY display_name, id
+                    SELECT COUNT(*) AS total, COUNT(DISTINCT item.student_id) AS students
+                    FROM {self._board_from_sql()}
+                    WHERE {where}
                     """
                 ),
-                {"tenant_id": _uuid(auth.tenant_id)},
+                params,
             )
-            item_result = await connection.execute(
-                text(self._action_center_items_sql()),
-                {"tenant_id": _uuid(auth.tenant_id)},
+            total_row = total_result.mappings().one()
+            counts_result = await connection.execute(
+                text(self._board_counts_sql()),
+                {"tenant_id": tenant_id, "now": now, "stale_before": now - STALE_AFTER},
             )
-            log_result = await connection.execute(
-                text(
-                    f"""
-                    SELECT id, work_item_id, action, message, actor_name, occurred_at
-                    FROM {self._table("staff_work_log")}
-                    WHERE tenant_id = :tenant_id
-                    ORDER BY occurred_at DESC, id
-                    """
-                ),
-                {"tenant_id": _uuid(auth.tenant_id)},
+            counts_row = dict(counts_result.mappings().one())
+            component_result = await connection.execute(
+                text(self._board_component_facets_sql()),
+                {"tenant_id": tenant_id, "now": now, "stale_before": now - STALE_AFTER},
             )
-            members = [
+            assignee_result = await connection.execute(
+                text(self._board_assignee_facets_sql()),
                 {
-                    "id": str(row["id"]),
-                    "name": str(row["display_name"]),
-                    "email": str(row["email_normalized"]),
-                    "component": str(row["component"]),
-                }
-                for row in member_result.mappings().all()
-            ]
-            logs = [dict(row) for row in log_result.mappings().all()]
-            items = [self._map_work_item(dict(row), logs) for row in item_result.mappings().all()]
+                    "tenant_id": tenant_id,
+                    "now": now,
+                    "stale_before": now - STALE_AFTER,
+                    "facet_limit": 25,
+                },
+            )
+            logs = await self._logs_for_items(
+                connection, tenant_id, [str(row["id"]) for row in page_rows]
+            )
+        members = [self._map_board_member(dict(row)) for row in member_result.mappings().all()]
+        items = [self._map_work_item(row, logs, now=now) for row in page_rows]
+        total = int(total_row["total"])
         return {
             "items": items,
             "staff": members,
             "counts": {
-                "todo": sum(item["status"] == "todo" for item in items),
-                "inProgress": sum(item["status"] == "in_progress" for item in items),
-                "followUpRequired": sum(item["status"] == "follow_up_required" for item in items),
-                "blocked": sum(item["status"] == "blocked" for item in items),
-                "done": sum(item["status"] == "done" for item in items),
-                "cancelled": sum(item["status"] == "cancelled" for item in items),
-                "urgent": sum(item["priority"] == "urgent" for item in items),
-                "escalated": sum(bool(item["escalated"]) for item in items),
+                "todo": int(counts_row["todo"]),
+                "inProgress": int(counts_row["in_progress"]),
+                "followUpRequired": int(counts_row["follow_up_required"]),
+                "blocked": int(counts_row["blocked"]),
+                "done": int(counts_row["done"]),
+                "cancelled": int(counts_row["cancelled"]),
+                "urgent": int(counts_row["urgent"]),
+                "escalated": int(counts_row["escalated"]),
+                "open": int(counts_row["open"]),
+                "overdue": int(counts_row["overdue"]),
+                "stale": int(counts_row["stale"]),
+                "unassigned": int(counts_row["unassigned"]),
+                "ownerRisk": int(counts_row["owner_risk"]),
             },
-            "generatedAt": _iso_timestamp(self._clock()),
+            "page": {
+                "limit": query.limit,
+                "offset": query.offset,
+                "total": total,
+                "hasMore": query.offset + len(items) < total,
+                "distinctStudents": int(total_row["students"]),
+            },
+            "facets": {
+                "components": [
+                    {
+                        "component": str(row["component"]),
+                        "open": int(row["open"]),
+                        "overdue": int(row["overdue"]),
+                        "unassigned": int(row["unassigned"]),
+                        "stale": int(row["stale"]),
+                        "ownerRisk": int(row["owner_risk"]),
+                        "urgent": int(row["urgent"]),
+                    }
+                    for row in component_result.mappings().all()
+                ],
+                "assignees": [
+                    {
+                        "staff": (
+                            self._map_board_member(dict(row)) if row.get("id") is not None else None
+                        ),
+                        "open": int(row["open"]),
+                        "overdue": int(row["overdue"]),
+                        "stale": int(row["stale"]),
+                        "urgent": int(row["urgent"]),
+                    }
+                    for row in assignee_result.mappings().all()
+                ],
+            },
+            "query": query.public(),
+            "generatedAt": _iso_timestamp(now),
+        }
+
+    async def _read_work_item(
+        self, auth: AuthContext, work_item_id: str, *, with_history: bool = True
+    ) -> dict[str, object] | None:
+        """One item by id, with its own history only."""
+
+        now = self._clock()
+        tenant_id = _uuid(auth.tenant_id)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    self._board_items_sql(
+                        where="item.tenant_id = :tenant_id AND item.id = :work_item_id",
+                        order="item.id",
+                        limit=False,
+                    )
+                ),
+                {"tenant_id": tenant_id, "work_item_id": _uuid(work_item_id), "now": now},
+            )
+            row = result.mappings().first()
+            if row is None:
+                return None
+            logs = (
+                await self._logs_for_items(connection, tenant_id, [work_item_id])
+                if with_history
+                else []
+            )
+        return self._map_work_item(dict(row), logs, now=now)
+
+    async def _logs_for_items(
+        self, connection: AsyncConnection, tenant_id: UUID, work_item_ids: list[str]
+    ) -> list[dict[str, object]]:
+        if not work_item_ids:
+            return []
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT id, work_item_id, action, message, actor_name, occurred_at
+                FROM {self._table("staff_work_log")}
+                WHERE tenant_id = :tenant_id AND work_item_id = ANY(:ids)
+                ORDER BY occurred_at DESC, id
+                """
+            ),
+            {"tenant_id": tenant_id, "ids": [_uuid(value) for value in work_item_ids]},
+        )
+        return [dict(row) for row in result.mappings().all()]
+
+    def _board_filters(
+        self, auth: AuthContext, query: ActionCenterQuery, now: datetime
+    ) -> tuple[str, dict[str, object]]:
+        clauses = ["item.tenant_id = :tenant_id", "item.status = ANY(:statuses)"]
+        params: dict[str, object] = {
+            "statuses": list(query.statuses),
+            "now": now,
+            "stale_before": now - STALE_AFTER,
+        }
+        if query.priority:
+            clauses.append("item.priority = :priority")
+            params["priority"] = query.priority
+        if query.component:
+            clauses.append("item.component ILIKE :component_pattern")
+            params["component_pattern"] = f"%{_escape_like(query.component)}%"
+        if query.assignee == "unassigned":
+            clauses.append("item.assignee_id IS NULL")
+        elif query.assignee == "me":
+            clauses.append("item.assignee_id = :assignee_id")
+            params["assignee_id"] = _uuid(auth.actor_id)
+        elif query.assignee:
+            if _UUID_PATTERN.fullmatch(query.assignee):
+                clauses.append("item.assignee_id = :assignee_id")
+                params["assignee_id"] = _uuid(query.assignee)
+            else:
+                # A name rather than an id: match the owner's display name.
+                clauses.append("assignee.display_name ILIKE :assignee_pattern")
+                params["assignee_pattern"] = f"%{_escape_like(query.assignee)}%"
+        if query.search:
+            clauses.append(
+                "(item.key ILIKE :search_pattern OR item.title ILIKE :search_pattern"
+                " OR item.description ILIKE :search_pattern"
+                " OR item.component ILIKE :search_pattern"
+                " OR person.first_name ILIKE :search_pattern"
+                " OR person.last_name ILIKE :search_pattern"
+                " OR (person.first_name || ' ' || person.last_name) ILIKE :search_pattern"
+                " OR assignee.display_name ILIKE :search_pattern)"
+            )
+            params["search_pattern"] = f"%{_escape_like(query.search)}%"
+        if query.due == "overdue":
+            clauses.append("item.due_at IS NOT NULL AND item.due_at < :now")
+        elif query.due == "today":
+            clauses.append("item.due_at >= :now AND item.due_at < :day_end")
+            params["day_end"] = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(
+                days=1
+            )
+        elif query.due == "seven_days":
+            clauses.append("item.due_at >= :now AND item.due_at < :week_end")
+            params["week_end"] = now + timedelta(days=7)
+        elif query.due == "no_due":
+            clauses.append("item.due_at IS NULL")
+        if query.stale is not None:
+            clauses.append(("" if query.stale else "NOT ") + f"({self._stale_sql()})")
+        if query.owner_risk is not None:
+            clauses.append(("" if query.owner_risk else "NOT ") + f"({self._owner_risk_sql()})")
+        if query.escalated is not None:
+            clauses.append("item.escalated = :escalated")
+            params["escalated"] = query.escalated
+        return " AND ".join(clauses), params
+
+    @staticmethod
+    def _stale_sql() -> str:
+        return "item.status = 'in_progress' AND item.updated_at < :stale_before"
+
+    @staticmethod
+    def _owner_risk_sql() -> str:
+        return (
+            "item.assignee_id IS NOT NULL AND ("
+            "assignee.employment_status IN ('departed', 'on_leave')"
+            " OR away.ends_at IS NOT NULL)"
+        )
+
+    def _board_order_sql(self, sort: str) -> str:
+        closed_last = "CASE WHEN item.status IN ('done', 'cancelled') THEN 1 ELSE 0 END"
+        priority = (
+            "CASE item.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2"
+            " WHEN 'medium' THEN 3 ELSE 4 END"
+        )
+        if sort == "due":
+            return f"{closed_last}, item.due_at NULLS LAST, {priority}, item.id"
+        if sort == "updated":
+            return f"{closed_last}, item.updated_at DESC, item.id"
+        if sort == "created":
+            return f"{closed_last}, item.created_at, item.id"
+        if sort == "stale":
+            return f"{closed_last}, item.updated_at, item.id"
+        return f"{closed_last}, {priority}, item.due_at NULLS LAST, item.updated_at DESC, item.id"
+
+    def _board_from_sql(self) -> str:
+        item = self._table("staff_work_item")
+        student = self._table("student")
+        person = self._table("person")
+        profile = self._table("student_profile")
+        member = self._table("staff_member")
+        time_off = self._table("staff_time_off")
+        away_kinds = ", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)
+        return f"""{item} AS item
+            JOIN {student} AS student
+              ON student.id = item.student_id AND student.tenant_id = item.tenant_id
+            JOIN {person} AS person
+              ON person.id = student.person_id AND person.tenant_id = student.tenant_id
+            LEFT JOIN {profile} AS profile
+              ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+            LEFT JOIN {member} AS assignee
+              ON assignee.id = item.assignee_id AND assignee.tenant_id = item.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT off.ends_at, off.kind
+              FROM {time_off} AS off
+              WHERE off.tenant_id = item.tenant_id
+                AND off.staff_member_id = item.assignee_id
+                AND off.kind IN ({away_kinds})
+                AND off.starts_at <= :now AND off.ends_at > :now
+              ORDER BY off.ends_at DESC
+              LIMIT 1
+            ) AS away ON item.assignee_id IS NOT NULL
+        """
+
+    def _board_items_sql(self, *, where: str, order: str, limit: bool) -> str:
+        offer = self._table("admission_offer")
+        program = self._table("program")
+        page = "LIMIT :limit OFFSET :offset" if limit else ""
+        return f"""
+            SELECT
+              item.id, item.key, item.student_id, item.title, item.description,
+              item.status, item.priority, item.work_type, item.component,
+              item.due_at, item.escalated, item.version, item.created_at,
+              item.updated_at, item.assignee_id, item.action_type,
+              item.selected_channel, item.attempt_count, item.follow_up_at,
+              item.blocker_code, item.blocker_detail, item.blocker_review_at,
+              item.outcome_code, item.resolution_code, item.next_step,
+              item.terminal_reason, item.started_at,
+              item.interaction_completed_at, item.completed_at, item.cancelled_at,
+              assignee.display_name AS assignee_name,
+              assignee.email_normalized AS assignee_email,
+              assignee.component AS assignee_component,
+              assignee.employment_status AS assignee_employment_status,
+              assignee.leave_until AS assignee_leave_until,
+              assignee.title AS assignee_title,
+              away.ends_at AS assignee_away_until,
+              away.kind AS assignee_away_kind,
+              person.first_name, person.last_name,
+              COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
+                AS preferred_name,
+              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              student.class_year, item.source_type, item.source_id
+            FROM {self._board_from_sql()}
+            LEFT JOIN LATERAL (
+              SELECT program.name
+              FROM {offer} AS offer
+              JOIN {program} AS program
+                ON program.id = offer.program_id AND program.tenant_id = offer.tenant_id
+              WHERE offer.tenant_id = item.tenant_id
+                AND offer.student_id = item.student_id
+              ORDER BY offer.created_at DESC
+              LIMIT 1
+            ) AS offer_program ON true
+            WHERE {where}
+            ORDER BY {order}
+            {page}
+        """
+
+    def _board_staff_sql(self) -> str:
+        member = self._table("staff_member")
+        time_off = self._table("staff_time_off")
+        away_kinds = ", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)
+        return f"""
+            SELECT m.id, m.display_name, m.email_normalized, m.component, m.title,
+                   m.employment_status, m.leave_until,
+                   away.ends_at AS away_until, away.kind AS away_kind
+            FROM {member} AS m
+            LEFT JOIN LATERAL (
+              SELECT off.ends_at, off.kind
+              FROM {time_off} AS off
+              WHERE off.tenant_id = m.tenant_id AND off.staff_member_id = m.id
+                AND off.kind IN ({away_kinds})
+                AND off.starts_at <= :now AND off.ends_at > :now
+              ORDER BY off.ends_at DESC
+              LIMIT 1
+            ) AS away ON true
+            WHERE m.tenant_id = :tenant_id AND m.active = true
+            ORDER BY m.display_name, m.id
+        """
+
+    def _board_counts_sql(self) -> str:
+        open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
+        return f"""
+            SELECT
+              COUNT(*) FILTER (WHERE item.status = 'todo') AS todo,
+              COUNT(*) FILTER (WHERE item.status = 'in_progress') AS in_progress,
+              COUNT(*) FILTER (WHERE item.status = 'follow_up_required')
+                AS follow_up_required,
+              COUNT(*) FILTER (WHERE item.status = 'blocked') AS blocked,
+              COUNT(*) FILTER (WHERE item.status = 'done') AS done,
+              COUNT(*) FILTER (WHERE item.status = 'cancelled') AS cancelled,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})
+                                 AND item.priority = 'urgent') AS urgent,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})
+                                 AND item.escalated) AS escalated,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})) AS open,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})
+                                 AND item.due_at IS NOT NULL AND item.due_at < :now)
+                AS overdue,
+              COUNT(*) FILTER (WHERE {self._stale_sql()}) AS stale,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})
+                                 AND item.assignee_id IS NULL) AS unassigned,
+              COUNT(*) FILTER (WHERE item.status IN ({open_statuses})
+                                 AND {self._owner_risk_sql()}) AS owner_risk
+            FROM {self._table("staff_work_item")} AS item
+            LEFT JOIN {self._table("staff_member")} AS assignee
+              ON assignee.id = item.assignee_id AND assignee.tenant_id = item.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT off.ends_at
+              FROM {self._table("staff_time_off")} AS off
+              WHERE off.tenant_id = item.tenant_id
+                AND off.staff_member_id = item.assignee_id
+                AND off.kind IN ({", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)})
+                AND off.starts_at <= :now AND off.ends_at > :now
+              LIMIT 1
+            ) AS away ON item.assignee_id IS NOT NULL
+            WHERE item.tenant_id = :tenant_id
+        """
+
+    def _board_open_from_sql(self) -> str:
+        open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
+        away_kinds = ", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)
+        return f"""{self._table("staff_work_item")} AS item
+            LEFT JOIN {self._table("staff_member")} AS assignee
+              ON assignee.id = item.assignee_id AND assignee.tenant_id = item.tenant_id
+            LEFT JOIN LATERAL (
+              SELECT off.ends_at, off.kind
+              FROM {self._table("staff_time_off")} AS off
+              WHERE off.tenant_id = item.tenant_id
+                AND off.staff_member_id = item.assignee_id
+                AND off.kind IN ({away_kinds})
+                AND off.starts_at <= :now AND off.ends_at > :now
+              ORDER BY off.ends_at DESC
+              LIMIT 1
+            ) AS away ON item.assignee_id IS NOT NULL
+            WHERE item.tenant_id = :tenant_id AND item.status IN ({open_statuses})
+        """
+
+    def _board_component_facets_sql(self) -> str:
+        return f"""
+            SELECT item.component,
+                   COUNT(*) AS open,
+                   COUNT(*) FILTER (WHERE item.due_at IS NOT NULL AND item.due_at < :now)
+                     AS overdue,
+                   COUNT(*) FILTER (WHERE item.assignee_id IS NULL) AS unassigned,
+                   COUNT(*) FILTER (WHERE {self._stale_sql()}) AS stale,
+                   COUNT(*) FILTER (WHERE {self._owner_risk_sql()}) AS owner_risk,
+                   COUNT(*) FILTER (WHERE item.priority = 'urgent') AS urgent
+            FROM {self._board_open_from_sql()}
+            GROUP BY item.component
+            ORDER BY open DESC, item.component
+        """
+
+    def _board_assignee_facets_sql(self) -> str:
+        return f"""
+            SELECT assignee.id, assignee.display_name, assignee.email_normalized,
+                   assignee.component, assignee.title, assignee.employment_status,
+                   assignee.leave_until,
+                   MAX(away.ends_at) AS away_until, MIN(away.kind) AS away_kind,
+                   COUNT(*) AS open,
+                   COUNT(*) FILTER (WHERE item.due_at IS NOT NULL AND item.due_at < :now)
+                     AS overdue,
+                   COUNT(*) FILTER (WHERE {self._stale_sql()}) AS stale,
+                   COUNT(*) FILTER (WHERE item.priority = 'urgent') AS urgent
+            FROM {self._board_open_from_sql()}
+            GROUP BY assignee.id, assignee.display_name, assignee.email_normalized,
+                     assignee.component, assignee.title, assignee.employment_status,
+                     assignee.leave_until
+            ORDER BY (assignee.id IS NOT NULL), open DESC, assignee.display_name
+            LIMIT :facet_limit
+        """
+
+    @staticmethod
+    def _map_board_member(row: Mapping[str, object]) -> dict[str, object]:
+        away_until = row.get("away_until")
+        return {
+            "id": str(row["id"]),
+            "name": str(row["display_name"]),
+            "email": str(row["email_normalized"]),
+            "component": str(row["component"]),
+            "title": str(row["title"]) if row.get("title") is not None else None,
+            "employmentStatus": str(row.get("employment_status") or "active"),
+            "leaveUntil": (str(row["leave_until"]) if row.get("leave_until") is not None else None),
+            "awayUntil": _iso_timestamp(away_until) if away_until is not None else None,
+            "awayKind": str(row["away_kind"]) if row.get("away_kind") is not None else None,
         }
 
     async def get_managed_content(self, auth: AuthContext) -> dict[str, object]:
@@ -929,20 +1343,23 @@ class PostgresStaffRepository:
                 },
             )
             item_result = await connection.execute(
-                text(self._action_center_items_sql()),
-                {"tenant_id": _uuid(auth.tenant_id)},
-            )
-            row = next(
-                (
-                    dict(candidate)
-                    for candidate in item_result.mappings().all()
-                    if str(candidate["id"]) == work_item_id
+                text(
+                    self._board_items_sql(
+                        where="item.tenant_id = :tenant_id AND item.id = :work_item_id",
+                        order="item.id",
+                        limit=False,
+                    )
                 ),
-                None,
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "work_item_id": _uuid(work_item_id),
+                    "now": now,
+                },
             )
+            row = item_result.mappings().first()
             if row is None:
                 raise RuntimeError("The newly created work item could not be reloaded")
-            return self._map_work_item(row, [])
+            return self._map_work_item(dict(row), [], now=now)
 
         return await self._run_idempotent(
             auth=auth,
@@ -1108,16 +1525,9 @@ class PostgresStaffRepository:
         ensure_document_work_items: bool = True,
     ) -> dict[str, object]:
         self._require_staff(auth)
-        center = (
-            await self.get_action_center(auth)
-            if ensure_document_work_items
-            else await self.get_work_queue(auth)
-        )
-        center_items = cast(list[dict[str, object]], center["items"])
-        work_item = next(
-            (item for item in center_items if item["id"] == work_item_id),
-            None,
-        )
+        if ensure_document_work_items:
+            await self._ensure_document_work_items(auth)
+        work_item = await self._read_work_item(auth, work_item_id)
         if work_item is None:
             raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
         student_id = str(cast(Mapping[str, object], work_item["student"])["id"])
@@ -1285,9 +1695,38 @@ class PostgresStaffRepository:
                 },
             )
 
-        staff_by_id = {
-            str(member["id"]): member for member in cast(list[dict[str, object]], center["staff"])
-        }
+        async with self._engine.connect() as connection:
+            staff_result = await connection.execute(
+                text(self._board_staff_sql()),
+                {"tenant_id": _uuid(auth.tenant_id), "now": self._clock()},
+            )
+            staff_by_id = {
+                str(row["id"]): self._map_board_member(dict(row))
+                for row in staff_result.mappings().all()
+            }
+            related_result = await connection.execute(
+                text(
+                    self._board_items_sql(
+                        where=(
+                            "item.tenant_id = :tenant_id AND item.student_id = :student_id"
+                            " AND item.id <> :work_item_id"
+                        ),
+                        order=self._board_order_sql("priority"),
+                        limit=True,
+                    )
+                ),
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(student_id),
+                    "work_item_id": _uuid(work_item_id),
+                    "now": self._clock(),
+                    "limit": 20,
+                    "offset": 0,
+                },
+            )
+            related_items = [
+                self._map_work_item(dict(row), []) for row in related_result.mappings().all()
+            ]
         comments = []
         for row in comment_result.mappings().all():
             mention_ids = [str(value) for value in _json_list(row["mentions"], "comment.mentions")]
@@ -1586,12 +2025,7 @@ class PostgresStaffRepository:
             "studentSummary": student_summary,
             "interactions": interactions,
             "comments": comments,
-            "relatedItems": [
-                item
-                for item in center_items
-                if item["id"] != work_item_id
-                and cast(Mapping[str, object], item["student"])["id"] == student_id
-            ],
+            "relatedItems": related_items,
             "relatedDocuments": [
                 {
                     "id": str(row["id"]),
@@ -4554,65 +4988,6 @@ class PostgresStaffRepository:
                         message="Created when the student document entered staff review.",
                     )
 
-    def _action_center_items_sql(self) -> str:
-        item = self._table("staff_work_item")
-        student = self._table("student")
-        person = self._table("person")
-        profile = self._table("student_profile")
-        member = self._table("staff_member")
-        offer = self._table("admission_offer")
-        program = self._table("program")
-        return f"""
-            SELECT
-              item.id, item.key, item.student_id, item.title, item.description,
-              item.status, item.priority, item.work_type, item.component,
-              item.due_at, item.escalated, item.version, item.created_at,
-              item.updated_at, item.assignee_id, item.action_type,
-              item.selected_channel, item.attempt_count, item.follow_up_at,
-              item.blocker_code, item.blocker_detail, item.blocker_review_at,
-              item.outcome_code, item.resolution_code, item.next_step,
-              item.terminal_reason, item.started_at,
-              item.interaction_completed_at, item.completed_at, item.cancelled_at,
-              assignee.display_name AS assignee_name,
-              assignee.email_normalized AS assignee_email,
-              assignee.component AS assignee_component,
-              person.first_name, person.last_name,
-              COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
-                AS preferred_name,
-              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
-              student.class_year, item.source_type, item.source_id
-            FROM {item} AS item
-            JOIN {student} AS student
-              ON student.id = item.student_id AND student.tenant_id = item.tenant_id
-            JOIN {person} AS person
-              ON person.id = student.person_id AND person.tenant_id = student.tenant_id
-            LEFT JOIN {profile} AS profile
-              ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
-            LEFT JOIN {member} AS assignee
-              ON assignee.id = item.assignee_id AND assignee.tenant_id = item.tenant_id
-            LEFT JOIN LATERAL (
-              SELECT program.name
-              FROM {offer} AS offer
-              JOIN {program} AS program
-                ON program.id = offer.program_id AND program.tenant_id = offer.tenant_id
-              WHERE offer.tenant_id = item.tenant_id
-                AND offer.student_id = item.student_id
-              ORDER BY offer.created_at DESC
-              LIMIT 1
-            ) AS offer_program ON true
-            WHERE item.tenant_id = :tenant_id
-            ORDER BY
-              CASE item.priority
-                WHEN 'urgent' THEN 1
-                WHEN 'high' THEN 2
-                WHEN 'medium' THEN 3
-                ELSE 4
-              END,
-              item.due_at NULLS LAST,
-              item.updated_at DESC,
-              item.id
-        """
-
     async def _student_summary(
         self,
         tenant_id: str,
@@ -4838,8 +5213,12 @@ class PostgresStaffRepository:
         self,
         item: Mapping[str, object],
         logs: list[dict[str, object]],
+        *,
+        now: datetime | None = None,
     ) -> dict[str, object]:
+        moment = now or self._clock()
         assignee = None
+        owner_risk = None
         if all(
             item.get(key) is not None
             for key in (
@@ -4849,12 +5228,31 @@ class PostgresStaffRepository:
                 "assignee_component",
             )
         ):
+            away_until = item.get("assignee_away_until")
             assignee = {
                 "id": str(item["assignee_id"]),
                 "name": str(item["assignee_name"]),
                 "email": str(item["assignee_email"]),
                 "component": str(item["assignee_component"]),
+                "title": (
+                    str(item["assignee_title"]) if item.get("assignee_title") is not None else None
+                ),
+                "employmentStatus": str(item.get("assignee_employment_status") or "active"),
+                "leaveUntil": (
+                    str(item["assignee_leave_until"])
+                    if item.get("assignee_leave_until") is not None
+                    else None
+                ),
+                "awayUntil": _iso_timestamp(away_until) if away_until is not None else None,
+                "awayKind": (
+                    str(item["assignee_away_kind"])
+                    if item.get("assignee_away_kind") is not None
+                    else None
+                ),
             }
+            owner_risk = owner_risk_for(
+                item.get("assignee_employment_status"), away_until=away_until
+            )
         source = None
         if item.get("source_type") is not None and item.get("source_id") is not None:
             source = {"type": str(item["source_type"]), "id": str(item["source_id"])}
@@ -4869,7 +5267,7 @@ class PostgresStaffRepository:
             for log in logs
             if str(log["work_item_id"]) == str(item["id"])
         ]
-        return {
+        mapped: dict[str, object] = {
             "id": str(item["id"]),
             "key": str(item["key"]),
             "title": str(item["title"]),
@@ -4945,19 +5343,19 @@ class PostgresStaffRepository:
             "source": source,
             "history": history,
         }
+        mapped["signals"] = derive_signals(mapped, now=moment, owner_risk=owner_risk)
+        return mapped
 
     async def _require_work_item(
         self,
         auth: AuthContext,
         work_item_id: str,
     ) -> dict[str, object]:
-        center = await self.get_action_center(auth)
-        items = center["items"]
-        if isinstance(items, list):
-            for item in items:
-                if isinstance(item, dict) and item.get("id") == work_item_id:
-                    return item
-        raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
+        await self._ensure_document_work_items(auth)
+        item = await self._read_work_item(auth, work_item_id)
+        if item is None:
+            raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
+        return item
 
     async def _lock_work_item(
         self,
@@ -6409,6 +6807,13 @@ def _map_staff_inquiry(
         "updatedAt": _iso_timestamp(updated_at),
         "version": version,
     }
+
+
+_UUID_PATTERN = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _iso_timestamp(value: object) -> str:

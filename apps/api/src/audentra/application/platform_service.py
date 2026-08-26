@@ -15,6 +15,7 @@ from audentra.core.assistant_execution import (
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
+from audentra.domain.action_center import parse_action_center_query
 from audentra.domain.documents import (
     can_retry_extraction,
     classify_extraction_failure,
@@ -375,7 +376,7 @@ class InMemoryPlatformService:
                 auth, self._path(call, "conversationId", "id")
             )
         if operation == "staff.get_action_center":
-            return self.store.get_action_center(auth)
+            return self.store.get_action_center(auth, parse_action_center_query(call.query_params))
         if operation == "staff.update_work_item":
             return self.store.update_work_item(
                 auth, self._path(call, "id", "work_item_id", "workItemId"), payload
@@ -896,10 +897,13 @@ class InMemoryPlatformService:
                             store.staff_attention_queue(auth, limit=limit)
                         )
                     ),
-                    "work_queue": lambda: _async_value(store.staff_work_queue(auth)),
+                    "work_queue": lambda query=None: _async_value(
+                        store.staff_work_queue(auth, parse_action_center_query(query))
+                    ),
                     # The in-memory store has no briefing composer; the tool
                     # reports the read as unavailable rather than inventing one.
                     "morning_brew": _unavailable_primitive("morning_brew"),
+                    "staff_capacity": _unavailable_primitive("staff_capacity"),
                     "work_item_detail": (
                         lambda work_item_id: _async_value(
                             store.staff_work_item_detail(auth, work_item_id)

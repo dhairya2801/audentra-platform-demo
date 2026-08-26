@@ -42,6 +42,7 @@ STAFF_TOOL_NAMES = (
     "getStudentOwnership",
     "getStudentsNeedingAttention",
     "getStaffWorkQueue",
+    "getStaffMember",
     "getMorningBriefing",
     "getWorkItemDetail",
     "getInquiries",
@@ -74,6 +75,7 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getStudentOwnership": "operational_state",
     "getStudentsNeedingAttention": "operational_state",
     "getStaffWorkQueue": "operational_state",
+    "getStaffMember": "operational_state",
     "getMorningBriefing": "operational_state",
     "getWorkItemDetail": "operational_state",
     "getInquiries": "operational_state",
@@ -168,10 +170,22 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
     ),
     "getStaffWorkQueue": (
         "Read the staff work queue — the SAME source of truth the Staff "
-        "Portal's Action Center renders — in canonical order (priority, then "
-        "due date), with optional ownership, component, status, due-window, "
-        "and topic (title keyword) filters, plus counts. Authoritative for "
-        "what is in the Action Center and in which order."
+        "Portal's Action Center renders — as one bounded page (25 items) in "
+        "canonical order (priority, then due date), filtered server-side by "
+        "ownership (mine / unassigned / all), assignee name, component, "
+        "status, due window, stale (in progress and untouched for 10+ days), "
+        "ownerRisk (owner departed, on leave, or away), and topic (keyword "
+        "over key, title, student and owner), plus board-wide counts and "
+        "per-component / per-owner rollups. Authoritative for what is in the "
+        "Action Center, in which order, and who is behind."
+    ),
+    "getStaffMember": (
+        "Look up staff members by name: employment status (active, on leave "
+        "until a date, departed), current absence, primary-adviser caseload "
+        "against cap, open/overdue/stale work, appointments awaiting an "
+        "outcome, and open appointment slots in the next 14 days. The "
+        "canonical answer to 'how many students does X advise', 'is X on "
+        "leave', 'when is X next free'. Returns at most five matches."
     ),
     "getMorningBriefing": (
         "Read today's Morning Brew — the same start-of-day briefing the Staff "
@@ -220,6 +234,7 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "getStudentOwnership": "ownership",
     "getStudentsNeedingAttention": "attention_queue",
     "getStaffWorkQueue": "work_queue",
+    "getStaffMember": "staff_capacity",
     "getMorningBriefing": "morning_brew",
     "getWorkItemDetail": "work_item",
     "getInquiries": "inquiries",
@@ -252,6 +267,8 @@ _CHANNELS = ("email", "sms", "voice", "portal")
 _QUEUE_OWNERSHIP = ("mine", "unassigned", "all")
 _QUEUE_STATUSES = ("todo", "in_progress", "follow_up_required", "blocked", "done", "cancelled")
 _QUEUE_DUE_WINDOWS = ("overdue", "today", "seven_days", "no_due", "all")
+_QUEUE_SORTS = ("priority", "due", "updated", "created", "stale")
+_FLAGS = ("true", "false")
 _INQUIRY_STATUSES = ("new", "open", "waiting_on_student", "resolved", "archived")
 
 # Argument schema per tool. Every argument the executor will pass must be
@@ -296,11 +313,17 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
     },
     "getStaffWorkQueue": {
         "ownership": {"kind": "enum", "values": _QUEUE_OWNERSHIP, "optional": True},
+        "assigneeName": {"kind": "text", "max_length": 120, "optional": True},
         "component": {"kind": "text", "max_length": 120, "optional": True},
         "status": {"kind": "enum", "values": _QUEUE_STATUSES, "optional": True},
         "dueWindow": {"kind": "enum", "values": _QUEUE_DUE_WINDOWS, "optional": True},
         "topic": {"kind": "text", "max_length": 80, "optional": True},
+        "stale": {"kind": "enum", "values": _FLAGS, "optional": True},
+        "ownerRisk": {"kind": "enum", "values": _FLAGS, "optional": True},
+        "sort": {"kind": "enum", "values": _QUEUE_SORTS, "optional": True},
+        "key": {"kind": "text", "max_length": 40, "optional": True},
     },
+    "getStaffMember": {"name": {"kind": "text", "max_length": 120}},
     "getMorningBriefing": {},
     "getWorkItemDetail": {"workItemId": {"kind": "uuid"}},
     "getInquiries": {

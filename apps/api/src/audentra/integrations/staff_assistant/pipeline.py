@@ -483,6 +483,16 @@ class StaffAssistantPipeline:
             # first would let a lookup failure preempt the refusal itself
             # ("Mark X's transcript as accepted" must refuse, not disambiguate).
             return resolution
+        if (
+            classification is not None
+            and classification.request_type == "staff_workload"
+            and request.candidate_student_id is None
+            and request.reference_token is None
+        ):
+            # The name in "Is Junia Pemberwell available this week?" is a staff
+            # member's; resolving it against the roster would turn a capacity
+            # question into a student disambiguation prompt.
+            return resolution
         needs_student = classification is None or (
             classification.request_type in STUDENT_REQUIRED_REQUEST_TYPES
         )
@@ -572,7 +582,9 @@ class StaffAssistantPipeline:
                 resolve_item(items[0])
                 return resolution
             if explicit_name is None:
-                queue = await run_referent_read(PlannedToolCall(tool="getStaffWorkQueue"))
+                queue = await run_referent_read(
+                    PlannedToolCall(tool="getStaffWorkQueue", arguments={"key": reference_token})
+                )
                 if queue is not None and any(
                     str(_as_mapping(item).get("key")) == reference_token
                     for item in queue.get("items", [])
@@ -796,7 +808,7 @@ class StaffAssistantPipeline:
         if request.work_item_key is None:
             return None
         round_result = await execute_staff_tool_reads(
-            [PlannedToolCall(tool="getStaffWorkQueue")],
+            [PlannedToolCall(tool="getStaffWorkQueue", arguments={"key": request.work_item_key})],
             self._host,
             timeout_seconds=self._tool_timeout_seconds,
             now=self._now(),
@@ -1153,6 +1165,20 @@ def _cohort_arguments(tool: str, classification: StaffClassification) -> JsonDic
             "filter": dict(classification.cohort_filter or {}),
             "groupBy": classification.cohort_group_by or "offer_status",
         }
+    if classification.reference is not None and classification.reference.startswith("staff:"):
+        # "Vera Jessamy's items in progress for more than a week" — the name is
+        # a queue filter and a directory lookup, never a roster search.
+        name, _, flags = classification.reference.removeprefix("staff:").partition("|")
+        if tool == "getStaffWorkQueue":
+            arguments: JsonDict = {}
+            if name:
+                arguments["assigneeName"] = name
+            if "stale" in flags:
+                arguments["stale"] = "true"
+                arguments["status"] = "in_progress"
+            return arguments
+        if tool == "getStaffMember":
+            return {"name": name} if name else {}
     if (
         tool == "getStaffWorkQueue"
         and classification.reference is not None

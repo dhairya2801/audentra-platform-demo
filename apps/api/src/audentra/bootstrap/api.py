@@ -109,6 +109,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             CompletionClient(http_client, recorder=platform.record_ai_provider_response),
             prompt_runtime,
         )
+        advising = PostgresAdvisingRepository(engine, portal)
         service = PostgresPlatformService(
             PostgresRepositoryBundle(
                 platform=platform,
@@ -117,10 +118,10 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 managed=managed,
                 tenant=tenant,
                 staff_assistant=PostgresStaffAssistantRepository(engine),
-                morning_brew=PostgresMorningBrewRepository(engine),
+                morning_brew=PostgresMorningBrewRepository(engine, capacity=advising),
                 ferpa=PostgresFerpaRepository(engine, portal),
                 edward_feedback=PostgresEdwardFeedbackRepository(engine),
-                advising=PostgresAdvisingRepository(engine, portal),
+                advising=advising,
             ),
             storage,
             ai,

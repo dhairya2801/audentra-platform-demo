@@ -1123,6 +1123,11 @@ export interface StaffMemberSummary {
   roleCode?: string;
   externalRef?: string | null;
   employmentStatus?: StaffEmploymentStatus;
+  /** Date (YYYY-MM-DD) leave ends, when `employmentStatus` is `on_leave`. */
+  leaveUntil?: string | null;
+  /** End of a current absence (vacation, sick, conference, leave) — null when present. */
+  awayUntil?: string | null;
+  awayKind?: string | null;
 }
 
 export type StaffEmploymentStatus = "active" | "on_leave" | "departed";
@@ -1390,6 +1395,23 @@ export interface StaffWorkItemLog {
   occurredAt: string;
 }
 
+/** Why an item's owner cannot be expected to work it right now. */
+export type StaffWorkItemOwnerRisk = "departed" | "on_leave" | "away";
+
+/**
+ * Operational signals derived per item at read time from its own timestamps
+ * and its owner's status. `stale` means in progress and untouched for 10+ days.
+ */
+export interface StaffWorkItemSignals {
+  overdue: boolean;
+  overdueDays: number | null;
+  stale: boolean;
+  staleDays: number | null;
+  ageDays: number;
+  unassigned: boolean;
+  ownerRisk: StaffWorkItemOwnerRisk | null;
+}
+
 export interface StaffWorkItem {
   id: string;
   key: string;
@@ -1431,11 +1453,13 @@ export interface StaffWorkItem {
   };
   source:
     | {
-        type: "onboarding" | "requirement" | "document" | "message";
+        type: "onboarding" | "requirement" | "document" | "message" | "scheduled_rule";
         id: string;
       }
     | null;
+  /** Populated on board pages for the items on the page and on the detail read. */
   history: StaffWorkItemLog[];
+  signals: StaffWorkItemSignals;
 }
 
 export interface StaffWorkComment {
@@ -1623,8 +1647,72 @@ export interface StaffWorkItemDetail {
   generatedAt: string;
 }
 
+export type StaffActionCenterStatusScope = "open" | "closed" | "all";
+export type StaffActionCenterDueWindow =
+  | "all"
+  | "overdue"
+  | "today"
+  | "seven_days"
+  | "no_due";
+export type StaffActionCenterSort =
+  | "priority"
+  | "due"
+  | "updated"
+  | "created"
+  | "stale";
+
+/**
+ * Query parameters of `GET /v1/staff/action-center`. Every field is optional;
+ * the default is open work, priority order, first 50 items.
+ */
+export interface StaffActionCenterQuery {
+  status?: StaffActionCenterStatusScope | StaffWorkItemStatus;
+  priority?: StaffWorkItemPriority;
+  component?: string;
+  /** `me`, `unassigned`, a staff member id, or part of an owner's name. */
+  assignee?: string;
+  /** Matches key, title, description, component, student and owner name. */
+  search?: string;
+  due?: StaffActionCenterDueWindow;
+  stale?: boolean;
+  ownerRisk?: boolean;
+  escalated?: boolean;
+  sort?: StaffActionCenterSort;
+  /** 1–200, default 50. */
+  limit?: number;
+  offset?: number;
+}
+
+export interface StaffActionCenterFacets {
+  /** Open work per component, most open first. */
+  components: {
+    component: string;
+    open: number;
+    overdue: number;
+    unassigned: number;
+    stale: number;
+    ownerRisk: number;
+    urgent: number;
+  }[];
+  /** Open work per owner (unassigned first), at most 25 rows. */
+  assignees: {
+    staff: StaffMemberSummary | null;
+    open: number;
+    overdue: number;
+    stale: number;
+    urgent: number;
+  }[];
+}
+
+/**
+ * One bounded page of the board plus board-wide counts and facets. The board
+ * is never returned in full: page further with `offset`, or narrow with the
+ * query. `counts.todo…escalated` describe the whole board (the legacy shape);
+ * `counts.open…ownerRisk` describe open work only.
+ */
 export interface StaffActionCenter {
   items: StaffWorkItem[];
+  /** Active staff (including people on leave, flagged), for assignment. */
   staff: StaffMemberSummary[];
   counts: {
     todo: number;
@@ -1635,6 +1723,35 @@ export interface StaffActionCenter {
     cancelled: number;
     urgent: number;
     escalated: number;
+    open: number;
+    overdue: number;
+    stale: number;
+    unassigned: number;
+    ownerRisk: number;
+  };
+  page: {
+    limit: number;
+    offset: number;
+    /** Items matching the query across all pages. */
+    total: number;
+    hasMore: boolean;
+    distinctStudents: number;
+  };
+  facets: StaffActionCenterFacets;
+  /** The normalized query this page answers. */
+  query: {
+    status: string;
+    priority: string | null;
+    component: string | null;
+    assignee: string | null;
+    search: string | null;
+    due: StaffActionCenterDueWindow;
+    stale: boolean | null;
+    ownerRisk: boolean | null;
+    escalated: boolean | null;
+    sort: StaffActionCenterSort;
+    limit: number;
+    offset: number;
   };
   generatedAt: string;
 }
@@ -2416,6 +2533,8 @@ export interface StaffBrewPriority {
   window: string;
   breakdown: { label: string; value: string }[];
   steps: string[];
+  /** Action Center query that opens the queue pre-filtered, when one applies. */
+  boardQuery?: StaffActionCenterQuery | null;
 }
 
 export interface StaffBrewDeadline {
@@ -2459,6 +2578,78 @@ export interface StaffBrewSynthesis {
   basis: string;
 }
 
+export type StaffBrewCapacitySeverity = "critical" | "high" | "medium" | "positive";
+export type StaffBrewCapacitySignalKind =
+  | "departed_with_caseload"
+  | "on_leave_with_caseload"
+  | "over_cap_no_slots"
+  | "over_cap"
+  | "away_with_backlog"
+  | "falling_behind"
+  | "spare_capacity"
+  | "component_backlog"
+  | "unassigned_backlog"
+  | "students_without_adviser";
+
+export interface StaffBrewCapacitySignal {
+  id: string;
+  kind: StaffBrewCapacitySignalKind;
+  severity: StaffBrewCapacitySeverity;
+  title: string;
+  detail: string;
+  count: number;
+  action: string;
+  staff: {
+    id: string;
+    name: string;
+    title: string | null;
+    component: string | null;
+    employmentStatus: StaffEmploymentStatus | null;
+  } | null;
+  component: string | null;
+  destination: StaffBrewDestination;
+  /** Action Center query that shows the items behind the signal, when there are any. */
+  boardQuery: StaffActionCenterQuery | null;
+}
+
+export interface StaffBrewCapacity {
+  available: boolean;
+  summary: {
+    staff: number;
+    active: number;
+    onLeave: number;
+    departed: number;
+    awayNow: number;
+    overCap: number;
+    fallingBehind: number;
+    spareCapacity: number;
+    itemsOwnedByUnavailable: number;
+    staleItems: number;
+    unassignedItems: number;
+    acceptedWithoutAdviser: number;
+    depositedWithoutAdviser: number;
+    studentsWithDepartedAdviser: number;
+    studentsWithAdviserOnLeave: number;
+    signalKinds: StaffBrewCapacitySignalKind[];
+    signalsTotal: number;
+  } | null;
+  /** At most 8, ranked by severity then size. */
+  signals: StaffBrewCapacitySignal[];
+  signalsOmitted?: number;
+  /** Open work per office, most overdue first, at most 12 rows. */
+  components: {
+    component: string;
+    open: number;
+    overdue: number;
+    unassigned: number;
+    stale: number;
+    urgent: number;
+    ownerRisk: number;
+    oldestOverdueDays: number | null;
+  }[];
+  basis: string;
+}
+
 export interface StaffMorningBrew {
   generatedAt: string;
   window: {
@@ -2498,11 +2689,20 @@ export interface StaffMorningBrew {
     unassigned: number;
     assignedToMe: number;
   };
+  /**
+   * The people dimension: where capacity is constrained or available, who is
+   * absent while owning work, and which offices are behind. A short ranked
+   * list of rule-based signals, never a per-person dashboard.
+   */
+  staffCapacity: StaffBrewCapacity;
   /** Freshness of the deterministic engagement scan behind attention flags. */
   engagementScan: {
     available: boolean;
     snapshots: number;
     lastProjectedAt: string | null;
+    /** Portal activity events in the last 30 days; 0 means inactivity is unknown. */
+    activityEvents30d?: number;
+    activitySignal?: boolean;
   };
   coverage: {
     source: "canonical_postgres";

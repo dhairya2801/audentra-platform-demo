@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from audentra.domain.agentic_workflows import InboundTriageCandidate, decide_inbound_action
+from audentra.domain.engagement import activity_feed_covers_population, decide_inactive
 
 _PENDING_INBOX_LIMIT = 25
 _ACTION_RULE_CANDIDATE_LIMIT = 250
@@ -1531,7 +1532,8 @@ class AgenticWorkflowScheduler:
                            activity.current_step_code, activity.recent_upload_failures,
                            activity.help_requested, requirements.completion_percentage,
                            requirements.blocking_requirement_count, requirements.next_deadline,
-                           inquiries.open_support_case_count
+                           inquiries.open_support_case_count,
+                           feed.active_students, feed.roster_size
                     FROM public.student AS s
                     LEFT JOIN LATERAL (
                       SELECT MAX(a.occurred_at) AS last_active_at,
@@ -1579,6 +1581,20 @@ class AgenticWorkflowScheduler:
                         AND inquiry.student_id = s.id
                         AND inquiry.status <> 'resolved'
                     ) AS inquiries ON true
+                    LEFT JOIN LATERAL (
+                      -- "Inactive" is only a fact where activity is recorded for
+                      -- the population. A tenant whose feed covers a handful of
+                      -- students has students whose engagement is unknown, not
+                      -- a roster that is all inactive.
+                      SELECT (
+                        SELECT COUNT(DISTINCT any_event.student_id)
+                        FROM public.activity_event AS any_event
+                        WHERE any_event.tenant_id = s.tenant_id
+                          AND any_event.occurred_at >= NOW() - INTERVAL '30 days'
+                      ) AS active_students,
+                      (SELECT COUNT(*) FROM public.student AS roster
+                        WHERE roster.tenant_id = s.tenant_id) AS roster_size
+                    ) AS feed ON true
                     LEFT JOIN public.student_engagement_snapshot AS snapshot
                       ON snapshot.tenant_id = s.tenant_id
                      AND snapshot.student_id = s.id
@@ -1605,15 +1621,25 @@ class AgenticWorkflowScheduler:
         help_requested = bool(student.get("help_requested"))
         recent_upload_failures = int(student.get("recent_upload_failures") or 0)
         days_to_deadline = (next_deadline - now).days if next_deadline is not None else None
-        inactive = last_meaningful is None or (now - last_meaningful).days >= 7
+        # Without a feed that covers the population, the inactivity test is
+        # undecidable; treat it as unknown rather than flagging the roster.
+        inactive = decide_inactive(
+            last_meaningful,
+            now=now,
+            activity_known=activity_feed_covers_population(
+                student.get("active_students"), student.get("roster_size")
+            ),
+        )
         intervention = (
-            (inactive and blocking > 0)
+            (inactive is True and blocking > 0)
             or (days_to_deadline is not None and days_to_deadline <= 7)
             or help_requested
         )
         reasons: list[str] = []
-        if inactive:
+        if inactive is True:
             reasons.append("inactive")
+        elif inactive is None:
+            reasons.append("activity_unknown")
         if blocking > 0:
             reasons.append("blocking_requirement")
         if days_to_deadline is not None and days_to_deadline <= 7:

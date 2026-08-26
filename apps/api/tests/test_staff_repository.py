@@ -558,13 +558,27 @@ def test_manual_work_item_creation_is_idempotent_linked_notified_and_ai_queued()
     assert result["status"] == "in_progress"
     assert result["priority"] == "urgent"
     assert result["component"] == "Registrar"
-    assert result["assignee"] == {
+    assignee = cast(dict[str, object], result["assignee"])
+    assert {key: assignee[key] for key in ("id", "name", "email", "component")} == {
         "id": STAFF_ID,
         "name": "Marcus Lee",
         "email": "marcus@aster.edu",
         "component": "Registrar",
     }
+    assert assignee["employmentStatus"] == "active"
+    assert result["signals"] == {
+        "overdue": False,
+        "overdueDays": None,
+        "stale": False,
+        "staleDays": None,
+        "ageDays": 0,
+        "unassigned": False,
+        "ownerRisk": None,
+    }
     statements = [sql for sql, _ in connection.executions]
+    # The reload is a single-item read, never the whole board.
+    reload_sql = next(sql for sql in statements if "FROM public.staff_work_item AS item" in sql)
+    assert "item.id = :work_item_id" in reload_sql
     assert any("INSERT INTO public.staff_work_item_link" in sql for sql in statements)
     assert any("INSERT INTO public.action_center_ai_job" in sql for sql in statements)
     assert any("INSERT INTO public.staff_notification" in sql for sql in statements)
@@ -638,7 +652,46 @@ def test_realtime_event_stream_bootstraps_replays_and_rejects_invalid_cursors() 
 def test_action_center_read_maps_staff_history_and_operational_counts() -> None:
     def handler(sql: str, values: dict[str, object]) -> FakeResult:
         assert values["tenant_id"] == UUID(TENANT_ID)
-        if "ORDER BY display_name" in sql:
+        if "SELECT COUNT(*) AS total" in sql:
+            assert values["statuses"] == ["todo", "in_progress", "follow_up_required", "blocked"]
+            return FakeResult([{"total": 1, "students": 1}])
+        if "AS follow_up_required" in sql and "COUNT(*) FILTER" in sql:
+            return FakeResult(
+                [
+                    {
+                        "todo": 0,
+                        "in_progress": 0,
+                        "follow_up_required": 0,
+                        "blocked": 1,
+                        "done": 0,
+                        "cancelled": 0,
+                        "urgent": 1,
+                        "escalated": 1,
+                        "open": 1,
+                        "overdue": 0,
+                        "stale": 0,
+                        "unassigned": 0,
+                        "owner_risk": 0,
+                    }
+                ]
+            )
+        if "GROUP BY item.component" in sql:
+            return FakeResult(
+                [
+                    {
+                        "component": "Registrar",
+                        "open": 1,
+                        "overdue": 0,
+                        "unassigned": 0,
+                        "stale": 0,
+                        "owner_risk": 0,
+                        "urgent": 1,
+                    }
+                ]
+            )
+        if "GROUP BY assignee.id" in sql:
+            return FakeResult([])
+        if "ORDER BY m.display_name" in sql:
             return FakeResult(
                 [
                     {
@@ -650,6 +703,10 @@ def test_action_center_read_maps_staff_history_and_operational_counts() -> None:
                 ]
             )
         if "FROM public.staff_work_item AS item" in sql:
+            assert "LIMIT :limit OFFSET :offset" in sql
+            assert "item.status = ANY(:statuses)" in sql
+            assert "CASE WHEN item.status IN ('done', 'cancelled') THEN 1 ELSE 0 END" in sql
+            assert values["limit"] == 50 and values["offset"] == 0
             return FakeResult(
                 [
                     {
@@ -727,8 +784,34 @@ def test_action_center_read_maps_staff_history_and_operational_counts() -> None:
         "cancelled": 0,
         "urgent": 1,
         "escalated": 1,
+        "open": 1,
+        "overdue": 0,
+        "stale": 0,
+        "unassigned": 0,
+        "ownerRisk": 0,
     }
+    assert center["page"] == {
+        "limit": 50,
+        "offset": 0,
+        "total": 1,
+        "hasMore": False,
+        "distinctStudents": 1,
+    }
+    assert cast(dict[str, object], center["query"])["status"] == "open"
+    facets = cast(dict[str, list[dict[str, object]]], center["facets"])
+    assert facets["components"][0]["component"] == "Registrar"
+    log_sql = next(sql for sql, _ in connection.executions if "FROM public.staff_work_log" in sql)
+    assert "work_item_id = ANY(:ids)" in log_sql
     item = cast(list[dict[str, object]], center["items"])[0]
+    assert item["signals"] == {
+        "overdue": False,
+        "overdueDays": None,
+        "stale": False,
+        "staleDays": None,
+        "ageDays": 1,
+        "unassigned": False,
+        "ownerRisk": None,
+    }
     assert item["blocker"] == {
         "code": "human_review",
         "detail": "Confirm one ambiguous course.",

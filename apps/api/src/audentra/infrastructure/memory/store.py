@@ -11,6 +11,12 @@ from uuid import uuid4
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.domain.action_center import (
+    DEFAULT_QUERY,
+    ActionCenterQuery,
+    derive_signals,
+    evaluate_board,
+)
 from audentra.domain.documents import bounded_document_label, can_retry_extraction
 from audentra.domain.onboarding import (
     ONBOARDING_STEPS,
@@ -1198,28 +1204,26 @@ class InMemoryPlatformStore:
                 }
             )
 
-    def get_action_center(self, auth: AuthContext) -> dict[str, Any]:
+    def get_action_center(
+        self, auth: AuthContext, query: ActionCenterQuery = DEFAULT_QUERY
+    ) -> dict[str, Any]:
         self.require_staff(auth)
         self.ensure_document_work_items()
-        items = sorted(
-            self.work_items,
-            key=lambda x: (
-                {"urgent": 0, "high": 1, "medium": 2, "low": 3}[x["priority"]],
-                x["dueAt"] or "",
-            ),
-        )
-        return {
-            "items": _clone(items),
-            "staff": _clone(self.staff_members),
-            "counts": {
-                "todo": sum(x["status"] == "todo" for x in items),
-                "inProgress": sum(x["status"] == "in_progress" for x in items),
-                "done": sum(x["status"] == "done" for x in items),
-                "urgent": sum(x["priority"] == "urgent" for x in items),
-                "escalated": sum(bool(x["escalated"]) for x in items),
-            },
-            "generatedAt": _now(),
-        }
+        return self._board(auth, query)
+
+    def _board(self, auth: AuthContext, query: ActionCenterQuery) -> dict[str, Any]:
+        """The same bounded, signalled board the PostgreSQL repository serves."""
+
+        now = datetime.now(UTC)
+        items = []
+        for raw in self.work_items:
+            item = _clone(raw)
+            item["signals"] = derive_signals(item, now=now, owner_risk=None)
+            items.append(item)
+        board = evaluate_board(items, query, now=now, actor_id=auth.actor_id)
+        board["staff"] = _clone(self.staff_members)
+        board["generatedAt"] = _now()
+        return board
 
     def _work_item(self, work_item_id: str) -> dict[str, Any]:
         item = next((x for x in self.work_items if x["id"] == work_item_id), None)
@@ -1879,33 +1883,14 @@ class InMemoryPlatformStore:
             ),
         }
 
-    def staff_work_queue(self, auth: AuthContext) -> dict[str, Any]:
+    def staff_work_queue(
+        self, auth: AuthContext, query: ActionCenterQuery = DEFAULT_QUERY
+    ) -> dict[str, Any]:
         """Pure queue read: same rows as the action center, no document
         work-item reconciliation side effect."""
 
         self.require_staff(auth)
-        items = sorted(
-            self.work_items,
-            key=lambda x: (
-                {"urgent": 0, "high": 1, "medium": 2, "low": 3}[x["priority"]],
-                x["dueAt"] or "",
-            ),
-        )
-        return {
-            "items": _clone(items),
-            "staff": _clone(self.staff_members),
-            "counts": {
-                "todo": sum(x["status"] == "todo" for x in items),
-                "inProgress": sum(x["status"] == "in_progress" for x in items),
-                "followUpRequired": sum(x["status"] == "follow_up_required" for x in items),
-                "blocked": sum(x["status"] == "blocked" for x in items),
-                "done": sum(x["status"] == "done" for x in items),
-                "cancelled": sum(x["status"] == "cancelled" for x in items),
-                "urgent": sum(x["priority"] == "urgent" for x in items),
-                "escalated": sum(bool(x["escalated"]) for x in items),
-            },
-            "generatedAt": _now(),
-        }
+        return self._board(auth, query)
 
     def staff_work_item_detail(self, auth: AuthContext, work_item_id: str) -> dict[str, Any]:
         self.require_staff(auth)

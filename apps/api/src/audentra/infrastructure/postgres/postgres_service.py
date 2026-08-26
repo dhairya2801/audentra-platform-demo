@@ -34,6 +34,11 @@ from audentra.core.auth import AuthContext
 from audentra.core.delegate_authorization import require_delegate_scope
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError, UnauthorizedError
 from audentra.core.ports import BinaryPayload, ServiceCall
+from audentra.domain.action_center import (
+    DEFAULT_QUERY,
+    ActionCenterQuery,
+    parse_action_center_query,
+)
 from audentra.domain.documents import (
     can_retry_extraction,
     classify_extraction_failure,
@@ -83,6 +88,7 @@ from .advising_repository import PostgresAdvisingRepository
 from .edward_feedback_repository import PostgresEdwardFeedbackRepository
 from .ferpa_repository import PostgresFerpaRepository
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
+from .model_usage_ledger import record_assistant_usage
 from .morning_brew_repository import PostgresMorningBrewRepository
 from .platform_repository import PostgresPlatformRepository
 from .portal_repository import PostgresPortalRepository
@@ -1126,15 +1132,21 @@ class PostgresPlatformService:
             )
         if operation == "staff.get_workspace":
             configurations = await self._managed_configurations(auth)
+            # The workspace carries the first page of open work plus the
+            # board-wide counts; the task board queries further pages and
+            # filters itself. "My" open items are read separately so the
+            # personal action center does not depend on which page came back.
+            action_center, personal_board = await asyncio.gather(
+                staff.get_action_center(auth, DEFAULT_QUERY),
+                staff.get_work_queue(auth, ActionCenterQuery(assignee="me", limit=200)),
+            )
             (
-                action_center,
                 student,
                 campus_life,
                 inquiries,
                 cohort,
                 managed_content,
             ) = await asyncio.gather(
-                staff.get_action_center(auth),
                 staff.get_student_record(auth, auth.student_id),
                 portal.get_campus_life(auth),
                 portal.list_staff_help_requests(auth),
@@ -1144,6 +1156,7 @@ class PostgresPlatformService:
             return compose_staff_workspace(
                 auth,
                 action_center=action_center,
+                personal_items=cast(Sequence[Mapping[str, Any]], personal_board.get("items", [])),
                 student=student,
                 campus_life=campus_life,
                 inquiries=cast(Sequence[Mapping[str, Any]], inquiries),
@@ -1244,7 +1257,7 @@ class PostgresPlatformService:
         if operation == "staff.preview_edward":
             return preview_edward(auth, payload)
         if operation == "staff.get_action_center":
-            return await staff.get_action_center(auth)
+            return await staff.get_action_center(auth, parse_action_center_query(call.query_params))
         if operation == "staff.create_work_item":
             return await staff.create_work_item(
                 auth,
@@ -2408,6 +2421,18 @@ class PostgresPlatformService:
                 page_label=page_label,
                 trace=trace,
             )
+            await record_assistant_usage(
+                self.repository.portal.engine,
+                tenant_id=auth.tenant_id,
+                feature="student_assistant",
+                actor_type="student",
+                actor_id=None,
+                student_id=auth.student_id,
+                provider=result.provider,
+                model=result.model,
+                usage=result.usage,
+                request_id=request_id,
+            )
             response = {
                 "message": result.message,
                 "blocks": result.blocks,
@@ -2713,11 +2738,14 @@ class PostgresPlatformService:
                     auth, limit=limit
                 ),
                 # Pure queue read: never the mutating get_action_center path.
-                "work_queue": lambda: staff.get_work_queue(auth),
+                "work_queue": lambda query=None: staff.get_work_queue(
+                    auth, parse_action_center_query(query)
+                ),
                 # The Staff Portal's own briefing composer — Edward reads the
                 # same briefing the staff member can already see, rather than
                 # recomputing a second, divergent one.
                 "morning_brew": lambda: self._morning_brew_for_assistant(auth),
+                "staff_capacity": lambda: self._advising().staff_capacity_snapshot(auth),
                 "work_item_detail": lambda work_item_id: staff.get_work_item_detail(
                     auth, work_item_id, ensure_document_work_items=False
                 ),
@@ -2821,6 +2849,18 @@ class PostgresPlatformService:
             referent_action = result.referent_action
             active_student_id = result.next_referent_student_id
             trace.student_id = resolved_student_id
+            await record_assistant_usage(
+                self.repository.portal.engine,
+                tenant_id=auth.tenant_id,
+                feature="staff_assistant",
+                actor_type="staff",
+                actor_id=auth.actor_id,
+                student_id=resolved_student_id,
+                provider=result.provider,
+                model=result.model,
+                usage=result.usage,
+                request_id=request_id,
+            )
             response = {
                 "message": result.message,
                 "blocks": result.blocks,

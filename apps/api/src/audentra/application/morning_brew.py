@@ -34,6 +34,7 @@ from audentra.domain.morning_brew import (
     severity_for,
     window_label,
 )
+from audentra.domain.staff_capacity import compose_staff_capacity
 from audentra.domain.student_cohort import DUE_SOON_HORIZON_DAYS
 
 JsonDict = dict[str, Any]
@@ -119,6 +120,8 @@ class MorningBrewReader(Protocol):
 
     async def engagement_scan_freshness(self, auth: AuthContext) -> JsonDict: ...
 
+    async def staff_capacity(self, auth: AuthContext) -> JsonDict | None: ...
+
 
 async def build_morning_brew(
     auth: AuthContext,
@@ -140,7 +143,9 @@ async def build_morning_brew(
         reader.staff_work_summary(auth),
         reader.engagement_scan_freshness(auth),
     )
+    capacity_snapshot = await reader.staff_capacity(auth)
     counts = BrewCounts(values=dict(counts_raw))
+    staff_capacity = compose_staff_capacity(capacity_snapshot, now=moment)
 
     ranked = _ranked_priorities(counts)
     detailed = ranked[:DETAILED_ATTENTION_ITEMS]
@@ -152,7 +157,7 @@ async def build_morning_brew(
     ]
     metrics = [_metric(spec, counts, activity) for spec in BREW_METRICS]
     changes = _changes(activity)
-    priorities = _work_priorities(staff_work, requests, deadlines, counts)
+    priorities = _work_priorities(staff_work, requests, deadlines, counts, staff_capacity)
 
     return {
         "generatedAt": _iso(moment),
@@ -172,7 +177,7 @@ async def build_morning_brew(
             "students": counts.get("roster"),
             "cohorts": {cohort.key: counts.get(cohort.key) for cohort in BREW_COHORTS},
         },
-        "synthesis": _synthesis(counts, activity, attention, requests, staff_work),
+        "synthesis": _synthesis(counts, activity, attention, requests, staff_work, staff_capacity),
         "metrics": metrics,
         "changes": changes,
         "attention": attention,
@@ -185,6 +190,7 @@ async def build_morning_brew(
             "unassigned": int(requests.get("unassigned", 0)),
         },
         "staffWork": dict(staff_work),
+        "staffCapacity": staff_capacity,
         "engagementScan": dict(scan),
         "coverage": {
             "source": "canonical_postgres",
@@ -516,6 +522,7 @@ def _work_priorities(
     requests: Mapping[str, Any],
     deadlines: Sequence[Mapping[str, Any]],
     counts: BrewCounts,
+    staff_capacity: Mapping[str, Any] | None = None,
 ) -> list[JsonDict]:
     """The queues a staff member actually works, sized from canonical rows.
 
@@ -556,6 +563,7 @@ def _work_priorities(
                 "Work the escalated items ahead of the merely urgent ones.",
             ],
         },
+        *_capacity_priorities(staff_capacity or {}),
         {
             "id": "unanswered-requests",
             "topic": "student_success",
@@ -671,6 +679,68 @@ def _work_priorities(
     return [item for item in candidates if int(item["count"]) > 0]
 
 
+def _capacity_priorities(staff_capacity: Mapping[str, Any]) -> list[JsonDict]:
+    """Queues that exist because of *people*: absent owners and stalled work."""
+
+    summary = staff_capacity.get("summary")
+    if not isinstance(summary, Mapping):
+        return []
+    owned = int(summary.get("itemsOwnedByUnavailable", 0))
+    stale = int(summary.get("staleItems", 0))
+    return [
+        {
+            "id": "ownership-at-risk",
+            "topic": "student_success",
+            "title": "Open items owned by someone departed, on leave or away",
+            "count": owned,
+            "level": "High",
+            "icon": "⚠",
+            "detail": (
+                f"{owned} open items are assigned to a person who cannot work them right now "
+                f"({summary.get('departed', 0)} departed, {summary.get('onLeave', 0)} on leave, "
+                f"{summary.get('awayNow', 0)} away today)."
+            ),
+            "linkLabel": "Show items with an unavailable owner",
+            "destination": "tasks",
+            "window": "Today",
+            "breakdown": [
+                {"label": "Owned by unavailable staff", "value": str(owned)},
+                {
+                    "label": "Students whose adviser left",
+                    "value": str(summary.get("studentsWithDepartedAdviser", 0)),
+                },
+                {
+                    "label": "Students whose adviser is on leave",
+                    "value": str(summary.get("studentsWithAdviserOnLeave", 0)),
+                },
+            ],
+            "steps": [
+                "Reassign the departed owner's items first; they will never move otherwise.",
+                "Name a cover for each person on leave or away this week.",
+            ],
+            "boardQuery": {"ownerRisk": True},
+        },
+        {
+            "id": "stale-work",
+            "topic": "student_success",
+            "title": "Work started and then left untouched",
+            "count": stale,
+            "level": "Medium",
+            "icon": "◷",
+            "detail": (f"{stale} items have been in progress with no update for 10 or more days."),
+            "linkLabel": "Show stale in-progress items",
+            "destination": "tasks",
+            "window": "Today",
+            "breakdown": [
+                {"label": "Stale in-progress items", "value": str(stale)},
+                {"label": "People falling behind", "value": str(summary.get("fallingBehind", 0))},
+            ],
+            "steps": ["Ask each owner whether the item is blocked, done, or forgotten."],
+            "boardQuery": {"stale": True},
+        },
+    ]
+
+
 def _deadline(item: Mapping[str, Any]) -> JsonDict:
     bucket = str(item.get("bucket"))
     days = item.get("daysAway")
@@ -748,6 +818,7 @@ def _synthesis(
     attention: Sequence[Mapping[str, Any]],
     requests: Mapping[str, Any],
     staff_work: Mapping[str, Any],
+    staff_capacity: Mapping[str, Any] | None = None,
 ) -> JsonDict:
     """A short executive read, assembled only from numbers already counted.
 
@@ -791,6 +862,18 @@ def _synthesis(
         impact = top.get("impact") or []
         first = impact[0].get("label") if impact else ""
         bullets.append(f"{top.get('title')}: {first}. {top.get('recommendedAction')}")
+    # The people dimension: the single most severe staff signal, if one fired.
+    capacity_signals = (staff_capacity or {}).get("signals") or []
+    lead = next(
+        (
+            signal
+            for signal in capacity_signals
+            if isinstance(signal, Mapping) and signal.get("severity") in {"critical", "high"}
+        ),
+        None,
+    )
+    if lead is not None:
+        bullets.append(f"{lead.get('title')}: {lead.get('detail')}")
     ready = counts.get("enrollment_ready")
     deposited = counts.get("deposit_paid")
     if deposited:
@@ -836,6 +919,12 @@ def _coverage_notes(scan: Mapping[str, Any], counts: BrewCounts) -> list[str]:
         notes.append(
             "The scheduled engagement scan has not projected this tenant yet, so "
             "attention flags are unavailable rather than zero."
+        )
+    elif scan.get("activitySignal") is False:
+        notes.append(
+            "No portal activity events have been recorded in the last 30 days, so "
+            "inactivity is unknown for every student and is not counted as a reason "
+            "to flag anyone."
         )
     return notes
 
