@@ -16,10 +16,11 @@ authenticated tenant in SQL.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from audentra.domain.student_cohort import (
@@ -73,14 +74,16 @@ class StaffAssistantToolHost:
         staff_member_id: str | None = None,
     ) -> None:
         self._primitives = dict(primitives)
-        self._cache: dict[tuple[str, tuple[tuple[str, Any], ...]], Mapping[str, Any]] = {}
+        self._cache: dict[tuple[str, str], Mapping[str, Any]] = {}
         self.staff_member_id = staff_member_id
 
     def supports(self, primitive: str) -> bool:
         return primitive in self._primitives
 
     async def read(self, primitive: str, **arguments: Any) -> Mapping[str, Any]:
-        key = (primitive, tuple(sorted(arguments.items())))
+        # Arguments may carry nested filter mappings; the key is their
+        # canonical JSON so equal reads coalesce and unequal ones never do.
+        key = (primitive, json.dumps(arguments, sort_keys=True, default=str))
         if key not in self._cache:
             self._cache[key] = await self._primitives[primitive](**arguments)
         return self._cache[key]
@@ -733,13 +736,67 @@ async def _tool_morning_briefing(
 async def _tool_work_queue(
     host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
 ) -> JsonDict:
-    queue = await _primitive(host, "work_queue")
-    items = [dict(_mapping(item)) for item in _sequence(queue.get("items"))]
+    """A bounded page of the Action Center with SQL-side counts.
+
+    The board read (`work_queue`) loads every item and every log row; at a
+    realistic tenant that alone exceeds the tool budget. When the bounded
+    primitives exist the page and the counts come from SQL; the whole-board
+    read remains only as the fallback for hosts without them.
+    """
+
     ownership = str(arguments.get("ownership") or "all")
     component = arguments.get("component")
     status = arguments.get("status")
     due_window = str(arguments.get("dueWindow") or "all")
     topic = str(arguments.get("topic") or "").strip().lower()
+    if host.supports("work_queue_search") and host.supports("work_queue_summary"):
+        filters: JsonDict = {
+            "ownership": ownership if ownership != "all" else None,
+            "component": component,
+            "status": status or "open",
+            "dueWindow": due_window if due_window != "all" else None,
+            "topic": topic or None,
+        }
+        page = await _primitive(host, "work_queue_search", filters=filters, limit=25)
+        summary = await _primitive(host, "work_queue_summary", filters=filters)
+        board = await _primitive(host, "work_queue_summary", filters={"status": "open"})
+        items = [dict(_mapping(item)) for item in _sequence(page.get("items"))]
+        by_status = _mapping(summary.get("byStatus"))
+        return {
+            "items": items,
+            "counts": {
+                "todo": int(_mapping(board.get("byStatus")).get("todo") or 0),
+                "inProgress": int(_mapping(board.get("byStatus")).get("inProgress") or 0),
+                "followUpRequired": int(
+                    _mapping(board.get("byStatus")).get("followUpRequired") or 0
+                ),
+                "blocked": int(_mapping(board.get("byStatus")).get("blocked") or 0),
+                "open": int(board.get("total") or 0),
+                "unassigned": int(board.get("unassigned") or 0),
+                "urgent": int(board.get("urgent") or 0),
+                "escalated": int(board.get("escalated") or 0),
+                "overdue": int(board.get("overdue") or 0),
+            },
+            "filteredTotal": int(page.get("total") or 0),
+            "filteredOpen": int(summary.get("total") or 0)
+            if (status or "open") == "open"
+            else sum(int(by_status.get(key) or 0) for key in by_status),
+            "filteredOverdue": int(summary.get("overdue") or 0),
+            "filteredUnassigned": int(summary.get("unassigned") or 0),
+            "filteredUrgent": int(summary.get("urgent") or 0),
+            "distinctOpenStudents": int(summary.get("distinctStudents") or 0),
+            "filters": {
+                "ownership": ownership,
+                "component": component,
+                "status": status,
+                "dueWindow": due_window,
+                "topic": topic or None,
+            },
+            "bounded": True,
+            "generatedAt": page.get("generatedAt"),
+        }
+    queue = await _primitive(host, "work_queue")
+    items = [dict(_mapping(item)) for item in _sequence(queue.get("items"))]
     if topic:
         items = [
             item
@@ -758,7 +815,7 @@ async def _tool_work_queue(
     if component:
         needle = str(component).lower()
         items = [item for item in items if needle in str(item.get("component") or "").lower()]
-    if status:
+    if status and status not in {"open", "any", "closed"}:
         items = [item for item in items if str(item.get("status")) == status]
     if due_window != "all":
         items = [item for item in items if _due_window(item.get("dueAt"), now) == due_window]
@@ -783,6 +840,7 @@ async def _tool_work_queue(
             "dueWindow": due_window,
             "topic": topic or None,
         },
+        "bounded": False,
         "generatedAt": queue.get("generatedAt"),
     }
 
@@ -874,6 +932,346 @@ async def _tool_mailbox_messages(
     return dict(result)
 
 
+# ---------------------------------------------------------------------------
+# Staff-aware tools (bounded reads about people, teams, queues, departments)
+# ---------------------------------------------------------------------------
+
+
+_QUEUE_FILTER_KEYS = (
+    "ownership",
+    "component",
+    "status",
+    "priority",
+    "dueWindow",
+    "topic",
+    "stale",
+    "escalated",
+    "actionType",
+    "workType",
+    "inProgressOverDays",
+    "studentId",
+)
+_INQUIRY_FILTER_KEYS = (
+    "status",
+    "ownership",
+    "priority",
+    "topic",
+    "olderThanHours",
+    "studentId",
+)
+
+
+def _queue_filters(arguments: JsonDict) -> JsonDict:
+    filters = {
+        key: arguments.get(key) for key in _QUEUE_FILTER_KEYS if arguments.get(key) is not None
+    }
+    if arguments.get("staffId"):
+        filters["assigneeId"] = str(arguments["staffId"])
+    if filters.get("ownership") == "all":
+        filters.pop("ownership")
+    if filters.get("dueWindow") == "all":
+        filters.pop("dueWindow")
+    return filters
+
+
+def _inquiry_filters(arguments: JsonDict) -> JsonDict:
+    filters = {
+        key: arguments.get(key) for key in _INQUIRY_FILTER_KEYS if arguments.get(key) is not None
+    }
+    if arguments.get("staffId"):
+        filters["assigneeId"] = str(arguments["staffId"])
+    if filters.get("ownership") == "all":
+        filters.pop("ownership")
+    return filters
+
+
+async def _tool_staff_profile(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    profile = await _primitive(host, "staff_profile", staff_member_id=str(arguments["staffId"]))
+    return dict(profile or {})
+
+
+async def _tool_search_staff(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "search_staff",
+            query=str(arguments.get("query") or ""),
+            component=arguments.get("component"),
+            role=arguments.get("role"),
+            absent_now=bool(arguments.get("absentNow")),
+            limit=int(arguments.get("limit") or 10),
+        )
+    )
+
+
+async def _tool_staff_team(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    team = await _primitive(host, "staff_team", staff_member_id=str(arguments["staffId"]))
+    data = dict(team or {})
+    members = [dict(_mapping(entry)) for entry in _sequence(data.get("team"))]
+    # Bound the payload: the subtree can be large, so keep the fields an
+    # answer needs and the flagged people first.
+    bounded = [
+        {
+            "id": entry.get("id"),
+            "name": entry.get("name"),
+            "title": entry.get("title"),
+            "roleCode": entry.get("roleCode"),
+            "component": entry.get("component"),
+            "employmentStatus": entry.get("employmentStatus"),
+            "leaveUntil": entry.get("leaveUntil"),
+            "level": entry.get("level"),
+            "caseload": dict(_mapping(entry.get("caseload"))),
+            "work": dict(_mapping(entry.get("work"))),
+            "availability": dict(_mapping(entry.get("availability"))),
+            "flags": list(_sequence(entry.get("flags"))),
+        }
+        for entry in members
+    ]
+    bounded.sort(key=lambda entry: (0 if entry["flags"] else 1, int(str(entry.get("level") or 1))))
+    return {
+        "manager": dict(_mapping(data.get("manager"))),
+        "members": bounded[:40],
+        "total": len(members),
+        "directReports": sum(1 for entry in members if int(entry.get("level") or 1) == 1),
+        "componentSummary": dict(_mapping(data.get("componentSummary"))),
+        "flagged": [
+            {"name": entry["name"], "flags": entry["flags"]} for entry in bounded if entry["flags"]
+        ][:20],
+    }
+
+
+async def _tool_staff_caseload(
+    host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
+) -> JsonDict:
+    role = arguments.get("role") or "primary_advisor"
+    caseload = await _primitive(
+        host, "staff_caseload", staff_member_id=str(arguments["staffId"]), role=role
+    )
+    data = dict(caseload or {})
+    items = [dict(_mapping(item)) for item in _sequence(data.get("items"))]
+    advising = str(arguments.get("advisingStatus") or "any")
+    if advising == "not_completed":
+        items = [i for i in items if _mapping(i.get("advising")).get("status") != "completed"]
+    elif advising == "no_booking":
+        items = [
+            i
+            for i in items
+            if _mapping(i.get("advising")).get("status") not in {"completed", "scheduled"}
+        ]
+    elif advising in {"completed", "missed", "scheduled"}:
+        items = [i for i in items if _mapping(i.get("advising")).get("status") == advising]
+    deposit = arguments.get("depositState")
+    if deposit == "paid":
+        items = [i for i in items if i.get("depositPaid") or i.get("depositState") == "paid"]
+    elif deposit == "unpaid":
+        items = [i for i in items if not (i.get("depositPaid") or i.get("depositState") == "paid")]
+    if arguments.get("withOpenWork"):
+        items = [i for i in items if int(_mapping(i.get("work")).get("open") or 0) > 0]
+    if arguments.get("withOverdueWork"):
+        items = [i for i in items if int(_mapping(i.get("work")).get("overdue") or 0) > 0]
+    limit = int(arguments.get("limit") or 12)
+    statuses = [str(_mapping(i.get("advising")).get("status") or "none") for i in items]
+    return {
+        "staff": dict(_mapping(data.get("staff"))),
+        "role": role,
+        "filters": {
+            key: arguments.get(key)
+            for key in ("advisingStatus", "depositState", "withOpenWork", "withOverdueWork")
+            if arguments.get(key) not in (None, "any", False)
+        },
+        "total": len(items),
+        "returned": min(len(items), limit),
+        "truncated": len(items) > limit,
+        "summary": {
+            "advisingCompleted": statuses.count("completed"),
+            "advisingScheduled": statuses.count("scheduled"),
+            "advisingMissed": statuses.count("missed"),
+            "advisingNone": statuses.count("none"),
+            "withOpenWork": sum(1 for i in items if int(_mapping(i.get("work")).get("open") or 0)),
+            "withOverdueWork": sum(
+                1 for i in items if int(_mapping(i.get("work")).get("overdue") or 0)
+            ),
+        },
+        "items": [
+            {
+                "student": dict(_mapping(item.get("student"))),
+                "offerStatus": item.get("offerStatus"),
+                "advising": dict(_mapping(item.get("advising"))),
+                "work": dict(_mapping(item.get("work"))),
+                "requirements": dict(_mapping(item.get("requirements"))),
+            }
+            for item in items[:limit]
+        ],
+        "asOf": now.isoformat(),
+    }
+
+
+def _appointment_window(window: str, now: datetime) -> tuple[str | None, str | None]:
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if window == "today":
+        return day.isoformat(), (day + timedelta(days=1)).isoformat()
+    if window == "tomorrow":
+        return (day + timedelta(days=1)).isoformat(), (day + timedelta(days=2)).isoformat()
+    if window == "week":
+        return now.isoformat(), (now + timedelta(days=7)).isoformat()
+    if window == "two_weeks":
+        return now.isoformat(), (now + timedelta(days=14)).isoformat()
+    if window == "past_week":
+        return (now - timedelta(days=7)).isoformat(), now.isoformat()
+    if window == "awaiting_outcome":
+        return (now - timedelta(days=60)).isoformat(), (now - timedelta(days=3)).isoformat()
+    return None, None
+
+
+async def _tool_staff_appointments(
+    host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
+) -> JsonDict:
+    window = str(arguments.get("window") or "week")
+    start, end = _appointment_window(window, now)
+    result = await _primitive(
+        host,
+        "staff_appointments",
+        staff_member_id=str(arguments["staffId"]),
+        window_from=start,
+        window_to=end,
+    )
+    data = dict(result or {})
+    items = [dict(_mapping(item)) for item in _sequence(data.get("items"))]
+    if window == "awaiting_outcome":
+        items = [item for item in items if str(item.get("status")) == "scheduled"]
+    return {
+        "staff": dict(_mapping(data.get("staff"))),
+        "window": window,
+        "from": data.get("from"),
+        "to": data.get("to"),
+        "total": len(items),
+        "counts": dict(_mapping(data.get("counts"))),
+        "items": [
+            {
+                "startsAt": item.get("startsAt"),
+                "type": item.get("type"),
+                "status": item.get("status"),
+                "modality": item.get("modality"),
+                "student": dict(_mapping(item.get("student"))),
+            }
+            for item in items[:25]
+        ],
+        "availability": dict(_mapping(data.get("availability"))),
+    }
+
+
+async def _tool_staff_availability(
+    host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
+) -> JsonDict:
+    profile = dict(
+        await _primitive(host, "staff_profile", staff_member_id=str(arguments["staffId"])) or {}
+    )
+    availability = dict(_mapping(profile.get("availability")))
+    status = str(profile.get("employmentStatus") or "active")
+    reason = availability.get("reason")
+    if status == "on_leave":
+        reason = "on_leave"
+    elif status == "departed":
+        reason = "departed"
+    return {
+        "staff": {
+            key: profile.get(key)
+            for key in ("id", "name", "title", "component", "employmentStatus", "leaveUntil")
+        },
+        "bookable": bool(availability.get("bookable")) and status == "active",
+        "reason": reason,
+        "nextOpenSlotAt": availability.get("nextOpenSlotAt"),
+        "openSlotsNext14Days": availability.get("openSlotsNext14Days"),
+        "bookedNext14Days": availability.get("bookedNext14Days"),
+        "timezone": availability.get("timezone") or profile.get("timezone"),
+        "weekdays": list(_sequence(profile.get("weekdays"))),
+        "currentAbsence": profile.get("currentAbsence"),
+        "upcomingAbsence": list(_sequence(profile.get("upcomingAbsence"))),
+        "leaveUntil": profile.get("leaveUntil"),
+        "asOf": now.isoformat(),
+    }
+
+
+async def _tool_compare_staff(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    profiles = []
+    for staff_id in list(arguments.get("staffIds") or [])[:4]:
+        profile = await _primitive(host, "staff_profile", staff_member_id=str(staff_id))
+        if profile:
+            profiles.append(dict(profile))
+    return {"items": profiles, "total": len(profiles)}
+
+
+async def _tool_summarize_work_queue(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "work_queue_summary",
+            filters=_queue_filters(arguments),
+            group_by=arguments.get("groupBy"),
+            limit=int(arguments.get("limit") or 12),
+        )
+    )
+
+
+async def _tool_search_work_queue(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "work_queue_search",
+            filters=_queue_filters(arguments),
+            limit=int(arguments.get("limit") or 10),
+            sort=str(arguments.get("sort") or "canonical"),
+        )
+    )
+
+
+async def _tool_summarize_inquiries(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "inquiry_summary",
+            filters=_inquiry_filters(arguments),
+            group_by=arguments.get("groupBy"),
+            limit=int(arguments.get("limit") or 10),
+        )
+    )
+
+
+async def _tool_search_inquiries(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "inquiry_search",
+            filters=_inquiry_filters(arguments),
+            limit=int(arguments.get("limit") or 10),
+            sort=str(arguments.get("sort") or "oldest"),
+        )
+    )
+
+
+async def _tool_component_summary(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    summary = await _primitive(host, "component_summary", component=str(arguments["component"]))
+    return dict(summary or {})
+
+
 _TOOL_IMPLEMENTATIONS: Mapping[
     str, Callable[[StaffAssistantToolHost, JsonDict, datetime], Awaitable[JsonDict]]
 ] = {
@@ -901,6 +1299,18 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getPlaybooks": _tool_playbooks,
     "getActionRules": _tool_action_rules,
     "getMailboxMessages": _tool_mailbox_messages,
+    "getStaffProfile": _tool_staff_profile,
+    "searchStaff": _tool_search_staff,
+    "getStaffTeam": _tool_staff_team,
+    "getStaffCaseload": _tool_staff_caseload,
+    "getStaffAppointments": _tool_staff_appointments,
+    "getStaffAvailability": _tool_staff_availability,
+    "compareStaff": _tool_compare_staff,
+    "summarizeWorkQueue": _tool_summarize_work_queue,
+    "searchWorkQueue": _tool_search_work_queue,
+    "summarizeInquiries": _tool_summarize_inquiries,
+    "searchInquiries": _tool_search_inquiries,
+    "getComponentSummary": _tool_component_summary,
 }
 
 
@@ -929,6 +1339,8 @@ def _record_count(data: Any) -> int:
             "corePlays",
             "workItemAssignees",
             "openWork",
+            "members",
+            "buckets",
         ):
             if isinstance(data.get(key), Sequence):
                 return len(data[key])

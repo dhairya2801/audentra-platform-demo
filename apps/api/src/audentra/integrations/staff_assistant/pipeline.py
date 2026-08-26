@@ -13,6 +13,7 @@ bound server-side after validation.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -23,6 +24,7 @@ from typing import Any
 from audentra.integrations.assistant.blocks import describe_blocks_for_prompt, text_block
 from audentra.integrations.assistant.trace import AssistantTurnTrace
 from audentra.integrations.staff_assistant.classify import (
+    STAFF_REQUIRED_REQUEST_TYPES,
     STUDENT_REQUIRED_REQUEST_TYPES,
     StaffClassification,
     classify_staff_request,
@@ -35,7 +37,18 @@ from audentra.integrations.staff_assistant.derive import (
     StaffDerivedState,
     derive_staff_state,
 )
+from audentra.integrations.staff_assistant.entities import (
+    Ambiguity,
+    EntityResolution,
+    ResolvedEntity,
+    extract_mentions,
+    resolve_entities,
+)
 from audentra.integrations.staff_assistant.guard import guard_staff_grounded_answer
+from audentra.integrations.staff_assistant.identity import (
+    StaffIdentity,
+    identity_from_profile,
+)
 from audentra.integrations.staff_assistant.normalize import (
     NormalizedStaffRequest,
     extract_candidate_name,
@@ -153,6 +166,13 @@ class StaffAssistantPipelineResult:
     # deliberately NOT reported as the turn's resolved student — the queue
     # answer is about the queue.
     next_referent_student_id: str | None = None
+    identity: StaffIdentity | None = None
+    entities: EntityResolution | None = None
+
+
+# Intents whose answer is about a person on staff: "her", "she", "his" after
+# one of these refers to that person, not to a student.
+_STAFF_REFERENT_TYPES = STAFF_REQUIRED_REQUEST_TYPES
 
 
 class StaffAssistantPipeline:
@@ -194,14 +214,68 @@ class StaffAssistantPipeline:
                 actionKind=request.action_kind,
             )
 
+        execution = StaffToolExecution()
+
+        # --- Identity: who is asking ---------------------------------------
         stage_started = time.perf_counter()
-        classification = classify_staff_request(request)
+        identity = await self._load_identity(execution, trace)
+        if trace is not None:
+            trace.identity = identity.as_trace() if identity else None
+            trace.add_stage("load_identity", (time.perf_counter() - stage_started) * 1_000)
+
+        # --- Entities: who or what the turn is about -------------------------
+        stage_started = time.perf_counter()
+        entities = await self._resolve_entities(request, execution, trace)
+        if trace is not None:
+            trace.entities = entities.as_trace()
+            trace.add_stage(
+                "resolve_entities",
+                (time.perf_counter() - stage_started) * 1_000,
+                staff=[e.name for e in entities.staff],
+                students=[e.name for e in entities.students],
+                departments=[e.name for e in entities.departments],
+                ambiguous=[a.mention for a in entities.ambiguities],
+            )
+
+        # A follow-up that refers back ("When is her next open slot?", "How
+        # many students does she have?") inherits the colleague the previous
+        # turn was about — before classification, so the turn is routed as a
+        # staff question rather than a roster count.
+        if not entities.staff and not entities.students and not entities.departments:
+            carried = await self._carry_staff_referent(request, entities, execution, trace)
+            if carried is not None:
+                entities.staff.append(carried)
+                if trace is not None:
+                    trace.entities = entities.as_trace()
+
+        stage_started = time.perf_counter()
+        classification = classify_staff_request(request, entities)
         tool_selection_source = "deterministic" if classification is not None else None
+        ambiguity_answer = self._entity_ambiguity_answer(classification, entities, request)
+        if ambiguity_answer is not None:
+            state = derive_staff_state(execution)
+            if trace is not None:
+                trace.classification = _classification_dict(classification)
+                trace.response_source = "deterministic"
+                trace.failure_codes = list(failure_codes)
+                trace.final_message = ambiguity_answer.message
+            return StaffAssistantPipelineResult(
+                message=ambiguity_answer.message,
+                blocks=ambiguity_answer.blocks,
+                provider="guided",
+                model=None,
+                usage=None,
+                context_receipts=_receipt_sources(execution.receipts),
+                classification=classification,
+                derived=state,
+                failure_codes=failure_codes,
+                identity=identity,
+                entities=entities,
+            )
 
         # --- Referent resolution -------------------------------------------
-        execution = StaffToolExecution()
         resolution = await self._resolve_student_referent(
-            request, classification, context_student_id, execution, trace
+            request, classification, context_student_id, execution, trace, entities
         )
         if resolution.short_circuit is not None:
             state = derive_staff_state(execution)
@@ -223,6 +297,8 @@ class StaffAssistantPipeline:
                 classification=classification,
                 derived=state,
                 failure_codes=failure_codes,
+                identity=identity,
+                entities=entities,
             )
         if resolution.treat_as_work_item:
             # The pasted token is a work-item key after all; answer the work
@@ -247,6 +323,7 @@ class StaffAssistantPipeline:
             )
             tool_selection_source = "deterministic"
         student_resolved = resolution.student_id is not None
+        staff_resolved = bool(entities.staff) or identity is not None
 
         # --- Planning -------------------------------------------------------
         planned_calls: list[PlannedToolCall] | None = None
@@ -257,13 +334,18 @@ class StaffAssistantPipeline:
                 candidate = await self._model_planner(
                     message=request.resolved_text,
                     student_resolved=student_resolved,
+                    context=_planner_context(identity, entities),
                 )
             except Exception:
                 candidate = None
                 planner_outcome = "model_error"
                 failure_codes.append("planner_model_failure")
             validated = (
-                validate_staff_model_plan(candidate, student_resolved=student_resolved)
+                validate_staff_model_plan(
+                    candidate,
+                    student_resolved=student_resolved,
+                    staff_resolved=staff_resolved,
+                )
                 if candidate is not None
                 else None
             )
@@ -303,6 +385,13 @@ class StaffAssistantPipeline:
                 "Tell me which student you mean — a full name works best, and "
                 "I'll pull their record."
             )
+            if entities.staff:
+                who = entities.staff[0].name
+                answer_text = (
+                    f"{who} is a member of staff, not a student, so I can't read a student "
+                    f"record for them. Ask me about {who}'s caseload, queue, appointments or "
+                    "availability instead — or name the student you mean."
+                )
             if trace is not None:
                 trace.classification = _classification_dict(classification)
                 trace.tool_selection_source = tool_selection_source
@@ -319,6 +408,8 @@ class StaffAssistantPipeline:
                 classification=classification,
                 derived=derive_staff_state(execution),
                 failure_codes=failure_codes,
+                identity=identity,
+                entities=entities,
             )
 
         if planned_calls is None:
@@ -327,7 +418,7 @@ class StaffAssistantPipeline:
                 for tool in select_staff_tools(classification, student_resolved=student_resolved)
             ]
         planned_calls = await self._bind_identity_arguments(
-            planned_calls, request, resolution, execution, trace
+            planned_calls, request, resolution, execution, trace, entities, identity
         )
         if trace is not None:
             trace.classification = _classification_dict(classification)
@@ -398,6 +489,17 @@ class StaffAssistantPipeline:
         # --- Compose + optional rewrite ---------------------------------------
         stage_started = time.perf_counter()
         draft = compose_staff_deterministic(classification, state)
+        if identity is not None and classification.request_type in {
+            "my_work",
+            "my_profile",
+            "team_overview",
+        }:
+            draft = ComposedStaffAnswer(
+                message=draft.message,
+                blocks=draft.blocks,
+                evidence_texts=[identity.describe(), *draft.evidence_texts],
+                required_phrases=draft.required_phrases,
+            )
         if trace is not None:
             trace.add_stage(
                 "compose_deterministic",
@@ -450,7 +552,171 @@ class StaffAssistantPipeline:
                 )
             ),
             next_referent_student_id=resolution.student_id or queue_referent,
+            identity=identity,
+            entities=entities,
         )
+
+    # ------------------------------------------------------------------
+    # Identity and entities
+    # ------------------------------------------------------------------
+
+    async def _run_read(
+        self,
+        call: PlannedToolCall,
+        execution: StaffToolExecution,
+        trace: AssistantTurnTrace | None,
+        round_name: str,
+    ) -> Mapping[str, Any] | None:
+        round_result = await execute_staff_tool_reads(
+            [call],
+            self._host,
+            timeout_seconds=self._tool_timeout_seconds,
+            now=self._now(),
+            receipt_offset=len(execution.receipts),
+        )
+        _merge_execution(execution, round_result)
+        if trace is not None:
+            _trace_round(trace, round_result, round_name)
+        read = round_result.reads.get(call.tool, {})
+        data = read.get("data")
+        return data if isinstance(data, Mapping) else None
+
+    async def _load_identity(
+        self, execution: StaffToolExecution, trace: AssistantTurnTrace | None
+    ) -> StaffIdentity | None:
+        """The signed-in staff member, from the bounded profile read."""
+
+        if not self._host.staff_member_id or not self._host.supports("staff_profile"):
+            return None
+        # Read through the host cache directly rather than as a tool call: a
+        # tool read lands in the derived state as *the subject's* profile,
+        # and the signed-in member is the reader, not the subject.
+        try:
+            profile = await asyncio.wait_for(
+                self._host.read("staff_profile", staff_member_id=self._host.staff_member_id),
+                timeout=self._tool_timeout_seconds,
+            )
+        except Exception:
+            return None
+        return identity_from_profile(profile if isinstance(profile, Mapping) else None)
+
+    async def _resolve_entities(
+        self,
+        request: NormalizedStaffRequest,
+        execution: StaffToolExecution,
+        trace: AssistantTurnTrace | None,
+    ) -> EntityResolution:
+        components: list[str] = []
+        if self._host.supports("list_components"):
+            # The component list is tiny and cached per request; it is read
+            # directly rather than through a tool so the trace stays about
+            # the names the turn actually resolved.
+            try:
+                raw = await self._host.read("list_components")
+                components = [
+                    str(item.get("component"))
+                    for item in raw.get("items", [])
+                    if isinstance(item, Mapping) and item.get("component")
+                ]
+            except Exception:
+                components = []
+
+        async def read(tool: str, arguments: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            if tool == "searchStaff" and not self._host.supports("search_staff"):
+                return None
+            return await self._run_read(
+                PlannedToolCall(tool=tool, arguments=dict(arguments)), execution, trace, "entities"
+            )
+
+        prefer = "student" if request.is_draft_request else None
+        return await resolve_entities(request, read, prefer_kind=prefer, components=components)
+
+    async def _carry_staff_referent(
+        self,
+        request: NormalizedStaffRequest,
+        entities: EntityResolution,
+        execution: StaffToolExecution,
+        trace: AssistantTurnTrace | None,
+    ) -> ResolvedEntity | None:
+        """A follow-up that refers back inherits the colleague of the prior turn.
+
+        Only the most recent user turn that named someone is consulted, and
+        only when that name resolved to a staff member; a prior *student*
+        stays with the student referent machinery.
+        """
+
+        if not request.history or has_explicit_entity(request):
+            return None
+        if not (request.uses_pronoun_referent or refers_back(request)):
+            return None
+        for item in reversed(request.history):
+            if item["role"] != "user":
+                continue
+            mentions = [m for m in extract_mentions(item["content"]) if m.kind_hint == "person"]
+            if not mentions:
+                continue
+            # The prior turn's own words decide who its name was ("How many
+            # students does Elena Larkspur advise?" is about the adviser even
+            # though four students share her name).
+            prior = await resolve_entities(
+                normalize_staff_request(item["content"]),
+                lambda tool, arguments: self._run_read(
+                    PlannedToolCall(tool=tool, arguments=dict(arguments)),
+                    execution,
+                    trace,
+                    "entities",
+                ),
+            )
+            if prior.staff:
+                return prior.staff[0]
+            # Only the most recent user turn that named someone counts.
+            break
+        return None
+
+    def _entity_ambiguity_answer(
+        self,
+        classification: StaffClassification | None,
+        entities: EntityResolution,
+        request: NormalizedStaffRequest,
+    ) -> ComposedStaffAnswer | None:
+        """Ask instead of guessing when a name is ambiguous or unknown.
+
+        Only when the question actually needs the person: a refusal or a
+        canned answer names nobody and must not be preempted by a lookup.
+        """
+
+        if classification is not None and classification.request_type in _NO_RESOLUTION_TYPES:
+            return None
+        if entities.staff or entities.students:
+            # Something resolved; the remaining ambiguities (if any) are
+            # secondary mentions and the answer proceeds on what resolved.
+            return None
+        for ambiguity in entities.ambiguities:
+            if ambiguity.reason == "staff_and_student":
+                return _staff_or_student_answer(ambiguity)
+            if ambiguity.reason == "several_staff":
+                return _several_staff_answer(ambiguity)
+            if ambiguity.reason == "several_students":
+                if (
+                    classification is not None
+                    and scope_of(classification.request_type) is not STUDENT_SCOPE
+                    and classification.request_type not in STAFF_REQUIRED_REQUEST_TYPES
+                ):
+                    continue
+                return _disambiguation_answer(ambiguity.mention, ambiguity.students)
+            if ambiguity.reason == "fuzzy" and (
+                classification is None
+                or classification.request_type in STUDENT_REQUIRED_REQUEST_TYPES
+                or classification.request_type in STAFF_REQUIRED_REQUEST_TYPES
+            ):
+                return _fuzzy_suggestion_answer(ambiguity.mention, ambiguity.students)
+            if ambiguity.reason == "not_found" and (
+                classification is None
+                or classification.request_type in STUDENT_REQUIRED_REQUEST_TYPES
+                or classification.request_type in STAFF_REQUIRED_REQUEST_TYPES
+            ):
+                return _nobody_found_answer(ambiguity.mention, entities.staff_context)
+        return None
 
     # ------------------------------------------------------------------
     # Referent resolution
@@ -476,6 +742,7 @@ class StaffAssistantPipeline:
         context_student_id: str | None,
         execution: StaffToolExecution,
         trace: AssistantTurnTrace | None,
+        entities: EntityResolution | None = None,
     ) -> StaffAssistantPipeline._Resolution:
         resolution = StaffAssistantPipeline._Resolution()
         if classification is not None and classification.request_type in _NO_RESOLUTION_TYPES:
@@ -483,6 +750,29 @@ class StaffAssistantPipeline:
             # first would let a lookup failure preempt the refusal itself
             # ("Mark X's transcript as accepted" must refuse, not disambiguate).
             return resolution
+        if entities is not None and entities.students and not request.reference_token:
+            # The entity resolver already placed the name on the roster
+            # (exactly one student); no second search is needed.
+            student = entities.students[0]
+            resolution.student_id = student.id
+            resolution.student_name = student.name
+            resolution.search_results = [dict(student.data)] if student.data else []
+            return resolution
+        if (
+            entities is not None
+            and (entities.staff or entities.departments)
+            and not request.reference_token
+            and not entities.students
+        ):
+            # The turn is about a colleague or a department; a student-scoped
+            # intent will be told so rather than searching the roster.
+            if (
+                classification is not None
+                and scope_of(classification.request_type) is not STUDENT_SCOPE
+            ):
+                return resolution
+            if entities.staff and not request.uses_pronoun_referent:
+                return resolution
         needs_student = classification is None or (
             classification.request_type in STUDENT_REQUIRED_REQUEST_TYPES
         )
@@ -572,13 +862,22 @@ class StaffAssistantPipeline:
                 resolve_item(items[0])
                 return resolution
             if explicit_name is None:
-                queue = await run_referent_read(PlannedToolCall(tool="getStaffWorkQueue"))
-                if queue is not None and any(
-                    str(_as_mapping(item).get("key")) == reference_token
-                    for item in queue.get("items", [])
-                ):
-                    resolution.treat_as_work_item = True
-                    return resolution
+                if self._host.supports("work_item_by_key"):
+                    try:
+                        found = await self._host.read("work_item_by_key", key=reference_token)
+                    except Exception:
+                        found = None
+                    if found and found.get("id"):
+                        resolution.treat_as_work_item = True
+                        return resolution
+                else:
+                    queue = await run_referent_read(PlannedToolCall(tool="getStaffWorkQueue"))
+                    if queue is not None and any(
+                        str(_as_mapping(item).get("key")) == reference_token
+                        for item in queue.get("items", [])
+                    ):
+                        resolution.treat_as_work_item = True
+                        return resolution
                 resolution.short_circuit = _unknown_reference_answer(reference_token)
                 return resolution
 
@@ -590,6 +889,20 @@ class StaffAssistantPipeline:
             if selected is not None:
                 return selected
 
+        if (
+            explicit_name is not None
+            and entities is not None
+            and (
+                entities.staff
+                or any(
+                    a.reason in {"not_found", "fuzzy", "several_students", "staff_and_student"}
+                    for a in entities.ambiguities
+                )
+            )
+        ):
+            # The resolver already searched this name and either placed it on
+            # staff or reported it; the ambiguity answer path handles the rest.
+            explicit_name = None
         if explicit_name is not None:
             search = await run_referent_read(
                 PlannedToolCall(
@@ -744,17 +1057,79 @@ class StaffAssistantPipeline:
         resolution: StaffAssistantPipeline._Resolution,
         execution: StaffToolExecution,
         trace: AssistantTurnTrace | None,
+        entities: EntityResolution | None = None,
+        identity: StaffIdentity | None = None,
     ) -> list[PlannedToolCall]:
         """Bind server-side identity arguments; drop calls that cannot bind."""
 
-        from audentra.integrations.staff_assistant.catalog import STUDENT_SCOPED_TOOLS
+        from audentra.integrations.staff_assistant.catalog import (
+            STAFF_SCOPED_TOOLS,
+            STUDENT_SCOPED_TOOLS,
+        )
 
+        staff_entity = entities.primary_staff if entities is not None else None
+        # "Me" binds to the signed-in member when the turn names no colleague.
+        self_id = identity.id if identity is not None else self._host.staff_member_id
         bound: list[PlannedToolCall] = []
         for call in planned_calls:
             arguments = dict(call.arguments)
             arguments.pop("studentId", None)
             arguments.pop("workItemId", None)
             arguments.pop("inquiryId", None)
+            arguments.pop("staffId", None)
+            arguments.pop("staffIds", None)
+            if call.tool in STAFF_SCOPED_TOOLS:
+                target = staff_entity.id if staff_entity is not None else self_id
+                if target is None:
+                    continue
+                arguments["staffId"] = target
+            if call.tool == "compareStaff":
+                ids = [e.id for e in (entities.staff if entities else []) if e.id]
+                if len(ids) < 2:
+                    continue
+                arguments["staffIds"] = ids[:4]
+            if call.tool in {
+                "searchWorkQueue",
+                "summarizeWorkQueue",
+                "searchInquiries",
+                "summarizeInquiries",
+            }:
+                if staff_entity is not None and not arguments.get("ownership"):
+                    arguments["staffId"] = staff_entity.id
+                elif (
+                    entities is not None
+                    and entities.self_reference
+                    and not staff_entity
+                    and not arguments.get("ownership")
+                    and not arguments.get("component")
+                ):
+                    arguments["ownership"] = "mine"
+                if (
+                    entities is not None
+                    and entities.primary_department is not None
+                    and len(entities.departments) == 1
+                    and not arguments.get("component")
+                    and arguments.get("groupBy") != "component"
+                    and not staff_entity
+                ):
+                    arguments["component"] = entities.primary_department.name
+            if (
+                call.tool == "searchStaff"
+                and arguments.get("absentNow")
+                and entities is not None
+                and entities.self_team
+                and identity is not None
+                and identity.component
+            ):
+                # "Who on my team is away?" — the signed-in member's component.
+                arguments["component"] = identity.component
+            if call.tool == "getComponentSummary" and not arguments.get("component"):
+                if entities is not None and entities.primary_department is not None:
+                    arguments["component"] = entities.primary_department.name
+                elif identity is not None and identity.component:
+                    arguments["component"] = identity.component
+                else:
+                    continue
             if call.tool in STUDENT_SCOPED_TOOLS:
                 if resolution.student_id is None:
                     continue
@@ -794,6 +1169,14 @@ class StaffAssistantPipeline:
             # A bare UUID in a work-item question is the id itself.
             return request.candidate_student_id
         if request.work_item_key is None:
+            return None
+        if self._host.supports("work_item_by_key"):
+            try:
+                found = await self._host.read("work_item_by_key", key=request.work_item_key)
+            except Exception:
+                found = None
+            if found and found.get("id"):
+                return str(found["id"])
             return None
         round_result = await execute_staff_tool_reads(
             [PlannedToolCall(tool="getStaffWorkQueue")],
@@ -1161,4 +1544,119 @@ def _cohort_arguments(tool: str, classification: StaffClassification) -> JsonDic
         # "transcript items in the Action Center" — the topic came from the
         # staff member's own words via the deterministic classifier.
         return {"topic": classification.reference.removeprefix("topic:")}
+    if tool == "getStaffWorkQueue" and classification.cohort_filter:
+        allowed = {"ownership", "component", "status", "dueWindow", "topic"}
+        return {k: v for k, v in dict(classification.cohort_filter).items() if k in allowed}
+    if tool == "searchStaff" and classification.request_type == "staff_directory":
+        return {"absentNow": True, "limit": 25}
+    if tool == "getStaffCaseload" and classification.cohort_filter:
+        allowed = {
+            "advisingStatus",
+            "depositState",
+            "withOpenWork",
+            "withOverdueWork",
+            "role",
+            "limit",
+        }
+        return {k: v for k, v in dict(classification.cohort_filter).items() if k in allowed}
+    if tool == "getStaffAppointments" and classification.cohort_filter:
+        window = dict(classification.cohort_filter).get("window")
+        return {"window": window} if window else {}
+    if tool in {"summarizeWorkQueue", "searchWorkQueue"}:
+        # The queue filters were parsed from the staff member's own words by
+        # the deterministic classifier (unassigned, urgent, overdue, stale,
+        # a department, a grouping); a page never carries the grouping.
+        filters = dict(classification.cohort_filter or {})
+        if classification.request_type == "inquiry_aggregate":
+            filters = dict((classification.additional_filters or {}).get("queue_aggregate") or {})
+        if tool == "searchWorkQueue":
+            filters.pop("groupBy", None)
+            filters.setdefault("limit", 10)
+        return filters
+    if tool in {"summarizeInquiries", "searchInquiries"}:
+        filters = dict(classification.cohort_filter or {})
+        if classification.request_type != "inquiry_aggregate":
+            # A compound ask ("how many items are unassigned and how many
+            # inquiries are awaiting a reply") carries the inquiry clause's
+            # own filters; the queue clause's filters must not leak over.
+            filters = dict((classification.additional_filters or {}).get("inquiry_aggregate") or {})
+        if tool == "searchInquiries":
+            filters.pop("groupBy", None)
+            filters.setdefault("limit", 8)
+        else:
+            filters.pop("sort", None)
+        return filters
     return {}
+
+
+def _planner_context(identity: StaffIdentity | None, entities: EntityResolution) -> JsonDict:
+    """What the model planner is told about who asks and who is named."""
+
+    context: JsonDict = {}
+    if identity is not None:
+        context["signedInStaff"] = {
+            "name": identity.name,
+            "title": identity.title,
+            "component": identity.component,
+            "isManager": identity.is_manager,
+            "directReports": identity.direct_reports,
+            "primaryAdvisees": identity.primary_advisees,
+        }
+    context["resolvedEntities"] = {
+        "staff": [
+            {"name": e.name, "title": e.data.get("title"), "component": e.data.get("component")}
+            for e in entities.staff
+        ],
+        "students": [{"name": e.name} for e in entities.students],
+        "departments": [e.name for e in entities.departments],
+        "ambiguous": [a.mention for a in entities.ambiguities],
+        "selfReference": entities.self_reference,
+    }
+    return context
+
+
+def _staff_or_student_answer(ambiguity: Ambiguity) -> ComposedStaffAnswer:
+    from audentra.integrations.assistant.blocks import bullet_list_block
+
+    staff = ambiguity.staff[0] if ambiguity.staff else {}
+    students = ambiguity.students
+    message = (
+        f"“{ambiguity.mention}” matches both a member of staff — {staff.get('name')}, "
+        f"{staff.get('title') or 'staff'} in {staff.get('component')} — and "
+        f"{len(students)} student{'s' if len(students) != 1 else ''} on the roster. Which do you "
+        f"mean? "
+        "Say “the adviser” for the staff member, or pick a student by ID."
+    )
+    block = bullet_list_block(
+        [{"text": _candidate_line(item)} for item in students[:8]],
+        title="Students with this name",
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message), block])
+
+
+def _several_staff_answer(ambiguity: Ambiguity) -> ComposedStaffAnswer:
+    from audentra.integrations.assistant.blocks import bullet_list_block
+
+    message = (
+        f"Several staff members match “{ambiguity.mention}” — which one do you mean? "
+        "A full name settles it."
+    )
+    block = bullet_list_block(
+        [
+            {
+                "text": f"{item.get('name')} — {item.get('title') or item.get('roleCode')}, "
+                f"{item.get('component')} ({item.get('employmentStatus')})"
+            }
+            for item in ambiguity.staff[:8]
+        ],
+        title="Staff matches",
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message), block])
+
+
+def _nobody_found_answer(name: str, staff_context: bool) -> ComposedStaffAnswer:
+    message = (
+        f"I couldn't find anyone called “{name}” — not on staff and not on the student "
+        "roster. A full name works best; I can also look up a student ID."
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message)])

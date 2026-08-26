@@ -148,6 +148,105 @@ class PostgresAdvisingRepository:
             "generatedAt": _iso(now),
         }
 
+    # ---------------------------------------------------------------- assistant
+    #
+    # Bounded reads for Staff Edward about *any* staff member of the tenant
+    # (the assistant answers a director's questions about their advisers and
+    # a colleague's questions about a peer). They reuse the same SQL and slot
+    # derivation the portal's own /v1/staff routes use, so the assistant can
+    # never disagree with the screen.
+
+    async def calendar_summary_for(
+        self,
+        connection: AsyncConnection,
+        tenant_id: str,
+        member: Mapping[str, Any],
+        now: datetime,
+        *,
+        lookahead: timedelta = MAX_AVAILABILITY_WINDOW,
+    ) -> JsonDict:
+        """The portal's 14-day summary, plus the next open slot beyond it.
+
+        "When is her next open slot?" is a hard fact even when it falls after
+        the two-week window the portal shows, so the search extends to the
+        booking horizon while the counts stay on the 14-day basis.
+        """
+
+        summary = await self._calendar_summary(
+            connection, tenant_id, member, now, include_pattern=False
+        )
+        if summary.get("nextOpenSlotAt") is None and summary.get("bookable"):
+            window_end = now + lookahead
+            slots = await self._open_slots(
+                connection, tenant_id, member, now + DEFAULT_LOOKAHEAD, window_end, now, None
+            )
+            summary["nextOpenSlotAt"] = _iso(slots[0].starts_at) if slots else None
+            summary["nextOpenSlotBeyond14Days"] = bool(slots)
+            summary["searchedUntil"] = _iso(window_end)
+        return summary
+
+    async def team_for(self, auth: AuthContext, staff_member_id: str) -> JsonDict | None:
+        """A manager's reporting subtree with flags and the component summary."""
+
+        _require_staff(auth)
+        now = self._clock()
+        async with self._engine.connect() as connection:
+            me = await self._staff_row(connection, auth.tenant_id, staff_member_id)
+            if me is None:
+                return None
+            team = await self._team_rows(connection, auth.tenant_id, staff_member_id, now)
+            summary = (
+                await self._component_summary(connection, auth.tenant_id, me, team, now)
+                if team
+                else None
+            )
+        return {
+            "manager": _map_staff_brief(me),
+            "team": team,
+            "directReports": [entry for entry in team if entry["level"] == 1],
+            "componentSummary": summary,
+            "generatedAt": _iso(now),
+        }
+
+    async def caseload_for(
+        self,
+        auth: AuthContext,
+        staff_member_id: str,
+        *,
+        role: str | None = None,
+    ) -> JsonDict | None:
+        """One staff member's current assignments with per-student state."""
+
+        _require_staff(auth)
+        if role is not None and role not in ASSIGNMENT_ROLES:
+            raise BadRequestError("VALIDATION_ERROR", "Unknown assignment role")
+        now = self._clock()
+        async with self._engine.connect() as connection:
+            member = await self._staff_row(connection, auth.tenant_id, staff_member_id)
+            if member is None:
+                return None
+            rows = await self._caseload_rows(connection, auth.tenant_id, staff_member_id, role, now)
+        items = [_map_caseload_row(row, now) for row in rows]
+        return {"staff": _map_staff_brief(member), "items": items, "total": len(items)}
+
+    async def appointments_for(
+        self,
+        auth: AuthContext,
+        staff_member_id: str,
+        *,
+        window_from: str | None = None,
+        window_to: str | None = None,
+    ) -> JsonDict | None:
+        try:
+            return await self.get_staff_appointments(
+                auth,
+                staff_member_id=staff_member_id,
+                window_from=window_from,
+                window_to=window_to,
+            )
+        except NotFoundError:
+            return None
+
     async def get_staff_caseload(self, auth: AuthContext, role: str | None) -> JsonDict:
         _require_staff(auth)
         if role is not None and role not in ASSIGNMENT_ROLES:
@@ -1485,6 +1584,10 @@ class PostgresAdvisingRepository:
             text(
                 """
                 SELECT a.role, a.assigned_at, a.source, a.note,
+                       EXISTS (SELECT 1 FROM payment_transaction pay
+                                WHERE pay.tenant_id=s.tenant_id AND pay.student_id=s.id
+                                  AND pay.type='enrollment_deposit' AND pay.status='succeeded')
+                         AS deposit_paid,
                        s.id AS student_id, s.external_ref, s.class_year,
                        person.first_name, person.last_name,
                        COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
@@ -1779,6 +1882,7 @@ def _map_caseload_row(row: Mapping[str, Any], now: datetime) -> JsonDict:
         },
         "offerStatus": row.get("offer_status"),
         "journeyStatus": row.get("journey_status"),
+        "depositPaid": bool(row.get("deposit_paid")),
         "requirements": {
             "completed": completed,
             "total": total,

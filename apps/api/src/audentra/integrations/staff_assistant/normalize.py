@@ -146,6 +146,35 @@ _NAME_STOPWORDS = frozenset(
         "yes",
         "you",
         "your",
+        # Imperatives that open a sentence and would otherwise read as a
+        # first name ("Rate Ada Ashgrove", "Move Bianca Kettleby").
+        "rate",
+        "move",
+        "bring",
+        "count",
+        "assign",
+        "reassign",
+        "transfer",
+        "put",
+        "book",
+        "schedule",
+        "escalate",
+        "flag",
+        "mark",
+        "add",
+        "remove",
+        "contact",
+        "reach",
+        "notify",
+        "remind",
+        "evaluate",
+        "score",
+        "grade",
+        "sort",
+        "summarise",
+        "describe",
+        "earliest",
+        "whose",
     }
 )
 
@@ -194,7 +223,9 @@ _ACTION_KINDS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "assign",
         re.compile(
             r"\b(?:assign|reassign|hand (?:this|it) (?:to|off)|give (?:this|it) to"
-            r"|route (?:this|it) to|take ownership)\b",
+            r"|route (?:this|it) to|take ownership)\b"
+            r"|\b(?:move|transfer|switch|shift)\b.{0,48}\b(?:to|into|onto|under)\b.{0,40}"
+            r"\b(?:caseload|team|queue|advis(?:er|or)|counsel(?:l)?or|desk)\b",
             re.IGNORECASE,
         ),
     ),
@@ -233,7 +264,8 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 # An interrogative opener: a question *about* an action ("When did we last
 # email her?") is not a request to perform it.
 _INTERROGATIVE_OPENER = re.compile(
-    r"^(?:did|do|does|when|has|have|had|was|were|is|are|who|whom|whose|which|why|how)\b",
+    r"^(?:did|do|does|when|has|have|had|was|were|is|are|who|whom|whose|which|why|how"
+    r"|can|could|may|would|will|should|is it possible)\b",
     re.IGNORECASE,
 )
 

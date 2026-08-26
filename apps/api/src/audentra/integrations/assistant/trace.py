@@ -138,6 +138,10 @@ class AssistantTurnTrace:
     # Populated when the bounded dependency round ran: which open gates
     # triggered it and which verifying reads it fetched.
     second_read: JsonDict | None = None
+    # Staff turns: who is signed in (role, component, team) and how every
+    # name in the message resolved (staff / student / department / ambiguous).
+    identity: JsonDict | None = None
+    entities: JsonDict | None = None
     # The deterministic evidence sentences the composer offered the model and
     # the claim guard checked prose against — the facts Edward reasoned from.
     # Already student-safe by construction (they are rendered into answers);
@@ -253,6 +257,8 @@ class AssistantTurnTrace:
             "selectedTools": list(self.selected_tools),
             "toolCalls": list(self.tool_calls),
             "secondRead": self.second_read,
+            "identity": self.identity,
+            "entities": self.entities,
             "evidence": [sanitize_trace_value(line) for line in self.evidence[:48]],
             "modelCalls": list(self.model_calls),
             "modelIterations": len(self.model_calls),

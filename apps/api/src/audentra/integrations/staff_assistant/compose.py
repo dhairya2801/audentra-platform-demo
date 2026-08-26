@@ -19,7 +19,7 @@ Two staff-specific composition families live here:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -65,6 +65,12 @@ _UNSUPPORTED_METRIC_MESSAGES: dict[str, str] = {
         "I don't have enrollment probabilities — no predictive model exists in "
         "Audentra. I can show objective signals instead: deposit state, open "
         "blocking requirements, deadlines, and recorded engagement."
+    ),
+    "staff_performance_rating": (
+        "Audentra holds no performance rating, satisfaction score or ranking for staff — "
+        "there is nothing to rate anyone out of ten with. What it does hold is each "
+        "person's caseload against their cap, their open, overdue and stale work, "
+        "appointments awaiting an outcome, and availability; ask for any of those by name."
     ),
     "recovery_likelihood": (
         "Recovery likelihood isn't something I have — no such model exists in "
@@ -235,6 +241,7 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
     """Every fact the composer may use, rendered once as plain text."""
 
     lines: list[str] = []
+    lines.extend(_staff_evidence_lines(state))
     cohort = state.cohort
     if cohort is not None:
         clauses = "; ".join(str(item) for item in cohort.get("filter") or []) or "no filter"
@@ -409,9 +416,21 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
         )
         lines.append("No housing application window or room assignment is modeled in the platform.")
     for appointment in state.appointments:
+        with_staff = _m(appointment.get("with"))
         lines.append(
             f"Appointment: {str(appointment.get('type', '')).replace('_', ' ')} at "
             f"{appointment.get('startsAt')} ({appointment.get('status')})"
+            + (
+                f" with {with_staff.get('name')}"
+                + (f", {with_staff.get('title')}" if with_staff.get("title") else "")
+                + (
+                    f" ({with_staff.get('employmentStatus')})"
+                    if with_staff.get("employmentStatus") not in (None, "active")
+                    else ""
+                )
+                if with_staff.get("name")
+                else ""
+            )
         )
     communications = state.communications
     if communications:
@@ -493,7 +512,7 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
             lines.append(
                 "Responsible offices for open requirements: " + ", ".join(map(str, offices))
             )
-        lines.append("No formal advisor or caseload model exists; ownership is per open case.")
+        lines.extend(_advising_evidence(ownership, name or "The student"))
     attention = state.attention
     if attention:
         for item in attention.get("items", []):
@@ -750,6 +769,10 @@ def _compose_student_overview(
         parts.append(f"Next due date: {str(req['nextDueAt'])[:10]}.")
     if student.get("openWorkItems"):
         parts.append(f"{student['openWorkItems']} open staff work item(s) on {name}.")
+    if state.ownership:
+        advising = _advising_sentence(state.ownership, name)
+        if advising:
+            parts.append(advising)
     message = " ".join(parts)
     identity = parts[0]
     required = [
@@ -1112,14 +1135,35 @@ def _compose_appointments(
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    message = f"{name} has {len(state.appointments)} appointment(s) on record."
+    upcoming = [item for item in state.appointments if str(item.get("status")) == "scheduled"]
+    upcoming.sort(key=lambda item: str(item.get("startsAt") or ""))
+    parts = [f"{name} has {_count(len(state.appointments), 'appointment')} on record."]
+    if upcoming:
+        first = upcoming[0]
+        staff = _m(first.get("with"))
+        parts.append(
+            f"The next one is {str(first.get('type', '')).replace('_', ' ')} on "
+            f"{_fmt_when(first.get('startsAt'))}"
+            + (f" with {staff.get('name')}" if staff.get("name") else "")
+            + "."
+        )
+    else:
+        parts.append("Nothing is currently scheduled.")
+    message = " ".join(parts)
     block = bullet_list_block(
         [
             {
                 "text": f"{str(item.get('type', '')).replace('_', ' ')} — "
-                f"{item.get('startsAt')} ({item.get('status')})"
+                f"{_fmt_when(item.get('startsAt'))} ({item.get('status')})"
+                + (
+                    f" with {_m(item.get('with')).get('name')}"
+                    if _m(item.get("with")).get("name")
+                    else ""
+                )
             }
-            for item in state.appointments
+            for item in sorted(
+                state.appointments, key=lambda i: str(i.get("startsAt") or ""), reverse=True
+            )[:8]
         ],
         title="Appointments",
     )
@@ -1167,6 +1211,25 @@ def _compose_communications(
         f"{lead} {len(events)} recorded event(s) in total — recorded "
         "interactions only; opens and clicks aren't tracked."
     )
+    open_inquiries = [
+        _m(entry)
+        for entry in communications.get("inquiries", [])
+        if str(_m(entry).get("status")) in {"new", "open", "waiting_on_student"}
+    ]
+    if open_inquiries:
+        unanswered = [entry for entry in open_inquiries if str(entry.get("status")) == "new"]
+        if unanswered:
+            message += (
+                f" {name} has {_count(len(unanswered), 'support inquiry', 'support inquiries')} "
+                f"still awaiting a first staff reply — “{unanswered[0].get('subject')}” is "
+                f"unanswered."
+            )
+        else:
+            message += (
+                f" {name} has "
+                f"{_count(len(open_inquiries), 'open support inquiry', 'open support inquiries')}"
+                f" (“{open_inquiries[0].get('subject')}”, {open_inquiries[0].get('status')})."
+            )
     block = bullet_list_block(
         [
             {
@@ -1284,10 +1347,13 @@ def _compose_ownership(
         parts.append(
             f"Responsible offices for their open requirements: {', '.join(map(str, offices))}."
         )
-    parts.append(
-        "There's no formal advisor or caseload model — ownership exists only per open case."
-    )
-    message = " ".join(parts)
+    parts.insert(0, _advising_sentence(ownership, name))
+    message = " ".join(part for part in parts if part)
+    required: list[tuple[str, str]] = []
+    if not work:
+        required.append(
+            ("no open staff work", f"No open staff work items exist for {name} right now.")
+        )
     blocks: list[JsonDict] = [text_block(message)]
     if work:
         blocks.append(
@@ -1304,7 +1370,98 @@ def _compose_ownership(
                 title="Open case ownership",
             )
         )
-    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+    return ComposedStaffAnswer(
+        message=message, blocks=blocks, evidence_texts=evidence, required_phrases=required
+    )
+
+
+_ROLE_LABELS = {
+    "primary_advisor": "primary academic adviser",
+    "admissions_counselor": "admissions counselor",
+    "financial_aid_counselor": "financial-aid counselor",
+    "international_adviser": "international student adviser (DSO)",
+    "housing_coordinator": "housing coordinator",
+}
+
+
+def _adviser_status_phrase(staff: dict[str, Any]) -> str:
+    status = str(staff.get("employmentStatus") or "active")
+    if status == "departed":
+        return " — who has left the university (no replacement assigned yet)"
+    if status == "on_leave":
+        until = staff.get("leaveUntil")
+        return f" — currently on leave{f' until {_fmt_day(until)}' if until else ''}"
+    return ""
+
+
+def _advising_evidence(ownership: dict[str, Any], name: str) -> list[str]:
+    """The standing relationships: adviser and counsellors, with their status."""
+
+    lines: list[str] = []
+    primary = _m(ownership.get("primaryAdviser"))
+    advisers = _sequence_list(ownership.get("advisers"))
+    if primary:
+        lines.append(
+            f"Primary academic adviser of {name}: {primary.get('name')}"
+            + (f" ({primary.get('title')})" if primary.get("title") else "")
+            + _adviser_status_phrase(primary)
+            + "."
+        )
+    elif str(ownership.get("advisorModel") or "none") != "none":
+        lines.append(f"{name} has no primary academic adviser assigned.")
+    for entry in advisers:
+        role = str(entry.get("role") or "")
+        staff = _m(entry.get("staff"))
+        if role == "primary_advisor" or not staff:
+            continue
+        lines.append(
+            f"{_ROLE_LABELS.get(role, role.replace('_', ' ')).capitalize()} of {name}: "
+            f"{staff.get('name')}{_adviser_status_phrase(staff)}."
+        )
+    for entry in advisers:
+        if str(entry.get("role")) == "primary_advisor" and entry.get("nextOpenSlotAt"):
+            lines.append(
+                f"Next open slot with the primary adviser: {_fmt_when(entry['nextOpenSlotAt'])}."
+            )
+    gaps = [
+        str(g.get("value", g)) if isinstance(g, dict) else str(g)
+        for g in _sequence_list(ownership.get("advisingGaps"))
+    ]
+    gap_text = {
+        "adviser_departed": "the adviser has left the university",
+        "adviser_on_leave": "the adviser is on leave",
+        "adviser_no_open_slots": "the adviser has no open slots in the next two weeks",
+        "no_primary_adviser": "no primary adviser is assigned",
+    }
+    for gap in gaps:
+        if gap in gap_text:
+            lines.append(f"Advising gap: {gap_text[gap]}.")
+    advising = _m(ownership.get("advisingStatus"))
+    if advising:
+        lines.append(
+            f"Advising appointment status for {name}: {advising.get('status')}"
+            + (
+                f" (last completed {_fmt_day(advising.get('lastCompletedAt'))})"
+                if advising.get("lastCompletedAt")
+                else ""
+            )
+            + "."
+        )
+    return lines
+
+
+def _advising_sentence(ownership: dict[str, Any], name: str) -> str:
+    primary = _m(ownership.get("primaryAdviser"))
+    if primary:
+        return (
+            f"{name}'s primary academic adviser is {primary.get('name')}"
+            + (f" ({primary.get('title')})" if primary.get("title") else "")
+            + _adviser_status_phrase(primary)
+            + "."
+        )
+    if str(ownership.get("advisorModel") or "none") != "none":
+        return f"{name} has no primary academic adviser assigned."
+    return ""
 
 
 def _compose_attention(
@@ -1915,8 +2072,14 @@ def _compose_work_queue(
         message = (
             f"{_count(total_open, 'open item')} in canonical order (priority, then due "
             f"date) — {counts.get('urgent', 0)} urgent, "
-            f"{counts.get('escalated', 0)} escalated. First up: {first.get('key')} "
-            f"for {first_student.get('name')}. The queue:"
+            f"{counts.get('escalated', 0)} escalated"
+            + (
+                f", {counts.get('unassigned')} unassigned"
+                if counts.get("unassigned") is not None
+                else ""
+            )
+            + (f", {counts.get('overdue')} overdue" if counts.get("overdue") is not None else "")
+            + f". First up: {first.get('key')} for {first_student.get('name')}. The queue:"
         )
     block = table_block(
         [
@@ -2395,6 +2558,1507 @@ def _compose_cohort_aggregate(
     return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
 
 
+# ---------------------------------------------------------------------------
+# Staff-aware evidence and composers
+# ---------------------------------------------------------------------------
+
+
+def _fmt_day(value: object) -> str:
+    text = str(value or "")
+    return text[:10] if text else "unknown"
+
+
+def _fmt_when(value: object) -> str:
+    """2026-09-11T17:00:00Z → 2026-09-11 17:00 UTC."""
+
+    text = str(value or "")
+    if len(text) >= 16 and "T" in text:
+        return f"{text[:10]} {text[11:16]} UTC"
+    return text or "unknown"
+
+
+def _status_phrase(profile: dict[str, Any]) -> str:
+    status = str(profile.get("employmentStatus") or "active")
+    if status == "departed":
+        ended = profile.get("endedAt")
+        return f"has left the university (departed{f' on {_fmt_day(ended)}' if ended else ''})"
+    if status == "on_leave":
+        until = profile.get("leaveUntil")
+        return f"is on leave{f' until {_fmt_day(until)}' if until else ''}"
+    absence = _m(profile.get("currentAbsence"))
+    if absence:
+        return (
+            f"is away right now ({absence.get('kind') or 'time off'} until "
+            f"{_fmt_day(absence.get('endsAt'))})"
+        )
+    return "is active"
+
+
+def _person_line(profile: dict[str, Any]) -> str:
+    title = profile.get("title") or str(profile.get("roleCode") or "staff").replace("_", " ")
+    return f"{profile.get('name')} — {title}, {profile.get('component')}; {_status_phrase(profile)}"
+
+
+def _profile_evidence(profile: dict[str, Any], *, prefix: str = "Staff member") -> list[str]:
+    lines = [f"{prefix}: {_person_line(profile)}."]
+    manager = _m(profile.get("manager"))
+    if manager:
+        lines.append(
+            f"{profile.get('name')} reports to {manager.get('name')}"
+            + (f" ({manager.get('title')})" if manager.get("title") else "")
+            + "."
+        )
+    if profile.get("directReports"):
+        lines.append(
+            f"{profile.get('name')} has {_count(int(profile['directReports']), 'direct report')}."
+        )
+    if profile.get("startedAt"):
+        lines.append(f"{profile.get('name')} started on {_fmt_day(profile['startedAt'])}.")
+    caseload = _m(profile.get("caseload"))
+    if caseload:
+        advisees = int(caseload.get("primaryAdvisees") or 0)
+        cap = caseload.get("cap")
+        line = f"Caseload: {advisees} primary advisee(s)"
+        if cap:
+            line += f" against a cap of {cap}"
+            line += (
+                " — OVER the cap"
+                if caseload.get("overCap")
+                else f" ({round(100 * advisees / int(cap))}% of cap)"
+            )
+        if caseload.get("endedPrimaryAssignments"):
+            line += (
+                f"; {caseload['endedPrimaryAssignments']} past primary assignment(s) ended "
+                "(moved to another adviser)"
+            )
+        lines.append(line + ".")
+    work = _m(profile.get("work"))
+    if work:
+        lines.append(
+            f"Work queue: {work.get('open', 0)} open item(s), {work.get('overdue', 0)} overdue, "
+            f"{work.get('urgent', 0)} urgent, {work.get('escalated', 0)} escalated, "
+            f"{work.get('staleInProgress', 0)} in progress with no update for 10+ days, "
+            f"{work.get('dueToday', 0)} due today, {work.get('completedLast7Days', 0)} completed "
+            f"in the last 7 days."
+        )
+        if work.get("appointmentsAwaitingOutcome"):
+            lines.append(
+                f"{work['appointmentsAwaitingOutcome']} past appointment(s) still have no recorded "
+                f"outcome (never closed out)."
+            )
+    appointments = _m(profile.get("appointments"))
+    if appointments:
+        lines.append(
+            f"Appointments: {appointments.get('scheduledToday', 0)} scheduled today, "
+            f"{appointments.get('scheduledNext7Days', 0)} scheduled in the next 7 days."
+        )
+    inquiries = _m(profile.get("inquiries"))
+    if inquiries and inquiries.get("open"):
+        lines.append(
+            f"Inquiries assigned: {inquiries.get('open', 0)} open, "
+            f"{inquiries.get('awaitingReply', 0)} awaiting a first reply."
+        )
+    availability = _m(profile.get("availability"))
+    if availability:
+        lines.extend(_availability_evidence(profile, availability))
+    for absence in _sequence_list(profile.get("upcomingAbsence"))[:2]:
+        lines.append(
+            f"Upcoming absence: {absence.get('kind')} from {_fmt_day(absence.get('startsAt'))} to "
+            f"{_fmt_day(absence.get('endsAt'))}."
+        )
+    flags = [str(flag) for flag in _sequence_list(profile.get("flags"))]
+    if flags:
+        lines.append("Flags: " + ", ".join(flag.replace("_", " ") for flag in flags) + ".")
+    return lines
+
+
+def _availability_evidence(profile: dict[str, Any], availability: dict[str, Any]) -> list[str]:
+    name = profile.get("name")
+    status = str(profile.get("employmentStatus") or "active")
+    lines: list[str] = []
+    if status == "on_leave":
+        lines.append(
+            f"{name} cannot be booked: on leave until {_fmt_day(profile.get('leaveUntil'))}; "
+            f"students cannot book them and the caseload is not covered."
+        )
+        return lines
+    if status == "departed":
+        lines.append(f"{name} cannot be booked: has left the university.")
+        return lines
+    weekdays = [str(day) for day in _sequence_list(profile.get("weekdays"))]
+    if weekdays:
+        lines.append(f"{name} holds appointment hours on {', '.join(weekdays)}.")
+    if not availability.get("bookable"):
+        reason = str(availability.get("reason") or "no_availability").replace("_", " ")
+        lines.append(f"{name} is not bookable right now ({reason}).")
+    next_slot = availability.get("nextOpenSlotAt")
+    open_slots = availability.get("openSlotsNext14Days")
+    booked = availability.get("bookedNext14Days")
+    if next_slot:
+        lines.append(f"Next open slot for {name}: {_fmt_when(next_slot)}.")
+    elif availability.get("bookable"):
+        lines.append(f"No open slot for {name} in the next 14 days.")
+    if open_slots is not None:
+        lines.append(
+            f"Open slots in the next 14 days for {name}: {open_slots}; booked: {booked or 0}."
+        )
+    absence = _m(profile.get("currentAbsence"))
+    if absence:
+        lines.append(
+            f"{name} is away right now: {absence.get('kind')} until "
+            f"{_fmt_day(absence.get('endsAt'))}."
+        )
+    return lines
+
+
+def _sequence_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [_m(item) if isinstance(item, dict) else {"value": item} for item in value]
+    return []
+
+
+def _staff_evidence_lines(state: StaffDerivedState) -> list[str]:
+    lines: list[str] = []
+    if state.staff_profile:
+        lines.extend(_profile_evidence(state.staff_profile))
+    for person in state.staff_search[:12]:
+        absence = _m(person.get("currentAbsence"))
+        lines.append(
+            f"Staff directory: {person.get('name')} — "
+            f"{person.get('title') or person.get('roleCode')}, "
+            f"{person.get('component')}, {person.get('employmentStatus')}"
+            + (
+                f", away ({absence.get('kind')} until {_fmt_day(absence.get('endsAt'))})"
+                if absence
+                else ""
+            )
+            + (
+                f", on leave until {_fmt_day(person.get('leaveUntil'))}"
+                if person.get("leaveUntil")
+                else ""
+            )
+            + f", {person.get('openItems', 0)} open item(s), "
+            + f"{person.get('primaryAdvisees', 0)} advisee(s)."
+        )
+    for profile in state.staff_comparison:
+        lines.extend(_profile_evidence(profile))
+    availability = state.staff_availability
+    if availability and not state.staff_profile:
+        staff = _m(availability.get("staff"))
+        lines.extend(_availability_evidence({**staff, **availability}, availability))
+    caseload = state.staff_caseload
+    if caseload:
+        staff = _m(caseload.get("staff"))
+        filters = _m(caseload.get("filters"))
+        summary = _m(caseload.get("summary"))
+        described = _describe_caseload_filters(filters)
+        lines.append(
+            f"Caseload query for {staff.get('name')} "
+            f"({caseload.get('role', 'primary_advisor').replace('_', ' ')}"
+            f"{', ' + described if described else ''}): {caseload.get('total', 0)} student(s) match"
+            + (f"; {caseload.get('returned')} listed below" if caseload.get("truncated") else "")
+            + "."
+        )
+        if summary:
+            lines.append(
+                f"Of these: advising completed {summary.get('advisingCompleted', 0)}, scheduled "
+                f"{summary.get('advisingScheduled', 0)}, "
+                f"missed {summary.get('advisingMissed', 0)}, no advising appointment at all "
+                f"{summary.get('advisingNone', 0)}; "
+                f"{summary.get('withOpenWork', 0)} with open staff work, "
+                f"{summary.get('withOverdueWork', 0)} with overdue work."
+            )
+        for item in _sequence_list(caseload.get("items"))[:12]:
+            student = _m(item.get("student"))
+            advising = _m(item.get("advising"))
+            work = _m(item.get("work"))
+            lines.append(
+                f"Advisee: {student.get('name')} (ID {student.get('externalRef')}) — "
+                f"{student.get('programName')}, "
+                f"advising {advising.get('status')}"
+                + (
+                    f", next appointment {_fmt_when(advising.get('nextAppointmentAt'))}"
+                    if advising.get("nextAppointmentAt")
+                    else ""
+                )
+                + f", {work.get('open', 0)} open / {work.get('overdue', 0)} overdue staff item(s)"
+            )
+    appointments = state.staff_appointments
+    if appointments:
+        staff = _m(appointments.get("staff"))
+        counts = _m(appointments.get("counts"))
+        window = str(appointments.get("window") or "week").replace("_", " ")
+        lines.append(
+            f"Appointments for {staff.get('name')} ({window}): {appointments.get('total', 0)} in "
+            f"the window"
+            + (
+                f" — scheduled {counts.get('scheduled', 0)}, completed "
+                f"{counts.get('completed', 0)}, "
+                f"cancelled {counts.get('cancelled', 0)}, no-show {counts.get('noShow', 0)}, "
+                f"awaiting an outcome {counts.get('awaitingOutcome', 0)}"
+                if counts
+                else ""
+            )
+            + "."
+        )
+        for item in _sequence_list(appointments.get("items"))[:10]:
+            student = _m(item.get("student"))
+            lines.append(
+                f"Appointment: {_fmt_when(item.get('startsAt'))} "
+                f"{str(item.get('type') or '').replace('_', ' ')} with "
+                f"{student.get('name')} ({item.get('status')})"
+            )
+    team = state.staff_team
+    if team:
+        manager = _m(team.get("manager"))
+        summary = _m(team.get("componentSummary"))
+        lines.append(
+            f"Team of {manager.get('name')}: {team.get('directReports', 0)} direct report(s), "
+            f"{team.get('total', 0)} people in the reporting tree."
+        )
+        if summary:
+            lines.append(
+                f"Component {summary.get('component')}: {summary.get('members', 0)} team "
+                f"member(s), "
+                f"{summary.get('membersOnLeave', 0)} on leave, {summary.get('membersDeparted', 0)} "
+                f"departed, "
+                f"{summary.get('membersOverCap', 0)} over caseload cap; "
+                f"{summary.get('primaryAdvisees', 0)} primary advisees "
+                f"against a combined cap of {summary.get('caseloadCap') or 'n/a'}; "
+                f"{summary.get('studentsWithDepartedAdviser', 0)} students whose adviser has left, "
+                f"{summary.get('studentsWithAdviserOnLeave', 0)} whose adviser is on leave, "
+                f"{summary.get('acceptedStudentsWithoutPrimaryAdviser', 0)} accepted students with "
+                f"no primary adviser; "
+                f"{summary.get('unassignedComponentItems', 0)} unassigned and "
+                f"{summary.get('overdueComponentItems', 0)} overdue component items."
+            )
+        for member in _sequence_list(team.get("members"))[:30]:
+            caseload_ = _m(member.get("caseload"))
+            work = _m(member.get("work"))
+            availability_ = _m(member.get("availability"))
+            flags = [
+                str(entry.get("value", entry)).replace("_", " ")
+                for entry in _sequence_list(member.get("flags"))
+            ]
+            line = (
+                f"Team member: {member.get('name')} — "
+                f"{member.get('title') or member.get('roleCode')}, "
+                f"{member.get('employmentStatus')}"
+                + (
+                    f" until {_fmt_day(member.get('leaveUntil'))}"
+                    if member.get("leaveUntil")
+                    else ""
+                )
+                + f"; {caseload_.get('primaryAdvisees', 0)} advisees"
+                + (f"/{caseload_.get('cap')} cap" if caseload_.get("cap") else "")
+                + f"; {work.get('open', 0)} open, {work.get('overdue', 0)} overdue, "
+                + f"{work.get('staleInProgress', 0)} stale items"
+                + (
+                    f"; {work.get('appointmentsAwaitingOutcome')} appointments never closed out"
+                    if work.get("appointmentsAwaitingOutcome")
+                    else ""
+                )
+                + f"; {availability_.get('openSlotsNext14Days', 0)} open slots in 14 days"
+                + (
+                    f", next {_fmt_when(availability_.get('nextOpenSlotAt'))}"
+                    if availability_.get("nextOpenSlotAt")
+                    else ""
+                )
+            )
+            if flags:
+                line += "; flags: " + ", ".join(flags)
+            lines.append(line + ".")
+    queue_summary = state.queue_summary
+    if queue_summary:
+        lines.extend(_queue_summary_evidence(queue_summary))
+    page = state.queue_page
+    if page:
+        filters = _m(page.get("filters"))
+        described = _describe_queue_filter_map(filters)
+        lines.append(
+            f"Queue page ({described or 'all open items'}): {page.get('total', 0)} item(s) match "
+            f"in total; "
+            f"{page.get('returned', 0)} listed, sorted by {page.get('sort', 'canonical')} order."
+        )
+        for item in _sequence_list(page.get("items"))[:12]:
+            student = _m(item.get("student"))
+            assignee = _m(item.get("assignee"))
+            lines.append(
+                f"Queue item {item.get('key')}: {item.get('title')} — {item.get('priority')}, "
+                f"{str(item.get('status') or '').replace('_', ' ')}, due "
+                f"{_fmt_day(item.get('dueAt')) if item.get('dueAt') else 'no date'}"
+                + (" (overdue)" if item.get("overdue") else "")
+                + f", student {student.get('name')}, "
+                + (f"assigned to {assignee.get('name')}" if assignee else "unassigned")
+                + (
+                    f", {item.get('daysSinceUpdate')} days since last update"
+                    if item.get("daysSinceUpdate") is not None
+                    else ""
+                )
+            )
+    inquiry_summary = state.inquiry_summary
+    if inquiry_summary:
+        described = _describe_inquiry_filter_map(_m(inquiry_summary.get("filters")))
+        lines.append(
+            f"Inquiry counts ({described or 'all open inquiries'}): "
+            f"{inquiry_summary.get('total', 0)} in scope; "
+            f"{inquiry_summary.get('awaitingFirstReply', 0)} awaiting a first reply (status new), "
+            f"{inquiry_summary.get('awaitingOver24h', 0)} of those older than 24 hours, "
+            f"{inquiry_summary.get('open', 0)} open (replied, ongoing), "
+            f"{inquiry_summary.get('waitingOnStudent', 0)} waiting on the student, "
+            f"{inquiry_summary.get('unassignedOpen', 0)} open with nobody assigned, "
+            f"{inquiry_summary.get('urgentOpen', 0)} urgent."
+        )
+        oldest = _m(inquiry_summary.get("oldestAwaiting"))
+        if oldest:
+            student = _m(oldest.get("student"))
+            lines.append(
+                f"Oldest inquiry awaiting a first reply: “{oldest.get('subject')}” from "
+                f"{student.get('name')} "
+                f"(ID {student.get('externalRef')}), opened {_fmt_when(oldest.get('createdAt'))}, "
+                f"{oldest.get('ageHours')} hours ago, priority {oldest.get('priority')}, topic "
+                f"{oldest.get('topic')}."
+            )
+        for bucket in _sequence_list(inquiry_summary.get("buckets"))[:10]:
+            lines.append(
+                f"Inquiries by {inquiry_summary.get('groupBy')}: {bucket.get('value')} — "
+                f"{bucket.get('count')} ({bucket.get('awaiting')} awaiting a reply)"
+            )
+    inquiry_page = state.inquiry_page
+    if inquiry_page:
+        lines.append(
+            f"Inquiry list: {inquiry_page.get('total', 0)} match; "
+            f"{inquiry_page.get('returned', 0)} listed (oldest first)."
+        )
+        for item in _sequence_list(inquiry_page.get("items"))[:10]:
+            student = _m(item.get("student"))
+            assignee = _m(item.get("assignee"))
+            lines.append(
+                f"Inquiry: “{item.get('subject')}” from {student.get('name')} — "
+                f"{item.get('status')}, {item.get('priority')}, "
+                f"{item.get('ageHours')} hours old, "
+                + (f"assigned to {assignee.get('name')}" if assignee else "unassigned")
+            )
+    component = state.component_summary
+    if component:
+        lines.extend(_component_evidence(component))
+    return lines
+
+
+def _queue_summary_evidence(summary: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    filters = _m(summary.get("filters"))
+    described = _describe_queue_filter_map(filters)
+    scope = described or "all open Action Center items"
+    lines.append(
+        f"Action Center counts ({scope}): {summary.get('total', 0)} item(s); "
+        f"{summary.get('unassigned', 0)} unassigned, {summary.get('urgent', 0)} urgent, "
+        f"{summary.get('escalated', 0)} escalated, {summary.get('overdue', 0)} overdue, "
+        f"{summary.get('dueToday', 0)} due today, {summary.get('dueNext7Days', 0)} due in the next "
+        f"7 days, "
+        f"{summary.get('staleInProgress', 0)} in progress with no update for 10+ days; "
+        f"{summary.get('distinctStudents', 0)} distinct student(s)."
+    )
+    by_status = _m(summary.get("byStatus"))
+    if by_status:
+        lines.append(
+            f"By status: {by_status.get('todo', 0)} to do, {by_status.get('inProgress', 0)} in "
+            f"progress, "
+            f"{by_status.get('blocked', 0)} blocked, {by_status.get('followUpRequired', 0)} "
+            f"follow-up required."
+        )
+    group_by = summary.get("groupBy")
+    for bucket in _sequence_list(summary.get("buckets"))[:12]:
+        lines.append(
+            f"By {str(group_by).replace('_', ' ')}: {bucket.get('value')} — {bucket.get('count')} "
+            f"item(s)"
+            f" ({bucket.get('overdue')} overdue, {bucket.get('unassigned')} unassigned, "
+            f"{bucket.get('urgent')} urgent, {bucket.get('stale')} stale)"
+        )
+    return lines
+
+
+def _component_evidence(component: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    staff = _m(component.get("staff"))
+    queue = _m(component.get("queue"))
+    inquiries = _m(component.get("inquiries"))
+    lines.append(
+        f"Department {component.get('component')}: {staff.get('total', 0)} staff "
+        f"({staff.get('active', 0)} active"
+        + (f", on leave: {', '.join(staff.get('onLeave', []))}" if staff.get("onLeave") else "")
+        + (f", departed: {', '.join(staff.get('departed', []))}" if staff.get("departed") else "")
+        + ")"
+        + (
+            f"; {staff.get('primaryAdvisees')} primary advisees"
+            if staff.get("primaryAdvisees")
+            else ""
+        )
+        + "."
+    )
+    for absent in _sequence_list(staff.get("absentNow"))[:6]:
+        lines.append(
+            f"Away right now in {component.get('component')}: {absent.get('name')} "
+            f"({absent.get('kind')} until {_fmt_day(absent.get('endsAt'))}), "
+            f"holding {absent.get('openItems', 0)} open item(s)."
+        )
+    lines.append(
+        f"{component.get('component')} queue: {queue.get('open', 0)} open item(s), "
+        f"{queue.get('unassigned', 0)} unassigned, "
+        f"{queue.get('overdue', 0)} overdue, {queue.get('urgent', 0)} urgent, "
+        f"{queue.get('escalated', 0)} escalated, "
+        f"{queue.get('stale', 0)} stale in progress, {queue.get('due_today', 0)} due today; "
+        f"{queue.get('document_reviews', 0)} open document reviews of which "
+        f"{queue.get('overdue_document_reviews', 0)} overdue; "
+        f"{queue.get('distinct_students', 0)} distinct students."
+    )
+    if inquiries:
+        lines.append(
+            f"{component.get('component')} inquiries: {inquiries.get('open', 0)} open, "
+            f"{inquiries.get('awaiting_first_reply', 0)} awaiting a first reply."
+        )
+    for member in _sequence_list(component.get("members"))[:12]:
+        lines.append(
+            f"{component.get('component')} member: {member.get('name')} "
+            f"({member.get('title') or member.get('roleCode')}, {member.get('employmentStatus')}) "
+            f"— "
+            f"{member.get('openItems', 0)} open, {member.get('overdueItems', 0)} overdue, "
+            f"{member.get('staleInProgress', 0)} stale"
+            + (
+                f", {member.get('primaryAdvisees')} advisees"
+                if member.get("primaryAdvisees")
+                else ""
+            )
+            + (
+                f", away ({_m(member.get('currentAbsence')).get('kind')} until "
+                f"{_fmt_day(_m(member.get('currentAbsence')).get('endsAt'))})"
+                if member.get("currentAbsence")
+                else ""
+            )
+        )
+    return lines
+
+
+def _describe_caseload_filters(filters: dict[str, Any]) -> str:
+    labels: dict[str, dict[Any, str]] = {
+        "advisingStatus": {
+            "not_completed": "advising not completed",
+            "no_booking": "advising not completed and no upcoming appointment",
+            "completed": "advising completed",
+            "missed": "missed advising",
+            "scheduled": "advising scheduled",
+        },
+        "depositState": {"paid": "deposit paid", "unpaid": "deposit not paid"},
+        "withOpenWork": {True: "with open staff work"},
+        "withOverdueWork": {True: "with overdue staff work"},
+    }
+    parts: list[str] = []
+    for key, value in filters.items():
+        mapping = labels.get(key) or {}
+        parts.append(str(mapping.get(value, f"{key} {value}")))
+    return ", ".join(parts)
+
+
+def _describe_queue_filter_map(filters: dict[str, Any]) -> str:
+    labels: dict[str, Callable[[Any], str]] = {
+        "ownership": lambda v: {"mine": "assigned to you", "unassigned": "unassigned"}.get(v, v),
+        "assigneeId": lambda v: "assigned to the named staff member",
+        "component": lambda v: f"component {v}",
+        "status": lambda v: {"open": "open", "closed": "closed"}.get(v, f"status {v}"),
+        "priority": lambda v: f"priority {v}",
+        "dueWindow": lambda v: {
+            "overdue": "overdue",
+            "today": "due today",
+            "seven_days": "due in the next 7 days",
+            "no_due": "no due date",
+        }.get(v, v),
+        "topic": lambda v: f"topic “{v}”",
+        "stale": lambda v: "in progress with no update for 10+ days",
+        "escalated": lambda v: "escalated",
+        "actionType": lambda v: f"action type {v}",
+        "workType": lambda v: {"document_review": "document reviews"}.get(v, f"work type {v}"),
+        "inProgressOverDays": lambda v: f"in progress for more than {v} days",
+    }
+    parts = [
+        labels[key](value)
+        for key, value in filters.items()
+        if key in labels and value not in (None, "", "all", False)
+    ]
+    return "; ".join(str(part) for part in parts)
+
+
+def _describe_inquiry_filter_map(filters: dict[str, Any]) -> str:
+    labels: dict[str, Callable[[Any], str]] = {
+        "status": lambda v: {
+            "awaiting_first_reply": "awaiting a first reply",
+            "waiting_on_student": "waiting on the student",
+            "open": "open",
+            "new": "new",
+            "resolved": "resolved",
+        }.get(v, v),
+        "ownership": lambda v: {"mine": "assigned to you", "unassigned": "unassigned"}.get(v, v),
+        "priority": lambda v: f"priority {v}",
+        "topic": lambda v: f"topic {v}",
+        "olderThanHours": lambda v: f"older than {v} hours",
+    }
+    parts = [
+        labels[key](value)
+        for key, value in filters.items()
+        if key in labels and value not in (None, "", "all")
+    ]
+    return "; ".join(str(part) for part in parts)
+
+
+def _profile_or_none(state: StaffDerivedState) -> dict[str, Any] | None:
+    return state.staff_profile
+
+
+def _is_recent(value: object, *, days: int = 180) -> bool:
+    """Whether a date falls within the last ``days`` days."""
+
+    from datetime import UTC, date, datetime, timedelta
+
+    try:
+        parsed = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return False
+    return (datetime.now(UTC).date() - parsed) <= timedelta(days=days)
+
+
+def _compose_staff_profile(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    profile = _profile_or_none(state)
+    if not profile:
+        message = "I couldn't read that staff member's profile just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    facet = str(classification.reference or "profile")
+    name = str(profile.get("name"))
+    caseload = _m(profile.get("caseload"))
+    work = _m(profile.get("work"))
+    availability = _m(profile.get("availability"))
+    manager = _m(profile.get("manager"))
+    parts = [f"{_person_line(profile)}."]
+    if manager:
+        parts.append(f"Reports to {manager.get('name')}.")
+    if profile.get("directReports"):
+        parts.append(f"{_count(int(profile['directReports']), 'direct report')}.")
+    if profile.get("startedAt"):
+        parts.append(f"Started {_fmt_day(profile['startedAt'])}.")
+    if caseload.get("primaryAdvisees") or caseload.get("cap"):
+        advisees = int(caseload.get("primaryAdvisees") or 0)
+        cap = caseload.get("cap")
+        parts.append(
+            f"Caseload {advisees}"
+            + (f" of a {cap} cap" if cap else "")
+            + (" — over the cap." if caseload.get("overCap") else ".")
+        )
+    parts.append(
+        f"Queue: {_count(int(work.get('open') or 0), 'open item')}, {work.get('overdue', 0)} "
+        f"overdue, "
+        f"{work.get('staleInProgress', 0)} stale in progress."
+    )
+    if work.get("appointmentsAwaitingOutcome"):
+        parts.append(
+            f"{work['appointmentsAwaitingOutcome']} past appointments still need an outcome."
+        )
+    if availability.get("nextOpenSlotAt"):
+        parts.append(f"Next open slot {_fmt_when(availability['nextOpenSlotAt'])}.")
+    elif (
+        availability
+        and profile.get("employmentStatus") == "active"
+        and profile.get("studentFacing")
+    ):
+        parts.append("No open slots in the next 14 days.")
+    message = " ".join(parts)
+    blocks: list[JsonDict] = [text_block(message)]
+    if facet == "workload" and state.queue_page:
+        blocks.append(_queue_page_block(state.queue_page, caption=f"{name}'s open items"))
+    required: list[tuple[str, str]] = []
+    if profile.get("startedAt") and _is_recent(profile.get("startedAt")):
+        # A recent start date is part of who someone is — a new hire's most
+        # important fact — and a paraphrase must not drop it.
+        required.append(("started", f"{name} started on {_fmt_day(profile['startedAt'])}."))
+    return ComposedStaffAnswer(
+        message=message, blocks=blocks, evidence_texts=evidence, required_phrases=required
+    )
+
+
+def _queue_page_block(page: dict[str, Any], *, caption: str) -> JsonDict:
+    return table_block(
+        [
+            {"key": "key", "label": "Key"},
+            {"key": "title", "label": "Task"},
+            {"key": "student", "label": "Student"},
+            {"key": "priority", "label": "Priority"},
+            {"key": "due", "label": "Due"},
+            {"key": "status", "label": "Status"},
+        ],
+        [
+            {
+                "key": str(item.get("key", "")),
+                "title": str(item.get("title", ""))[:60],
+                "student": str(_m(item.get("student")).get("name", "")),
+                "priority": str(item.get("priority", "")),
+                "due": _fmt_day(item.get("dueAt")) if item.get("dueAt") else "",
+                "status": str(item.get("status", "")).replace("_", " "),
+            }
+            for item in _sequence_list(page.get("items"))[:10]
+        ],
+        caption=caption,
+    )
+
+
+def _compose_staff_workload(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    profile = _profile_or_none(state)
+    page = state.queue_page
+    if not profile and not page:
+        message = "I couldn't read that staff member's work queue just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    name = str((profile or {}).get("name") or _m(_m(page or {}).get("staff")).get("name") or "They")
+    work = _m((profile or {}).get("work"))
+    filters = _m((page or {}).get("filters"))
+    described = _describe_queue_filter_map({k: v for k, v in filters.items() if k != "assigneeId"})
+    parts = []
+    if page is not None and described:
+        parts.append(f"{name} has {_count(int(page.get('total') or 0), 'item')} {described}.")
+    if work:
+        parts.append(
+            f"Overall {name} holds {_count(int(work.get('open') or 0), 'open item')} — "
+            f"{work.get('overdue', 0)} overdue, "
+            f"{work.get('urgent', 0)} urgent, {work.get('staleInProgress', 0)} in progress with no "
+            f"update for 10+ days."
+        )
+        if work.get("appointmentsAwaitingOutcome"):
+            parts.append(
+                f"{work['appointmentsAwaitingOutcome']} past appointments have no recorded outcome."
+            )
+    if profile and profile.get("employmentStatus") != "active":
+        parts.append(f"Note: {name} {_status_phrase(profile)}.")
+    message = " ".join(parts) or f"{name}'s queue is empty."
+    blocks: list[JsonDict] = [text_block(message)]
+    if page and _sequence_list(page.get("items")):
+        blocks.append(_queue_page_block(page, caption=f"{name}'s items ({described or 'open'})"))
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_staff_availability(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    availability = state.staff_availability or {}
+    profile = state.staff_profile or {}
+    staff: dict[str, Any] = _m(availability.get("staff")) or dict(profile)
+    if not availability and not profile:
+        message = "I couldn't read that staff member's availability just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    name = str(staff.get("name") or profile.get("name") or "They")
+    status = str(staff.get("employmentStatus") or profile.get("employmentStatus") or "active")
+    if status == "on_leave":
+        until = staff.get("leaveUntil") or profile.get("leaveUntil")
+        message = (
+            f"No — {name} is on leave"
+            + (f" until {_fmt_day(until)}" if until else "")
+            + ", so students cannot book them and nothing on their calendar is open."
+        )
+    elif status == "departed":
+        message = f"No — {name} has left the university and cannot be booked."
+    else:
+        weekdays = [
+            str(d) for d in _sequence_list(availability.get("weekdays") or profile.get("weekdays"))
+        ]
+        next_slot = availability.get("nextOpenSlotAt") or _m(profile.get("availability")).get(
+            "nextOpenSlotAt"
+        )
+        open_slots = availability.get("openSlotsNext14Days")
+        if open_slots is None:
+            open_slots = _m(profile.get("availability")).get("openSlotsNext14Days")
+        absence = _m(availability.get("currentAbsence") or profile.get("currentAbsence"))
+        parts = []
+        if absence:
+            parts.append(
+                f"{name} is away right now ({absence.get('kind')} until "
+                f"{_fmt_day(absence.get('endsAt'))})."
+            )
+        if next_slot:
+            parts.append(f"{name}'s next open slot is {_fmt_when(next_slot)}.")
+        else:
+            parts.append(f"{name} has no open slot in the next 14 days.")
+        if open_slots is not None:
+            parts.append(f"{_count(int(open_slots), 'open slot')} in the next two weeks.")
+        if weekdays:
+            parts.append(f"Appointment hours run on {', '.join(weekdays)}.")
+        message = " ".join(parts)
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message)], evidence_texts=evidence
+    )
+
+
+def _compose_staff_caseload(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    profile = state.staff_profile or {}
+    caseload = state.staff_caseload
+    if not profile and not caseload:
+        message = "I couldn't read that staff member's caseload just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    name = str(profile.get("name") or _m(_m(caseload or {}).get("staff")).get("name") or "They")
+    load = _m(profile.get("caseload"))
+    parts = []
+    filters = _m((caseload or {}).get("filters"))
+    described = _describe_caseload_filters(filters)
+    if caseload is not None and described:
+        parts.append(
+            f"{_count(int(caseload.get('total') or 0), 'advisee', 'advisees')} of {name}'s match: "
+            f"{described}."
+        )
+    if load:
+        advisees = int(load.get("primaryAdvisees") or 0)
+        cap = load.get("cap")
+        line = f"{name} advises {_count(advisees, 'student')}"
+        if cap:
+            line += f" against a cap of {cap}"
+            line += " — over the cap" if load.get("overCap") else ""
+        parts.append(line + ".")
+        if load.get("endedPrimaryAssignments"):
+            parts.append(
+                f"{load['endedPrimaryAssignments']} of their past advisees were moved to another "
+                f"adviser."
+            )
+    if caseload is not None and not described:
+        summary = _m(caseload.get("summary"))
+        if summary:
+            parts.append(
+                f"Advising status across the caseload: {summary.get('advisingCompleted', 0)} "
+                f"completed, "
+                f"{summary.get('advisingScheduled', 0)} scheduled, "
+                f"{summary.get('advisingMissed', 0)} missed, "
+                f"{summary.get('advisingNone', 0)} with nothing booked; "
+                f"{summary.get('withOverdueWork', 0)} have overdue staff work."
+            )
+    if profile.get("employmentStatus") != "active" and profile:
+        parts.append(f"Note: {name} {_status_phrase(profile)}.")
+    message = " ".join(parts) or f"{name} has no assigned students."
+    blocks: list[JsonDict] = [text_block(message)]
+    items = _sequence_list((caseload or {}).get("items"))
+    if items and (described or len(items) <= 12):
+        blocks.append(
+            table_block(
+                [
+                    {"key": "name", "label": "Student"},
+                    {"key": "ref", "label": "ID"},
+                    {"key": "advising", "label": "Advising"},
+                    {"key": "next", "label": "Next appt"},
+                    {"key": "work", "label": "Open / overdue"},
+                ],
+                [
+                    {
+                        "name": str(_m(i.get("student")).get("name", "")),
+                        "ref": str(_m(i.get("student")).get("externalRef") or ""),
+                        "advising": str(_m(i.get("advising")).get("status", "")),
+                        "next": _fmt_day(_m(i.get("advising")).get("nextAppointmentAt"))
+                        if _m(i.get("advising")).get("nextAppointmentAt")
+                        else "—",
+                        "work": (
+                            f"{_m(i.get('work')).get('open', 0)} / "
+                            f"{_m(i.get('work')).get('overdue', 0)}"
+                        ),
+                    }
+                    for i in items[:12]
+                ],
+                caption=f"{name}'s advisees" + (f" ({described})" if described else ""),
+            )
+        )
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_staff_appointments(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    appointments = state.staff_appointments
+    profile = state.staff_profile or {}
+    if not appointments:
+        message = "I couldn't read that staff member's appointments just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    staff: dict[str, Any] = _m(appointments.get("staff")) or dict(profile)
+    name = str(staff.get("name") or "They")
+    window = str(appointments.get("window") or "week")
+    counts = _m(appointments.get("counts"))
+    total = int(appointments.get("total") or 0)
+    label = {
+        "today": "today",
+        "tomorrow": "tomorrow",
+        "week": "in the next 7 days",
+        "two_weeks": "in the next two weeks",
+        "past_week": "in the past week",
+        "awaiting_outcome": "past their time with no recorded outcome",
+    }.get(window, window)
+    if window == "awaiting_outcome":
+        message = f"{name} has {_count(total, 'appointment')} {label}."
+    else:
+        scheduled = int(counts.get("scheduled") or 0)
+        message = f"{name} has {_count(scheduled, 'scheduled appointment')} {label}"
+        others = total - scheduled
+        if others:
+            message += f" (plus {others} completed, cancelled or no-show in the window)"
+        message += "."
+    work = _m(profile.get("work"))
+    if window != "awaiting_outcome" and work.get("appointmentsAwaitingOutcome"):
+        message += (
+            f" {work['appointmentsAwaitingOutcome']} earlier appointments still need an "
+            "outcome recorded."
+        )
+    blocks: list[JsonDict] = [text_block(message)]
+    items = _sequence_list(appointments.get("items"))
+    if items:
+        blocks.append(
+            bullet_list_block(
+                [
+                    {
+                        "text": f"{_fmt_when(i.get('startsAt'))} — "
+                        f"{str(i.get('type') or '').replace('_', ' ')} with "
+                        f"{_m(i.get('student')).get('name')} ({i.get('status')})"
+                    }
+                    for i in items[:10]
+                ],
+                title=f"{name}'s appointments {label}",
+            )
+        )
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_staff_comparison(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    profiles = state.staff_comparison
+    if len(profiles) < 2:
+        message = "I need two staff members to compare — name both and I'll put them side by side."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    rows = []
+    sentences = []
+    for profile in profiles:
+        load = _m(profile.get("caseload"))
+        work = _m(profile.get("work"))
+        availability = _m(profile.get("availability"))
+        rows.append(
+            {
+                "name": str(profile.get("name")),
+                "status": str(profile.get("employmentStatus")),
+                "advisees": f"{load.get('primaryAdvisees', 0)}"
+                + (f"/{load.get('cap')}" if load.get("cap") else ""),
+                "open": str(work.get("open", 0)),
+                "overdue": str(work.get("overdue", 0)),
+                "stale": str(work.get("staleInProgress", 0)),
+                "slots": str(availability.get("openSlotsNext14Days", "—")),
+            }
+        )
+        sentences.append(
+            f"{profile.get('name')}: {load.get('primaryAdvisees', 0)} advisees"
+            + (f" of {load.get('cap')}" if load.get("cap") else "")
+            + f", {work.get('open', 0)} open items ({work.get('overdue', 0)} overdue, "
+            + f"{work.get('staleInProgress', 0)} stale)"
+            + (
+                f", {work.get('appointmentsAwaitingOutcome')} appointments not closed out"
+                if work.get("appointmentsAwaitingOutcome")
+                else ""
+            )
+            + (
+                f", {availability.get('openSlotsNext14Days')} open slots in 14 days"
+                if availability.get("openSlotsNext14Days") is not None
+                else ""
+            )
+        )
+    message = " ".join(s + "." for s in sentences)
+    block = table_block(
+        [
+            {"key": "name", "label": "Staff"},
+            {"key": "status", "label": "Status"},
+            {"key": "advisees", "label": "Advisees / cap"},
+            {"key": "open", "label": "Open", "align": "right"},
+            {"key": "overdue", "label": "Overdue", "align": "right"},
+            {"key": "stale", "label": "Stale", "align": "right"},
+            {"key": "slots", "label": "Open slots (14d)", "align": "right"},
+        ],
+        rows,
+        caption="Side by side",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_my_work(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    facet = str(classification.reference or "workload")
+    profile = state.staff_profile
+    if facet == "availability" and (state.staff_availability or profile):
+        answer = _compose_staff_availability(classification, state)
+    elif facet == "caseload" and (state.staff_caseload or profile):
+        answer = _compose_staff_caseload(classification, state)
+    elif facet == "appointments" and state.staff_appointments:
+        answer = _compose_staff_appointments(classification, state)
+    else:
+        answer = _compose_staff_workload(classification, state)
+        if profile and facet == "priorities" and state.queue_page:
+            head = _sequence_list(state.queue_page.get("items"))[:1]
+            if head:
+                item = head[0]
+                answer = ComposedStaffAnswer(
+                    message=f"Start with {item.get('key')}: {item.get('title')} "
+                    f"({item.get('priority')}"
+                    + (", overdue" if item.get("overdue") else "")
+                    + f") for {_m(item.get('student')).get('name')}. "
+                    + answer.message,
+                    blocks=answer.blocks,
+                    evidence_texts=answer.evidence_texts,
+                )
+    if profile:
+        # Second person: the answer is about the reader.
+        name = str(profile.get("name") or "")
+        message = (
+            answer.message.replace(f"{name}'s", "your")
+            .replace(f"{name} has", "You have")
+            .replace(f"{name} advises", "You advise")
+            .replace(f"{name} holds", "You hold")
+        )
+        message = (
+            message.replace(f"No — {name} is", "You are")
+            .replace(f"{name} is", "You are")
+            .replace(f"{name} cannot", "You cannot")
+            .replace(f"{name} —", "You —")
+            .replace(name, "you")
+        )
+        message = message.replace("Overall you hold", "You hold").replace("you has", "you have")
+        answer = ComposedStaffAnswer(
+            message=message,
+            blocks=[text_block(message), *answer.blocks[1:]],
+            evidence_texts=answer.evidence_texts,
+            required_phrases=answer.required_phrases,
+        )
+    return answer
+
+
+def _compose_my_profile(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    profile = state.staff_profile
+    if not profile:
+        message = "I couldn't read your staff profile just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    manager = _m(profile.get("manager"))
+    parts = [
+        f"You are signed in as {profile.get('name')}, "
+        f"{profile.get('title') or profile.get('roleCode')} in {profile.get('component')}."
+    ]
+    if manager:
+        parts.append(
+            f"You report to {manager.get('name')}"
+            + (f" ({manager.get('title')})" if manager.get("title") else "")
+            + "."
+        )
+    else:
+        parts.append("No manager is recorded for you.")
+    reports = int(profile.get("directReports") or 0)
+    parts.append(
+        f"{_count(reports, 'person reports', 'people report')} to you."
+        if reports
+        else "Nobody reports to you."
+    )
+    load = _m(profile.get("caseload"))
+    if load.get("primaryAdvisees"):
+        parts.append(
+            f"You advise {load['primaryAdvisees']} students"
+            + (f" (cap {load.get('cap')})" if load.get("cap") else "")
+            + "."
+        )
+    message = " ".join(parts)
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message)], evidence_texts=evidence
+    )
+
+
+def _compose_team_overview(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    team = state.staff_team
+    if not team:
+        message = (
+            "I couldn't read a team for you — nobody reports to you in the staff directory, "
+            "so I can only answer team questions by department."
+        )
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    focus = str(classification.reference or "overview")
+    members = _sequence_list(team.get("members"))
+    summary = _m(team.get("componentSummary"))
+    flagged = [m for m in members if _sequence_list(m.get("flags"))]
+
+    def names_with(flag: str) -> list[str]:
+        return [
+            str(m.get("name"))
+            for m in members
+            if flag in [str(f.get("value", f)) for f in _sequence_list(m.get("flags"))]
+        ]
+
+    over_cap = names_with("over_cap")
+    on_leave = [str(m.get("name")) for m in members if m.get("employmentStatus") == "on_leave"]
+    departed = [str(m.get("name")) for m in members if m.get("employmentStatus") == "departed"]
+    no_slots = names_with("no_open_slots")
+    spare = names_with("spare_capacity")
+    behind = names_with("falling_behind")
+    parts = [
+        f"Your team: {team.get('directReports', 0)} direct reports, {team.get('total', 0)} people "
+        f"in the reporting tree."
+    ]
+    if focus == "capacity":
+        advisers = [m for m in members if _m(m.get("caseload")).get("cap")]
+        advisers.sort(key=lambda m: _m(m.get("caseload")).get("utilization") or 0)
+        if over_cap:
+            parts.append(f"Over cap: {', '.join(over_cap)}.")
+        if spare:
+            parts.append(f"Spare capacity: {', '.join(spare)}.")
+        if advisers:
+            light = advisers[0]
+            heavy = advisers[-1]
+            parts.append(
+                f"Lightest relative to cap: {light.get('name')} "
+                f"({_m(light.get('caseload')).get('primaryAdvisees')}/"
+                f"{_m(light.get('caseload')).get('cap')}); "
+                f"heaviest: {heavy.get('name')} "
+                f"({_m(heavy.get('caseload')).get('primaryAdvisees')}/{_m(heavy.get('caseload')).get('cap')})."
+            )
+    if focus in {"availability", "overview", "capacity"} and no_slots:
+        parts.append(f"No open slots in the next two weeks: {', '.join(no_slots)}.")
+    if focus == "availability":
+        bookable = [m for m in members if _m(m.get("availability")).get("nextOpenSlotAt")]
+        bookable.sort(key=lambda m: str(_m(m.get("availability")).get("nextOpenSlotAt")))
+        if bookable:
+            parts.append(
+                "Soonest openings: "
+                + "; ".join(
+                    f"{m.get('name')} {_fmt_when(_m(m.get('availability')).get('nextOpenSlotAt'))}"
+                    for m in bookable[:5]
+                )
+                + "."
+            )
+    if focus in {"absence", "overview", "attention", "capacity"}:
+        if on_leave:
+            parts.append(
+                f"On leave: {', '.join(on_leave)}"
+                + (
+                    f" — {summary.get('studentsWithAdviserOnLeave')} students not covered"
+                    if summary.get("studentsWithAdviserOnLeave")
+                    else ""
+                )
+                + "."
+            )
+        if departed:
+            parts.append(
+                f"Departed but still assigned students: {', '.join(departed)}"
+                + (
+                    f" — {summary.get('studentsWithDepartedAdviser')} students"
+                    if summary.get("studentsWithDepartedAdviser")
+                    else ""
+                )
+                + "."
+            )
+    if focus in {"appointments", "attention", "overview"} and behind:
+        parts.append(
+            f"Falling behind (stale items or appointments never closed out): {', '.join(behind)}."
+        )
+    if focus == "appointments":
+        unclosed = [m for m in members if _m(m.get("work")).get("appointmentsAwaitingOutcome")]
+        if unclosed:
+            parts.append(
+                "Appointments never closed out: "
+                + ", ".join(
+                    f"{m.get('name')} ({_m(m.get('work')).get('appointmentsAwaitingOutcome')})"
+                    for m in unclosed
+                )
+                + "."
+            )
+        else:
+            parts.append("Nobody on the team has appointments past their time without an outcome.")
+    if focus in {"overview", "attention"} and over_cap:
+        parts.append(f"Over caseload cap: {', '.join(over_cap)}.")
+    if focus in {"overview", "attention"} and spare and focus == "overview":
+        parts.append(f"Spare capacity: {', '.join(spare)}.")
+    if summary.get("acceptedStudentsWithoutPrimaryAdviser") and focus in {"overview", "capacity"}:
+        parts.append(
+            f"{summary['acceptedStudentsWithoutPrimaryAdviser']} accepted students have no primary "
+            f"adviser at all."
+        )
+    if len(parts) == 1:
+        parts.append("Nothing is flagged on the team right now.")
+    message = " ".join(parts)
+    rows = [
+        {
+            "name": str(m.get("name")),
+            "status": str(m.get("employmentStatus")),
+            "advisees": f"{_m(m.get('caseload')).get('primaryAdvisees', 0)}"
+            + (f"/{_m(m.get('caseload')).get('cap')}" if _m(m.get("caseload")).get("cap") else ""),
+            "open": str(_m(m.get("work")).get("open", 0)),
+            "overdue": str(_m(m.get("work")).get("overdue", 0)),
+            "slots": str(_m(m.get("availability")).get("openSlotsNext14Days", "—")),
+            "flags": ", ".join(
+                str(f.get("value", f)).replace("_", " ") for f in _sequence_list(m.get("flags"))
+            ),
+        }
+        for m in (flagged + [m for m in members if m not in flagged])[:12]
+    ]
+    block = table_block(
+        [
+            {"key": "name", "label": "Staff"},
+            {"key": "status", "label": "Status"},
+            {"key": "advisees", "label": "Advisees / cap"},
+            {"key": "open", "label": "Open", "align": "right"},
+            {"key": "overdue", "label": "Overdue", "align": "right"},
+            {"key": "slots", "label": "Open slots", "align": "right"},
+            {"key": "flags", "label": "Flags"},
+        ],
+        rows,
+        caption="Team (flagged first)",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_department_operations(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    component = state.component_summary
+    if not component:
+        message = "I couldn't find that department in the staff directory."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    staff = _m(component.get("staff"))
+    queue = _m(component.get("queue"))
+    inquiries = _m(component.get("inquiries"))
+    name = str(component.get("component"))
+    parts = [
+        f"{name}: {_count(int(staff.get('total') or 0), 'staff member')} ({staff.get('active', 0)} "
+        f"active), "
+        f"{_count(int(queue.get('open') or 0), 'open item')} — {queue.get('overdue', 0)} overdue, "
+        f"{queue.get('unassigned', 0)} unassigned, "
+        f"{queue.get('urgent', 0)} urgent, {queue.get('stale', 0)} stale in progress."
+    ]
+    if queue.get("document_reviews"):
+        parts.append(
+            f"{queue['document_reviews']} open document reviews, "
+            f"{queue.get('overdue_document_reviews', 0)} of them overdue."
+        )
+    if staff.get("onLeave"):
+        parts.append(f"On leave: {', '.join(staff['onLeave'])}.")
+    if staff.get("departed"):
+        parts.append(f"Departed: {', '.join(staff['departed'])}.")
+    absent = _sequence_list(staff.get("absentNow"))
+    if absent:
+        parts.append(
+            "Away right now: "
+            + "; ".join(
+                f"{a.get('name')} ({a.get('kind')} until {_fmt_day(a.get('endsAt'))}, "
+                f"{a.get('openItems', 0)} open items)"
+                for a in absent[:4]
+            )
+            + "."
+        )
+    if inquiries.get("open"):
+        parts.append(
+            f"{inquiries['open']} open inquiries assigned to the team, "
+            f"{inquiries.get('awaiting_first_reply', 0)} awaiting a first reply."
+        )
+    members = _sequence_list(component.get("members"))
+    heaviest = [m for m in members if int(m.get("overdueItems") or 0) > 0][:3]
+    if heaviest:
+        parts.append(
+            "Most overdue: "
+            + ", ".join(
+                f"{m.get('name')} ({m.get('overdueItems')} overdue of {m.get('openItems')} open)"
+                for m in heaviest
+            )
+            + "."
+        )
+    message = " ".join(parts)
+    block = table_block(
+        [
+            {"key": "name", "label": "Staff"},
+            {"key": "title", "label": "Title"},
+            {"key": "status", "label": "Status"},
+            {"key": "open", "label": "Open", "align": "right"},
+            {"key": "overdue", "label": "Overdue", "align": "right"},
+        ],
+        [
+            {
+                "name": str(m.get("name")),
+                "title": str(m.get("title") or ""),
+                "status": str(m.get("employmentStatus"))
+                + (" (away)" if m.get("currentAbsence") else ""),
+                "open": str(m.get("openItems", 0)),
+                "overdue": str(m.get("overdueItems", 0)),
+            }
+            for m in members[:12]
+        ],
+        caption=f"{name} — people",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_queue_aggregate(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    summary = state.queue_summary
+    if not summary:
+        message = "I couldn't count the work queue just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    filters = _m(summary.get("filters"))
+    described = _describe_queue_filter_map(filters)
+    total = int(summary.get("total") or 0)
+    scope = f" ({described})" if described else " in the Action Center"
+    parts = [f"{_count(total, 'open item')}{scope}."]
+    if not described:
+        parts.append(
+            f"{summary.get('unassigned', 0)} unassigned, {summary.get('urgent', 0)} urgent, "
+            f"{summary.get('escalated', 0)} escalated, "
+            f"{summary.get('overdue', 0)} overdue, {summary.get('dueToday', 0)} due today, "
+            f"{summary.get('dueNext7Days', 0)} due in the next 7 days, "
+            f"{summary.get('staleInProgress', 0)} in progress with no update for 10+ days."
+        )
+    elif total:
+        parts.append(
+            f"Within that: {summary.get('unassigned', 0)} unassigned, {summary.get('urgent', 0)} "
+            f"urgent, {summary.get('overdue', 0)} overdue, "
+            f"across {_count(int(summary.get('distinctStudents') or 0), 'student')}."
+        )
+    buckets = _sequence_list(summary.get("buckets"))
+    group_by = summary.get("groupBy")
+    blocks: list[JsonDict] = []
+    focus = str(classification.reference or "")
+    if focus.startswith("compare:") and buckets:
+        wanted = [name.strip().lower() for name in focus.removeprefix("compare:").split("|")]
+        named = [b for b in buckets if str(b.get("value", "")).lower() in wanted]
+        if named:
+            named.sort(key=lambda b: -int(b.get("count") or 0))
+            parts.append(
+                "Side by side: "
+                + "; ".join(
+                    f"{b.get('value')} {_count(int(b.get('count') or 0), 'item')}" for b in named
+                )
+                + f" — {named[0].get('value')} has more."
+            )
+    if buckets and group_by:
+        top = buckets[0]
+        parts.append(
+            f"By {str(group_by).replace('_', ' ')}, the most is {top.get('value')} with "
+            f"{_count(int(top.get('count') or 0), 'item')}"
+            + (f" ({top.get('overdue')} overdue)" if top.get("overdue") else "")
+            + "."
+        )
+        blocks.append(
+            table_block(
+                [
+                    {"key": "group", "label": str(group_by).replace("_", " ").title()},
+                    {"key": "count", "label": "Items", "align": "right"},
+                    {"key": "overdue", "label": "Overdue", "align": "right"},
+                    {"key": "unassigned", "label": "Unassigned", "align": "right"},
+                ],
+                [
+                    {
+                        "group": str(b.get("value")),
+                        "count": str(b.get("count")),
+                        "overdue": str(b.get("overdue")),
+                        "unassigned": str(b.get("unassigned")),
+                    }
+                    for b in buckets[:12]
+                ],
+                caption=f"By {str(group_by).replace('_', ' ')}",
+            )
+        )
+    message = " ".join(parts)
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), *blocks], evidence_texts=evidence
+    )
+
+
+def _compose_inquiry_aggregate(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    summary = state.inquiry_summary
+    page = state.inquiry_page
+    if not summary:
+        message = "I couldn't count the inquiries just now."
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    filters = _m(summary.get("filters"))
+    status = filters.get("status")
+    awaiting = int(summary.get("awaitingFirstReply") or 0)
+    parts = []
+    if status == "awaiting_first_reply":
+        parts.append(
+            f"{_count(awaiting, 'student inquiry is', 'student inquiries are')} still awaiting a "
+            f"first reply"
+        )
+        if filters.get("olderThanHours"):
+            parts[-1] += f" and older than {filters['olderThanHours']} hours"
+        parts[-1] += (
+            f"; {summary.get('awaitingOver24h', 0)} of all awaiting are more than 24 hours old."
+        )
+    elif status == "waiting_on_student":
+        parts.append(
+            f"{_count(int(summary.get('waitingOnStudent') or 0), 'inquiry is', 'inquiries are')} "
+            f"waiting on the student."
+        )
+    else:
+        parts.append(
+            f"{_count(int(summary.get('total') or 0), 'open inquiry', 'open inquiries')}: "
+            f"{awaiting} awaiting a first reply "
+            f"({summary.get('awaitingOver24h', 0)} older than 24 hours), {summary.get('open', 0)} "
+            f"in progress, "
+            f"{summary.get('waitingOnStudent', 0)} waiting on the student, "
+            f"{summary.get('unassignedOpen', 0)} with nobody assigned."
+        )
+    if filters.get("ownership") == "unassigned":
+        parts.append(f"{summary.get('unassignedOpen', 0)} open inquiries have nobody assigned.")
+    oldest = _m(summary.get("oldestAwaiting"))
+    if oldest:
+        student = _m(oldest.get("student"))
+        parts.append(
+            f"The oldest unanswered one is “{oldest.get('subject')}” from {student.get('name')}, "
+            f"opened {_fmt_when(oldest.get('createdAt'))} "
+            f"({round(float(oldest.get('ageHours') or 0) / 24, 1)} days ago)."
+        )
+    buckets = _sequence_list(summary.get("buckets"))
+    if buckets:
+        parts.append(
+            f"By {summary.get('groupBy')}: "
+            + ", ".join(f"{b.get('value')} {b.get('count')}" for b in buckets[:6])
+            + "."
+        )
+    message = " ".join(parts)
+    blocks: list[JsonDict] = [text_block(message)]
+    items = _sequence_list((page or {}).get("items"))
+    if items:
+        blocks.append(
+            bullet_list_block(
+                [
+                    {
+                        "text": f"“{i.get('subject')}” — {_m(i.get('student')).get('name')} "
+                        f"({i.get('status')}, {i.get('priority')}, "
+                        f"{round(float(i.get('ageHours') or 0) / 24, 1)} days old, "
+                        + (
+                            f"assigned to {_m(i.get('assignee')).get('name')}"
+                            if i.get("assignee")
+                            else "unassigned"
+                        )
+                        + ")"
+                    }
+                    for i in items[:8]
+                ],
+                title="Oldest first",
+            )
+        )
+    return ComposedStaffAnswer(message=message, blocks=blocks, evidence_texts=evidence)
+
+
+def _compose_staff_directory(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    evidence = build_staff_evidence_bundle(state)
+    people = state.staff_search
+    if not people:
+        message = (
+            "Nobody on staff is away right now — no leave, vacation, sick or conference "
+            "absence is recorded for today."
+        )
+        return ComposedStaffAnswer(
+            message=message, blocks=[text_block(message)], evidence_texts=evidence
+        )
+    ranked = sorted(people, key=lambda p: (-int(p.get("openItems") or 0), str(p.get("name"))))
+    top = ranked[0]
+    absence = _m(top.get("currentAbsence"))
+    parts = [
+        f"{_count(len(people), 'staff member is', 'staff members are')} away right now."
+        + (
+            f" The one holding the most open work is {top.get('name')} "
+            f"({top.get('title') or top.get('component')}) — "
+            f"{absence.get('kind') or 'on leave'} until "
+            f"{_fmt_day(absence.get('endsAt') or top.get('leaveUntil'))}, "
+            f"with {_count(int(top.get('openItems') or 0), 'open item')}."
+        )
+    ]
+    message = " ".join(parts)
+    block = table_block(
+        [
+            {"key": "name", "label": "Staff"},
+            {"key": "component", "label": "Component"},
+            {"key": "absence", "label": "Absence"},
+            {"key": "until", "label": "Until"},
+            {"key": "open", "label": "Open items", "align": "right"},
+        ],
+        [
+            {
+                "name": str(p.get("name")),
+                "component": str(p.get("component")),
+                "absence": str(
+                    _m(p.get("currentAbsence")).get("kind") or p.get("employmentStatus") or ""
+                ),
+                "until": _fmt_day(_m(p.get("currentAbsence")).get("endsAt") or p.get("leaveUntil")),
+                "open": str(p.get("openItems", 0)),
+            }
+            for p in ranked[:12]
+        ],
+        caption="Away right now",
+    )
+    return ComposedStaffAnswer(
+        message=message, blocks=[text_block(message), block], evidence_texts=evidence
+    )
+
+
+def _compose_not_found(
+    classification: StaffClassification, state: StaffDerivedState
+) -> ComposedStaffAnswer:
+    who = classification.reference or "that name"
+    message = (
+        f"I couldn't find anyone called “{who}” — not on staff and not on the student roster. "
+        "A full name works best; I can also look up a student ID."
+    )
+    return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+
+
 _COMPOSERS = {
     "greeting": _compose_greeting,
     "capability_overview": _compose_capabilities,
@@ -2427,6 +4091,20 @@ _COMPOSERS = {
     "playbook_lookup": _compose_playbooks,
     "action_rules": _compose_action_rules,
     "mailbox_read": _compose_mailbox_read,
+    "staff_profile": _compose_staff_profile,
+    "staff_workload": _compose_staff_workload,
+    "staff_availability": _compose_staff_availability,
+    "staff_caseload": _compose_staff_caseload,
+    "staff_appointments": _compose_staff_appointments,
+    "staff_comparison": _compose_staff_comparison,
+    "my_work": _compose_my_work,
+    "my_profile": _compose_my_profile,
+    "team_overview": _compose_team_overview,
+    "department_operations": _compose_department_operations,
+    "queue_aggregate": _compose_queue_aggregate,
+    "inquiry_aggregate": _compose_inquiry_aggregate,
+    "staff_directory": _compose_staff_directory,
+    "not_found": _compose_not_found,
     "general_question": _compose_general,
     "unsupported_or_out_of_scope": _compose_unsupported,
 }
@@ -2457,6 +4135,18 @@ def _unavailable_notes(state: StaffDerivedState) -> list[str]:
         "getPlaybooks": "staff guidance",
         "getActionRules": "automation rules",
         "getMailboxMessages": "authorized mailbox messages",
+        "getStaffProfile": "the staff profile",
+        "searchStaff": "the staff directory",
+        "getStaffTeam": "the team view",
+        "getStaffCaseload": "the caseload",
+        "getStaffAppointments": "the staff calendar",
+        "getStaffAvailability": "the availability",
+        "compareStaff": "the staff profiles",
+        "summarizeWorkQueue": "the queue counts",
+        "searchWorkQueue": "the queue page",
+        "summarizeInquiries": "the inquiry counts",
+        "searchInquiries": "the inquiry list",
+        "getComponentSummary": "the department summary",
     }
     notes = []
     for item in state.unavailable_data:
@@ -2468,9 +4158,14 @@ def _unavailable_notes(state: StaffDerivedState) -> list[str]:
 
 def _student_name(state: StaffDerivedState) -> str | None:
     student = state.student
-    if not student:
-        return None
-    return str(student.get("preferredName") or student.get("name") or "") or None
+    if student:
+        return str(student.get("preferredName") or student.get("name") or "") or None
+    # A turn that read only an ownership/appointments view still resolved
+    # the student through the roster search; that hit carries the name.
+    if len(state.search_results) == 1:
+        hit = state.search_results[0]
+        return str(hit.get("preferredName") or hit.get("name") or "") or None
+    return None
 
 
 def _join_titles(items: Sequence[dict[str, Any]]) -> str:

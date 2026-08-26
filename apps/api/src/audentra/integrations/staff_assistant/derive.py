@@ -54,6 +54,19 @@ class StaffDerivedState:
     action_rules: list[JsonDict] = field(default_factory=list)
     mailbox_messages: list[JsonDict] = field(default_factory=list)
     mailbox_ranking_method: str | None = None
+    # Staff-aware reads.
+    staff_profile: JsonDict | None = None
+    staff_search: list[JsonDict] = field(default_factory=list)
+    staff_team: JsonDict | None = None
+    staff_caseload: JsonDict | None = None
+    staff_appointments: JsonDict | None = None
+    staff_availability: JsonDict | None = None
+    staff_comparison: list[JsonDict] = field(default_factory=list)
+    queue_summary: JsonDict | None = None
+    queue_page: JsonDict | None = None
+    inquiry_summary: JsonDict | None = None
+    inquiry_page: JsonDict | None = None
+    component_summary: JsonDict | None = None
     # Derived communication signals.
     awaiting_reply: bool | None = None
     last_outbound: JsonDict | None = None
@@ -115,6 +128,30 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     appointments = reads.get("getStudentAppointments")
     if appointments:
         state.appointments = [dict(item) for item in _items(appointments)]
+
+    for tool, attribute in (
+        ("getStaffProfile", "staff_profile"),
+        ("getStaffTeam", "staff_team"),
+        ("getStaffCaseload", "staff_caseload"),
+        ("getStaffAppointments", "staff_appointments"),
+        ("getStaffAvailability", "staff_availability"),
+        ("summarizeWorkQueue", "queue_summary"),
+        ("searchWorkQueue", "queue_page"),
+        ("summarizeInquiries", "inquiry_summary"),
+        ("searchInquiries", "inquiry_page"),
+        ("getComponentSummary", "component_summary"),
+    ):
+        read = reads.get(tool)
+        if read:
+            setattr(state, attribute, dict(read))
+    staff_search = reads.get("searchStaff")
+    if staff_search:
+        state.staff_search = [dict(_mapping(item)) for item in _sequence(staff_search.get("items"))]
+    comparison = reads.get("compareStaff")
+    if comparison:
+        state.staff_comparison = [
+            dict(_mapping(item)) for item in _sequence(comparison.get("items"))
+        ]
 
     communications = reads.get("getStudentCommunicationHistory")
     if communications:

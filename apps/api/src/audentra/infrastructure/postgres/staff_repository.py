@@ -106,6 +106,92 @@ class PostgresStaffRepository:
         self._require_staff(auth)
         return await self._read_action_center(auth)
 
+    async def _staff_members(self, auth: AuthContext) -> list[dict[str, object]]:
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, display_name, email_normalized, component
+                    FROM {self._table("staff_member")}
+                    WHERE tenant_id = :tenant_id AND active = true
+                    ORDER BY display_name, id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            return [
+                {
+                    "id": str(row["id"]),
+                    "name": str(row["display_name"]),
+                    "email": str(row["email_normalized"]),
+                    "component": str(row["component"]),
+                }
+                for row in result.mappings().all()
+            ]
+
+    async def _student_work_items_for_detail(
+        self, auth: AuthContext, student_id: str
+    ) -> list[dict[str, object]]:
+        """The board rows for one student — the related-items strip."""
+
+        sql = self._action_center_items_sql().replace(
+            "WHERE item.tenant_id = :tenant_id",
+            "WHERE item.tenant_id = :tenant_id AND item.student_id = :student_id",
+            1,
+        )
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(sql),
+                        {"tenant_id": _uuid(auth.tenant_id), "student_id": _uuid(student_id)},
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        return [self._map_work_item(dict(row), []) for row in rows]
+
+    async def _read_work_item(
+        self, auth: AuthContext, work_item_id: str
+    ) -> dict[str, object] | None:
+        """One board row with its own log entries — a bounded detail read."""
+
+        try:
+            item_uuid = _uuid(work_item_id)
+        except (TypeError, ValueError):
+            return None
+        sql = self._action_center_items_sql().replace(
+            "WHERE item.tenant_id = :tenant_id",
+            "WHERE item.tenant_id = :tenant_id AND item.id = :item_id",
+            1,
+        )
+        async with self._engine.connect() as connection:
+            row = (
+                (
+                    await connection.execute(
+                        text(sql), {"tenant_id": _uuid(auth.tenant_id), "item_id": item_uuid}
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            log_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT id, work_item_id, action, message, actor_name, occurred_at
+                    FROM {self._table("staff_work_log")}
+                    WHERE tenant_id = :tenant_id AND work_item_id = :item_id
+                    ORDER BY occurred_at DESC, id
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id), "item_id": item_uuid},
+            )
+            logs = [dict(entry) for entry in log_result.mappings().all()]
+        return self._map_work_item(dict(row), logs)
+
     async def _read_action_center(self, auth: AuthContext) -> dict[str, object]:
         async with self._engine.connect() as connection:
             member_result = await connection.execute(
@@ -1108,16 +1194,12 @@ class PostgresStaffRepository:
         ensure_document_work_items: bool = True,
     ) -> dict[str, object]:
         self._require_staff(auth)
-        center = (
-            await self.get_action_center(auth)
-            if ensure_document_work_items
-            else await self.get_work_queue(auth)
-        )
-        center_items = cast(list[dict[str, object]], center["items"])
-        work_item = next(
-            (item for item in center_items if item["id"] == work_item_id),
-            None,
-        )
+        if ensure_document_work_items:
+            await self._ensure_document_work_items(auth)
+        # One item, its own history: never the whole board. At a realistic
+        # tenant the board read alone exceeds the assistant's tool budget,
+        # and the detail view needs exactly one row of it.
+        work_item = await self._read_work_item(auth, work_item_id)
         if work_item is None:
             raise NotFoundError("STAFF_WORK_ITEM_NOT_FOUND", "The work item was not found")
         student_id = str(cast(Mapping[str, object], work_item["student"])["id"])
@@ -1285,9 +1367,8 @@ class PostgresStaffRepository:
                 },
             )
 
-        staff_by_id = {
-            str(member["id"]): member for member in cast(list[dict[str, object]], center["staff"])
-        }
+        staff_by_id = {str(member["id"]): member for member in await self._staff_members(auth)}
+        center_items = await self._student_work_items_for_detail(auth, student_id)
         comments = []
         for row in comment_result.mappings().all():
             mention_ids = [str(value) for value in _json_list(row["mentions"], "comment.mentions")]

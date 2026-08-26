@@ -49,6 +49,21 @@ STAFF_TOOL_NAMES = (
     "getPlaybooks",
     "getActionRules",
     "getMailboxMessages",
+    # Staff-aware reads (bounded, SQL-side): people, teams, queues, inquiries,
+    # departments. Identity arguments (staffId) are bound server-side from the
+    # resolved staff entity or the signed-in member, never from a model.
+    "getStaffProfile",
+    "searchStaff",
+    "getStaffTeam",
+    "getStaffCaseload",
+    "getStaffAppointments",
+    "getStaffAvailability",
+    "compareStaff",
+    "summarizeWorkQueue",
+    "searchWorkQueue",
+    "summarizeInquiries",
+    "searchInquiries",
+    "getComponentSummary",
 )
 
 # Source-of-truth classification, mirroring the student catalog's discipline.
@@ -81,6 +96,18 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getPlaybooks": "institution_knowledge",
     "getActionRules": "institution_knowledge",
     "getMailboxMessages": "operational_state",
+    "getStaffProfile": "operational_state",
+    "searchStaff": "operational_state",
+    "getStaffTeam": "operational_state",
+    "getStaffCaseload": "operational_state",
+    "getStaffAppointments": "operational_state",
+    "getStaffAvailability": "operational_state",
+    "compareStaff": "operational_state",
+    "summarizeWorkQueue": "operational_state",
+    "searchWorkQueue": "operational_state",
+    "summarizeInquiries": "operational_state",
+    "searchInquiries": "operational_state",
+    "getComponentSummary": "operational_state",
 }
 
 STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
@@ -167,11 +194,93 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Rule-based signals, not risk scores or probabilities."
     ),
     "getStaffWorkQueue": (
-        "Read the staff work queue — the SAME source of truth the Staff "
-        "Portal's Action Center renders — in canonical order (priority, then "
-        "due date), with optional ownership, component, status, due-window, "
-        "and topic (title keyword) filters, plus counts. Authoritative for "
-        "what is in the Action Center and in which order."
+        "Read a bounded page (up to 25 items) of the staff work queue — the "
+        "SAME source of truth the Staff Portal's Action Center renders — in "
+        "canonical order (priority, then due date), with optional ownership, "
+        "component, status, due-window and topic filters, plus SQL-side "
+        "counts. Use searchWorkQueue/summarizeWorkQueue for richer filters "
+        "or grouped counts."
+    ),
+    "getStaffProfile": (
+        "Read one staff member's profile: title, role, component, manager, "
+        "direct reports, employment status (active / on leave / departed), "
+        "current absence, caseload vs cap, open/overdue/stale work, "
+        "appointments today and this week, open inquiries, and calendar "
+        "summary (next open slot, open slots in 14 days, weekly days). Bound "
+        "to the resolved staff member or the signed-in member ('me')."
+    ),
+    "searchStaff": (
+        "Search the staff directory by name, component (department) or role, "
+        "or list who is away right now (absentNow: on leave, vacation, sick, "
+        "conference); returns briefs with match quality (exact_name, "
+        "first_name, last_name, partial), employment status, absence, advisee "
+        "and open-item counts. This — not the student roster — is where a "
+        "colleague's name resolves."
+    ),
+    "getStaffTeam": (
+        "Read a manager's reporting subtree with per-person flags "
+        "(over_cap, on_leave_with_caseload, departed_with_caseload, "
+        "no_open_slots, falling_behind, spare_capacity), caseload, backlog, "
+        "availability, and the component summary (students with departed / "
+        "on-leave adviser, accepted students without an adviser, unassigned "
+        "and overdue component items). Bound to the resolved manager or 'me'."
+    ),
+    "getStaffCaseload": (
+        "List the students currently assigned to one staff member (primary "
+        "advisees by default) with advising status, next appointment, open "
+        "and overdue work, deposit and offer state; optional filters for "
+        "advising status, deposit state, open or overdue work; reports the "
+        "true total behind the page."
+    ),
+    "getStaffAppointments": (
+        "Read one staff member's appointments in a window (today, tomorrow, "
+        "this week, next two weeks, the past week, or those awaiting an "
+        "outcome) with the student on each and per-status counts."
+    ),
+    "getStaffAvailability": (
+        "Read one staff member's bookability: whether students can book them "
+        "now (and why not: on leave, departed, no hours), next open slot, "
+        "open slots in the next 14 days, booked slots, weekly appointment "
+        "days, current and upcoming absences."
+    ),
+    "compareStaff": (
+        "Read the profiles of two to four staff members side by side "
+        "(caseload, backlog, appointments, availability) for a comparison "
+        "question. Bound to the resolved staff members."
+    ),
+    "summarizeWorkQueue": (
+        "Count Action Center work in SQL with optional filters (ownership "
+        "mine/unassigned, a specific assignee, component, status, priority, "
+        "due window, topic keyword, stale in-progress, escalated, action "
+        "type, work type) and an optional grouping (assignee, component, "
+        "status, priority, due_window, action_type, work_type, student). "
+        "Returns totals — open, unassigned, urgent, overdue, due today, due "
+        "in 7 days, stale, escalated, distinct students — and the top "
+        "buckets. Use this for every 'how many items…' / 'which team or "
+        "person has the most…' question instead of reading the board."
+    ),
+    "searchWorkQueue": (
+        "Read a bounded page of Action Center items matching the same filters "
+        "as summarizeWorkQueue, in canonical order (or by due date / oldest / "
+        "stalest), with the true total behind the page."
+    ),
+    "summarizeInquiries": (
+        "Count student support inquiries in SQL: awaiting a first reply "
+        "(status new), open, waiting on the student, resolved, unassigned, "
+        "urgent, older than 24 hours, the oldest awaiting inquiry, and "
+        "optional grouping by status, assignee, topic or priority."
+    ),
+    "searchInquiries": (
+        "Read a bounded page of support inquiries (oldest first by default) "
+        "with subject, topic, priority, age, assignee and student, matching "
+        "status / ownership / topic / age filters."
+    ),
+    "getComponentSummary": (
+        "Read one department's (component's) operational picture: headcount, "
+        "who is on leave / departed / absent right now, each member's open, "
+        "overdue and stale work, the component's open / unassigned / overdue "
+        "/ urgent / escalated / due-today items, document reviews, and open "
+        "inquiries."
     ),
     "getMorningBriefing": (
         "Read today's Morning Brew — the same start-of-day briefing the Staff "
@@ -227,7 +336,32 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "getPlaybooks": "staff_guidance",
     "getActionRules": "action_rules",
     "getMailboxMessages": "authorized_mailboxes",
+    "getStaffProfile": "staff_directory",
+    "searchStaff": "staff_directory",
+    "getStaffTeam": "staff_team",
+    "getStaffCaseload": "staff_caseload",
+    "getStaffAppointments": "staff_calendar",
+    "getStaffAvailability": "staff_calendar",
+    "compareStaff": "staff_directory",
+    "summarizeWorkQueue": "work_queue",
+    "searchWorkQueue": "work_queue",
+    "summarizeInquiries": "inquiries",
+    "searchInquiries": "inquiries",
+    "getComponentSummary": "staff_team",
 }
+
+# Tools whose primary argument is a resolved staff member. The pipeline binds
+# ``staffId`` from the turn's resolved staff entity — or from the signed-in
+# member when the turn is about "me" — never from a model plan.
+STAFF_SCOPED_TOOLS = frozenset(
+    {
+        "getStaffProfile",
+        "getStaffTeam",
+        "getStaffCaseload",
+        "getStaffAppointments",
+        "getStaffAvailability",
+    }
+)
 
 # Tools whose primary argument is the resolved student referent. The pipeline
 # binds ``studentId`` for these itself; a model plan never supplies it.
@@ -249,6 +383,86 @@ STUDENT_SCOPED_TOOLS = frozenset(
 )
 
 _CHANNELS = ("email", "sms", "voice", "portal")
+_QUEUE_STATUS_FILTERS = (
+    "open",
+    "closed",
+    "any",
+    "todo",
+    "in_progress",
+    "follow_up_required",
+    "blocked",
+    "done",
+    "cancelled",
+)
+_PRIORITIES = ("urgent", "high", "medium", "low")
+_QUEUE_GROUP_BY = (
+    "assignee",
+    "component",
+    "status",
+    "priority",
+    "due_window",
+    "action_type",
+    "work_type",
+    "student",
+)
+_QUEUE_SORTS = ("canonical", "due", "oldest", "stalest")
+_WORK_TYPES = ("enrollment", "document_review", "communication")
+_INQUIRY_STATUS_FILTERS = (
+    "awaiting_first_reply",
+    "open",
+    "any",
+    "new",
+    "waiting_on_student",
+    "resolved",
+)
+_INQUIRY_GROUP_BY = ("status", "assignee", "topic", "priority")
+_INQUIRY_SORTS = ("oldest", "newest")
+_APPOINTMENT_WINDOWS = (
+    "today",
+    "tomorrow",
+    "week",
+    "two_weeks",
+    "past_week",
+    "awaiting_outcome",
+)
+_ADVISING_FILTERS = ("any", "not_completed", "no_booking", "completed", "missed", "scheduled")
+_DEPOSIT_FILTERS = ("paid", "unpaid")
+_ASSIGNMENT_ROLES = (
+    "primary_advisor",
+    "admissions_counselor",
+    "financial_aid_counselor",
+    "international_adviser",
+    "housing_coordinator",
+)
+
+_QUEUE_FILTER_ARGUMENTS: Mapping[str, JsonDict] = {
+    "ownership": {"kind": "enum", "values": ("mine", "unassigned", "all"), "optional": True},
+    "staffId": {"kind": "uuid", "optional": True},
+    "component": {"kind": "text", "max_length": 120, "optional": True},
+    "status": {"kind": "enum", "values": _QUEUE_STATUS_FILTERS, "optional": True},
+    "priority": {"kind": "enum", "values": _PRIORITIES, "optional": True},
+    "dueWindow": {
+        "kind": "enum",
+        "values": ("overdue", "today", "seven_days", "no_due", "all"),
+        "optional": True,
+    },
+    "topic": {"kind": "text", "max_length": 80, "optional": True},
+    "stale": {"kind": "bool", "optional": True},
+    "escalated": {"kind": "bool", "optional": True},
+    "actionType": {"kind": "text", "max_length": 48, "optional": True},
+    "workType": {"kind": "enum", "values": _WORK_TYPES, "optional": True},
+    "inProgressOverDays": {"kind": "int", "minimum": 1, "maximum": 365, "optional": True},
+    "studentId": {"kind": "uuid", "optional": True},
+}
+_INQUIRY_FILTER_ARGUMENTS: Mapping[str, JsonDict] = {
+    "status": {"kind": "enum", "values": _INQUIRY_STATUS_FILTERS, "optional": True},
+    "ownership": {"kind": "enum", "values": ("mine", "unassigned", "all"), "optional": True},
+    "staffId": {"kind": "uuid", "optional": True},
+    "priority": {"kind": "enum", "values": _PRIORITIES, "optional": True},
+    "topic": {"kind": "text", "max_length": 80, "optional": True},
+    "olderThanHours": {"kind": "int", "minimum": 1, "maximum": 8760, "optional": True},
+    "studentId": {"kind": "uuid", "optional": True},
+}
 _QUEUE_OWNERSHIP = ("mine", "unassigned", "all")
 _QUEUE_STATUSES = ("todo", "in_progress", "follow_up_required", "blocked", "done", "cancelled")
 _QUEUE_DUE_WINDOWS = ("overdue", "today", "seven_days", "no_due", "all")
@@ -313,6 +527,51 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
         "query": {"kind": "text", "max_length": 500, "optional": True},
         "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
     },
+    "getStaffProfile": {"staffId": {"kind": "uuid"}},
+    "searchStaff": {
+        "query": {"kind": "text", "max_length": 120, "optional": True},
+        "component": {"kind": "text", "max_length": 120, "optional": True},
+        "role": {"kind": "text", "max_length": 80, "optional": True},
+        "absentNow": {"kind": "bool", "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
+    "getStaffTeam": {"staffId": {"kind": "uuid"}},
+    "getStaffCaseload": {
+        "staffId": {"kind": "uuid"},
+        "role": {"kind": "enum", "values": _ASSIGNMENT_ROLES, "optional": True},
+        "advisingStatus": {"kind": "enum", "values": _ADVISING_FILTERS, "optional": True},
+        "depositState": {"kind": "enum", "values": _DEPOSIT_FILTERS, "optional": True},
+        "withOpenWork": {"kind": "bool", "optional": True},
+        "withOverdueWork": {"kind": "bool", "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
+    "getStaffAppointments": {
+        "staffId": {"kind": "uuid"},
+        "window": {"kind": "enum", "values": _APPOINTMENT_WINDOWS, "optional": True},
+    },
+    "getStaffAvailability": {"staffId": {"kind": "uuid"}},
+    "compareStaff": {"staffIds": {"kind": "uuid_list", "maximum": 4}},
+    "summarizeWorkQueue": {
+        **_QUEUE_FILTER_ARGUMENTS,
+        "groupBy": {"kind": "enum", "values": _QUEUE_GROUP_BY, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 50, "optional": True},
+    },
+    "searchWorkQueue": {
+        **_QUEUE_FILTER_ARGUMENTS,
+        "sort": {"kind": "enum", "values": _QUEUE_SORTS, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
+    "summarizeInquiries": {
+        **_INQUIRY_FILTER_ARGUMENTS,
+        "groupBy": {"kind": "enum", "values": _INQUIRY_GROUP_BY, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 50, "optional": True},
+    },
+    "searchInquiries": {
+        **_INQUIRY_FILTER_ARGUMENTS,
+        "sort": {"kind": "enum", "values": _INQUIRY_SORTS, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
+    },
+    "getComponentSummary": {"component": {"kind": "text", "max_length": 120}},
 }
 
 
@@ -384,6 +643,29 @@ def _validate_value(tool: str, name: str, value: Any, spec: Mapping[str, Any]) -
                 f"{tool}.{name} must be one of {', '.join(values)}",
             )
         return candidate
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        lowered = str(value).strip().lower()
+        if lowered in {"true", "yes", "1"}:
+            return True
+        if lowered in {"false", "no", "0"}:
+            return False
+        raise ToolArgumentError("invalid_boolean", f"{tool}.{name} must be true or false")
+    if kind == "uuid_list":
+        if isinstance(value, str) or not isinstance(value, list | tuple):
+            raise ToolArgumentError("invalid_uuid_list", f"{tool}.{name} must be a list of UUIDs")
+        cleaned_ids: list[str] = []
+        for entry in value[: int(spec.get("maximum", 4))]:
+            try:
+                cleaned_ids.append(str(UUID(str(entry))))
+            except (TypeError, ValueError) as error:
+                raise ToolArgumentError(
+                    "invalid_uuid", f"{tool}.{name} must contain UUIDs"
+                ) from error
+        if not cleaned_ids:
+            raise ToolArgumentError("invalid_uuid_list", f"{tool}.{name} must not be empty")
+        return cleaned_ids
     if kind == "cohort_filter":
         # The cohort vocabulary is owned by the domain module, so the catalog
         # delegates rather than keeping a second copy of the allowed values.

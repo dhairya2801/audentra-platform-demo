@@ -38,6 +38,9 @@ QUEUE_SCOPE = "queue"
 RANKING_SCOPE = "ranking"
 INSTITUTION_SCOPE = "institution"
 CONVERSATIONAL_SCOPE = "conversational"
+# A turn about a person on staff, the signed-in member, a team or a
+# department. Never inherits a *student* referent; may inherit a staff one.
+STAFF_SCOPE = "staff"
 
 REQUEST_TYPE_SCOPE: Mapping[str, str] = {
     "greeting": CONVERSATIONAL_SCOPE,
@@ -72,6 +75,20 @@ REQUEST_TYPE_SCOPE: Mapping[str, str] = {
     "inquiries": QUEUE_SCOPE,
     "playbook_lookup": INSTITUTION_SCOPE,
     "action_rules": INSTITUTION_SCOPE,
+    "staff_profile": STAFF_SCOPE,
+    "staff_workload": STAFF_SCOPE,
+    "staff_availability": STAFF_SCOPE,
+    "staff_caseload": STAFF_SCOPE,
+    "staff_appointments": STAFF_SCOPE,
+    "staff_comparison": STAFF_SCOPE,
+    "my_work": STAFF_SCOPE,
+    "my_profile": STAFF_SCOPE,
+    "team_overview": STAFF_SCOPE,
+    "department_operations": STAFF_SCOPE,
+    "queue_aggregate": QUEUE_SCOPE,
+    "inquiry_aggregate": QUEUE_SCOPE,
+    "staff_directory": STAFF_SCOPE,
+    "not_found": CONVERSATIONAL_SCOPE,
 }
 
 # --- Language that decides scope on the turn itself -------------------------
@@ -212,7 +229,7 @@ def referent_action(*, resolved_student_id: str | None, request_type: str | None
     if resolved_student_id is not None:
         return "set"
     scope = scope_of(request_type)
-    if scope in (COHORT_SCOPE, QUEUE_SCOPE, RANKING_SCOPE):
+    if scope in (COHORT_SCOPE, QUEUE_SCOPE, RANKING_SCOPE, STAFF_SCOPE):
         # The staff member has moved to population or queue work; keeping a
         # stale student on the conversation is what made the next question
         # snap back to them.

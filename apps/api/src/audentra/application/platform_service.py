@@ -992,12 +992,18 @@ class InMemoryPlatformService:
         from audentra.integrations.staff_assistant.catalog import STAFF_TOOL_DESCRIPTIONS
         from audentra.integrations.staff_assistant.classify import STAFF_REQUEST_TYPES
 
-        async def plan(*, message: str, student_resolved: bool = False) -> Mapping[str, Any] | None:
+        async def plan(
+            *,
+            message: str,
+            student_resolved: bool = False,
+            context: Mapping[str, Any] | None = None,
+        ) -> Mapping[str, Any] | None:
             return await planner(  # type: ignore[no-any-return]
                 message=message,
                 allowed_request_types=STAFF_REQUEST_TYPES,
                 available_tools=STAFF_TOOL_DESCRIPTIONS,
                 student_resolved=student_resolved,
+                context=context,
                 tenant_id=auth.tenant_id,
                 staff_member_id=auth.actor_id,
                 request_id=request_id,

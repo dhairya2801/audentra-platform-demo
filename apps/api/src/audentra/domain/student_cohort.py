@@ -82,6 +82,8 @@ COHORT_GROUP_BY: tuple[str, ...] = (
     "assigned_staff",
     "blocking_requirement",
     "housing_state",
+    "primary_adviser",
+    "adviser_state",
 )
 """Dimensions an aggregation may group by. `blocking_requirement` groups by the
 requirement code that is open and blocking, which is what "the most common
@@ -107,8 +109,15 @@ COHORT_FILTER_FIELDS = frozenset(
         "hasOpenBlockingRequirement",
         "residencyStatus",
         "citizenshipStatus",
+        "primaryAdviserId",
+        "adviserState",
     }
 )
+
+# The standing adviser relationship, as a cohort dimension: `none` selects
+# students with no current primary adviser, `departed`/`on_leave`/`active`
+# select by the adviser's employment status.
+ADVISER_STATES: tuple[str, ...] = ("none", "assigned", "active", "on_leave", "departed")
 
 
 @dataclass(frozen=True)
@@ -138,6 +147,8 @@ class CohortFilter:
     has_open_blocking_requirement: bool | None = None
     residency_status: str | None = None
     citizenship_status: str | None = None
+    primary_adviser_id: str | None = None
+    adviser_state: str | None = None
 
     def describe(self) -> list[str]:
         """Human-readable clauses, so an answer can restate what it counted.
@@ -158,6 +169,7 @@ class CohortFilter:
             ("citizenship status", self.citizenship_status),
             ("housing state", self.housing_state),
             ("assigned staff", self.assigned_staff_id),
+            ("primary adviser", self.primary_adviser_id),
         ):
             if value is not None and value != "":
                 clauses.append(f"{label} = {value}")
@@ -186,6 +198,16 @@ class CohortFilter:
                 "has an open blocking requirement"
                 if self.has_open_blocking_requirement
                 else "has no open blocking requirement"
+            )
+        if self.adviser_state:
+            clauses.append(
+                {
+                    "none": "has no primary adviser assigned",
+                    "assigned": "has a primary adviser assigned",
+                    "active": "primary adviser is active",
+                    "on_leave": "primary adviser is on leave",
+                    "departed": "primary adviser has left the university",
+                }[self.adviser_state]
             )
         return clauses
 
@@ -294,6 +316,8 @@ def build_cohort_filter(raw: Mapping[str, Any]) -> CohortFilter:
         has_open_blocking_requirement=_boolean(raw.get("hasOpenBlockingRequirement")),
         residency_status=_text(raw.get("residencyStatus"), max_length=48),
         citizenship_status=_text(raw.get("citizenshipStatus"), max_length=48),
+        primary_adviser_id=_uuid_text("primaryAdviserId", raw.get("primaryAdviserId")),
+        adviser_state=_enum("adviserState", raw.get("adviserState"), ADVISER_STATES),
     )
 
 
