@@ -79,6 +79,7 @@ from audentra.integrations.staff_assistant.pipeline import (
 from audentra.integrations.staff_assistant.safety import guarded_staff_response
 from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
+from .advising_repository import PostgresAdvisingRepository
 from .edward_feedback_repository import PostgresEdwardFeedbackRepository
 from .ferpa_repository import PostgresFerpaRepository
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
@@ -343,6 +344,7 @@ class PostgresRepositoryBundle:
     morning_brew: PostgresMorningBrewRepository | None = None
     ferpa: PostgresFerpaRepository | None = None
     edward_feedback: PostgresEdwardFeedbackRepository | None = None
+    advising: PostgresAdvisingRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -746,7 +748,11 @@ class PostgresPlatformService:
         if operation == "student.list_requirement_appointments":
             identifier = self._path(call, "requirementId", "id", "requirement_id")
             await self._authorize_requirement_appointment(auth, identifier, mutation=False)
-            appointments = await portal.get_student_appointments(auth)
+            appointments = (
+                await self.repository.advising.get_student_appointments(auth)
+                if self.repository.advising is not None
+                else await portal.get_student_appointments(auth)
+            )
             active_items = [
                 dict(_mapping(item))
                 for item in _sequence(appointments.get("items"))
@@ -756,6 +762,10 @@ class PostgresPlatformService:
         if operation == "student.create_requirement_appointment":
             identifier = self._path(call, "requirementId", "id", "requirement_id")
             await self._authorize_requirement_appointment(auth, identifier, mutation=True)
+            if self.repository.advising is not None:
+                return await self.repository.advising.create_student_appointment(
+                    auth, payload, self._key(key), call.request_id
+                )
             return await portal.create_student_appointment(
                 auth, payload, self._key(key), call.request_id
             )
@@ -1049,12 +1059,44 @@ class PostgresPlatformService:
                 auth, self._path(call, "conversationId", "id")
             )
         if operation == "student.list_appointments":
-            return await portal.get_student_appointments(auth)
+            advising = self.repository.advising
+            if advising is None:
+                return await portal.get_student_appointments(auth)
+            return await advising.get_student_appointments(auth)
         if operation == "student.create_appointment":
             require_delegate_scope(auth, "appointments")
-            return await portal.create_student_appointment(
+            advising = self.repository.advising
+            if advising is None:
+                return await portal.create_student_appointment(
+                    auth, payload, self._key(key), call.request_id
+                )
+            return await advising.create_student_appointment(
                 auth, payload, self._key(key), call.request_id
             )
+        if operation == "student.get_appointment_availability":
+            return await self._advising().get_student_availability(
+                auth,
+                appointment_type=str(call.query_params.get("type") or ""),
+                staff_member_id=call.query_params.get("staffMemberId") or None,
+                window_from=call.query_params.get("from") or None,
+                window_to=call.query_params.get("to") or None,
+            )
+        if operation == "student.cancel_appointment":
+            require_delegate_scope(auth, "appointments")
+            return await self._advising().cancel_student_appointment(
+                auth, self._path(call, "appointmentId", "id"), payload, call.request_id
+            )
+        if operation == "student.reschedule_appointment":
+            require_delegate_scope(auth, "appointments")
+            return await self._advising().reschedule_student_appointment(
+                auth,
+                self._path(call, "appointmentId", "id"),
+                payload,
+                self._key(key),
+                call.request_id,
+            )
+        if operation == "student.get_advising":
+            return await self._advising().get_student_advising(auth)
         if operation == "student.list_payments":
             return await portal.get_student_payments(auth)
         if operation == "student.create_deposit":
@@ -1109,6 +1151,23 @@ class PostgresPlatformService:
                 managed_content=managed_content,
                 configurations=configurations,
                 generated_at=self._timestamp(),
+            )
+        if operation == "staff.get_me":
+            return await self._advising().get_staff_me(auth)
+        if operation == "staff.get_caseload":
+            return await self._advising().get_staff_caseload(
+                auth, call.query_params.get("role") or None
+            )
+        if operation == "staff.get_appointments":
+            return await self._advising().get_staff_appointments(
+                auth,
+                staff_member_id=call.query_params.get("staffMemberId") or None,
+                window_from=call.query_params.get("from") or None,
+                window_to=call.query_params.get("to") or None,
+            )
+        if operation == "staff.update_appointment":
+            return await self._advising().update_staff_appointment(
+                auth, self._path(call, "appointmentId", "id"), payload, call.request_id
             )
         if operation == "staff.get_morning_brew":
             brew = self.repository.morning_brew
@@ -1565,6 +1624,22 @@ class PostgresPlatformService:
     @staticmethod
     def _timestamp() -> str:
         return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    async def _student_advising_primitive(self, auth: AuthContext) -> JsonDict:
+        advising = self.repository.advising
+        if advising is None:
+            return {"primaryAdviser": None, "advisers": [], "gaps": []}
+        return await advising.get_student_advising(auth)
+
+    def _advising(self) -> PostgresAdvisingRepository:
+        advising = self.repository.advising
+        if advising is None:
+            raise ApiError(
+                503,
+                "ADVISING_UNAVAILABLE",
+                "The advising repository is not provisioned",
+            )
+        return advising
 
     @staticmethod
     def _key(value: str | None) -> str:
@@ -2248,7 +2323,14 @@ class PostgresPlatformService:
         if granted("enrollment"):
             primitives["housing_plan"] = lambda: portal.get_student_housing_plan(auth)
         if granted("appointments", "enrollment"):
-            primitives["appointments"] = lambda: portal.get_student_appointments(auth)
+            primitives["appointments"] = lambda: (
+                self.repository.advising.get_student_appointments(auth)
+                if self.repository.advising is not None
+                else portal.get_student_appointments(auth)
+            )
+            if self.repository.advising is not None:
+                advising_repo = self.repository.advising
+                primitives["advising"] = lambda: advising_repo.get_student_advising(auth)
         if granted("help"):
             primitives["help"] = lambda: portal.get_student_help(auth)
         if granted("classrooms", "enrollment"):
@@ -2605,7 +2687,12 @@ class PostgresPlatformService:
                 "student_housing_plan": lambda student_id: portal.get_student_housing_plan(
                     student_auth(student_id)
                 ),
-                "student_appointments": lambda student_id: portal.get_student_appointments(
+                "student_appointments": lambda student_id: (
+                    self.repository.advising.get_student_appointments(student_auth(student_id))
+                    if self.repository.advising is not None
+                    else portal.get_student_appointments(student_auth(student_id))
+                ),
+                "student_advising": lambda student_id: self._student_advising_primitive(
                     student_auth(student_id)
                 ),
                 "student_work_items": lambda student_id: assistant.get_student_work_items(

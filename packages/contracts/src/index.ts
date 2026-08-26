@@ -1119,6 +1119,246 @@ export interface StaffMemberSummary {
   name: string;
   email: string;
   component: string;
+  title?: string | null;
+  roleCode?: string;
+  externalRef?: string | null;
+  employmentStatus?: StaffEmploymentStatus;
+}
+
+export type StaffEmploymentStatus = "active" | "on_leave" | "departed";
+export type StaffAssignmentRole =
+  | "primary_advisor"
+  | "admissions_counselor"
+  | "financial_aid_counselor"
+  | "international_adviser"
+  | "housing_coordinator";
+
+/** A staff member as other people and students see them. */
+export interface StaffPersonBrief {
+  id: string;
+  name: string;
+  email: string;
+  component: string;
+  title: string | null;
+  roleCode: string;
+  externalRef: string | null;
+  employmentStatus: StaffEmploymentStatus;
+  leaveUntil: string | null;
+  endedAt: string | null;
+}
+
+export interface StaffPerson extends StaffPersonBrief {
+  active: boolean;
+  employmentType: "full_time" | "part_time";
+  startedAt: string | null;
+  timezone: string;
+  officeLocation: string | null;
+  caseloadCap: number | null;
+  studentFacing: boolean;
+  appointmentTypes: StudentAppointmentType[];
+  managerId: string | null;
+}
+
+export interface StaffAvailabilitySummary {
+  bookable: boolean;
+  reason: "departed" | "on_leave" | "no_availability" | "does_not_offer_type" | null;
+  nextOpenSlotAt: string | null;
+  openSlotsNext14Days: number;
+  bookedNext14Days: number;
+  timezone?: string;
+  weekly?: StaffAvailabilityRule[];
+  timeOff?: StaffTimeOff[];
+}
+
+export interface StaffAvailabilityRule {
+  weekday: number;
+  startMinute: number;
+  endMinute: number;
+  slotMinutes: number;
+  modality: "in_person" | "virtual" | "either";
+  location: string | null;
+  appointmentTypes: StudentAppointmentType[];
+}
+
+export interface StaffTimeOff {
+  id: string;
+  startsAt: string;
+  endsAt: string;
+  kind: "leave" | "vacation" | "sick" | "training" | "conference" | "blocked" | "other";
+  note: string | null;
+  blocksBookings: boolean;
+  current: boolean;
+}
+
+export interface StaffCaseloadSummary {
+  primaryAdvisees: number;
+  cap: number | null;
+  utilization: number | null;
+  overCap: boolean;
+}
+
+export interface StaffWorkSummary {
+  open: number;
+  overdue: number;
+  staleInProgress: number;
+  appointmentsAwaitingOutcome: number;
+  urgent?: number;
+  escalated?: number;
+  completedLast7Days?: number;
+}
+
+export interface StaffTeamMember extends StaffPersonBrief {
+  /** 1 = reports to me directly; 2+ = reports to one of my reports. */
+  level: number;
+  reportsTo: string | null;
+  caseload: StaffCaseloadSummary & { assignments: number };
+  work: StaffWorkSummary;
+  availability: StaffAvailabilitySummary;
+  flags: Array<
+    | "departed_with_caseload"
+    | "departed"
+    | "on_leave_with_caseload"
+    | "on_leave"
+    | "over_cap"
+    | "no_open_slots"
+    | "falling_behind"
+    | "spare_capacity"
+  >;
+}
+
+export interface StaffComponentSummary {
+  component: string;
+  members: number;
+  directReports: number;
+  membersOnLeave: number;
+  membersDeparted: number;
+  membersOverCap: number;
+  primaryAdvisees: number;
+  caseloadCap: number | null;
+  studentsWithDepartedAdviser: number;
+  studentsWithAdviserOnLeave: number;
+  acceptedStudentsWithoutPrimaryAdviser: number;
+  unassignedComponentItems: number;
+  overdueComponentItems: number;
+}
+
+/** GET /v1/staff/me */
+export interface StaffMe {
+  staff: StaffPerson;
+  manager: StaffPersonBrief | null;
+  directReports: StaffTeamMember[];
+  /** Everyone under me, direct reports first. */
+  team: StaffTeamMember[];
+  caseload: StaffCaseloadSummary & { byRole: Record<StaffAssignmentRole, number> };
+  work: StaffWorkSummary;
+  availability: StaffAvailabilitySummary;
+  appointmentsToday: StaffAppointment[];
+  componentSummary: StaffComponentSummary | null;
+  generatedAt: string;
+}
+
+export interface StaffCaseloadItem {
+  role: StaffAssignmentRole;
+  assignedAt: string;
+  source: string;
+  note: string | null;
+  student: {
+    id: string;
+    name: string;
+    preferredName: string;
+    externalRef: string | null;
+    classYear: number | null;
+    programName: string;
+  };
+  offerStatus: string | null;
+  journeyStatus: string | null;
+  requirements: { completed: number; total: number; percent: number | null };
+  advising: {
+    status: "completed" | "scheduled" | "missed" | "none";
+    lastCompletedAt: string | null;
+    nextAppointmentAt: string | null;
+    nextAppointmentId: string | null;
+  };
+  work: { open: number; overdue: number };
+}
+
+/** GET /v1/staff/caseload */
+export interface StaffCaseload {
+  staff: StaffPersonBrief;
+  items: StaffCaseloadItem[];
+  total: number;
+  summary: {
+    byRole: Partial<Record<StaffAssignmentRole, number>>;
+    primaryAdvisees: number;
+    cap: number | null;
+    utilization: number | null;
+    overCap: boolean;
+    advising: { completed: number; scheduled: number; missed: number; none: number };
+    withOpenWork: number;
+    withOverdueWork: number;
+  };
+  generatedAt: string;
+}
+
+export interface StaffAppointment extends StudentAppointment {
+  student: {
+    id: string;
+    name: string;
+    preferredName: string | null;
+    externalRef: string | null;
+  };
+}
+
+/** GET /v1/staff/appointments */
+export interface StaffAppointmentCalendar {
+  staff: StaffPersonBrief;
+  from: string;
+  to: string;
+  items: StaffAppointment[];
+  total: number;
+  counts: {
+    scheduled: number;
+    completed: number;
+    cancelled: number;
+    noShow: number;
+    awaitingOutcome: number;
+  };
+  availability: StaffAvailabilitySummary;
+}
+
+export interface UpdateStaffAppointmentInput {
+  status: "cancelled" | "completed" | "no_show";
+  reason?: string;
+  outcomeNote?: string;
+  expectedVersion?: number;
+}
+
+/** GET /v1/auth/demo/staff/directory — development and preview only. */
+export interface DemoStaffDirectoryEntry {
+  id: string;
+  name: string;
+  email: string;
+  component: string;
+  title: string | null;
+  roleCode: string;
+  externalRef: string | null;
+  employmentStatus: StaffEmploymentStatus;
+  leaveUntil: string | null;
+  managerName: string | null;
+  caseload: { primaryAdvisees: number; cap: number | null };
+  openWorkItems: number;
+  directReports: number;
+  canSignIn: boolean;
+}
+
+export interface DemoStaffDirectory {
+  items: DemoStaffDirectoryEntry[];
+  total: number;
+  notice: string;
+}
+
+export interface DemoStaffSignInInput {
+  staffRef: string;
 }
 
 export interface StaffWorkItemLog {
@@ -1423,7 +1663,7 @@ export interface StudentSsoConfiguration {
 
 export interface StaffSession {
   authenticated: true;
-  mode: "credentials" | "google" | "microsoft";
+  mode: "credentials" | "google" | "microsoft" | "demo";
   actorType: "staff";
   staff: StaffMemberSummary;
   notice: string;
@@ -2999,15 +3239,45 @@ export interface CampusLifeFeed {
 export type StudentAppointmentType =
   | "admissions_counseling"
   | "financial_aid"
-  | "enrollment_support";
+  | "enrollment_support"
+  | "academic_advising"
+  | "international_check_in";
+
+export type StudentAppointmentStatus =
+  | "scheduled"
+  | "cancelled"
+  | "completed"
+  | "no_show"
+  | "rescheduled";
+
+export interface AppointmentStaffSummary {
+  id: string;
+  name: string;
+  title: string | null;
+  component: string | null;
+  email: string | null;
+  employmentStatus: StaffEmploymentStatus;
+}
 
 export interface StudentAppointment {
   id: string;
   type: StudentAppointmentType;
   startsAt: string;
+  endsAt?: string | null;
   notes: string | null;
-  status: "scheduled" | "cancelled" | "completed";
+  status: StudentAppointmentStatus;
   createdAt: string;
+  modality?: "in_person" | "virtual" | null;
+  location?: string | null;
+  bookedVia?: "student_portal" | "staff" | "walk_in" | "import";
+  cancelledAt?: string | null;
+  cancelReason?: string | null;
+  rescheduledToId?: string | null;
+  rescheduledFromId?: string;
+  outcomeNote?: string | null;
+  version?: number;
+  /** The person the appointment is with; null for legacy or unassigned bookings. */
+  staff?: AppointmentStaffSummary | null;
 }
 
 export interface StudentAppointmentList {
@@ -3019,6 +3289,71 @@ export interface CreateStudentAppointmentInput {
   type: StudentAppointmentType;
   startsAt: string;
   notes?: string;
+  /** Book with a specific person; otherwise the student's assigned staff for the type. */
+  staffMemberId?: string;
+  modality?: "in_person" | "virtual";
+}
+
+export interface CancelStudentAppointmentInput {
+  reason?: string;
+}
+
+export interface RescheduleStudentAppointmentInput {
+  startsAt: string;
+  staffMemberId?: string;
+  modality?: "in_person" | "virtual";
+  notes?: string;
+}
+
+export interface AppointmentSlot {
+  startsAt: string;
+  endsAt: string;
+  modality: "in_person" | "virtual" | "either";
+  location: string | null;
+}
+
+export interface AppointmentAvailabilityStaff extends StaffPersonBrief {
+  relationship: StaffAssignmentRole | null;
+  reason: "departed" | "on_leave" | "does_not_offer_type" | "no_open_slots" | null;
+  slots: AppointmentSlot[];
+  nextOpenSlotAt: string | null;
+}
+
+/** GET /v1/student/appointments/availability */
+export interface AppointmentAvailability {
+  type: StudentAppointmentType;
+  from: string;
+  to: string;
+  staff: AppointmentAvailabilityStaff[];
+  generatedAt: string;
+}
+
+export interface StudentAdviserAssignment {
+  role: StaffAssignmentRole;
+  assignedAt: string;
+  source: string;
+  staff: StaffPersonBrief & { officeLocation?: string | null };
+  availability: StaffAvailabilitySummary;
+}
+
+export interface StudentAdvisingGap {
+  code: "no_primary_adviser" | "adviser_departed" | "adviser_on_leave" | "adviser_no_open_slots";
+  message: string;
+}
+
+/** GET /v1/student/advising */
+export interface StudentAdvising {
+  primaryAdviser: StudentAdviserAssignment | null;
+  advisers: StudentAdviserAssignment[];
+  advising: {
+    type: StudentAppointmentType;
+    status: "completed" | "scheduled" | "missed" | "none";
+    lastCompletedAt: string | null;
+    nextAppointment: StudentAppointment | null;
+    missedCount: number;
+  };
+  gaps: StudentAdvisingGap[];
+  generatedAt: string;
 }
 
 export interface StudentPayment {

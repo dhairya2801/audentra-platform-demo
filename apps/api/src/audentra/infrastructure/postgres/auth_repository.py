@@ -638,6 +638,8 @@ class PostgresDevelopmentAuth:
                     """
                     SELECT member.id, member.display_name,
                            member.email_normalized, member.component,
+                           member.title, member.role_code, member.employment_status,
+                           member.external_ref,
                            session.expires_at, session.authentication_method
                     FROM staff_auth_session session
                     JOIN staff_member member
@@ -658,6 +660,11 @@ class PostgresDevelopmentAuth:
             row = result.mappings().first()
             if row is None:
                 return None
+            # A demo session is only ever minted with development flows on.
+            # Should the deployment later turn them off (or a row be forged
+            # into the table), the session dies here rather than in the UI.
+            if row["authentication_method"] == "demo" and not self._development_flows_enabled:
+                return None
             await connection.execute(
                 text(
                     """
@@ -669,6 +676,153 @@ class PostgresDevelopmentAuth:
                 {"token_hash": token_hash},
             )
         return await self._staff_session(dict(row), tenant_id, tenant_slug)
+
+    async def list_demo_staff(
+        self, tenant_id: str, *, query: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """Browse the tenant's staff for the development "log in as" panel.
+
+        Reads only; the same `demo_auth_enabled` gate as demo students applies,
+        and departed people are listed so the panel can say why they cannot
+        be opened rather than silently hiding them.
+        """
+
+        self._require_development_flows()
+        pattern = f"%{query.strip()}%" if query.strip() else "%"
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT m.id, m.display_name, m.email_normalized, m.component, m.active,
+                           m.title, m.role_code, m.employment_status, m.external_ref,
+                           m.caseload_cap, m.leave_until, m.student_facing,
+                           manager.display_name AS manager_name,
+                           (SELECT COUNT(*) FROM student_staff_assignment a
+                             WHERE a.tenant_id=m.tenant_id AND a.staff_member_id=m.id
+                               AND a.role='primary_advisor' AND a.ended_at IS NULL) AS advisees,
+                           (SELECT COUNT(*) FROM staff_work_item w
+                             WHERE w.tenant_id=m.tenant_id AND w.assignee_id=m.id
+                               AND w.status NOT IN ('done','cancelled')) AS open_items,
+                           (SELECT COUNT(*) FROM staff_member r
+                             WHERE r.tenant_id=m.tenant_id AND r.manager_id=m.id) AS reports
+                    FROM staff_member m
+                    JOIN tenant t ON t.id=m.tenant_id
+                    LEFT JOIN staff_member manager
+                      ON manager.id=m.manager_id AND manager.tenant_id=m.tenant_id
+                    WHERE m.tenant_id=:tenant_id
+                      AND t.status='active' AND t.demo_auth_enabled=true
+                      AND (m.display_name ILIKE :pattern OR m.email_normalized ILIKE :pattern
+                           OR m.component ILIKE :pattern OR COALESCE(m.title,'') ILIKE :pattern
+                           OR COALESCE(m.external_ref,'') ILIKE :pattern
+                           OR COALESCE(m.role_code,'') ILIKE :pattern)
+                    ORDER BY m.component, m.display_name, m.id
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "tenant_id": UUID(tenant_id),
+                    "pattern": pattern,
+                    "limit": max(1, min(limit, 500)),
+                },
+            )
+            rows = result.mappings().all()
+        return [
+            {
+                "id": str(row["id"]),
+                "name": str(row["display_name"]),
+                "email": str(row["email_normalized"]),
+                "component": str(row["component"]),
+                "title": _optional_text(row.get("title")),
+                "roleCode": str(row.get("role_code") or "staff"),
+                "externalRef": _optional_text(row.get("external_ref")),
+                "employmentStatus": str(row.get("employment_status") or "active"),
+                "leaveUntil": row["leave_until"].isoformat() if row.get("leave_until") else None,
+                "managerName": _optional_text(row.get("manager_name")),
+                "caseload": {
+                    "primaryAdvisees": int(row["advisees"]),
+                    "cap": row.get("caseload_cap"),
+                },
+                "openWorkItems": int(row["open_items"]),
+                "directReports": int(row["reports"]),
+                "canSignIn": bool(row["active"]),
+            }
+            for row in rows
+        ]
+
+    async def demo_staff_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> StaffSession:
+        """Open a session as one staff member of a demo-enabled tenant.
+
+        The session has no credential account: `authentication_method='demo'`
+        marks it, the schema forbids it from carrying one, and `resolve_staff`
+        refuses it whenever development flows are off. A departed person is
+        refused with a specific error so the product's "this adviser left"
+        state is visible instead of masked by a generic sign-in failure.
+        """
+
+        self._require_development_flows()
+        candidate = reference.strip()
+        if not candidate or len(candidate) > 320:
+            raise ApiError(404, "DEMO_STAFF_NOT_FOUND", "No staff member matches that identifier")
+        try:
+            staff_uuid: UUID | None = UUID(candidate)
+        except ValueError:
+            staff_uuid = None
+        predicate = (
+            "m.id = :staff_id"
+            if staff_uuid is not None
+            else (
+                "(lower(m.email_normalized) = lower(CAST(:reference AS varchar))"
+                " OR upper(COALESCE(m.external_ref,'')) = upper(CAST(:reference AS varchar)))"
+            )
+        )
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT m.id, m.display_name, m.email_normalized, m.component, m.active,
+                           m.title, m.role_code, m.employment_status, m.external_ref
+                    FROM staff_member m
+                    JOIN tenant t ON t.id=m.tenant_id
+                    WHERE m.tenant_id=:tenant_id
+                      AND t.status='active' AND t.demo_auth_enabled=true
+                      AND {predicate}
+                    LIMIT 1
+                    """  # noqa: S608 -- `predicate` is one of two literals above
+                ),
+                {"tenant_id": UUID(tenant_id), "staff_id": staff_uuid, "reference": candidate},
+            )
+            row = result.mappings().first()
+            if row is None:
+                raise ApiError(
+                    404, "DEMO_STAFF_NOT_FOUND", "No staff member matches that identifier"
+                )
+            if not row["active"] or row["employment_status"] == "departed":
+                raise ApiError(
+                    409,
+                    "STAFF_MEMBER_DEPARTED",
+                    f"{row['display_name']} has left the university and cannot sign in",
+                )
+            expires_at = datetime.now(UTC) + _STAFF_SESSION_LIFETIME
+            token = secrets.token_urlsafe(32)
+            await self._insert_staff_session(
+                connection,
+                account_id=None,
+                tenant_id=UUID(tenant_id),
+                staff_member_id=UUID(str(row["id"])),
+                session_id=uuid4(),
+                token_hash=_required_session_token_hash(token),
+                expires_at=expires_at,
+                authentication_method="demo",
+            )
+        return await self._staff_session(
+            {**dict(row), "authentication_method": "demo"},
+            tenant_id,
+            tenant_slug,
+            token=token,
+            expires_at_epoch=int(expires_at.timestamp()),
+        )
 
     async def sign_up_staff(
         self,
@@ -1225,6 +1379,10 @@ class PostgresDevelopmentAuth:
             component=str(row["component"]),
             token=token,
             expires_at_epoch=expires_at_epoch,
+            title=_optional_text(row.get("title")),
+            role_code=str(row.get("role_code") or "staff"),
+            employment_status=str(row.get("employment_status") or "active"),
+            external_ref=_optional_text(row.get("external_ref")),
         )
 
     async def _insert_staff_session(
@@ -1356,6 +1514,13 @@ def _delegate_session(
         token=token,
         expires_at_epoch=expires_at_epoch,
     )
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value or None
 
 
 def _normalize_email(value: str) -> str:

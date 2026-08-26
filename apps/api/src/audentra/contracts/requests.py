@@ -783,12 +783,57 @@ class SubmitAssistantVoiceTurnRequest(StrictRequest):
     ]
 
 
+AppointmentType = Literal[
+    "admissions_counseling",
+    "financial_aid",
+    "enrollment_support",
+    "academic_advising",
+    "international_check_in",
+]
+
+
 class CreateStudentAppointmentRequest(StrictRequest):
-    type: Literal["admissions_counseling", "financial_aid", "enrollment_support"]
+    type: AppointmentType
     starts_at: StrictStr
+    notes: Annotated[StrictStr, StringConstraints(max_length=500)] | None = None
+    staff_member_id: StrictStr | None = None
+    modality: Literal["in_person", "virtual"] | None = None
+
+    _validate_starts_at = field_validator("starts_at")(_ensure_iso8601)
+
+
+class CancelStudentAppointmentRequest(StrictRequest):
+    reason: Annotated[StrictStr, StringConstraints(max_length=240)] | None = None
+
+
+class RescheduleStudentAppointmentRequest(StrictRequest):
+    starts_at: StrictStr
+    staff_member_id: StrictStr | None = None
+    modality: Literal["in_person", "virtual"] | None = None
     notes: Annotated[StrictStr, StringConstraints(max_length=500)] | None = None
 
     _validate_starts_at = field_validator("starts_at")(_ensure_iso8601)
+
+
+class UpdateStaffAppointmentRequest(StrictRequest):
+    status: Literal["cancelled", "completed", "no_show"]
+    reason: Annotated[StrictStr, StringConstraints(max_length=240)] | None = None
+    outcome_note: Annotated[StrictStr, StringConstraints(max_length=2000)] | None = None
+    expected_version: StrictInt | None = None
+
+
+class DemoStaffSignInRequest(StrictRequest):
+    """Sign in as a named staff member. Development and preview only.
+
+    The reference is the staff member's UUID, email or institution reference;
+    which one, and whether it resolves inside the caller's tenant, is decided
+    server-side.
+    """
+
+    staff_ref: Annotated[
+        StrictStr,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=320),
+    ]
 
 
 class CreateStudentHelpRequest(StrictRequest):

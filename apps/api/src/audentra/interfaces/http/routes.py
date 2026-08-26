@@ -18,6 +18,7 @@ from audentra.contracts.requests import (
     ActivityEventBatchRequest,
     AskEdwardRequest,
     AskStaffEdwardRequest,
+    CancelStudentAppointmentRequest,
     CompleteFerpaAuthorizationRequest,
     CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
@@ -44,6 +45,7 @@ from audentra.contracts.requests import (
     RecordStaffCommunicationRequest,
     RegisterCampusEventRequest,
     RequestStaffAiRefreshRequest,
+    RescheduleStudentAppointmentRequest,
     RetryStaffCallTranscriptionRequest,
     ReviewStaffDocumentRequest,
     SelectPaymentPlanRequest,
@@ -53,6 +55,7 @@ from audentra.contracts.requests import (
     SubmitStudentRequirementResponseRequest,
     UpdateFerpaAccessRequest,
     UpdateStaffActionRuleRequest,
+    UpdateStaffAppointmentRequest,
     UpdateStaffClubRequest,
     UpdateStaffCorePlayRequest,
     UpdateStaffInquiryRequest,
@@ -1648,6 +1651,81 @@ async def create_appointment(
     )
 
 
+@router.get("/v1/student/appointments/availability", status_code=200, response_model=None)
+async def get_appointment_availability(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    type: Annotated[str, Query(max_length=40)],
+    staff_member_id: Annotated[str | None, Query(alias="staffMemberId", max_length=64)] = None,
+    window_from: Annotated[str | None, Query(alias="from", max_length=40)] = None,
+    window_to: Annotated[str | None, Query(alias="to", max_length=40)] = None,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.get_appointment_availability",
+        auth=auth,
+        query_params={
+            "type": type,
+            "staffMemberId": staff_member_id or "",
+            "from": window_from or "",
+            "to": window_to or "",
+        },
+    )
+
+
+@router.post(
+    "/v1/student/appointments/{appointmentId}/cancel", status_code=200, response_model=None
+)
+async def cancel_appointment(
+    appointment_id: Annotated[UUID, Path(alias="appointmentId")],
+    body: CancelStudentAppointmentRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.cancel_appointment",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"appointmentId": _uuid(appointment_id)},
+    )
+
+
+@router.post(
+    "/v1/student/appointments/{appointmentId}/reschedule", status_code=200, response_model=None
+)
+async def reschedule_appointment(
+    appointment_id: Annotated[UUID, Path(alias="appointmentId")],
+    body: RescheduleStudentAppointmentRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.reschedule_appointment",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"appointmentId": _uuid(appointment_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/v1/student/advising", status_code=200, response_model=None)
+async def get_student_advising(
+    request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service, request=request, operation="student.get_advising", auth=auth
+    )
+
+
 @router.get("/v1/student/payments", status_code=200, response_model=None)
 async def list_payments(
     request: Request, service: ServiceDependency, auth: AuthDependency
@@ -1753,6 +1831,69 @@ async def get_staff_workspace(
 ) -> object:
     return await _dispatch(
         service=service, request=request, operation="staff.get_workspace", auth=auth
+    )
+
+
+@router.get("/v1/staff/me", status_code=200, response_model=None)
+async def get_staff_me(
+    request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(service=service, request=request, operation="staff.get_me", auth=auth)
+
+
+@router.get("/v1/staff/caseload", status_code=200, response_model=None)
+async def get_staff_caseload(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    role: Annotated[str | None, Query(max_length=40)] = None,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_caseload",
+        auth=auth,
+        query_params={"role": role or ""},
+    )
+
+
+@router.get("/v1/staff/appointments", status_code=200, response_model=None)
+async def get_staff_appointments(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    staff_member_id: Annotated[str | None, Query(alias="staffMemberId", max_length=64)] = None,
+    window_from: Annotated[str | None, Query(alias="from", max_length=40)] = None,
+    window_to: Annotated[str | None, Query(alias="to", max_length=40)] = None,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_appointments",
+        auth=auth,
+        query_params={
+            "staffMemberId": staff_member_id or "",
+            "from": window_from or "",
+            "to": window_to or "",
+        },
+    )
+
+
+@router.patch("/v1/staff/appointments/{appointmentId}", status_code=200, response_model=None)
+async def update_staff_appointment(
+    appointment_id: Annotated[UUID, Path(alias="appointmentId")],
+    body: UpdateStaffAppointmentRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.update_appointment",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"appointmentId": _uuid(appointment_id)},
     )
 
 

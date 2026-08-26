@@ -1113,12 +1113,25 @@ async def _tool_appointments(host: AssistantToolHost, now: datetime) -> JsonDict
     items = []
     upcoming = []
     for entry in (_mapping(item) for item in _items(appointments)):
+        staff = entry.get("staff")
         record = {
             "type": entry.get("type"),
             "label": _appointment_label(entry.get("type")),
             "startsAt": entry.get("startsAt"),
+            "endsAt": entry.get("endsAt"),
             "status": entry.get("status"),
             "notes": _clip(entry.get("notes"), 240),
+            "modality": entry.get("modality"),
+            "location": entry.get("location"),
+            "with": (
+                {
+                    "name": _mapping(staff).get("name"),
+                    "title": _mapping(staff).get("title"),
+                    "component": _mapping(staff).get("component"),
+                }
+                if isinstance(staff, Mapping)
+                else None
+            ),
         }
         items.append(record)
         starts_at = parse_moment(entry.get("startsAt"))
@@ -1128,12 +1141,33 @@ async def _tool_appointments(host: AssistantToolHost, now: datetime) -> JsonDict
             and starts_at >= now
         ):
             upcoming.append(record)
-    return {
+    result: JsonDict = {
         "items": items,
         "total": len(items),
         "upcoming": upcoming,
         "bookingHref": "/appointments",
     }
+    if host.supports("advising"):
+        advising = await _primitive(host, "advising")
+        primary = advising.get("primaryAdviser")
+        result["primaryAdviser"] = (
+            {
+                "name": _mapping(_mapping(primary).get("staff")).get("name"),
+                "title": _mapping(_mapping(primary).get("staff")).get("title"),
+                "employmentStatus": _mapping(_mapping(primary).get("staff")).get(
+                    "employmentStatus"
+                ),
+                "nextOpenSlotAt": _mapping(_mapping(primary).get("availability")).get(
+                    "nextOpenSlotAt"
+                ),
+            }
+            if isinstance(primary, Mapping)
+            else None
+        )
+        result["advisingGaps"] = [
+            _mapping(gap).get("message") for gap in _sequence(advising.get("gaps"))
+        ]
+    return result
 
 
 _TOOL_IMPLEMENTATIONS: Mapping[

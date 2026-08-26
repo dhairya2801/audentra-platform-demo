@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import time
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import RedirectResponse
 
 from audentra.contracts.requests import (
+    DemoStaffSignInRequest,
     DemoStudentSignInRequest,
     EmptyBody,
     ExchangeDelegateLinkRequest,
@@ -25,6 +26,7 @@ from audentra.core.ports import (
     CredentialStudentSession,
     DelegateBrowserAuthService,
     DelegateSession,
+    DemoStaffAuthService,
     DemoStudentSession,
     StaffSession,
 )
@@ -158,8 +160,16 @@ def _staff_response(session: StaffSession) -> dict[str, Any]:
             "name": session.name,
             "email": session.email,
             "component": session.component,
+            "title": session.title,
+            "roleCode": session.role_code,
+            "employmentStatus": session.employment_status,
+            "externalRef": session.external_ref,
         },
-        "notice": "Authenticated tenant-scoped staff session.",
+        "notice": (
+            "Development fixture only. This is not an institutional authentication session."
+            if session.context.authentication_method == "demo"
+            else "Authenticated tenant-scoped staff session."
+        ),
     }
 
 
@@ -542,6 +552,72 @@ async def sign_out_student(
         "authenticated": False,
         "mode": "oidc" if get_settings(request).auth_mode == "oidc" else "credentials",
     }
+
+
+def _demo_staff_service(auth: object) -> DemoStaffAuthService:
+    if not isinstance(auth, DemoStaffAuthService):
+        raise ApiError(
+            404,
+            "DEVELOPMENT_AUTH_DISABLED",
+            "Development authentication is not available",
+        )
+    return auth
+
+
+@auth_router.get("/v1/auth/demo/staff/directory", status_code=200, response_model=None)
+async def list_demo_staff_directory(
+    request: Request,
+    auth: AuthServiceDependency,
+    q: Annotated[str, Query(max_length=120)] = "",
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+) -> object:
+    """Browse the synthetic staff a developer may open the portal as."""
+
+    _development_only(request)
+    tenant_id, _tenant_slug = await resolve_request_tenant(request)
+    items = await _demo_staff_service(auth).list_demo_staff(tenant_id, query=q, limit=limit)
+    return {
+        "items": items,
+        "total": len(items),
+        "notice": (
+            "Development fixture only. Staff sessions opened here are not institutional sign-ins."
+        ),
+    }
+
+
+@auth_router.post("/v1/auth/demo/staff/sign-in-as", status_code=200, response_model=None)
+async def sign_in_demo_staff_by_reference(
+    body: DemoStaffSignInRequest,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDependency,
+) -> object:
+    """Open the staff portal as a chosen staff member. Development and preview only.
+
+    Like the student counterpart this reads existing state and mints a real,
+    revocable server-side session; unlike a credential sign-in it needs no
+    password, which is exactly why the route, the adapter and the session
+    resolver each refuse it outside development flows.
+    """
+
+    _development_only(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    session = await _demo_staff_service(auth).demo_staff_by_reference(
+        tenant_id, tenant_slug, body.staff_ref
+    )
+    if session.token is None or session.expires_at_epoch is None:
+        raise ApiError(500, "AUTH_SESSION_FAILED", "The staff session could not be created")
+    previous = request.cookies.get("vv_staff_session")
+    if previous is not None:
+        await auth.sign_out_staff(previous)
+    _set_session_cookie(
+        response,
+        request,
+        name="vv_staff_session",
+        token=session.token,
+        expires_at_epoch=session.expires_at_epoch,
+    )
+    return _staff_response(session)
 
 
 @auth_router.post("/v1/auth/staff/sign-in", status_code=200, response_model=None)

@@ -147,6 +147,13 @@ async def get_auth_context(request: Request) -> AuthContext:
                 and staff_session.context.authentication_method == "credentials"
             ):
                 raise UnauthorizedError("The staff session must use institutional sign-in")
+            # A demo staff session is a development fixture. The adapter already
+            # refuses it when development flows are off; this is the HTTP-side
+            # twin so a production deployment never honours one by accident.
+            if staff_session.context.authentication_method == "demo" and (
+                settings.environment == "production" or settings.auth_mode != "demo"
+            ):
+                raise UnauthorizedError("Development staff sessions are not available")
             return staff_session.context
         if settings.browser_auth_required:
             raise UnauthorizedError("Staff authentication is required")

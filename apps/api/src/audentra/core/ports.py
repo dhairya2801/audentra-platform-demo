@@ -56,6 +56,10 @@ class StaffSession:
     component: str
     token: str | None = None
     expires_at_epoch: int | None = None
+    title: str | None = None
+    role_code: str = "staff"
+    employment_status: str = "active"
+    external_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +179,19 @@ class BrowserAuthService(Protocol):
     async def sign_out_staff(self, token: str | None) -> None: ...
 
     async def reset_demo_fixture(self, *, completed_onboarding: bool) -> None: ...
+
+
+@runtime_checkable
+class DemoStaffAuthService(Protocol):
+    """Development-only entry into the staff portal as a chosen staff member."""
+
+    async def list_demo_staff(
+        self, tenant_id: str, *, query: str, limit: int
+    ) -> list[dict[str, Any]]: ...
+
+    async def demo_staff_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> StaffSession: ...
 
 
 @runtime_checkable

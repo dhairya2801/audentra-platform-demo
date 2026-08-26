@@ -17,6 +17,7 @@ from audentra.core.ports import (
     UnavailablePlatformService,
 )
 from audentra.infrastructure.db.engine import create_database_engine
+from audentra.infrastructure.postgres.advising_repository import PostgresAdvisingRepository
 from audentra.infrastructure.postgres.auth_repository import PostgresDevelopmentAuth
 from audentra.infrastructure.postgres.edward_feedback_repository import (
     PostgresEdwardFeedbackRepository,
@@ -119,6 +120,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 morning_brew=PostgresMorningBrewRepository(engine),
                 ferpa=PostgresFerpaRepository(engine, portal),
                 edward_feedback=PostgresEdwardFeedbackRepository(engine),
+                advising=PostgresAdvisingRepository(engine, portal),
             ),
             storage,
             ai,

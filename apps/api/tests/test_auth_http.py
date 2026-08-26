@@ -67,6 +67,9 @@ class FakeBrowserAuthService:
         self.staff_revoked = False
         self.staff_sign_up_input: dict[str, str | None] | None = None
         self.demo_reference: str | None = None
+        self.demo_staff_reference: str | None = None
+        self.demo_staff_query: tuple[str, int] | None = None
+        self.staff_session_method = "credentials"
         self.delegate_scopes: frozenset[PortalScope] = frozenset({"dashboard"})
 
     def student_context(self, method: str = "credentials") -> AuthContext:
@@ -163,12 +166,43 @@ class FakeBrowserAuthService:
         assert token in {None, DELEGATE_TOKEN}
         self.delegate_revoked = True
 
+    async def list_demo_staff(
+        self, tenant_id: str, *, query: str, limit: int
+    ) -> list[dict[str, object]]:
+        assert tenant_id == TENANT_ID
+        self.demo_staff_query = (query, limit)
+        return [
+            {
+                "id": STAFF_ID,
+                "name": "Priya Shah",
+                "email": "priya.shah@aster.example.edu",
+                "component": "Admissions",
+                "title": "Associate Director of Admissions",
+                "roleCode": "associate_director",
+                "employmentStatus": "active",
+                "canSignIn": True,
+            }
+        ]
+
+    async def demo_staff_by_reference(
+        self, tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> StaffSession:
+        assert tenant_id == TENANT_ID
+        self.demo_staff_reference = reference
+        if reference == "departed@aster.example.edu":
+            raise ApiError(409, "STAFF_MEMBER_DEPARTED", "Quentin has left the university")
+        if reference != STAFF_ID and reference != "priya.shah@aster.example.edu":
+            raise ApiError(404, "DEMO_STAFF_NOT_FOUND", "No staff member matches that identifier")
+        return self._staff_session(
+            token=STAFF_TOKEN, method="demo", title="Associate Director of Admissions"
+        )
+
     async def resolve_staff(
         self, token: str, tenant_id: str, tenant_slug: str | None
     ) -> StaffSession | None:
         if self.staff_revoked or token != STAFF_TOKEN:
             return None
-        return self._staff_session()
+        return self._staff_session(method=self.staff_session_method)
 
     async def sign_in_staff(
         self,
@@ -245,21 +279,29 @@ class FakeBrowserAuthService:
             expires_at_epoch=4_102_444_800,
         )
 
-    def _staff_session(self, *, email: str = "priya.shah@aster.example.edu") -> StaffSession:
+    def _staff_session(
+        self,
+        *,
+        email: str = "priya.shah@aster.example.edu",
+        token: str | None = STAFF_TOKEN,
+        method: str = "credentials",
+        title: str | None = None,
+    ) -> StaffSession:
         return StaffSession(
             context=AuthContext(
                 tenant_id=TENANT_ID,
                 student_id=STUDENT_ID,
                 actor_id=STAFF_ID,
                 actor_type="staff",
-                authentication_method="credentials",
+                authentication_method=method,  # type: ignore[arg-type]
                 tenant_slug="aster",
             ),
             name="Priya Shah",
             email=email,
             component="Admissions",
-            token=STAFF_TOKEN,
+            token=token,
             expires_at_epoch=4_102_444_800,
+            title=title,
         )
 
     def _delegate_session(self) -> DelegateSession:
@@ -839,3 +881,72 @@ async def test_preview_cross_site_auth_cookie_and_cors_are_credential_safe(
         "https://audentra-portals-demo-web.vercel.app"
     )
     assert demo_response.headers["access-control-allow-origin"] != "*"
+
+
+async def test_demo_staff_directory_and_sign_in_as_open_a_real_staff_session(
+    client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    directory = await client.get("/v1/auth/demo/staff/directory", params={"q": "shah"})
+    assert directory.status_code == 200, directory.text
+    assert directory.json()["items"][0]["name"] == "Priya Shah"
+    assert auth_service.demo_staff_query == ("shah", 200)
+
+    signed_in = await client.post(
+        "/v1/auth/demo/staff/sign-in-as", json={"staffRef": "  priya.shah@aster.example.edu "}
+    )
+    assert signed_in.status_code == 200, signed_in.text
+    body = signed_in.json()
+    assert body["mode"] == "demo"
+    assert body["actorType"] == "staff"
+    assert body["staff"]["title"] == "Associate Director of Admissions"
+    assert "Development fixture only" in body["notice"]
+    assert "vv_staff_session=" in signed_in.headers["set-cookie"]
+    assert "HttpOnly" in signed_in.headers["set-cookie"]
+    assert auth_service.demo_staff_reference == "priya.shah@aster.example.edu"
+
+    auth_service.staff_session_method = "demo"
+    accepted = await client.get("/v1/staff/me", headers={"X-Demo-Actor-Type": "staff"})
+    assert accepted.status_code == 200, accepted.text
+
+
+async def test_demo_staff_sign_in_as_surfaces_departed_and_unknown_people(
+    client: AsyncClient,
+) -> None:
+    departed = await client.post(
+        "/v1/auth/demo/staff/sign-in-as", json={"staffRef": "departed@aster.example.edu"}
+    )
+    assert departed.status_code == 409
+    assert departed.json()["error"]["code"] == "STAFF_MEMBER_DEPARTED"
+    assert "vv_staff_session" not in departed.headers.get("set-cookie", "")
+
+    unknown = await client.post("/v1/auth/demo/staff/sign-in-as", json={"staffRef": "nobody"})
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["code"] == "DEMO_STAFF_NOT_FOUND"
+
+
+async def test_demo_staff_routes_are_unavailable_in_production_and_oidc_mode(
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> None:
+    for settings in (
+        HttpSettings(environment="production", browser_auth_required=True),
+        HttpSettings(auth_mode="oidc", oidc_tenant_id=TENANT_ID, browser_auth_required=True),
+    ):
+        app = create_app(service=platform_service, auth_service=auth_service, settings=settings)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="https://testserver"
+        ) as locked:
+            directory = await locked.get("/v1/auth/demo/staff/directory")
+            sign_in = await locked.post(
+                "/v1/auth/demo/staff/sign-in-as", json={"staffRef": STAFF_ID}
+            )
+            # A demo session that somehow exists is refused by the resolver too.
+            auth_service.staff_session_method = "demo"
+            locked.cookies.set("vv_staff_session", STAFF_TOKEN)
+            resolved = await locked.get("/v1/staff/me", headers={"X-Demo-Actor-Type": "staff"})
+        assert directory.status_code == 404, directory.text
+        assert directory.json()["error"]["code"] == "DEVELOPMENT_AUTH_DISABLED"
+        assert sign_in.status_code == 404, sign_in.text
+        assert resolved.status_code == 401, resolved.text
+        auth_service.staff_session_method = "credentials"

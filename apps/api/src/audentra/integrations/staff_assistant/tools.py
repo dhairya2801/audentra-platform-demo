@@ -543,11 +543,26 @@ async def _tool_student_appointments(
         {
             "type": entry.get("type"),
             "startsAt": entry.get("startsAt"),
+            "endsAt": entry.get("endsAt"),
             "status": entry.get("status"),
+            "modality": entry.get("modality"),
+            "with": _appointment_staff(entry.get("staff")),
         }
         for entry in _items(appointments)
     ]
     return {"items": items, "total": len(items)}
+
+
+def _appointment_staff(value: object) -> JsonDict | None:
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        "id": value.get("id"),
+        "name": value.get("name"),
+        "title": value.get("title"),
+        "component": value.get("component"),
+        "employmentStatus": value.get("employmentStatus"),
+    }
 
 
 async def _tool_student_communications(
@@ -619,12 +634,30 @@ async def _tool_student_ownership(
             and str(item.get("status") or "") not in _DONE_REQUIREMENT_STATUSES
         }
     )
+    advising: Mapping[str, Any] = {}
+    if host.supports("student_advising"):
+        advising = await _primitive(host, "student_advising", student_id=student_id)
+    primary = advising.get("primaryAdviser")
     return {
         "workItemAssignees": work_assignees,
         "inquiryAssignees": inquiry_assignees,
         "responsibleOffices": responsible_offices,
-        # There is no advisor/caseload model; ownership is per open case only.
-        "advisorModel": "none",
+        # Standing relationships come from student_staff_assignment; open-case
+        # ownership still comes from the work items and inquiries above.
+        "advisorModel": "primary_advisor" if advising else "none",
+        "primaryAdviser": _mapping(primary).get("staff") if isinstance(primary, Mapping) else None,
+        "advisers": [
+            {
+                "role": _mapping(entry).get("role"),
+                "staff": _mapping(entry).get("staff"),
+                "nextOpenSlotAt": _mapping(_mapping(entry).get("availability")).get(
+                    "nextOpenSlotAt"
+                ),
+            }
+            for entry in _sequence(advising.get("advisers"))
+        ],
+        "advisingGaps": list(_sequence(advising.get("gaps"))),
+        "advisingStatus": advising.get("advising"),
     }
 
 
