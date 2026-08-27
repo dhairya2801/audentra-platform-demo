@@ -60,6 +60,8 @@ def test_personal_microsoft_account_test_mode_is_local_only(tmp_path: Path) -> N
         RuntimeSettings.from_environment(
             {
                 "AUDENTRA_ENV": "preview",
+                "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+                "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
                 "DATABASE_URL": "postgresql://example/preview",
                 "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
                 "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
@@ -148,6 +150,8 @@ def test_deployed_student_oidc_requires_exact_https_origins(
     values.update(
         {
             "AUDENTRA_ENV": "preview",
+            "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+            "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
             "OIDC_PUBLIC_BASE_URL": "https://api.example",
             "OIDC_PORTAL_BASE_URL": "https://portal.example",
             variable: value,
@@ -176,6 +180,8 @@ def test_student_oidc_rejects_malformed_origin_authorities(value: str, tmp_path:
     values.update(
         {
             "AUDENTRA_ENV": "preview",
+            "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+            "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
             "OIDC_PUBLIC_BASE_URL": value,
             "OIDC_PORTAL_BASE_URL": "https://portal.example",
         }
@@ -239,6 +245,8 @@ def test_voice_settings_are_absent_until_livekit_is_fully_configured(tmp_path: P
             {
                 **complete,
                 "AUDENTRA_ENV": "preview",
+                "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+                "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
                 "BROWSER_AUTH_REQUIRED": "true",
                 "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
                 "VV_STAFF_INVITATION_CODE": "a-long-enough-invitation-code",
@@ -299,6 +307,8 @@ def test_preview_keeps_demo_auth_but_uses_secure_browser_cookies(tmp_path: Path)
     settings = RuntimeSettings.from_environment(
         {
             "AUDENTRA_ENV": "preview",
+            "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+            "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
             "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
@@ -319,6 +329,8 @@ def test_gcs_storage_uses_application_default_credentials(tmp_path: Path) -> Non
     settings = RuntimeSettings.from_environment(
         {
             "AUDENTRA_ENV": "preview",
+            "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+            "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
             "DATABASE_URL": "postgresql://example/preview",
             "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
             "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
@@ -342,6 +354,8 @@ def test_preview_requires_a_private_staff_invitation_code(tmp_path: Path) -> Non
         RuntimeSettings.from_environment(
             {
                 "AUDENTRA_ENV": "preview",
+                "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+                "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP",
                 "DATABASE_URL": "postgresql://example/preview",
                 "DOCUMENT_WORKER_TOKEN": "preview-worker-token",
                 "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
@@ -432,3 +446,33 @@ def test_hostile_edward_browser_fixture_is_prohibited_in_production(tmp_path: Pa
             },
             package_root=tmp_path,
         )
+
+
+def test_a_deployed_demo_must_name_its_personas(tmp_path: Path) -> None:
+    deployed = {
+        "AUDENTRA_ENV": "preview",
+        "DATABASE_URL": "postgresql://example/preview",
+        "DOCUMENT_WORKER_TOKEN": "preview-worker-token-that-is-long-enough-for-preview",
+        "OBJECT_STORAGE_SECRET_KEY": "preview-storage-secret",
+        "VV_STAFF_INVITATION_CODE": "preview-private-staff-code",
+        "FERPA_DELEGATE_LINK_SECRET": FERPA_LINK_SECRET,
+    }
+    with pytest.raises(ValueError, match="DEMO_STUDENT_ALLOWLIST and DEMO_STAFF_ALLOWLIST"):
+        RuntimeSettings.from_environment(deployed, package_root=tmp_path)
+
+    settings = RuntimeSettings.from_environment(
+        {
+            **deployed,
+            "DEMO_STUDENT_ALLOWLIST": "SYN-000061",
+            "DEMO_STAFF_ALLOWLIST": "SYN-ADV-001, SYN-STF-ADV-DIR, SYN-STF-VP",
+        },
+        package_root=tmp_path,
+    )
+    assert settings.demo_personas.restricted is True
+    assert settings.demo_personas.students == ("SYN-000061",)
+    assert settings.demo_personas.staff == ("SYN-ADV-001", "SYN-STF-ADV-DIR", "SYN-STF-VP")
+    assert settings.http_settings().demo_personas == settings.demo_personas
+
+    # Development keeps the broad panels unless it opts in.
+    open_settings = RuntimeSettings.from_environment({}, package_root=tmp_path)
+    assert open_settings.demo_personas.restricted is False

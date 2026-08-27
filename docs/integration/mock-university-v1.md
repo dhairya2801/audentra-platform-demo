@@ -1,5 +1,11 @@
 # integration/mock-university-v1 — running and manually testing the combined stack
 
+> Merged into `main` on 2026-08-27 as the release candidate; the release-facing
+> adjustments (My desk removed from the Staff Portal, demo sign-in allowlisted to
+> four personas) and the commands for running `main` are in
+> `docs/release-candidate-mock-university-v1.md`. The persona table below is the
+> broad development set; it still applies to the open (unrestricted) shape.
+
 The integration candidate combines, on top of `main` (the staff/advising
 foundation): `feat/mock-university-ops` (bounded Action Center, Morning Brew
 people & capacity, engagement coverage, model-usage ledger) and

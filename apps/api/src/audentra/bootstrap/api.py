@@ -139,6 +139,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             environment=settings.environment,
             staff_invitation_code=settings.staff_invitation_code,
             development_flows_enabled=settings.auth_mode == "demo",
+            personas=settings.demo_personas,
         )
         oidc_auth_service: OidcAuthService = (
             PostgresOidcAuth(engine, http_client, settings.oidc)

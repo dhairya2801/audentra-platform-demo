@@ -1359,7 +1359,29 @@ export interface DemoStaffDirectoryEntry {
 export interface DemoStaffDirectory {
   items: DemoStaffDirectoryEntry[];
   total: number;
+  /** True when the deployment exposes a fixed allowlist of demo people. */
+  restricted?: boolean;
   notice: string;
+}
+
+/**
+ * GET /v1/auth/demo/personas — the demo identities this deployment exposes.
+ *
+ * Open (development) deployments answer `restricted: false` with empty lists
+ * and the sign-in panels browse the whole synthetic university. A restricted
+ * deployment answers with exactly the allowlisted people; the platform refuses
+ * to open anyone else, so the panels only ever offer what the backend accepts.
+ */
+export interface DemoPersonaStudent {
+  id: string;
+  preferredName: string;
+  externalRef: string | null;
+}
+
+export interface DemoPersonas {
+  restricted: boolean;
+  students: DemoPersonaStudent[];
+  staff: DemoStaffDirectoryEntry[];
 }
 
 export interface DemoStaffSignInInput {

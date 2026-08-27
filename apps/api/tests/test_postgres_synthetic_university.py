@@ -23,12 +23,13 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import text
 
 from audentra.core.auth import AuthContext
+from audentra.core.demo_personas import DemoPersonaAllowlist
 from audentra.core.errors import ApiError
 from audentra.core.ports import ServiceCall
 from audentra.domain.student_cohort import CohortFilter
@@ -790,3 +791,105 @@ async def _explain(engine: Any, sql: str, **params: Any) -> str:
             (await connection.execute(text(f"EXPLAIN {sql}"), params)).scalars().all()
         )
     return "\n".join(str(row) for row in rows)
+
+
+# ---------------------------------------------------------------------------
+# Restricted demo personas: the adapter, not the panel, is the gate
+# ---------------------------------------------------------------------------
+
+
+def test_a_restricted_adapter_opens_only_the_named_people(seeded_url: str) -> None:
+    """With an allowlist, every other synthetic person is refused by the adapter.
+
+    The same adapter serves sign-in by reference, the tenant's default demo
+    student, the per-request student cookie and the staff directory, so this
+    is the check that a caller who edits a request body cannot open anyone the
+    deployment did not name.
+    """
+
+    async def scenario(harness: _Harness) -> None:
+        everyone = await harness.auth.list_demo_staff(SYNTHETIC_TENANT_ID, query="", limit=500)
+        openable = [person for person in everyone if person["canSignIn"]]
+        assert len(openable) >= 2, "the synthetic university seeds several openable staff"
+        # The compact seed leaves staff without institution references; the
+        # mock university assigns them. Give two people the references the
+        # allowlist names, the way the university deploy does.
+        async with harness.engine.begin() as connection:
+            for person, reference in (
+                (openable[0], "SYN-TEST-STF-A"),
+                (openable[1], "SYN-TEST-STF-B"),
+            ):
+                await connection.execute(
+                    text("UPDATE staff_member SET external_ref=:reference WHERE id=:id"),
+                    {"reference": reference, "id": UUID(str(person["id"]))},
+                )
+        chosen_staff = {**openable[0], "externalRef": "SYN-TEST-STF-A"}
+        other_staff = {**openable[1], "externalRef": "SYN-TEST-STF-B"}
+
+        restricted = PostgresDevelopmentAuth(
+            harness.engine,
+            environment="test",
+            staff_invitation_code="test-staff-invitation-code",
+            personas=DemoPersonaAllowlist.of(
+                students=["SYN-000000"], staff=[str(chosen_staff["externalRef"]).lower()]
+            ),
+        )
+
+        # The named student opens, by reference and by UUID (the cookie path).
+        named = await restricted.demo_student_by_reference(
+            SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, "syn-000000"
+        )
+        assert named.external_ref == "SYN-000000"
+        by_uuid = await restricted.demo_student_by_reference(
+            SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, named.context.student_id
+        )
+        assert by_uuid.context.student_id == named.context.student_id
+        # "The demo student" is the named default, not the tenant's first row.
+        default = await restricted.demo_student(SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG)
+        assert default.context.student_id == named.context.student_id
+
+        # Another synthetic student, one the open adapter resolves fine, is refused.
+        other = await harness.auth.demo_student_by_reference(
+            SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, "SYN-000003"
+        )
+        for reference in ("SYN-000003", other.context.student_id):
+            with pytest.raises(ApiError) as refused:
+                await restricted.demo_student_by_reference(
+                    SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, reference
+                )
+            assert refused.value.status_code == 403
+            assert refused.value.code == "DEMO_PERSONA_NOT_ALLOWED"
+
+        # The directory lists only the named staff, and only they can be opened.
+        listed = await restricted.list_demo_staff(SYNTHETIC_TENANT_ID, query="", limit=500)
+        assert [person["id"] for person in listed] == [chosen_staff["id"]]
+        session = await restricted.demo_staff_by_reference(
+            SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, str(chosen_staff["externalRef"])
+        )
+        assert session.external_ref == chosen_staff["externalRef"]
+        assert session.token is not None
+        resolved = await restricted.resolve_staff(
+            session.token, SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG
+        )
+        assert resolved is not None and resolved.context.actor_id == session.context.actor_id
+
+        for reference in (str(other_staff["externalRef"]), str(other_staff["id"])):
+            with pytest.raises(ApiError) as refused:
+                await restricted.demo_staff_by_reference(
+                    SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, reference
+                )
+            assert refused.value.status_code == 403
+            assert refused.value.code == "DEMO_PERSONA_NOT_ALLOWED"
+
+        # A demo session minted while the deployment was open dies once it is
+        # restricted to other people: the allowlist, not the cookie, is the truth.
+        stale = await harness.auth.demo_staff_by_reference(
+            SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG, str(other_staff["id"])
+        )
+        assert stale.token is not None
+        assert (
+            await restricted.resolve_staff(stale.token, SYNTHETIC_TENANT_ID, SYNTHETIC_TENANT_SLUG)
+            is None
+        )
+
+    _run(seeded_url, scenario)

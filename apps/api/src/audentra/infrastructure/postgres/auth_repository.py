@@ -22,6 +22,7 @@ from audentra.core.auth import (
     AuthContext,
     PortalScope,
 )
+from audentra.core.demo_personas import DemoPersonaAllowlist
 from audentra.core.errors import ApiError, ConflictError, UnauthorizedError
 from audentra.core.ports import (
     CredentialStudentSession,
@@ -51,6 +52,7 @@ class PostgresDevelopmentAuth:
         environment: str,
         staff_invitation_code: str,
         development_flows_enabled: bool = True,
+        personas: DemoPersonaAllowlist | None = None,
     ) -> None:
         if environment not in {"development", "preview", "test"} and development_flows_enabled:
             raise ValueError("The development authentication adapter is disabled in production")
@@ -60,6 +62,11 @@ class PostgresDevelopmentAuth:
         self._environment = environment
         self._staff_invitation_code = staff_invitation_code
         self._development_flows_enabled = development_flows_enabled
+        # Which demo people may be opened. Open (the default) keeps every demo
+        # route broad; restricted is the release shape, and it is enforced
+        # here — on every path that mints or resolves a demo identity — so no
+        # caller can reach a person the deployment did not name.
+        self._personas = personas if personas is not None else DemoPersonaAllowlist.open()
 
     def _require_development_flows(self) -> None:
         if not self._development_flows_enabled:
@@ -71,6 +78,11 @@ class PostgresDevelopmentAuth:
 
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
         self._require_development_flows()
+        default_ref = self._personas.default_student_ref
+        if default_ref is not None:
+            # A restricted demo has one default student by name, never "the
+            # first row of the tenant".
+            return await self.demo_student_by_reference(tenant_id, tenant_slug, default_ref)
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(
@@ -167,6 +179,8 @@ class PostgresDevelopmentAuth:
                 "DEMO_STUDENT_NOT_FOUND",
                 "No demo student matches that identifier at this university",
             )
+        if not self._personas.allows_student(_optional_text(row.get("external_ref"))):
+            raise _persona_not_allowed()
         return _demo_session(row, tenant_id=tenant_id, tenant_slug=tenant_slug)
 
     async def resolve_student(
@@ -665,6 +679,12 @@ class PostgresDevelopmentAuth:
             # into the table), the session dies here rather than in the UI.
             if row["authentication_method"] == "demo" and not self._development_flows_enabled:
                 return None
+            # Likewise a demo session minted before the deployment restricted
+            # its personas: the allowlist is the current truth, not the cookie.
+            if row["authentication_method"] == "demo" and not self._personas.allows_staff(
+                _optional_text(row.get("external_ref"))
+            ):
+                return None
             await connection.execute(
                 text(
                     """
@@ -715,6 +735,8 @@ class PostgresDevelopmentAuth:
                            OR m.component ILIKE :pattern OR COALESCE(m.title,'') ILIKE :pattern
                            OR COALESCE(m.external_ref,'') ILIKE :pattern
                            OR COALESCE(m.role_code,'') ILIKE :pattern)
+                      AND (CAST(:restricted AS boolean) = false
+                           OR upper(COALESCE(m.external_ref,'')) = ANY(CAST(:allowed AS varchar[])))
                     ORDER BY m.component, m.display_name, m.id
                     LIMIT :limit
                     """
@@ -723,6 +745,8 @@ class PostgresDevelopmentAuth:
                     "tenant_id": UUID(tenant_id),
                     "pattern": pattern,
                     "limit": max(1, min(limit, 500)),
+                    "restricted": self._personas.restricted,
+                    "allowed": list(self._personas.staff),
                 },
             )
             rows = result.mappings().all()
@@ -798,6 +822,8 @@ class PostgresDevelopmentAuth:
                 raise ApiError(
                     404, "DEMO_STAFF_NOT_FOUND", "No staff member matches that identifier"
                 )
+            if not self._personas.allows_staff(_optional_text(row.get("external_ref"))):
+                raise _persona_not_allowed()
             if not row["active"] or row["employment_status"] == "departed":
                 raise ApiError(
                     409,
@@ -1554,6 +1580,14 @@ def _new_student_identity(legal_name: str | None) -> dict[str, str]:
 def _federated_display_name(value: str, fallback_email: str) -> str:
     normalized = " ".join(unicodedata.normalize("NFKC", value).split())[:160]
     return normalized or fallback_email
+
+
+def _persona_not_allowed() -> ApiError:
+    return ApiError(
+        403,
+        "DEMO_PERSONA_NOT_ALLOWED",
+        "That person is not one of the demo identities this deployment exposes",
+    )
 
 
 def _demo_session(

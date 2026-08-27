@@ -616,8 +616,6 @@ def summarize_board(
         raise BadRequestError("INVALID_ACTION_CENTER_QUERY", f"Unknown queue grouping {group_by!r}")
     matched = [item for item in items if matches_query(item, query, now=now, actor_id=actor_id)]
     week_end = now + timedelta(days=7)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
 
     def due(item: Mapping[str, Any]) -> datetime | None:
         return _parse(item.get("dueAt"))

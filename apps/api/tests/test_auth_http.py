@@ -6,6 +6,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from audentra.core.auth import AuthContext, PortalScope
+from audentra.core.demo_personas import DemoPersonaAllowlist
 from audentra.core.errors import ApiError, NotFoundError, UnauthorizedError
 from audentra.core.ports import (
     BinaryPayload,
@@ -85,7 +86,7 @@ class FakeBrowserAuthService:
     async def demo_student(self, tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
         assert tenant_id == TENANT_ID
         assert tenant_slug in {None, "aster"}
-        return DemoStudentSession(self.student_context("demo"), "Alex")
+        return DemoStudentSession(self.student_context("demo"), "Alex", "SYN-000000")
 
     async def demo_student_by_reference(
         self, tenant_id: str, tenant_slug: str | None, reference: str
@@ -179,9 +180,21 @@ class FakeBrowserAuthService:
                 "component": "Admissions",
                 "title": "Associate Director of Admissions",
                 "roleCode": "associate_director",
+                "externalRef": "SYN-STF-ADM-AD",
                 "employmentStatus": "active",
                 "canSignIn": True,
-            }
+            },
+            {
+                "id": "00000000-0000-7000-8000-000000000902",
+                "name": "Elena Larkspur",
+                "email": "elena.larkspur@aster.example.edu",
+                "component": "Academic Advising",
+                "title": "Academic Adviser",
+                "roleCode": "academic_adviser",
+                "externalRef": "SYN-ADV-012",
+                "employmentStatus": "active",
+                "canSignIn": True,
+            },
         ]
 
     async def demo_staff_by_reference(
@@ -191,6 +204,13 @@ class FakeBrowserAuthService:
         self.demo_staff_reference = reference
         if reference == "departed@aster.example.edu":
             raise ApiError(409, "STAFF_MEMBER_DEPARTED", "Quentin has left the university")
+        if reference == "SYN-ADV-012":
+            return self._staff_session(
+                token=STAFF_TOKEN,
+                method="demo",
+                title="Academic Adviser",
+                external_ref="SYN-ADV-012",
+            )
         if reference != STAFF_ID and reference != "priya.shah@aster.example.edu":
             raise ApiError(404, "DEMO_STAFF_NOT_FOUND", "No staff member matches that identifier")
         return self._staff_session(
@@ -286,6 +306,7 @@ class FakeBrowserAuthService:
         token: str | None = STAFF_TOKEN,
         method: str = "credentials",
         title: str | None = None,
+        external_ref: str | None = "SYN-STF-ADM-AD",
     ) -> StaffSession:
         return StaffSession(
             context=AuthContext(
@@ -302,6 +323,7 @@ class FakeBrowserAuthService:
             token=token,
             expires_at_epoch=4_102_444_800,
             title=title,
+            external_ref=external_ref,
         )
 
     def _delegate_session(self) -> DelegateSession:
@@ -950,3 +972,115 @@ async def test_demo_staff_routes_are_unavailable_in_production_and_oidc_mode(
         assert sign_in.status_code == 404, sign_in.text
         assert resolved.status_code == 401, resolved.text
         auth_service.staff_session_method = "credentials"
+
+
+# ---------------------------------------------------------------------------
+# Restricted demo personas (the release-candidate shape)
+# ---------------------------------------------------------------------------
+
+
+RESTRICTED = DemoPersonaAllowlist.of(students=["SYN-000000"], staff=["SYN-STF-ADM-AD"])
+
+
+@pytest.fixture
+async def restricted_client(
+    auth_service: FakeBrowserAuthService,
+    platform_service: FakePlatformService,
+) -> AsyncIterator[AsyncClient]:
+    app = create_app(
+        service=platform_service,
+        auth_service=auth_service,
+        settings=HttpSettings(browser_auth_required=True, demo_personas=RESTRICTED),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as async_client:
+        yield async_client
+
+
+async def test_an_open_deployment_reports_no_persona_restriction(client: AsyncClient) -> None:
+    personas = await client.get("/v1/auth/demo/personas")
+    assert personas.status_code == 200, personas.text
+    assert personas.json() == {"restricted": False, "students": [], "staff": []}
+    directory = await client.get("/v1/auth/demo/staff/directory")
+    assert directory.json()["restricted"] is False
+    assert [item["externalRef"] for item in directory.json()["items"]] == [
+        "SYN-STF-ADM-AD",
+        "SYN-ADV-012",
+    ]
+
+
+async def test_a_restricted_deployment_lists_exactly_its_personas(
+    restricted_client: AsyncClient,
+) -> None:
+    personas = await restricted_client.get("/v1/auth/demo/personas")
+    assert personas.status_code == 200, personas.text
+    body = personas.json()
+    assert body["restricted"] is True
+    assert body["students"] == [
+        {"id": STUDENT_ID, "preferredName": "Alex", "externalRef": "SYN-000000"}
+    ]
+    assert [item["externalRef"] for item in body["staff"]] == ["SYN-STF-ADM-AD"]
+
+    directory = await restricted_client.get("/v1/auth/demo/staff/directory")
+    assert directory.json()["restricted"] is True
+    assert directory.json()["total"] == 1
+    assert [item["externalRef"] for item in directory.json()["items"]] == ["SYN-STF-ADM-AD"]
+
+
+async def test_a_restricted_deployment_opens_only_allowlisted_people(
+    restricted_client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    student = await restricted_client.post(
+        "/v1/auth/demo/sign-in-as", json={"studentRef": "SYN-000000"}
+    )
+    assert student.status_code == 200, student.text
+    assert student.json()["student"]["externalRef"] == "SYN-000000"
+
+    default = await restricted_client.post("/v1/auth/demo/sign-in", json={})
+    assert default.status_code == 200, default.text
+
+    staff = await restricted_client.post(
+        "/v1/auth/demo/staff/sign-in-as", json={"staffRef": "priya.shah@aster.example.edu"}
+    )
+    assert staff.status_code == 200, staff.text
+    assert staff.json()["staff"]["externalRef"] == "SYN-STF-ADM-AD"
+
+
+async def test_a_restricted_deployment_refuses_other_synthetic_people(
+    restricted_client: AsyncClient,
+    auth_service: FakeBrowserAuthService,
+) -> None:
+    # The fake resolves SYN-ADV-012 as a real, active adviser: the only thing
+    # standing between the caller and her portal is the allowlist.
+    other_staff = await restricted_client.post(
+        "/v1/auth/demo/staff/sign-in-as", json={"staffRef": "SYN-ADV-012"}
+    )
+    assert other_staff.status_code == 403, other_staff.text
+    assert other_staff.json()["error"]["code"] == "DEMO_PERSONA_NOT_ALLOWED"
+    assert "vv_staff_session" not in other_staff.headers.get("set-cookie", "")
+
+    # A student the tenant would resolve, but the deployment does not expose.
+    async def another_student(
+        tenant_id: str, tenant_slug: str | None, reference: str
+    ) -> DemoStudentSession:
+        return DemoStudentSession(auth_service.student_context("demo"), "Sam", "SYN-000007")
+
+    auth_service.demo_student_by_reference = another_student  # type: ignore[method-assign]
+    other_student = await restricted_client.post(
+        "/v1/auth/demo/sign-in-as", json={"studentRef": "SYN-000007"}
+    )
+    assert other_student.status_code == 403, other_student.text
+    assert other_student.json()["error"]["code"] == "DEMO_PERSONA_NOT_ALLOWED"
+    assert "vv_demo_student" not in other_student.headers.get("set-cookie", "")
+
+    # And the tenant's "first student" default is refused too when it is not
+    # the named default: the deployment's list is the only truth.
+    async def unnamed_default(tenant_id: str, tenant_slug: str | None) -> DemoStudentSession:
+        return DemoStudentSession(auth_service.student_context("demo"), "Alex")
+
+    auth_service.demo_student = unnamed_default  # type: ignore[method-assign]
+    default = await restricted_client.post("/v1/auth/demo/sign-in", json={})
+    assert default.status_code == 403, default.text

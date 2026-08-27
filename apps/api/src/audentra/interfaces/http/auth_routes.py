@@ -69,6 +69,26 @@ def _guided_reset_only(request: Request) -> None:
         )
 
 
+def _persona_not_allowed() -> ApiError:
+    return ApiError(
+        403,
+        "DEMO_PERSONA_NOT_ALLOWED",
+        "That person is not one of the demo identities this deployment exposes",
+    )
+
+
+def _require_allowed_student(request: Request, session: DemoStudentSession) -> None:
+    """The HTTP twin of the adapter's allowlist: same policy object, second gate."""
+
+    if not get_settings(request).demo_personas.allows_student(session.external_ref):
+        raise _persona_not_allowed()
+
+
+def _require_allowed_staff(request: Request, session: StaffSession) -> None:
+    if not get_settings(request).demo_personas.allows_staff(session.external_ref):
+        raise _persona_not_allowed()
+
+
 def _set_session_cookie(
     response: Response,
     request: Request,
@@ -402,6 +422,7 @@ async def sign_in_demo_student(
     _development_only(request)
     tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.demo_student(tenant_id, tenant_slug)
+    _require_allowed_student(request, session)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     # Signing in as "the demo student" clears any earlier per-student choice.
@@ -428,6 +449,7 @@ async def sign_in_demo_student_by_reference(
     _development_only(request)
     tenant_id, tenant_slug = await resolve_request_tenant(request)
     session = await auth.demo_student_by_reference(tenant_id, tenant_slug, body.student_ref)
+    _require_allowed_student(request, session)
     await auth.sign_out_student(request.cookies.get("vv_session"))
     _expire_cookie(response, request, "vv_session")
     _demo_cookie(response, request)
@@ -575,14 +597,62 @@ async def list_demo_staff_directory(
 
     _development_only(request)
     tenant_id, _tenant_slug = await resolve_request_tenant(request)
-    items = await _demo_staff_service(auth).list_demo_staff(tenant_id, query=q, limit=limit)
+    personas = get_settings(request).demo_personas
+    items = [
+        item
+        for item in await _demo_staff_service(auth).list_demo_staff(tenant_id, query=q, limit=limit)
+        if personas.allows_staff(item.get("externalRef"))
+    ]
     return {
         "items": items,
         "total": len(items),
+        "restricted": personas.restricted,
         "notice": (
             "Development fixture only. Staff sessions opened here are not institutional sign-ins."
         ),
     }
+
+
+@auth_router.get("/v1/auth/demo/personas", status_code=200, response_model=None)
+async def list_demo_personas(
+    request: Request,
+    auth: AuthServiceDependency,
+) -> object:
+    """The demo identities this deployment exposes, for the sign-in panels.
+
+    Open (development) deployments answer `restricted: false` with empty lists
+    and the panels keep their browse-anyone behaviour. A restricted deployment
+    answers with exactly the allowlisted people, resolved inside the tenant
+    the way sign-in resolves them, so the panel can only ever offer a person
+    the backend would also accept.
+    """
+
+    _development_only(request)
+    tenant_id, tenant_slug = await resolve_request_tenant(request)
+    personas = get_settings(request).demo_personas
+    if not personas.restricted:
+        return {"restricted": False, "students": [], "staff": []}
+    students: list[dict[str, Any]] = []
+    for reference in personas.students:
+        try:
+            session = await auth.demo_student_by_reference(tenant_id, tenant_slug, reference)
+        except ApiError as error:
+            if error.code in {"DEMO_STUDENT_NOT_FOUND", "DEMO_PERSONA_NOT_ALLOWED"}:
+                continue
+            raise
+        students.append(
+            {
+                "id": session.context.student_id,
+                "preferredName": session.preferred_name,
+                "externalRef": session.external_ref,
+            }
+        )
+    staff = [
+        item
+        for item in await _demo_staff_service(auth).list_demo_staff(tenant_id, query="", limit=500)
+        if personas.allows_staff(item.get("externalRef"))
+    ]
+    return {"restricted": True, "students": students, "staff": staff}
 
 
 @auth_router.post("/v1/auth/demo/staff/sign-in-as", status_code=200, response_model=None)
@@ -605,6 +675,7 @@ async def sign_in_demo_staff_by_reference(
     session = await _demo_staff_service(auth).demo_staff_by_reference(
         tenant_id, tenant_slug, body.staff_ref
     )
+    _require_allowed_staff(request, session)
     if session.token is None or session.expires_at_epoch is None:
         raise ApiError(500, "AUTH_SESSION_FAILED", "The staff session could not be created")
     previous = request.cookies.get("vv_staff_session")

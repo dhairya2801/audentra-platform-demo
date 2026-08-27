@@ -13,6 +13,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from audentra.core.demo_personas import DemoPersonaAllowlist
 from audentra.infrastructure.db.engine import DatabaseEngineOptions
 from audentra.infrastructure.postgres.oidc_repository import (
     OidcProviderConfig,
@@ -92,6 +93,7 @@ class RuntimeSettings:
     demo_student_id: str
     demo_actor_id: str
     demo_staff_actor_id: str
+    demo_personas: DemoPersonaAllowlist
     oidc_tenant_id: str | None
     object_storage: StorageSettings
     ai: GatewaySettings
@@ -215,6 +217,15 @@ class RuntimeSettings:
         _http_url(api_public_url, "API_PUBLIC_URL")
 
         oidc = _oidc_settings(values, environment=app_environment, auth_mode=auth_mode)
+        # Which demo people a browser may open. Development stays open; a
+        # deployed demo must say who it shows, so the restriction is a
+        # deliberate configuration rather than an accident of the fixture.
+        demo_personas = DemoPersonaAllowlist.from_environment(values)
+        if app_environment == "preview" and auth_mode == "demo" and not demo_personas.restricted:
+            raise ValueError(
+                "A deployed demo (AUDENTRA_ENV=preview, AUTH_MODE=demo) must name the people it "
+                "exposes: set DEMO_STUDENT_ALLOWLIST and DEMO_STAFF_ALLOWLIST"
+            )
         configured_oidc_tenant = (
             values.get("OIDC_AUDENTRA_TENANT_ID", "").strip() if auth_mode == "oidc" else ""
         )
@@ -261,6 +272,7 @@ class RuntimeSettings:
             demo_staff_actor_id=values.get(
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
+            demo_personas=demo_personas,
             oidc_tenant_id=oidc_tenant_id,
             object_storage=_object_storage_settings(
                 values,
@@ -375,6 +387,7 @@ class RuntimeSettings:
             demo_student_id=self.demo_student_id,
             demo_actor_id=self.demo_actor_id,
             demo_staff_actor_id=self.demo_staff_actor_id,
+            demo_personas=self.demo_personas,
             oidc_tenant_id=self.oidc_tenant_id,
             oidc_portal_base_url=(self.oidc.portal_base_url if self.oidc else ""),
         )

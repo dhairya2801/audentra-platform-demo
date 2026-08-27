@@ -1,9 +1,11 @@
 """Configuration for the HTTP boundary only."""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
+
+from audentra.core.demo_personas import DemoPersonaAllowlist
 
 CookieSameSite = Literal["lax", "none", "strict"]
 HttpEnvironment = Literal["development", "preview", "test", "production"]
@@ -24,6 +26,7 @@ class HttpSettings:
     demo_student_id: str = "00000000-0000-7000-8000-000000000101"
     demo_actor_id: str = "00000000-0000-7000-8000-000000000100"
     demo_staff_actor_id: str = "00000000-0000-7000-8000-000000000901"
+    demo_personas: DemoPersonaAllowlist = field(default_factory=DemoPersonaAllowlist.open)
     oidc_tenant_id: str | None = None
     oidc_portal_base_url: str = ""
     demo_session_token: str = "demo-session-v2"  # noqa: S105
@@ -70,6 +73,7 @@ class HttpSettings:
             demo_staff_actor_id=os.getenv(
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
+            demo_personas=DemoPersonaAllowlist.from_environment(os.environ),
             oidc_tenant_id=_oidc_tenant_id(
                 os.getenv("OIDC_AUDENTRA_TENANT_ID"),
                 auth_mode=_auth_mode(os.getenv("AUTH_MODE")),

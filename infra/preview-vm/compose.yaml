@@ -32,6 +32,11 @@ x-runtime-environment: &runtime-environment
   DEMO_STUDENT_ID: 00000000-0000-7000-8000-000000000101
   DEMO_ACTOR_ID: 00000000-0000-7000-8000-000000000100
   DEMO_STAFF_ACTOR_ID: 00000000-0000-7000-8000-000000000901
+  # The only synthetic people a deployed demo lets a browser open (institution
+  # references of the demo tenant). Required whenever AUTH_MODE=demo is deployed;
+  # the API refuses to start without both.
+  DEMO_STUDENT_ALLOWLIST: ${DEMO_STUDENT_ALLOWLIST:-SYN-000061}
+  DEMO_STAFF_ALLOWLIST: ${DEMO_STAFF_ALLOWLIST:-SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP}
   VV_STAFF_INVITATION_CODE: ${VV_STAFF_INVITATION_CODE:?Set VV_STAFF_INVITATION_CODE}
   WORKER_ID: preview-worker
   WORKER_CONSUMER_NAME: student-dashboard-v1
