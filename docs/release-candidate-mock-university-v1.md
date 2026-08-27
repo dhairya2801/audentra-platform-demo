@@ -66,8 +66,12 @@ Prerequisites already on this machine: `docker compose -f infra/compose.yaml up`
     cd ~/Dhairya/projects/Audentra-platform
     DEMO_STUDENT_ALLOWLIST=SYN-000061 \
     DEMO_STAFF_ALLOWLIST=SYN-ADV-001,SYN-STF-ADV-DIR,SYN-STF-VP \
+    BROWSER_AUTH_REQUIRED=true \
     scripts/integration-stack.sh api
-    #    …or without the two variables for the open development shape
+    #    BROWSER_AUTH_REQUIRED=true is the deployed shape: without it an unauthenticated
+    #    /staff load falls back to the legacy dev header identity (aster fixture) and the
+    #    portal shows "staff identity is not provisioned" instead of the sign-in page.
+    #    Drop the two allowlist variables for the open development shape.
 
     # 2. worker (optional; scheduled rules, SLA sweeps, outbox)
     scripts/integration-stack.sh worker
