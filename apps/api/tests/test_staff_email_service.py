@@ -69,6 +69,7 @@ OTHER_STUDENT_ID = "00000000-0000-7000-8000-000000000102"
 MAILBOX_ID = "00000000-0000-7000-8000-000000000801"
 AUTHORIZATION_ID = "00000000-0000-7000-8000-000000000802"
 INTENT_ID = "00000000-0000-7000-8000-000000000803"
+AGENT_ACTION_INTENT_ID = "00000000-0000-7000-8000-000000000806"
 INTERACTION_ID = "00000000-0000-7000-8000-000000000804"
 MESSAGE_ID = "00000000-0000-7000-8000-000000000805"
 NOW = datetime.now(UTC)
@@ -273,7 +274,7 @@ class FakeConnection:
             return FakeResult(scalar=UUID(MAILBOX_ID))
         if "SELECT DISTINCT mailbox.id" in sql:
             return FakeResult([self.mailbox_row()])
-        if "SELECT mailbox.*, authorization.provider_subject" in sql:
+        if "SELECT mailbox.*, mail_auth.provider_subject" in sql:
             return self._row("mailbox", self.mailbox_row())
         if "SELECT id, sender_address, recipient_addresses" in sql:
             return FakeResult([self.message_row()])
@@ -282,6 +283,10 @@ class FakeConnection:
                 "reply",
                 {"sender_address": "student@harvard.edu", "linked_student_id": UUID(STUDENT_ID)},
             )
+        if "SELECT id FROM agent_action_intent" in sql:
+            return self._row("agent_action", {"id": UUID(AGENT_ACTION_INTENT_ID)})
+        if "SELECT * FROM staff_email_send_intent" in sql:
+            return self._row("agent_email_intent", self.intent_row())
         if "FROM staff_interaction interaction" in sql:
             parameters = cast(Mapping[str, object], _params or {})
             if parameters.get("student_id") != self.interaction_student_id:
@@ -289,7 +294,7 @@ class FakeConnection:
             return self._row("interaction", {"id": UUID(INTERACTION_ID)})
         if "SELECT intent.*, mailbox.address_normalized" in sql:
             return self._row("intent", self.intent_row())
-        if "SELECT mailbox.*, authorization.provider_tenant" in sql:
+        if "SELECT mailbox.*, mail_auth.provider_tenant" in sql:
             return self._row("mailbox", self.mailbox_row())
         if "SELECT intent.*, mailbox.provider" in sql:
             return self._row("intent", self.intent_row())
@@ -766,6 +771,40 @@ async def test_send_intent_binds_interaction_to_tenant_student_and_active_staff_
         assert not any(
             "INSERT INTO staff_email_send_intent" in query for query in engine.connection.queries
         )
+    finally:
+        await client.aclose()
+
+
+async def test_edward_email_intent_is_same_actor_bound_and_retry_idempotent() -> None:
+    service, engine, _auth, client = await make_service()
+    payload = {
+        "mailboxId": MAILBOX_ID,
+        "studentId": STUDENT_ID,
+        "subject": "Advising follow-up",
+        "body": "Please review the next step.",
+        "agentActionIntentId": AGENT_ACTION_INTENT_ID,
+    }
+    try:
+        engine.connection.missing.add("agent_email_intent")
+        created = await service.create_send_intent(staff_context(), payload)
+        assert created["status"] == "pending_confirmation"
+        insert_parameters = next(
+            values
+            for sql, values in zip(
+                engine.connection.queries, engine.connection.parameters, strict=False
+            )
+            if "INSERT INTO staff_email_send_intent" in sql
+        )
+        assert insert_parameters["agent_action_intent_id"] == UUID(AGENT_ACTION_INTENT_ID)
+
+        engine.connection.missing.discard("agent_email_intent")
+        retried = await service.create_send_intent(staff_context(), payload)
+        assert retried["id"] == INTENT_ID
+
+        engine.connection.missing.add("agent_action")
+        with pytest.raises(ApiError) as forbidden:
+            await service.create_send_intent(staff_context(), payload)
+        assert forbidden.value.code == "EDWARD_EMAIL_ACTION_FORBIDDEN"
     finally:
         await client.aclose()
 

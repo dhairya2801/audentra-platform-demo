@@ -157,10 +157,12 @@ def test_postgres_conversation_round_trip_and_replay() -> None:
                       content text NOT NULL, client_message_id varchar(128),
                       request_id varchar(128), provider varchar(24), model varchar(120),
                       usage jsonb, blocks jsonb,
-                      context_receipts jsonb NOT NULL DEFAULT '[]'::jsonb,
-                      suggested_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
-                      widgets jsonb NOT NULL DEFAULT '[]'::jsonb,
-                      created_at timestamptz NOT NULL DEFAULT now(),
+                          context_receipts jsonb NOT NULL DEFAULT '[]'::jsonb,
+                          suggested_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
+                          widgets jsonb NOT NULL DEFAULT '[]'::jsonb,
+                          action_intents jsonb NOT NULL DEFAULT '[]'::jsonb,
+                          action_receipts jsonb NOT NULL DEFAULT '[]'::jsonb,
+                          created_at timestamptz NOT NULL DEFAULT now(),
                       FOREIGN KEY (conversation_id, tenant_id, student_id)
                         REFERENCES {schema}.assistant_conversation(id, tenant_id, student_id)
                         ON DELETE CASCADE

@@ -47,6 +47,19 @@ from audentra.domain.documents import (
     failed_extraction,
     validate_document_upload,
 )
+from audentra.domain.edward_action_catalog import CAPABILITY_BY_ACTION
+from audentra.domain.edward_actions import (
+    SemanticActionRequest,
+    amend_pending_action,
+    has_question_sentence,
+    named_day,
+    parse_staff_action,
+    parse_student_action,
+    question_sentences,
+    recognize_with_model,
+    repeats_action_for_another,
+    untrusted_action_framing,
+)
 from audentra.domain.student_state import derive_deposit_state
 from audentra.infrastructure.documents.processing import (
     NormalizedImageRegion,
@@ -56,6 +69,7 @@ from audentra.infrastructure.documents.processing import (
     extract_student_document_image_region,
 )
 from audentra.infrastructure.storage.s3 import ObjectNotFoundError, StorageError
+from audentra.integrations import edward_action_responses as action_responses
 from audentra.integrations.ai.edward_safety import (
     EdwardActionAuthority,
     guarded_response,
@@ -71,7 +85,11 @@ from audentra.integrations.assistant.trace import (
     get_assistant_trace_recorder,
 )
 from audentra.integrations.staff_assistant.catalog import STAFF_TOOL_DESCRIPTIONS
-from audentra.integrations.staff_assistant.classify import STAFF_REQUEST_TYPES
+from audentra.integrations.staff_assistant.classify import (
+    STAFF_REQUEST_TYPES,
+    cohort_filter_from_text,
+)
+from audentra.integrations.staff_assistant.normalize import normalize_staff_request
 from audentra.integrations.staff_assistant.pipeline import (
     ModelComposer as StaffModelComposer,
 )
@@ -85,6 +103,7 @@ from audentra.integrations.staff_assistant.safety import guarded_staff_response
 from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
 
 from .advising_repository import PostgresAdvisingRepository
+from .edward_action_gateway import EdwardActionGateway, StaffEmailActions
 from .edward_feedback_repository import PostgresEdwardFeedbackRepository
 from .ferpa_repository import PostgresFerpaRepository
 from .managed_configuration_repository import PostgresManagedConfigurationRepository
@@ -156,6 +175,342 @@ def _mapping(value: object) -> Mapping[str, Any]:
 
 def _sequence(value: object) -> Sequence[object]:
     return value if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) else ()
+
+
+def _pipeline_already_asked(result: Any) -> bool:
+    """True when the read turn ended in a question the action clarifier
+    would only make worse.
+
+    An ambiguous or unknown student name produces a candidate list with
+    student references in it. Replacing that with "Which student is the
+    follow-up for?" throws away the disambiguators the person needs.
+    """
+
+    if getattr(result, "resolved_student_id", None):
+        return False
+    message = str(getattr(result, "message", "") or "")
+    return "?" in message and bool(
+        re.search(r"which one|did you mean|couldn't find|SYN-\d", message, re.I)
+    )
+
+
+def _continued_action(
+    message: str,
+    state: Mapping[str, Any],
+    *,
+    actor: str,
+) -> tuple[SemanticActionRequest | None, str | None]:
+    """Carry an action forward when the message only carries the change.
+
+    Two shapes, both ordinary in a working conversation and both previously
+    lost to the read pipeline:
+
+    * **Amendment** — "actually make it urgent". The verb and the target are in
+      the previous turn; only the correction is here. A confirmation card is
+      immutable by design, so this produces a *fresh* proposal for the same
+      action against the same target, which the gateway re-resolves and
+      re-authorizes from scratch. Only a pending, unconfirmed intent can be
+      amended: once something is committed the honest answer is a new change.
+    * **Repetition** — "and one for Greta Oakenshaw too". The same action, a
+      newly named person. The target is *not* inherited here; the person named
+      this turn is resolved normally, which is what keeps a repetition from
+      quietly acting on the previous student.
+
+    Returns the request and, for an amendment only, the student to inherit.
+    """
+
+    pending = [item for item in _sequence(state.get("pending")) if isinstance(item, Mapping)]
+    receipts = [item for item in _sequence(state.get("receipts")) if isinstance(item, Mapping)]
+    last_field: str | None = None
+    pending_fields: dict[str, Any] = {}
+    if pending:
+        last_action = str(pending[-1].get("action") or "")
+        inherited = pending[-1].get("targetStudentId")
+        raw_pending_fields = pending[-1].get("fields")
+        if isinstance(raw_pending_fields, Mapping):
+            pending_fields = dict(raw_pending_fields)
+        # "Right — use 020 7946 0222 instead" names a value and no field; the
+        # field is whichever one the pending proposal already carries.
+        if len(pending_fields) == 1:
+            last_field = next(iter(pending_fields))
+    elif receipts:
+        last_action = str(receipts[-1].get("action") or "")
+        inherited = None
+        result = receipts[-1].get("result")
+        changes = _sequence(result.get("changes")) if isinstance(result, Mapping) else ()
+        last_field = next(
+            (
+                str(item["field"])
+                for item in changes
+                if isinstance(item, Mapping) and item.get("field")
+            ),
+            None,
+        )
+    else:
+        return None, None
+    if not last_action:
+        return None, None
+
+    if repeats_action_for_another(message):
+        if last_action not in {
+            "operations.follow_up.create",
+            "operations.work_item.update",
+            "student.preferences.update",
+        }:
+            return None, None
+        fields = (
+            _follow_up_fields_for(message) if last_action == "operations.follow_up.create" else {}
+        )
+        repeated_request = SemanticActionRequest(
+            cast(Any, last_action), fields, 0.85, source="continuation"
+        )
+        return repeated_request, None
+
+    amended = amend_pending_action(
+        message, cast(Any, last_action), actor=cast(Any, actor), last_field=last_field
+    )
+    if amended is None:
+        return None, None
+    if pending and pending_fields:
+        # Corrections accumulate: "make it urgent", then "and due thursday",
+        # must end urgent AND due thursday. Each amendment is still a fresh
+        # proposal — only the starting fields come from the one on the table.
+        merged = {**pending_fields, **amended.fields}
+        amended = SemanticActionRequest(
+            amended.action, merged, amended.confidence, source="continuation"
+        )
+    # An amendment to a *pending* proposal keeps its target; one that follows a
+    # committed change is a new change to the same record, which the actor's
+    # own identity already resolves.
+    return amended, (str(inherited) if pending and inherited else None)
+
+
+#: The clarifying questions the write plane itself asks, matched against the
+#: previous assistant turn so the user's next message can be read as the
+#: answer. Each sentinel is a stable substring of exactly one server-authored
+#: question; prose from the read plane never contains them.
+_CLARIFY_BLOCKER_SENTINEL = "What is it waiting on?"
+_CLARIFY_DATE_SENTINELS = (
+    "needs a date and a next step",
+    "Choose a date for work that moves to follow-up",
+)
+_CLARIFY_CANCEL_SENTINEL = "what should the record say the reason was"
+_CLARIFY_STUDENT_SENTINELS = (
+    "Which student is the follow-up for?",
+    "Who should the email go to?",
+    "which one do you mean",
+)
+
+_ANY_WORK_ITEM_KEY = re.compile(r"\b([A-Za-z]{2,6}-\d{2,6})\b")
+
+
+def _last_key_anywhere(history: Sequence[Mapping[str, Any]]) -> str | None:
+    """The most recent work-item key in the conversation, noun or no noun.
+
+    `_recent_work_item_key` requires a task noun beside the key so "that
+    task" cannot inherit an id from prose. The clarify loop is stricter
+    context: Edward's own question already bound the item, and the answer to
+    "what is it waiting on?" ("AST-00006 is stuck…" two turns up) rarely
+    repeats a noun."""
+
+    for item in reversed(history):
+        found = _ANY_WORK_ITEM_KEY.findall(str(item.get("content") or ""))
+        if found:
+            return str(found[-1]).upper()
+    return None
+
+
+def _clarify_loop_continuation(
+    message: str, history: Sequence[Mapping[str, Any]]
+) -> tuple[SemanticActionRequest, str | None, bool] | None:
+    """Interpret this turn as the answer to Edward's own last question.
+
+    Returns the reconstructed request, a work-item key recovered from the
+    conversation when the question was about one, and whether the turn is a
+    disambiguation pick whose resolved student should be trusted as the
+    action target. Everything still crosses the gateway: this establishes a
+    *request*, never authority.
+    """
+
+    text = message.strip()
+    if not text or len(text) > 300 or untrusted_action_framing(text):
+        return None
+    last_assistant = next(
+        (item for item in reversed(history) if str(item.get("role")) == "assistant"), None
+    )
+    if last_assistant is None:
+        return None
+    question = str(last_assistant.get("content") or "")
+
+    if _CLARIFY_BLOCKER_SENTINEL in question:
+        fields: JsonDict = {"status": "blocked", "nextStep": text[:200]}
+        return (
+            SemanticActionRequest(
+                "operations.work_item.update", fields, 0.9, source="continuation"
+            ),
+            _last_key_anywhere(history),
+            False,
+        )
+    if any(sentinel in question for sentinel in _CLARIFY_DATE_SENTINELS):
+        fields = {"status": "follow_up_required", "nextStep": text[:200]}
+        day = named_day(text)
+        if day:
+            fields["followUp"] = day
+        return (
+            SemanticActionRequest(
+                "operations.work_item.update", fields, 0.9, source="continuation"
+            ),
+            _last_key_anywhere(history),
+            False,
+        )
+    if _CLARIFY_CANCEL_SENTINEL in question:
+        fields = {"status": "cancelled", "nextStep": text[:200]}
+        return (
+            SemanticActionRequest(
+                "operations.work_item.update", fields, 0.9, source="continuation"
+            ),
+            _last_key_anywhere(history),
+            False,
+        )
+    if any(sentinel in question for sentinel in _CLARIFY_STUDENT_SENTINELS):
+        # The action lives in the user turn that triggered the question; the
+        # student lives in this one. Re-derive the action from that turn and
+        # let normal resolution bind whoever this turn names or picks.
+        for item in reversed(history):
+            if str(item.get("role")) != "user":
+                continue
+            content = str(item.get("content") or "")
+            if content.strip() == text:
+                continue
+            prior = parse_staff_action(content)
+            if prior is not None and prior.action in {
+                "operations.follow_up.create",
+                "communications.email.prepare",
+            }:
+                return (
+                    SemanticActionRequest(
+                        prior.action, dict(prior.fields), 0.85, source="continuation"
+                    ),
+                    None,
+                    True,
+                )
+            break
+    return None
+
+
+def _follow_up_fields_for(message: str) -> JsonDict:
+    """Field values a repeated follow-up should carry from its own sentence."""
+
+    repeated = parse_staff_action(f"create a follow-up {message}")
+    return dict(repeated.fields) if repeated is not None else {}
+
+
+class _ActionClarified(Exception):
+    """Internal signal: the turn asked a question instead of proposing."""
+
+
+def _recognition_source(
+    request: SemanticActionRequest | None, recognizer_usage: Mapping[str, Any] | None
+) -> str | None:
+    """Which recognition stage settled this turn, for the trace.
+
+    "pattern" and "continuation" come from the request itself; "model" means
+    tier 1 recognized it; "model_none" means tier 1 was actually called (a
+    provider round trip happened) and found nothing. None means no stage
+    produced anything and no provider was consulted — the turn was never
+    action-shaped, or recognition was blocked before any tier ran.
+    """
+
+    if request is not None:
+        return request.source
+    if recognizer_usage is not None:
+        return "model_none"
+    return None
+
+
+def _record_recognizer_call(
+    trace: AssistantTurnTrace,
+    usage: Mapping[str, Any] | None,
+    request: SemanticActionRequest | None,
+) -> None:
+    """Meter the model recognition tier like every other model call.
+
+    A tier that is invisible in the trace is a tier nobody can attribute a
+    regression or a cost to, and this one runs on turns the read planner never
+    sees.
+    """
+
+    if usage is None:
+        return
+    trace.add_model_call(
+        operation="action_recognizer",
+        attempt=1,
+        duration_ms=0.0,
+        outcome="recognized" if request is not None else "no_action",
+        provider=usage.get("provider"),
+        model=usage.get("model"),
+        usage=usage.get("usage") if isinstance(usage.get("usage"), Mapping) else None,
+        detail=request.action if request is not None else None,
+    )
+
+
+def _edward_action_unavailable_response(error: ApiError) -> JsonDict:
+    """Render an expected policy or resolution denial without claiming a write."""
+
+    message = error.message
+    return {
+        "message": message,
+        "blocks": [{"type": "text", "text": message}],
+        "provider": "guided",
+        "model": None,
+        "usage": None,
+        "actionIntents": [],
+        "actionReceipts": [],
+        "actionError": {"code": error.code, "message": message},
+    }
+
+
+def _recent_work_item_key(history: Sequence[Mapping[str, Any]]) -> str | None:
+    """Resolve "that task" from recent server history without inheriting an ID blindly.
+
+    A key in the *user's own* words ("show me AST-00533" → "set it in
+    progress") is their reference and safe to carry. A key inside Edward's
+    prose still needs a task noun beside it, so an answer that happens to
+    list keys cannot silently become the target of the next verb.
+    """
+
+    for item in reversed(history):
+        content = str(item.get("content") or "")
+        normalized = normalize_staff_request(content)
+        key = normalized.work_item_key
+        if key and (
+            str(item.get("role")) == "user"
+            or re.search(r"\b(?:task|work item|item|case|ticket)\b", content, re.I)
+        ):
+            return key
+    return None
+
+
+def _action_may_inherit_student(
+    message: str, action: str, *, has_server_draft: bool = False
+) -> bool:
+    """Require current-turn referential language before using a carried student."""
+
+    if re.search(
+        r"\b(?:her|him|their|that student|this student|the same student|for them)\b",
+        message,
+        re.I,
+    ):
+        return True
+    return bool(
+        action == "communications.email.prepare"
+        and has_server_draft
+        # A server-persisted draft names its own recipient. "Send that",
+        # "prepare it", "get that ready to go" are all the same request about
+        # the same draft, and asking "who should the email go to?" when the
+        # answer is written on the draft is a round trip for nothing.
+        and re.search(r"\b(?:that|this|the|it)\b|\bsend it\b|\bready to go\b", message, re.I)
+    )
 
 
 def _integer(value: object) -> int:
@@ -578,6 +933,33 @@ class PostgresPlatformService:
         self.signed_documents = signed_documents
         self.worker_token = worker_token
         self.ferpa_link_secret = ferpa_link_secret
+        self.edward_actions = (
+            EdwardActionGateway(
+                repository.portal.engine,
+                repository.portal,
+                repository.staff,
+                repository.staff_assistant,
+            )
+            if repository.staff_assistant is not None
+            else None
+        )
+
+    def configure_edward_staff_email(self, staff_email: StaffEmailActions) -> None:
+        """Attach mail after bootstrap constructs the independently routed service."""
+
+        if self.repository.staff_assistant is not None:
+            self.edward_actions = EdwardActionGateway(
+                self.repository.portal.engine,
+                self.repository.portal,
+                self.repository.staff,
+                self.repository.staff_assistant,
+                staff_email=staff_email,
+            )
+
+    def _edward_actions(self) -> EdwardActionGateway:
+        if self.edward_actions is None:
+            raise ApiError(503, "EDWARD_ACTIONS_UNAVAILABLE", "Edward actions are unavailable")
+        return self.edward_actions
 
     async def dispatch(self, call: ServiceCall) -> object:
         operation = call.operation
@@ -626,6 +1008,23 @@ class PostgresPlatformService:
         portal = self.repository.portal
         platform = self.repository.platform
         staff = self.repository.staff
+
+        if operation in {"student.get_edward_action", "staff.get_edward_action"}:
+            return await self._edward_actions().get_intent(auth, self._path(call, "intentId", "id"))
+        if operation in {"student.confirm_edward_action", "staff.confirm_edward_action"}:
+            return await self._edward_actions().confirm(
+                auth,
+                self._path(call, "intentId", "id"),
+                expected_version=int(payload["expectedVersion"]),
+                content_sha256=str(payload["contentSha256"]),
+                request_id=call.request_id,
+            )
+        if operation in {"student.cancel_edward_action", "staff.cancel_edward_action"}:
+            return await self._edward_actions().cancel(
+                auth,
+                self._path(call, "intentId", "id"),
+                int(payload["expectedVersion"]),
+            )
 
         if operation == "student.get_dashboard":
             return await self._delegate_dashboard(auth, platform.get_student_dashboard(auth))
@@ -2356,6 +2755,127 @@ class PostgresPlatformService:
             primitives["messages"] = lambda: portal.get_student_messages(auth)
         return AssistantToolHost(cast(Any, primitives))
 
+    @staticmethod
+    def _action_conversation_response(message: str, state: Mapping[str, Any]) -> JsonDict | None:
+        """Answer a question about what this conversation already changed.
+
+        These three questions — did it happen, undo it, forget it — used to
+        fall into the read pipeline, which answered about the student instead.
+        They are answerable, and only from server state: receipts prove what
+        was committed, pending intents prove what was not, and the difference
+        is exactly what the person is asking about.
+        """
+
+        receipts = [item for item in _sequence(state.get("receipts")) if isinstance(item, Mapping)]
+        pending = [item for item in _sequence(state.get("pending")) if isinstance(item, Mapping)]
+        if action_responses.is_undo_request(message):
+            return action_responses.undo_answer(receipts)
+        if action_responses.is_abandon_request(message) and pending:
+            return action_responses.abandon_answer(pending)
+        if action_responses.is_recall_question(message):
+            return action_responses.recall_answer(receipts, pending=pending)
+        return None
+
+    async def _single_caseload_name(self, auth: AuthContext, message: str) -> str | None:
+        """A unique on-caseload student named by first name alone, or None.
+
+        Bounded: at most three capitalised tokens are searched, only exact
+        first/preferred-name matches count, and only when exactly one student
+        across every token is on the asker's caseload. Anything else keeps
+        the clarifying question. The gateway still re-resolves and
+        re-authorizes whatever this returns.
+        """
+
+        skip = {
+            "The", "This", "That", "These", "Those", "Please", "Can", "Could", "Would",
+            "Will", "What", "When", "Where", "Which", "Who", "How", "Why", "Does", "Did",
+            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+            "Create", "Make", "Queue", "Add", "Set", "Put", "Log", "Flag", "Chase",
+            "Edward", "Action", "Center",
+        }
+        tokens = [
+            token
+            for token in re.findall(r"\b([A-Z][a-z]{2,20})\b", message)
+            if token not in skip
+        ][:3]
+        if not tokens:
+            return None
+        matches: set[str] = set()
+        repo = self._staff_assistant_repo()
+        for token in tokens:
+            try:
+                found = await repo.search_students(auth, query=token, limit=25)
+            except Exception:
+                return None
+            items = list(found.get("items", []))
+            if len(items) >= 25:
+                # A full page means the roster holds more of this name than
+                # the page shows; a unique-looking match could be an artifact
+                # of truncation. Keep the question.
+                return None
+            for item in items:
+                if not item.get("onCaseload"):
+                    continue
+                first = str(item.get("name", "")).split(" ")[0].lower()
+                preferred = str(item.get("preferredName", "")).lower()
+                if token.lower() in {first, preferred}:
+                    matches.add(str(item["id"]))
+            if len(matches) > 1:
+                return None
+        return next(iter(matches)) if len(matches) == 1 else None
+
+    async def _recognize_with_model(
+        self,
+        message: str,
+        *,
+        actor: str,
+        capabilities: Sequence[str] = (),
+        request_id: str,
+        tenant_id: str,
+        allows_model_calls: bool = True,
+    ) -> tuple[SemanticActionRequest | None, JsonDict | None]:
+        """Tier 1: bounded model recognition, for turns the patterns missed.
+
+        Reached only after the deterministic tier and the conversation
+        continuation have both found nothing, so an amendment to a proposal
+        already on the table is never re-derived from a sentence that names
+        neither the action nor the target. What it returns is a *request*,
+        which the gateway then resolves, authorizes and previews exactly as it
+        does a pattern-matched one. A model failure degrades to "not
+        recognized", never to an error.
+        """
+
+        # `deterministic` mode promises a turn with no provider call at all,
+        # and that promise is what makes the mode useful as a control. The
+        # recognizer is a model call like any other, so it is gated by the
+        # same switch rather than quietly exempt from it.
+        recognizer = getattr(self.ai, "recognize_edward_action", None)
+        if recognizer is None or not allows_model_calls:
+            return None, None
+        usage: JsonDict | None = None
+
+        async def complete(**kwargs: Any) -> Mapping[str, Any] | None:
+            nonlocal usage
+            parsed = cast(Mapping[str, Any] | None, await recognizer(**kwargs))
+            if isinstance(parsed, Mapping):
+                usage = {
+                    "operation": "action_recognizer",
+                    "provider": parsed.get("provider"),
+                    "model": parsed.get("model"),
+                    "usage": parsed.get("usage"),
+                }
+            return parsed
+
+        recognized = await recognize_with_model(
+            message,
+            actor=cast(Any, actor),
+            capabilities=capabilities,
+            complete=complete,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
+        return recognized, usage
+
     async def _ask_edward(
         self,
         auth: AuthContext,
@@ -2368,6 +2888,40 @@ class PostgresPlatformService:
         page_path, page_label = _assistant_page_context(payload.get("pageContext"))
         conversation_id = payload.get("conversationId")
         client_message_id = payload.get("clientMessageId")
+        # Recognition happens before the conversation is created because a
+        # recognized action needs a durable conversation to bind the intent to,
+        # and everything else must not create one.
+        injection_reason = None if auth.is_delegate else untrusted_action_framing(message)
+        semantic_action: SemanticActionRequest | None = None
+        recognizer_usage: JsonDict | None = None
+        student_conversation_state: JsonDict = {"receipts": [], "pending": []}
+        # Recognition order is deliberate: patterns, then this conversation's
+        # own state, then the model. A correction to a proposal already on the
+        # table must not be re-derived by a tier that cannot see the table.
+        if not auth.is_delegate and injection_reason is None:
+            semantic_action = parse_student_action(message)
+            if semantic_action is None and conversation_id is not None:
+                student_conversation_state = await self._edward_actions().conversation_actions(
+                    auth, str(conversation_id)
+                )
+                semantic_action, _ = _continued_action(
+                    message, student_conversation_state, actor="student"
+                )
+            if semantic_action is None:
+                semantic_action, recognizer_usage = await self._recognize_with_model(
+                    message,
+                    actor="student",
+                    request_id=request_id,
+                    tenant_id=auth.tenant_id,
+                    allows_model_calls=execution.mode.allows_model_calls,
+                )
+        trace_action_requested = semantic_action.action if semantic_action is not None else None
+        trace_recognition_source = _recognition_source(semantic_action, recognizer_usage)
+        if semantic_action is not None and conversation_id is None:
+            created = await self.repository.portal.create_assistant_conversation(
+                auth, page_path=page_path, page_label=page_label
+            )
+            conversation_id = created["id"]
         persist = not auth.is_delegate and (
             conversation_id is not None or client_message_id is not None
         )
@@ -2380,7 +2934,10 @@ class PostgresPlatformService:
             user_message=message,
             execution_mode=execution.mode.value,
             ignored_execution_mode_request=execution.ignored_request,
+            action_requested=trace_action_requested,
+            action_recognition_source=trace_recognition_source,
         )
+        _record_recognizer_call(trace, recognizer_usage, semantic_action)
 
         if not auth.is_delegate and isinstance(client_message_id, str) and client_message_id:
             replay = await self.repository.portal.find_assistant_exchange_by_client_id(
@@ -2393,11 +2950,143 @@ class PostgresPlatformService:
                 return replay
 
         guarded = guarded_response(message)
+        conversation_state = student_conversation_state
+        if (
+            not conversation_state["receipts"]
+            and not conversation_state["pending"]
+            and conversation_id is not None
+            and not auth.is_delegate
+        ):
+            conversation_state = await self._edward_actions().conversation_actions(
+                auth, str(conversation_id)
+            )
+        action_recall = self._action_conversation_response(message, conversation_state)
         if guarded is not None:
             response = dict(guarded)
             trace.path = "pre_pipeline_safety_gate"
             trace.response_source = "deterministic"
             trace.provider = str(response.get("provider") or "guided")
+        elif injection_reason is not None:
+            response = action_responses.injection_refusal(injection_reason)
+            trace.path = "action_untrusted_framing"
+            trace.response_source = "deterministic"
+            trace.failure_codes.append(f"untrusted_{injection_reason}")
+        elif action_recall is not None:
+            response = action_recall
+            trace.path = "action_conversation_recall"
+            trace.response_source = "deterministic"
+        elif (
+            semantic_action is not None
+            and (
+                clarify := action_responses.clarification(
+                    semantic_action.action, semantic_action.fields, message=message
+                )
+            )
+            is not None
+        ):
+            # Understood, one value short. A question is the whole answer; a
+            # refusal here would throw away everything the student just said.
+            response = clarify
+            trace.path = "action_clarification"
+            trace.response_source = "deterministic"
+            trace.action_proposed = semantic_action.action
+            trace.action_policy_result = "clarify"
+        elif semantic_action is not None:
+            assert conversation_id is not None
+            try:
+                intent = await self._edward_actions().propose_student(
+                    auth,
+                    semantic_action,
+                    conversation_id=str(conversation_id),
+                    trace_id=request_id,
+                    page_path=page_path,
+                )
+                action_message = action_responses.proposal_message(
+                    semantic_action.action, _mapping(intent.get("preview"))
+                )
+                # A compound turn — "What's my preferred name right now? change
+                # it to Naddy" — owes the question an answer alongside the
+                # card. The read half runs deterministically (no model calls,
+                # ~2 ms) on only the question sentences, because the full
+                # message would classify as the very write the card already
+                # carries. A read failure never blocks the proposal.
+                read_question = (
+                    question_sentences(message) if has_question_sentence(message) else ""
+                )
+                if read_question:
+                    try:
+                        read_pipeline = AssistantPipeline(self._assistant_host(auth))
+                        read_result = await read_pipeline.execute(
+                            message=read_question,
+                            history=await self.repository.portal.get_recent_assistant_history(
+                                auth, str(conversation_id)
+                            ),
+                            page_path=page_path,
+                            page_label=page_label,
+                            trace=None,
+                        )
+                        read_prose = str(read_result.message or "").strip()
+                        if read_prose:
+                            action_message = f"{read_prose}\n\n{action_message}"
+                    except Exception:  # noqa: S110 - the card must still land
+                        pass
+                response = {
+                    "message": action_message,
+                    "blocks": [{"type": "text", "text": action_message}],
+                    "provider": "guided",
+                    "model": None,
+                    "usage": None,
+                    "suggestedActions": [],
+                    "contextReceipts": [],
+                    "widgets": [],
+                    "actionIntents": [intent],
+                    "actionReceipts": [],
+                }
+                trace.path = "action_proposal"
+                trace.response_source = "deterministic"
+                trace.classification = {
+                    "requestType": "action_request",
+                    "action": semantic_action.action,
+                    "confidence": semantic_action.confidence,
+                }
+                trace.action_proposed = semantic_action.action
+                trace.action_policy_result = "allowed"
+                trace.action_intent_id = str(intent["id"])
+                trace.action_confirmation_mode = str(intent["confirmationMode"])
+                trace.action_authorization_capability = intent.get("authorizationCapability")
+                preview = _mapping(intent.get("preview"))
+                cohort = _mapping(preview.get("cohort"))
+                trace.action_blast_radius = int(cohort.get("count") or 1)
+                trace.action_provenance = [
+                    dict(item)
+                    for item in _sequence(intent.get("provenance"))
+                    if isinstance(item, Mapping)
+                ]
+            except ApiError as error:
+                response = action_responses.denial(error.code, error.message)
+                trace.path = "action_proposal_denied"
+                trace.response_source = "deterministic"
+                trace.failure_codes.append(error.code)
+                trace.action_policy_result = "denied"
+                trace.action_denial_reason = error.code
+        elif (boundary := action_responses.boundary("student", message)) is not None:
+            # Understood, and genuinely out of reach. Naming the real limit and
+            # the real route beats both a stock refusal and a read answer to a
+            # question the student did not ask.
+            response = boundary
+            trace.path = "action_boundary"
+            trace.response_source = "deterministic"
+        elif action_responses.is_capability_question(message):
+            response = action_responses.capability_answer(
+                "student",
+                (),
+                reads=(
+                    "I can read your enrollment record — your checklist, documents, "
+                    "deadlines, financial aid, housing, registration and account."
+                ),
+            )
+            trace.path = "action_capability_answer"
+            trace.response_source = "deterministic"
         else:
             history: Sequence[Mapping[str, Any]]
             if conversation_id is not None and not auth.is_delegate:
@@ -2458,6 +3147,23 @@ class PostgresPlatformService:
                 )
             response["contextReceipts"] = result.context_receipts
 
+        # A student who says they are stuck has asked a question and, without
+        # saying so, asked for help. Answer the question, then say the route
+        # exists — it is the highest-value thing Edward can add to a read.
+        support_offer = (
+            action_responses.offers_support_route(message)
+            if not auth.is_delegate and not response.get("actionIntents")
+            else None
+        )
+        if support_offer and support_offer not in str(response.get("message") or ""):
+            response = dict(response)
+            response["message"] = f"{response.get('message', '').rstrip()} {support_offer}".strip()
+            blocks = list(_sequence(response.get("blocks")))
+            response["blocks"] = [
+                *blocks,
+                {"type": "text", "text": support_offer, "fallbackText": support_offer},
+            ]
+
         if persist:
             stored = await self.repository.portal.append_assistant_exchange(
                 auth,
@@ -2478,6 +3184,8 @@ class PostgresPlatformService:
                     "contextReceipts": response.get("contextReceipts"),
                     "suggestedActions": response.get("suggestedActions"),
                     "widgets": response.get("widgets"),
+                    "actionIntents": response.get("actionIntents"),
+                    "actionReceipts": response.get("actionReceipts"),
                 },
                 request_id=request_id,
             )
@@ -2856,6 +3564,52 @@ class PostgresPlatformService:
         message = str(payload.get("message", ""))
         conversation_id = payload.get("conversationId")
         client_message_id = payload.get("clientMessageId")
+        injection_reason = untrusted_action_framing(message)
+        staff_capabilities = await self._edward_actions().capabilities_for(auth)
+        semantic_action: SemanticActionRequest | None = None
+        recognizer_usage: JsonDict | None = None
+        staff_conversation_state: JsonDict = {"receipts": [], "pending": []}
+        staff_inherited_student_id: str | None = None
+        clarify_forced_work_item_key: str | None = None
+        clarify_pick_student = False
+        # Patterns, then this conversation's own state, then the answer to a
+        # question Edward itself just asked, then the model — the same order
+        # the student path uses, and for the same reason.
+        if injection_reason is None:
+            semantic_action = parse_staff_action(message)
+            if semantic_action is None and conversation_id is not None:
+                staff_conversation_state = await self._edward_actions().conversation_actions(
+                    auth, str(conversation_id)
+                )
+                semantic_action, staff_inherited_student_id = _continued_action(
+                    message, staff_conversation_state, actor="staff"
+                )
+            if semantic_action is None and conversation_id is not None:
+                # "What is it waiting on?" → "the registrar hasn't sent the
+                # file". The reply to Edward's own clarifying question names
+                # neither an action nor a target; both are in the question it
+                # answers. Without this the reply fell into the read plane and
+                # the exchange dead-ended one step from done.
+                recent_for_clarify = await repo.get_recent_history(auth, str(conversation_id))
+                continuation = _clarify_loop_continuation(
+                    message, list(recent_for_clarify.get("history", []))
+                )
+                if continuation is not None:
+                    semantic_action, clarify_forced_work_item_key, clarify_pick_student = (
+                        continuation
+                    )
+            if semantic_action is None:
+                semantic_action, recognizer_usage = await self._recognize_with_model(
+                    message,
+                    actor="staff",
+                    capabilities=staff_capabilities,
+                    request_id=request_id,
+                    tenant_id=auth.tenant_id,
+                    allows_model_calls=execution.mode.allows_model_calls,
+                )
+        if semantic_action is not None and conversation_id is None:
+            created = await repo.create_conversation(auth)
+            conversation_id = created["id"]
         persist = conversation_id is not None or client_message_id is not None
         trace = AssistantTurnTrace(
             trace_id=request_id,
@@ -2867,7 +3621,10 @@ class PostgresPlatformService:
             user_message=message,
             execution_mode=execution.mode.value,
             ignored_execution_mode_request=execution.ignored_request,
+            action_requested=semantic_action.action if semantic_action else None,
+            action_recognition_source=_recognition_source(semantic_action, recognizer_usage),
         )
+        _record_recognizer_call(trace, recognizer_usage, semantic_action)
 
         if isinstance(client_message_id, str) and client_message_id:
             replay = await repo.find_exchange_by_client_id(auth, client_message_id)
@@ -2878,12 +3635,47 @@ class PostgresPlatformService:
                 return replay
 
         guarded = guarded_staff_response(message)
+        conversation_state = staff_conversation_state
+        if (
+            not conversation_state["receipts"]
+            and not conversation_state["pending"]
+            and conversation_id is not None
+        ):
+            conversation_state = await self._edward_actions().conversation_actions(
+                auth, str(conversation_id)
+            )
+        inherited_student_id = staff_inherited_student_id
+        action_recall = self._action_conversation_response(message, conversation_state)
+        if guarded is None and injection_reason is not None:
+            guarded = action_responses.injection_refusal(injection_reason)
+            trace.failure_codes.append(f"untrusted_{injection_reason}")
+        elif guarded is None and action_recall is not None:
+            guarded = action_recall
+        elif guarded is None and semantic_action is None:
+            # Understood but out of reach, or a question about what Edward can
+            # do at all. Both used to answer "I'm read-only in this version",
+            # which stopped being true the moment the write plane shipped.
+            boundary = action_responses.boundary("staff", message)
+            if boundary is not None:
+                guarded = boundary
+            elif action_responses.is_capability_question(message):
+                guarded = action_responses.capability_answer(
+                    "staff",
+                    staff_capabilities,
+                    reads=(
+                        "I can read your students' enrollment state, your work queue, "
+                        "communications, inquiries and attention signals."
+                    ),
+                )
         resolved_student_id: str | None = None
         referent_action = "keep"
         active_student_id: str | None = None
+        active_cohort_filter: Mapping[str, Any] | None = None
+        prior_cohort_filter: Mapping[str, Any] | None = None
         if guarded is not None:
             response = dict(guarded)
-            trace.path = "pre_pipeline_safety_gate"
+            kind = _mapping(response.get("actionResponse")).get("kind")
+            trace.path = f"action_{kind}" if kind else "pre_pipeline_safety_gate"
             trace.response_source = "deterministic"
             trace.provider = str(response.get("provider") or "guided")
         else:
@@ -2896,14 +3688,30 @@ class PostgresPlatformService:
                 recent = await repo.get_recent_history(auth, str(conversation_id))
                 history = list(recent.get("history", []))
                 context_student_id = recent.get("activeStudentId")
+                raw_prior_cohort = recent.get("activeCohortFilter")
+                prior_cohort_filter = (
+                    raw_prior_cohort if isinstance(raw_prior_cohort, Mapping) else None
+                )
                 trace.history_source = "server"
             pipeline = StaffAssistantPipeline(
                 self._staff_assistant_host(auth),
-                model_composer=model_hook(
-                    execution.mode, self._staff_assistant_composer(auth, request_id)
+                # A recognised write request is resolved by the deterministic
+                # classifier and Action Gateway. Running model planning here
+                # would add cost and latency to a result that is discarded,
+                # while also allowing untrusted prose to influence reads used
+                # for action target binding. Normal read/reason turns retain
+                # the optional model-assisted path.
+                model_composer=(
+                    None
+                    if semantic_action is not None
+                    else model_hook(
+                        execution.mode, self._staff_assistant_composer(auth, request_id)
+                    )
                 ),
-                model_planner=model_hook(
-                    execution.mode, self._staff_assistant_planner(auth, request_id)
+                model_planner=(
+                    None
+                    if semantic_action is not None
+                    else model_hook(execution.mode, self._staff_assistant_planner(auth, request_id))
                 ),
             )
             result = await pipeline.execute(
@@ -2911,10 +3719,14 @@ class PostgresPlatformService:
                 history=history,
                 context_student_id=context_student_id,
                 trace=trace,
+                action_is_supported=semantic_action is not None,
             )
             resolved_student_id = result.resolved_student_id
             referent_action = result.referent_action
             active_student_id = result.next_referent_student_id
+            active_cohort_filter = (
+                result.classification.cohort_filter if result.classification is not None else None
+            )
             trace.student_id = resolved_student_id
             await record_assistant_usage(
                 self.repository.portal.engine,
@@ -2944,6 +3756,230 @@ class PostgresPlatformService:
                     else None
                 ),
             }
+            if semantic_action is not None:
+                action_filter = cohort_filter_from_text(message) or prior_cohort_filter
+                normalized = normalize_staff_request(message, history=history)
+                draft = (
+                    await repo.get_recent_email_draft(auth, str(conversation_id))
+                    if semantic_action.action == "communications.email.prepare"
+                    and conversation_id is not None
+                    else None
+                )
+                explicit_student = bool(
+                    normalized.candidate_student_name
+                    or normalized.candidate_student_id
+                    or (normalized.reference_token and normalized.work_item_key is None)
+                )
+                allows_inheritance = _action_may_inherit_student(
+                    message,
+                    semantic_action.action,
+                    has_server_draft=draft is not None,
+                )
+                # The read pipeline can resolve a carried referent for prose,
+                # but action target binding is stricter: current-turn entity
+                # language or an explicit anaphor is required.
+                action_student_id = (
+                    resolved_student_id if explicit_student or allows_inheritance else None
+                )
+                if action_student_id is None and inherited_student_id is not None:
+                    # An amendment to a pending proposal keeps that proposal's
+                    # target: "actually make it urgent" is about the follow-up
+                    # already on the table, and re-deriving the student from a
+                    # sentence that names nobody would lose it.
+                    action_student_id = inherited_student_id
+                if (
+                    action_student_id is None
+                    and context_student_id is not None
+                    and allows_inheritance
+                ):
+                    action_student_id = str(context_student_id)
+                if action_student_id is None and clarify_pick_student and resolved_student_id:
+                    # The turn answers Edward's own "which student?" — the
+                    # pipeline resolved whoever it named or picked, and that
+                    # resolution is the whole point of the exchange.
+                    action_student_id = resolved_student_id
+                if (
+                    action_student_id is None
+                    and semantic_action.action
+                    in {
+                        "operations.follow_up.create",
+                        "communications.email.prepare",
+                    }
+                    # Only when NO full name was in play. When one was and it
+                    # is ambiguous or out of scope, the question/denial it
+                    # produced is the answer — a first-name fallback here once
+                    # bound "Fiona Larkspur" to Fiona Calderwood, which is the
+                    # exact silent-wrong-target failure the gateway exists to
+                    # prevent.
+                    and normalized.candidate_student_name is None
+                    and normalized.candidate_student_id is None
+                    and normalized.reference_token is None
+                    and not _pipeline_already_asked(result)
+                ):
+                    # "Yusuf's been quiet — put something on my plate": one
+                    # first name, one caseload. A bounded roster search that
+                    # accepts only a UNIQUE on-caseload first-name match; two
+                    # Milos still get the question.
+                    action_student_id = await self._single_caseload_name(auth, message)
+                work_item_key = normalized.work_item_key
+                if work_item_key is None and re.search(
+                    r"\b(?:that|this|it|previous)\b", message, re.I
+                ):
+                    work_item_key = _recent_work_item_key(history)
+                    if work_item_key is None and conversation_id is not None:
+                        work_item_key = await self._edward_actions().recent_work_item_key(
+                            auth, str(conversation_id)
+                        )
+                if work_item_key is None and clarify_forced_work_item_key is not None:
+                    # The answer to "what is it waiting on?" rarely repeats the
+                    # key; the question already bound it.
+                    work_item_key = clarify_forced_work_item_key
+                # Capability is checked before anything is clarified: an
+                # adviser without the bulk permission cannot be helped by
+                # describing a cohort, and asking them to is a worse answer
+                # than saying which permission is missing.
+                required_capability = CAPABILITY_BY_ACTION.get(semantic_action.action)
+                capability_missing = bool(
+                    required_capability and required_capability not in staff_capabilities
+                )
+                clarify = (
+                    None
+                    if capability_missing
+                    else action_responses.clarification(
+                        semantic_action.action,
+                        semantic_action.fields,
+                        message=message,
+                        has_student=(
+                            action_student_id is not None
+                            or semantic_action.action
+                            not in {"operations.follow_up.create", "communications.email.prepare"}
+                        ),
+                        has_work_item=(
+                            work_item_key is not None
+                            or semantic_action.action != "operations.work_item.update"
+                        ),
+                        has_cohort=(
+                            bool(action_filter)
+                            or semantic_action.action != "operations.cohort.create_follow_ups"
+                        ),
+                        has_draft=(
+                            draft is not None
+                            or semantic_action.action != "communications.email.prepare"
+                        ),
+                    )
+                )
+                if (
+                    semantic_action.action
+                    in {"operations.follow_up.create", "communications.email.prepare"}
+                    and (listed := action_responses.several_students_named(message)) is not None
+                ):
+                    response.update(listed)
+                    trace.path = "action_clarification"
+                    trace.response_source = "deterministic"
+                    trace.action_proposed = semantic_action.action
+                    trace.action_policy_result = "clarify"
+                    semantic_action = None
+                elif clarify is not None and _pipeline_already_asked(result):
+                    # The read pipeline already asked a better question than a
+                    # generic one — an ambiguous name deserves the candidate
+                    # list it produced, not "which student?" with no options.
+                    trace.path = "action_clarification"
+                    trace.response_source = "deterministic"
+                    trace.action_proposed = semantic_action.action
+                    trace.action_policy_result = "clarify"
+                    semantic_action = None
+                elif clarify is not None:
+                    # One question instead of a policy error the staff member
+                    # cannot act on. "Create a follow-up" with no student is a
+                    # complete intent missing one noun.
+                    response.update(clarify)
+                    trace.path = "action_clarification"
+                    trace.response_source = "deterministic"
+                    trace.action_proposed = semantic_action.action
+                    trace.action_policy_result = "clarify"
+                    semantic_action = None
+                try:
+                    if semantic_action is None:
+                        raise _ActionClarified
+                    intent = await self._edward_actions().propose_staff(
+                        auth,
+                        semantic_action,
+                        conversation_id=str(conversation_id),
+                        trace_id=request_id,
+                        resolved_student_id=action_student_id,
+                        cohort_filter=action_filter,
+                        draft=draft,
+                        work_item_key=work_item_key,
+                    )
+                    action_message = (
+                        "I prepared a server-verified preview. Nothing has happened yet — "
+                        "review the target, scope, and exact effect below."
+                    )
+                    # A compound turn owes its question an answer beside the
+                    # card. The deterministic pipeline already ran for target
+                    # resolution; its prose is the read half, and it is kept
+                    # only when the turn actually asked something — a bare
+                    # command stays a bare card.
+                    read_prose = str(result.message or "").strip()
+                    if read_prose and has_question_sentence(message):
+                        action_message = f"{read_prose}\n\n{action_message}"
+                    response.update(
+                        {
+                            "message": action_message,
+                            "blocks": [{"type": "text", "text": action_message}],
+                            "provider": "guided",
+                            "model": None,
+                            "usage": None,
+                            "actionIntents": [intent],
+                            "actionReceipts": [],
+                        }
+                    )
+                    trace.path = "action_proposal"
+                    trace.response_source = "deterministic"
+                    trace.classification = {
+                        "requestType": "action_request",
+                        "action": semantic_action.action,
+                        "confidence": semantic_action.confidence,
+                    }
+                    trace.action_proposed = semantic_action.action
+                    trace.action_policy_result = "allowed"
+                    trace.action_intent_id = str(intent["id"])
+                    trace.action_confirmation_mode = str(intent["confirmationMode"])
+                    trace.action_authorization_capability = intent.get("authorizationCapability")
+                    preview = _mapping(intent.get("preview"))
+                    cohort = _mapping(preview.get("cohort"))
+                    trace.action_blast_radius = int(cohort.get("count") or 1)
+                    trace.action_provenance = [
+                        dict(item)
+                        for item in _sequence(intent.get("provenance"))
+                        if isinstance(item, Mapping)
+                    ]
+                except _ActionClarified:
+                    pass
+                except ApiError as error:
+                    denial_payload = action_responses.denial(
+                        error.code,
+                        error.message,
+                        student_name=result.resolved_student_name,
+                    )
+                    # "Who's got AST-00001, and can you mark it done?" — the
+                    # scope denial is right and the read half is still owed.
+                    # The pipeline's own answer (which names the owner) rides
+                    # in front of the denial when the turn asked a question.
+                    read_prose = str(result.message or "").strip()
+                    if read_prose and has_question_sentence(message):
+                        merged_text = f"{read_prose}\n\n{denial_payload['message']}"
+                        denial_payload = dict(denial_payload)
+                        denial_payload["message"] = merged_text
+                        denial_payload["blocks"] = [
+                            {"type": "text", "text": merged_text, "fallbackText": merged_text}
+                        ]
+                    response.update(denial_payload)
+                    trace.path = "action_proposal_denied"
+                    trace.response_source = "deterministic"
+                    trace.failure_codes.append(error.code)
+                    trace.action_policy_result = "denied"
+                    trace.action_denial_reason = error.code
 
         if persist:
             stored = await repo.append_exchange(
@@ -2960,11 +3996,21 @@ class PostgresPlatformService:
                     "usage": response.get("usage"),
                     "blocks": response.get("blocks"),
                     "contextReceipts": response.get("contextReceipts"),
+                    "actionIntents": response.get("actionIntents"),
+                    "actionReceipts": response.get("actionReceipts"),
                 },
                 referenced_student_id=resolved_student_id,
                 request_id=request_id,
                 referent_action=referent_action,
                 active_student_id=active_student_id,
+                active_cohort_filter=active_cohort_filter,
+                cohort_action=(
+                    "set"
+                    if active_cohort_filter
+                    else "clear"
+                    if resolved_student_id is not None
+                    else "keep"
+                ),
             )
             response.update(stored)
             trace.conversation_id = str(stored.get("conversationId") or "") or trace.conversation_id

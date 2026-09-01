@@ -252,6 +252,14 @@ _AID_ENTITY = re.compile(
     r"|\bwork[- ]study\b|\bverification worksheet\b|\bdisburse|\baward",
     re.IGNORECASE,
 )
+_AID_FUTURE_OUTCOME = re.compile(
+    r"\b(?:next (?:year|term|semester)|future (?:year|term|semester)|upcoming academic year)\b"
+    r"|\b(?:renew(?:ed|al)?|increase(?:d)?|more|additional)\b[^?]{0,32}"
+    r"\b(?:aid|award|grant|scholarship|funding)\b"
+    r"|\b(?:will|would|could) i (?:get|receive|qualify for|be awarded)\b[^?]{0,48}"
+    r"\b(?:aid|award|grant|scholarship|funding)\b",
+    re.IGNORECASE,
+)
 _HOUSING_ENTITY = re.compile(
     r"\bhousing\b|\bdorm\w*\b|\bresidence\b|\broommate\b|\broom\b|\bon[- ]campus living\b",
     re.IGNORECASE,
@@ -462,6 +470,15 @@ def _classify(request: NormalizedRequest) -> Classification | None:
     if _HOUSING_ASSIGNMENT_QUESTION.search(text):
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="housing_assignment_unavailable"
+        )
+
+    # Future aid awards are institutional decisions, not a projection from the
+    # student's current checklist. Route them away from the aid-status branch
+    # before a prose model can turn current requirements into fabricated
+    # eligibility or a promise about a later award cycle.
+    if aid_entity and _AID_FUTURE_OUTCOME.search(text):
+        return Classification(
+            "unsupported_or_out_of_scope", 1, requirement_reference="future_aid_unavailable"
         )
 
     # Institutional policy questions are settled before the domain branches so

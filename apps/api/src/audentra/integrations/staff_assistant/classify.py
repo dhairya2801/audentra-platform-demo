@@ -29,6 +29,7 @@ STAFF_REQUEST_TYPES = (
     "greeting",
     "capability_overview",
     "action_request",
+    "supported_action_request",
     "unsupported_metric",
     "draft_email",
     "draft_sms",
@@ -214,6 +215,10 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
     (
         re.compile(
             r"\b(?:missing|no|without|owes?|owing|awaiting|await|lacking"
+            # "everyone who hasn't submitted a transcript" is the same cohort as
+            # "students who haven't submitted a transcript"; the subject word
+            # does not change the predicate.
+            r"|(?:has|have)(?:n'?t| not)\s+(?:sent|submitted|uploaded|provided)"
             r"|haven'?t (?:sent|submitted|uploaded)|still (?:need|owe|missing)"
             r"|waiting (?:on|for)|yet to (?:send|submit|upload))"
             r"[^.?]{0,28}\btranscripts?\b"
@@ -319,6 +324,67 @@ _COHORT_PREDICATES: tuple[tuple[re.Pattern[str], dict[str, Any]], ...] = (
         ),
         {"hasOpenWorkItem": True},
     ),
+    # Predicates the CohortFilter vocabulary has always supported and the
+    # parser never reached. Without them "how many students have an open
+    # blocking requirement?" produced no filter, the unrecognised-qualifier
+    # guard correctly refused to answer 2,576, and the question fell through
+    # to the single-student branches — which asked which student was meant
+    # about a question that was plainly about all of them. It also made every
+    # cohort *action* over those groups unreachable, because Edward can only
+    # act on a population it can count.
+    (
+        re.compile(
+            r"\b(?:open|outstanding|unmet|remaining)\s+blocking\s+requirements?\b"
+            r"|\bblocking\s+requirements?\b(?!\s*(?:breakdown|distribution))"
+            r"|\bblocked (?:from|on) (?:enrol|registration)\w*\b",
+            re.I,
+        ),
+        {"hasOpenBlockingRequirement": True},
+    ),
+    (
+        re.compile(
+            r"\b(?:open|outstanding|incomplete|unfinished)\s+requirements?\b"
+            r"|\brequirements?\s+(?:still\s+)?(?:open|outstanding|incomplete)\b",
+            re.I,
+        ),
+        {"requirementState": "open"},
+    ),
+    (
+        re.compile(
+            r"\brejected\s+(?:a\s+)?documents?\b|\bdocuments?\s+(?:was|were)\s+rejected\b", re.I
+        ),
+        {"documentState": "rejected"},
+    ),
+    (
+        re.compile(
+            r"\bdocuments?\s+(?:under|in)\s+review\b|\b(?:under|in)\s+review\s+documents?\b",
+            re.I,
+        ),
+        {"documentState": "under_review"},
+    ),
+    (
+        re.compile(
+            r"\bmissing\s+(?:an?\s+)?immuni[sz]ation\b|\bimmuni[sz]ation\s+records?\s+missing\b"
+            r"|\bno\s+immuni[sz]ation\b|\bwithout\s+(?:an?\s+)?immuni[sz]ation\b",
+            re.I,
+        ),
+        {"documentCategory": "immunization", "documentState": "missing"},
+    ),
+    (
+        re.compile(
+            r"\bno (?:primary |assigned )?advis(?:er|or)\b|\bwithout an advis(?:er|or)\b"
+            r"|\bunassigned\b|\badvis(?:er|or)less\b",
+            re.I,
+        ),
+        {"adviserState": "none"},
+    ),
+)
+
+#: "class of 2029", "the 2030 cohort" — a year, not a filter phrase, so it is
+#: extracted rather than matched. Bounded to plausible admission years so a
+#: dollar amount or a student reference can never become a class year.
+_CLASS_YEAR = re.compile(
+    r"\bclass of (?P<year>20[2-4][0-9])\b|\b(?P<year2>20[2-4][0-9]) cohort\b", re.I
 )
 
 _COHORT_GROUP_PHRASES: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -364,7 +430,36 @@ def _cohort_predicates(text: str) -> dict[str, Any]:
         if pattern.search(text):
             for key, value in fields.items():
                 filters.setdefault(key, value)
+    year = _CLASS_YEAR.search(text)
+    if year:
+        filters.setdefault("classYear", int(year.group("year") or year.group("year2")))
+    program = _PROGRAM_QUALIFIER.search(text)
+    if program:
+        filters.setdefault("program", program.group("program").strip())
     return filters
+
+
+#: "Computer Science students", "students in Data Science". A program name is a
+#: proper noun before the word students, or after "in"/"studying". It is the
+#: one cohort dimension that cannot be enumerated in a pattern table, so it is
+#: captured and passed to the repository, which matches it against the real
+#: program list and returns nothing when it is not one.
+_PROGRAM_QUALIFIER = re.compile(
+    r"\b(?P<program>(?:[A-Z][a-z]+)(?:\s+(?:[A-Z][a-z]+|and|of))*)\s+(?:students|majors)\b"
+    r"|\bstudents?\s+(?:in|studying|majoring in|doing|on)\s+"
+    r"(?P<program2>(?:[A-Z][a-z]+)(?:\s+(?:[A-Z][a-z]+|and|of))*)\b"
+)
+
+
+def cohort_filter_from_text(text: str) -> dict[str, Any]:
+    """Return only the validated cohort vocabulary recognized in user text.
+
+    Action planning reuses the exact predicate parser used by read/count
+    questions. It deliberately returns no IDs and an empty mapping when no
+    supported population was expressed.
+    """
+
+    return _cohort_predicates(text)
 
 
 def classify_cohort_question(text: str) -> StaffClassification | None:
@@ -853,7 +948,13 @@ def _classify_primary(
     ):
         return StaffClassification("mailbox_read", 0.99)
 
-    if request.action_kind is not None:
+    if request.action_kind is not None and not request.action_is_supported:
+        # A *supported* write request deliberately does not stop here. The
+        # action plane needs the student the message names, and that student is
+        # resolved by the branches below — so short-circuiting to an action
+        # answer left the gateway with no target and made Edward ask "which
+        # student?" about a message that named one. The composed prose is
+        # discarded for a recognized action; only the resolution is used.
         return StaffClassification("action_request", 1, reference=request.action_kind)
 
     ranking_language = bool(_RANKING_LANGUAGE.search(text))

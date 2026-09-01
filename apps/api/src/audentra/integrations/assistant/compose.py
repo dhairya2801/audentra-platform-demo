@@ -492,7 +492,9 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
         for exemption in state.academics.get("suggestedExemptions", []):
             lines.append(f"Suggested course exemption: {exemption}")
     if state.campus_life:
-        for event in state.campus_life.get("upcomingEvents", []):
+        for event in (
+            state.campus_life.get("events") or state.campus_life.get("upcomingEvents") or []
+        ):
             lines.append(
                 f"Campus event: {event.get('title')} at {event.get('location')} "
                 f"on {event.get('startsAt')}"
@@ -1840,13 +1842,22 @@ def _compose_unsupported(
             "here that predicts them. What I can show you is your housing "
             "step: whether it's open to you, and what has to clear first."
         )
+    elif reference == "future_aid_unavailable":
+        message = (
+            "I can't predict or promise future financial aid or scholarship "
+            "awards. Those are institutional decisions for the relevant award "
+            "cycle. I can show the awards and requirements currently recorded "
+            "for you."
+        )
     elif reference and reference.endswith("write_unavailable"):
         destination, href = _WRITE_DESTINATIONS.get(
             reference, ("the matching portal page", links.ENROLLMENT)
         )
         message = (
-            "I can't make that change myself — I'm read-only. You can do it "
-            f"yourself in {destination}."
+            f"That isn't a change I can make from here — {destination} is where it "
+            "happens. I can change your preferred name, your pronouns, your mobile "
+            "number, and whether we contact you by email or text, and I can open a "
+            "support request so a person picks something up."
         )
         return ComposedAnswer(
             message=message,
@@ -1925,7 +1936,7 @@ def _compose_campus_life(
     if _read_failed(state, "getCampusLife"):
         return _unavailable_answer(state, "getCampusLife")
     campus = state.campus_life or {}
-    events = campus.get("upcomingEvents", [])
+    events = campus.get("events") or campus.get("upcomingEvents") or []
     clubs = campus.get("clubs", [])
     if not events and not clubs:
         message = (

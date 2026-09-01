@@ -734,6 +734,17 @@ class AskStaffEdwardRequest(StrictRequest):
     ) = None
 
 
+class ConfirmEdwardActionRequest(StrictRequest):
+    """Confirm the exact server-owned preview the actor reviewed."""
+
+    expected_version: StrictInt = Field(ge=1)
+    content_sha256: Annotated[StrictStr, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
+
+
+class CancelEdwardActionRequest(StrictRequest):
+    expected_version: StrictInt = Field(ge=1)
+
+
 class EdwardFeedbackRequest(StrictRequest):
     """A partial update to the one feedback record for an Edward response."""
 

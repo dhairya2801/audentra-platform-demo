@@ -7530,7 +7530,7 @@ class PostgresPortalRepository:
             """
             SELECT id, conversation_id, role, input_mode, content, client_message_id,
                    request_id, provider, model, usage, blocks, context_receipts,
-                   suggested_actions, widgets, created_at
+                   suggested_actions, widgets, action_intents, action_receipts, created_at
             FROM assistant_message
             WHERE tenant_id=:tenant_id AND conversation_id=:conversation_id
             ORDER BY created_at, CASE role WHEN 'user' THEN 0 ELSE 1 END, id
@@ -7606,7 +7606,7 @@ class PostgresPortalRepository:
                 """
                 SELECT id, conversation_id, role, input_mode, content, client_message_id,
                        request_id, provider, model, usage, blocks, context_receipts,
-                       suggested_actions, widgets, created_at
+                       suggested_actions, widgets, action_intents, action_receipts, created_at
                 FROM assistant_message
                 WHERE tenant_id=:tenant_id AND student_id=:student_id
                   AND conversation_id=:conversation_id
@@ -7639,6 +7639,8 @@ class PostgresPortalRepository:
             "suggestedActions": assistant.get("suggestedActions", []),
             "contextReceipts": assistant.get("contextReceipts", []),
             "widgets": assistant.get("widgets", []),
+            "actionIntents": assistant.get("actionIntents", []),
+            "actionReceipts": assistant.get("actionReceipts", []),
         }
 
     async def append_assistant_exchange(
@@ -7759,12 +7761,14 @@ class PostgresPortalRepository:
                     INSERT INTO assistant_message (
                       id, tenant_id, conversation_id, student_id, role, input_mode,
                       content, request_id, provider, model, usage, blocks,
-                      context_receipts, suggested_actions, widgets
+                      context_receipts, suggested_actions, widgets,
+                      action_intents, action_receipts
                     ) VALUES (
                       :id, :tenant_id, :conversation_id, :student_id, 'assistant', 'text',
                       :content, :request_id, :provider, :model, CAST(:usage AS jsonb),
                       CAST(:blocks AS jsonb), CAST(:context_receipts AS jsonb),
-                      CAST(:suggested_actions AS jsonb), CAST(:widgets AS jsonb)
+                      CAST(:suggested_actions AS jsonb), CAST(:widgets AS jsonb),
+                      CAST(:action_intents AS jsonb), CAST(:action_receipts AS jsonb)
                     )
                     """
                 ),
@@ -7786,6 +7790,8 @@ class PostgresPortalRepository:
                     "context_receipts": _json(assistant_message.get("contextReceipts") or []),
                     "suggested_actions": _json(assistant_message.get("suggestedActions") or []),
                     "widgets": _json(assistant_message.get("widgets") or []),
+                    "action_intents": _json(assistant_message.get("actionIntents") or []),
+                    "action_receipts": _json(assistant_message.get("actionReceipts") or []),
                 },
             )
             await connection.execute(
@@ -7819,6 +7825,8 @@ def _map_assistant_message(row: Mapping[str, Any]) -> JsonDict:
         "contextReceipts": _list(row.get("context_receipts") or []),
         "suggestedActions": _list(row.get("suggested_actions") or []),
         "widgets": _list(row.get("widgets") or []),
+        "actionIntents": _list(row.get("action_intents") or []),
+        "actionReceipts": _list(row.get("action_receipts") or []),
         "createdAt": _iso(row["created_at"]),
     }
     if row.get("blocks") is not None:

@@ -156,6 +156,7 @@ class DemoStaffSeed:
     display_name: str
     email: str
     component: str
+    role_code: str = "staff"
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,6 +767,7 @@ _DEMO_STAFF = (
         "Priya Shah",
         "priya.shah@aster.example.edu",
         "Admissions",
+        "operations_lead",
     ),
     DemoStaffSeed(
         ASTER_TENANT_ID,
@@ -787,6 +789,7 @@ _DEMO_STAFF = (
         "Priya Shah",
         "priya.shah@harvard.example.edu",
         "Admissions",
+        "operations_lead",
     ),
     DemoStaffSeed(
         HARVARD_TENANT_ID,
@@ -1180,6 +1183,7 @@ _SYNTHETIC_STAFF = (
         "Priya Shah",
         "priya.shah@aster-demo.example.edu",
         "Admissions",
+        "operations_lead",
     ),
     DemoStaffSeed(
         SYNTHETIC_TENANT_ID,
@@ -2466,11 +2470,13 @@ async def _ensure_demo_staff_and_work(
             text(
                 """
                 INSERT INTO staff_member (
-                  id, tenant_id, display_name, email_normalized, component, active
+                  id, tenant_id, display_name, email_normalized, component, active,
+                  role_code
                 ) VALUES (
-                  :id, :tenant_id, :display_name, :email, :component, true
+                  :id, :tenant_id, :display_name, :email, :component, true,
+                  :role_code
                 )
-                ON CONFLICT (id) DO NOTHING
+                ON CONFLICT (id) DO UPDATE SET role_code=EXCLUDED.role_code
                 """
             ),
             {
@@ -2479,7 +2485,51 @@ async def _ensure_demo_staff_and_work(
                 "display_name": staff.display_name,
                 "email": staff.email,
                 "component": staff.component,
+                "role_code": staff.role_code,
             },
+        )
+    seeded_tenants = sorted(
+        {
+            staff.tenant_id
+            for staff in staff_seeds
+            if tenant_id is None or staff.tenant_id == tenant_id
+        }
+    )
+    for seeded_tenant_id in seeded_tenants:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_role_capability (tenant_id, role_code, capability)
+                SELECT DISTINCT member.tenant_id, member.role_code, capability
+                FROM staff_member member
+                CROSS JOIN unnest(ARRAY[
+                  'edward.act', 'edward.follow_up.create',
+                  'edward.work_item.update', 'edward.email.prepare'
+                ]::text[]) capability
+                WHERE member.tenant_id=:tenant_id
+                ON CONFLICT DO NOTHING
+                """
+            ),
+            {"tenant_id": UUID(seeded_tenant_id)},
+        )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO staff_role_capability (tenant_id, role_code, capability)
+                SELECT DISTINCT member.tenant_id, member.role_code, capability
+                FROM staff_member member
+                CROSS JOIN unnest(ARRAY[
+                  'edward.student.any', 'edward.cohort.follow_up.create'
+                ]::text[]) capability
+                WHERE member.tenant_id=:tenant_id
+                  AND lower(member.role_code) IN (
+                    'admin', 'administrator', 'director', 'manager', 'supervisor',
+                    'operations_lead'
+                  )
+                ON CONFLICT DO NOTHING
+                """
+            ),
+            {"tenant_id": UUID(seeded_tenant_id)},
         )
     for item in work_item_seeds:
         if tenant_id is not None and item.tenant_id != tenant_id:

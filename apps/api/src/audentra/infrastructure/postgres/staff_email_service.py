@@ -466,19 +466,19 @@ class PostgresStaffEmailService:
                     SELECT DISTINCT mailbox.id, mailbox.provider, mailbox.address_normalized,
                            mailbox.display_name, mailbox.mailbox_kind, mailbox.status,
                            mailbox.last_synced_at,
-                           bool_or(grant.can_read) AS can_read,
-                           bool_or(grant.can_send) AS can_send,
-                           bool_or(grant.can_manage) AS can_manage
+                           bool_or(mgrant.can_read) AS can_read,
+                           bool_or(mgrant.can_send) AS can_send,
+                           bool_or(mgrant.can_manage) AS can_manage
                     FROM staff_mailbox mailbox
-                    JOIN staff_mailbox_grant grant
-                      ON grant.tenant_id=mailbox.tenant_id AND grant.mailbox_id=mailbox.id
+                    JOIN staff_mailbox_grant mgrant
+                      ON mgrant.tenant_id=mailbox.tenant_id AND mgrant.mailbox_id=mailbox.id
                     JOIN staff_member member
                       ON member.tenant_id=mailbox.tenant_id AND member.id=:staff_id
                     WHERE mailbox.tenant_id=:tenant_id AND member.active=true
                       AND (
-                        grant.principal_type='all_staff'
-                        OR (grant.principal_type='staff' AND grant.staff_member_id=:staff_id)
-                        OR (grant.principal_type='component' AND grant.component=member.component)
+                        mgrant.principal_type='all_staff'
+                        OR (mgrant.principal_type='staff' AND mgrant.staff_member_id=:staff_id)
+                        OR (mgrant.principal_type='component' AND mgrant.component=member.component)
                       )
                     GROUP BY mailbox.id
                     ORDER BY mailbox.address_normalized
@@ -584,6 +584,7 @@ class PostgresStaffEmailService:
         student_id = str(payload.get("studentId") or "").strip() or None
         reply_id = str(payload.get("replyToMessageId") or "").strip() or None
         interaction_id = str(payload.get("interactionId") or "").strip() or None
+        agent_action_id = str(payload.get("agentActionIntentId") or "").strip() or None
         if not subject or len(subject) > 998 or not body or len(body) > 100_000:
             raise BadRequestError("EMAIL_CONTENT_INVALID", "Subject and body are required")
         if (student_id is None) == (reply_id is None):
@@ -597,7 +598,63 @@ class PostgresStaffEmailService:
         interaction_uuid = (
             _uuid(interaction_id, "interactionId") if interaction_id is not None else None
         )
+        agent_action_uuid = (
+            _uuid(agent_action_id, "agentActionIntentId") if agent_action_id is not None else None
+        )
         async with self._engine.begin() as connection:
+            if agent_action_uuid is not None:
+                action = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT id FROM agent_action_intent
+                                WHERE tenant_id=:tenant_id AND id=:intent_id
+                                  AND actor_type='staff' AND staff_member_id=:staff_id
+                                  AND action_type='communications.email.prepare'
+                                  AND status='executing'
+                                FOR UPDATE
+                                """
+                            ),
+                            {
+                                "tenant_id": UUID(auth.tenant_id),
+                                "intent_id": agent_action_uuid,
+                                "staff_id": UUID(auth.actor_id),
+                            },
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if action is None:
+                    raise ApiError(
+                        403,
+                        "EDWARD_EMAIL_ACTION_FORBIDDEN",
+                        "The Edward email action is not executable by this staff member",
+                    )
+                existing = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT * FROM staff_email_send_intent
+                                WHERE tenant_id=:tenant_id
+                                  AND agent_action_intent_id=:intent_id
+                                  AND created_by_staff_id=:staff_id
+                                """
+                            ),
+                            {
+                                "tenant_id": UUID(auth.tenant_id),
+                                "intent_id": agent_action_uuid,
+                                "staff_id": UUID(auth.actor_id),
+                            },
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if existing is not None:
+                    return _send_intent_response(cast(Mapping[str, object], existing))
             mailbox = await self._authorized_mailbox(
                 connection, auth, str(mailbox_uuid), permission="send", lock=True
             )
@@ -686,11 +743,13 @@ class PostgresStaffEmailService:
                     INSERT INTO staff_email_send_intent (
                       id, tenant_id, mailbox_id, created_by_staff_id, student_id,
                       interaction_id, reply_to_message_id, recipient_addresses,
-                      subject, body_text, content_sha256, stable_message_id, expires_at
+                      subject, body_text, content_sha256, stable_message_id, expires_at,
+                      agent_action_intent_id
                     ) VALUES (
                       :id, :tenant_id, :mailbox_id, :staff_id, :student_id,
                       :interaction_id, :reply_id, CAST(:recipients AS jsonb),
-                      :subject, :body, :digest, :message_id, :expires_at
+                      :subject, :body, :digest, :message_id, :expires_at,
+                      :agent_action_intent_id
                     )
                     """
                 ),
@@ -708,6 +767,7 @@ class PostgresStaffEmailService:
                     "digest": digest,
                     "message_id": stable_message_id,
                     "expires_at": expires_at,
+                    "agent_action_intent_id": agent_action_uuid,
                 },
             )
         return {
@@ -810,17 +870,17 @@ class PostgresStaffEmailService:
             result = await connection.execute(
                 text(
                     """
-                    SELECT mailbox.*, authorization.provider_tenant,
-                           authorization.granted_scopes,
-                           authorization.refresh_token_ciphertext,
-                           authorization.refresh_token_nonce,
-                           authorization.id AS authorization_id
+                    SELECT mailbox.*, mail_auth.provider_tenant,
+                           mail_auth.granted_scopes,
+                           mail_auth.refresh_token_ciphertext,
+                           mail_auth.refresh_token_nonce,
+                           mail_auth.id AS authorization_id
                     FROM staff_mailbox mailbox
-                    JOIN staff_mail_authorization authorization
-                      ON authorization.tenant_id=mailbox.tenant_id
-                     AND authorization.id=mailbox.authorization_id
+                    JOIN staff_mail_authorization mail_auth
+                      ON mail_auth.tenant_id=mailbox.tenant_id
+                     AND mail_auth.id=mailbox.authorization_id
                     WHERE mailbox.tenant_id=:tenant_id AND mailbox.id=:mailbox_id
-                      AND mailbox.status='active' AND authorization.status='active'
+                      AND mailbox.status='active' AND mail_auth.status='active'
                     """
                 ),
                 {"tenant_id": UUID(tenant_id), "mailbox_id": UUID(mailbox_id)},
@@ -850,18 +910,18 @@ class PostgresStaffEmailService:
                     """
                     SELECT intent.*, mailbox.provider, mailbox.address_normalized,
                            mailbox.provider_mailbox_id, mailbox.authorization_id,
-                           authorization.provider_tenant, authorization.granted_scopes,
-                           authorization.refresh_token_ciphertext,
-                           authorization.refresh_token_nonce
+                           mail_auth.provider_tenant, mail_auth.granted_scopes,
+                           mail_auth.refresh_token_ciphertext,
+                           mail_auth.refresh_token_nonce
                     FROM staff_email_send_intent intent
                     JOIN staff_mailbox mailbox
                       ON mailbox.tenant_id=intent.tenant_id AND mailbox.id=intent.mailbox_id
-                    JOIN staff_mail_authorization authorization
-                      ON authorization.tenant_id=mailbox.tenant_id
-                     AND authorization.id=mailbox.authorization_id
+                    JOIN staff_mail_authorization mail_auth
+                      ON mail_auth.tenant_id=mailbox.tenant_id
+                     AND mail_auth.id=mailbox.authorization_id
                     WHERE intent.tenant_id=:tenant_id AND intent.id=:intent_id
                       AND intent.status IN ('queued', 'sending')
-                      AND mailbox.status='active' AND authorization.status='active'
+                      AND mailbox.status='active' AND mail_auth.status='active'
                     FOR UPDATE OF intent
                     """
                 ),
@@ -1649,34 +1709,34 @@ class PostgresStaffEmailService:
     ) -> Mapping[str, object]:
         self._require_staff(auth)
         query = """
-            SELECT mailbox.*, authorization.provider_subject,
-                   authorization.provider_tenant, authorization.granted_scopes,
-                   authorization.refresh_token_ciphertext,
-                   authorization.refresh_token_nonce,
-                   authorization.status AS authorization_status
+            SELECT mailbox.*, mail_auth.provider_subject,
+                   mail_auth.provider_tenant, mail_auth.granted_scopes,
+                   mail_auth.refresh_token_ciphertext,
+                   mail_auth.refresh_token_nonce,
+                   mail_auth.status AS authorization_status
             FROM staff_mailbox mailbox
-            JOIN staff_mail_authorization authorization
-              ON authorization.tenant_id=mailbox.tenant_id
-             AND authorization.id=mailbox.authorization_id
+            JOIN staff_mail_authorization mail_auth
+              ON mail_auth.tenant_id=mailbox.tenant_id
+             AND mail_auth.id=mailbox.authorization_id
             JOIN staff_member member
               ON member.tenant_id=mailbox.tenant_id AND member.id=:staff_id
             WHERE mailbox.tenant_id=:tenant_id AND mailbox.id=:mailbox_id
-              AND mailbox.status='active' AND authorization.status='active'
+              AND mailbox.status='active' AND mail_auth.status='active'
               AND member.active=true
               AND EXISTS (
-                SELECT 1 FROM staff_mailbox_grant grant
-                WHERE grant.tenant_id=mailbox.tenant_id
-                  AND grant.mailbox_id=mailbox.id
+                SELECT 1 FROM staff_mailbox_grant mgrant
+                WHERE mgrant.tenant_id=mailbox.tenant_id
+                  AND mgrant.mailbox_id=mailbox.id
                   AND CASE :permission
-                    WHEN 'read' THEN grant.can_read
-                    WHEN 'send' THEN grant.can_send
-                    WHEN 'manage' THEN grant.can_manage
+                    WHEN 'read' THEN mgrant.can_read
+                    WHEN 'send' THEN mgrant.can_send
+                    WHEN 'manage' THEN mgrant.can_manage
                     ELSE false
                   END = true
                   AND (
-                    grant.principal_type='all_staff'
-                    OR (grant.principal_type='staff' AND grant.staff_member_id=:staff_id)
-                    OR (grant.principal_type='component' AND grant.component=member.component)
+                    mgrant.principal_type='all_staff'
+                    OR (mgrant.principal_type='staff' AND mgrant.staff_member_id=:staff_id)
+                    OR (mgrant.principal_type='component' AND mgrant.component=member.component)
                   )
               )
         """

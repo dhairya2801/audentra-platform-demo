@@ -33,7 +33,7 @@ from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger("audentra.assistant.trace")
 
@@ -152,6 +152,27 @@ class AssistantTurnTrace:
     usage: JsonDict | None = None
     response_source: str | None = None
     failure_codes: list[str] = field(default_factory=list)
+    # Action-plane observability. These are server decisions, never model
+    # chain-of-thought: requested semantic action, policy result, immutable
+    # intent identity and the typed provenance shown in its preview.
+    action_requested: str | None = None
+    # Which recognition stage produced (or declined) the request: "pattern",
+    # "continuation", "model", "model_none" (tier 1 ran and found nothing),
+    # or None when no recognition stage was consulted at all. The suites need
+    # this to attribute a recognition to a tier — a tier invisible in the
+    # trace is a tier whose regressions cannot be attributed.
+    action_recognition_source: str | None = None
+    action_proposed: str | None = None
+    action_policy_result: str | None = None
+    action_denial_reason: str | None = None
+    action_intent_id: str | None = None
+    action_confirmation_mode: str | None = None
+    action_authorization_capability: str | None = None
+    action_blast_radius: int | None = None
+    action_provenance: list[JsonDict] = field(default_factory=list)
+    action_receipt: JsonDict | None = None
+    action_execution_result: str | None = None
+    action_latency_ms: int | None = None
     final_message: str = ""
     user_message_id: str | None = None
     assistant_message_id: str | None = None
@@ -267,6 +288,19 @@ class AssistantTurnTrace:
             "usage": self.usage,
             "responseSource": self.response_source,
             "failureCodes": list(self.failure_codes),
+            "actionRequested": self.action_requested,
+            "actionRecognitionSource": self.action_recognition_source,
+            "actionProposed": self.action_proposed,
+            "actionPolicyResult": self.action_policy_result,
+            "actionDenialReason": self.action_denial_reason,
+            "actionIntentId": self.action_intent_id,
+            "actionConfirmationMode": self.action_confirmation_mode,
+            "actionAuthorizationCapability": self.action_authorization_capability,
+            "actionBlastRadius": self.action_blast_radius,
+            "actionProvenance": sanitize_trace_value(self.action_provenance),
+            "actionReceipt": sanitize_trace_value(self.action_receipt),
+            "actionExecutionResult": self.action_execution_result,
+            "actionLatencyMs": self.action_latency_ms,
             "finalMessage": sanitize_trace_value(self.final_message),
             "userMessageId": self.user_message_id,
             "assistantMessageId": self.assistant_message_id,
@@ -318,6 +352,17 @@ class AssistantTraceRecorder:
                     return payload
         return None
 
+    def merge_payload(self, trace_id: str, updates: Mapping[str, Any]) -> bool:
+        """Merge later action-plane facts into the original turn trace."""
+
+        safe_updates = cast(JsonDict, sanitize_trace_value(updates))
+        with self._lock:
+            for payload in reversed(self._traces):
+                if payload.get("traceId") == trace_id:
+                    payload.update(safe_updates)
+                    return True
+        return False
+
     def list(self, limit: int = 50) -> list[JsonDict]:
         """Newest first, summaries only, so the index stays readable."""
 
@@ -342,6 +387,10 @@ class AssistantTraceRecorder:
                 "modelIterations": payload.get("modelIterations"),
                 "responseSource": payload.get("responseSource"),
                 "failureCodes": payload.get("failureCodes"),
+                "actionRequested": payload.get("actionRequested"),
+                "actionProposed": payload.get("actionProposed"),
+                "actionPolicyResult": payload.get("actionPolicyResult"),
+                "actionExecutionResult": payload.get("actionExecutionResult"),
                 "durationMs": payload.get("durationMs"),
             }
             for payload in reversed(recent)

@@ -88,6 +88,7 @@ _SKIP_REWRITE = frozenset(
         "greeting",
         "capability_overview",
         "action_request",
+        "supported_action_request",
         "unsupported_metric",
         "unsupported_or_out_of_scope",
         "draft_email",
@@ -198,10 +199,13 @@ class StaffAssistantPipeline:
         history: Sequence[Mapping[str, str]] = (),
         context_student_id: str | None = None,
         trace: AssistantTurnTrace | None = None,
+        action_is_supported: bool = False,
     ) -> StaffAssistantPipelineResult:
         failure_codes: list[str] = []
         stage_started = time.perf_counter()
-        request = normalize_staff_request(message, history=history)
+        request = normalize_staff_request(
+            message, history=history, action_is_supported=action_is_supported
+        )
         if trace is not None:
             trace.user_message = request.text
             trace.history_messages = len(request.history)
@@ -911,6 +915,14 @@ class StaffAssistantPipeline:
                 # resolution — the staff member typed something else.
                 resolution.short_circuit = _fuzzy_suggestion_answer(explicit_name, items)
                 return resolution
+            if len(items) > 1 and (request.action_is_supported or request.is_draft_request):
+                # Same-name candidates on a write-action turn narrow to the
+                # asker's own caseload: the gateway would deny every other one
+                # anyway, so a unique on-caseload match is the student meant.
+                # See `_add_students` in entities.py for the full argument.
+                in_scope = [item for item in items if item.get("onCaseload")]
+                if len(in_scope) >= 1:
+                    items = in_scope
             if len(items) == 1:
                 resolve_item(items[0])
                 return resolution

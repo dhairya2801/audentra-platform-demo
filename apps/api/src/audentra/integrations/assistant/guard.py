@@ -15,6 +15,8 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from audentra.integrations.action_receipts import action_claim_has_receipt
+
 MAX_ANSWER_CHARACTERS = 1_200
 
 _WRITE_CLAIM = re.compile(
@@ -226,6 +228,7 @@ def guard_grounded_answer(
     no_official_holds: bool = False,
     unavailable_sources: Sequence[str] = (),
     deposit_payment_pending: bool = False,
+    action_receipts: Sequence[Mapping[str, object]] = (),
 ) -> GuardResult:
     normalized = re.sub(r"\s+", " ", answer).strip()
 
@@ -236,7 +239,9 @@ def guard_grounded_answer(
         return reject("empty")
     if len(normalized) > MAX_ANSWER_CHARACTERS:
         return reject("too_long")
-    if _WRITE_CLAIM.search(normalized):
+    if _WRITE_CLAIM.search(normalized) and not action_claim_has_receipt(
+        normalized, action_receipts
+    ):
         return reject("claimed_write")
     if _IDENTIFIER.search(normalized):
         return reject("leaked_identifier")

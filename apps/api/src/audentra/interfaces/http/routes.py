@@ -18,10 +18,12 @@ from audentra.contracts.requests import (
     ActivityEventBatchRequest,
     AskEdwardRequest,
     AskStaffEdwardRequest,
+    CancelEdwardActionRequest,
     CancelStudentAppointmentRequest,
     CompleteFerpaAuthorizationRequest,
     CompleteStaffInteractionRequest,
     CompleteStudentOnboardingRequest,
+    ConfirmEdwardActionRequest,
     ConfirmStudentDocumentExtractionRequest,
     CreateAssistantConversationRequest,
     CreateAssistantVoiceSessionRequest,
@@ -1317,6 +1319,66 @@ async def ask_edward(
         auth=auth,
         payload=body.public_payload(),
         assistant_execution=_assistant_execution_mode(request),
+    )
+
+
+@router.get("/v1/student/assistant/action-intents/{id}", status_code=200, response_model=None)
+async def get_student_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.get_edward_action",
+        auth=auth,
+        path_params={"intentId": _uuid(intent_id)},
+    )
+
+
+@router.post(
+    "/v1/student/assistant/action-intents/{id}/confirm",
+    status_code=200,
+    response_model=None,
+)
+async def confirm_student_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    body: ConfirmEdwardActionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.confirm_edward_action",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"intentId": _uuid(intent_id)},
+    )
+
+
+@router.post(
+    "/v1/student/assistant/action-intents/{id}/cancel",
+    status_code=200,
+    response_model=None,
+)
+async def cancel_student_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    body: CancelEdwardActionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="student.cancel_edward_action",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"intentId": _uuid(intent_id)},
     )
 
 
@@ -2629,6 +2691,66 @@ async def ask_staff_edward(
         auth=auth,
         payload=body.public_payload(),
         assistant_execution=_assistant_execution_mode(request),
+    )
+
+
+@router.get("/v1/staff/assistant/action-intents/{id}", status_code=200, response_model=None)
+async def get_staff_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.get_edward_action",
+        auth=auth,
+        path_params={"intentId": _uuid(intent_id)},
+    )
+
+
+@router.post(
+    "/v1/staff/assistant/action-intents/{id}/confirm",
+    status_code=200,
+    response_model=None,
+)
+async def confirm_staff_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    body: ConfirmEdwardActionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.confirm_edward_action",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"intentId": _uuid(intent_id)},
+    )
+
+
+@router.post(
+    "/v1/staff/assistant/action-intents/{id}/cancel",
+    status_code=200,
+    response_model=None,
+)
+async def cancel_staff_edward_action(
+    intent_id: Annotated[UUID, Path(alias="id")],
+    body: CancelEdwardActionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.cancel_edward_action",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"intentId": _uuid(intent_id)},
     )
 
 

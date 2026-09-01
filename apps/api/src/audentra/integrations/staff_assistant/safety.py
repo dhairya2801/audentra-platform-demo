@@ -107,9 +107,10 @@ def guarded_staff_response(message: object) -> dict[str, Any] | None:
         )
     elif _FORGED_RECORD_MUTATION.search(message):
         reason = (
-            "I can't mark, forge, or alter record state from chat — I'm read-only, and "
-            "record changes must go through the authorized portal workflow so validation "
-            "and the audit trail are preserved."
+            "I can't set a payment or a document decision from chat. Those states come "
+            "from the systems that produce them, and an assistant writing them would make "
+            "the record unverifiable. I can update the work item that tracks it, and show "
+            "you what would actually clear the block."
         )
     elif _ARBITRARY_DATA_ACCESS.search(message):
         reason = (

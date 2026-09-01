@@ -454,7 +454,15 @@ async def resolve_entities(
             continue
         if mention.kind_hint != "person":
             continue
-        await _resolve_person(mention, resolution, read, prefer_kind)
+        await _resolve_person(
+            mention,
+            resolution,
+            read,
+            prefer_kind,
+            # Draft turns get the same narrowing: "write a note to Rosa
+            # Mossbank" from Rosa's adviser means their Rosa.
+            narrow_to_caseload=request.action_is_supported or request.is_draft_request,
+        )
     return resolution
 
 
@@ -481,6 +489,8 @@ async def _resolve_person(
     resolution: EntityResolution,
     read: Reader,
     prefer_kind: str | None,
+    *,
+    narrow_to_caseload: bool = False,
 ) -> None:
     staff_search = await read("searchStaff", {"query": mention.text, "limit": 8})
     staff_items = [dict(i) for i in _items(staff_search)]
@@ -504,7 +514,7 @@ async def _resolve_person(
             resolution.ambiguities.append(Ambiguity(mention.text, staff_hits, [], "several_staff"))
         return
     if student_exact and not staff_hits:
-        _add_students(resolution, student_exact, mention)
+        _add_students(resolution, student_exact, mention, narrow_to_caseload=narrow_to_caseload)
         return
     if staff_hits and student_exact:
         # A generic lookup ("tell me about X", "who is X", "pull up X") is
@@ -541,7 +551,7 @@ async def _resolve_person(
             _add_staff(resolution, staff_hits[0], mention)
             return
         if wants_student:
-            _add_students(resolution, student_exact, mention)
+            _add_students(resolution, student_exact, mention, narrow_to_caseload=narrow_to_caseload)
             return
         resolution.ambiguities.append(
             Ambiguity(mention.text, staff_hits, student_exact, "staff_and_student")
@@ -578,8 +588,30 @@ def _add_staff(resolution: EntityResolution, item: Mapping[str, Any], mention: M
 
 
 def _add_students(
-    resolution: EntityResolution, items: Sequence[Mapping[str, Any]], mention: Mention
+    resolution: EntityResolution,
+    items: Sequence[Mapping[str, Any]],
+    mention: Mention,
+    *,
+    narrow_to_caseload: bool = False,
 ) -> None:
+    if len(items) > 1 and narrow_to_caseload:
+        # A write-action turn. A narrow-scope staff member saying "create a
+        # follow-up for Anton Pemberwell" means *their* Anton: when exactly one
+        # of the same-named students is on the asker's caseload, that is the
+        # one every other candidate would be denied for anyway, so asking
+        # "which of these students (most of whom I won't act on)?" wastes the
+        # turn. Several on-caseload matches still ask — between two advisees
+        # the guess would be real. Identity remains canonical: the roster
+        # search supplied the candidates and the gateway still re-resolves and
+        # re-authorizes the target. Read turns never take this branch.
+        in_scope = [item for item in items if item.get("onCaseload")]
+        if len(in_scope) == 1:
+            items = in_scope
+        elif len(in_scope) > 1:
+            resolution.ambiguities.append(
+                Ambiguity(mention.text, [], [dict(i) for i in in_scope], "several_students")
+            )
+            return
     if len(items) == 1:
         item = items[0]
         resolution.students.append(

@@ -16,9 +16,10 @@ staff-specific families:
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from audentra.integrations.action_receipts import action_claim_has_receipt
 from audentra.integrations.assistant.guard import (
     collect_contacts,
     collect_dates,
@@ -63,6 +64,7 @@ def guard_staff_grounded_answer(
     *,
     answer: str,
     evidence_texts: Sequence[str],
+    action_receipts: Sequence[Mapping[str, object]] = (),
 ) -> StaffGuardResult:
     normalized = re.sub(r"\s+", " ", answer).strip()
 
@@ -73,7 +75,9 @@ def guard_staff_grounded_answer(
         return reject("empty")
     if len(normalized) > MAX_STAFF_ANSWER_CHARACTERS:
         return reject("too_long")
-    if _ACTION_CLAIM.search(normalized):
+    if _ACTION_CLAIM.search(normalized) and not action_claim_has_receipt(
+        normalized, action_receipts
+    ):
         return reject("claimed_action")
     if _IDENTIFIER.search(normalized):
         return reject("leaked_identifier")

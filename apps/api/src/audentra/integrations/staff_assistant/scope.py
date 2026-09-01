@@ -46,6 +46,7 @@ REQUEST_TYPE_SCOPE: Mapping[str, str] = {
     "greeting": CONVERSATIONAL_SCOPE,
     "capability_overview": CONVERSATIONAL_SCOPE,
     "action_request": CONVERSATIONAL_SCOPE,
+    "supported_action_request": CONVERSATIONAL_SCOPE,
     "unsupported_metric": CONVERSATIONAL_SCOPE,
     "unsupported_or_out_of_scope": CONVERSATIONAL_SCOPE,
     "general_question": CONVERSATIONAL_SCOPE,

@@ -10,6 +10,7 @@ record read at question time.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, cast
 
 from audentra.application.platform_service import InMemoryPlatformService
@@ -140,7 +141,9 @@ def _full_primitives() -> dict[str, dict[str, Any]]:
             "events": [
                 {
                     "title": "Welcome Week Fair",
-                    "startsAt": "2026-08-24T17:00:00Z",
+                    # Intentionally far-future: the campus tool excludes past
+                    # events, and this fixture must not decay with wall time.
+                    "startsAt": "2099-08-24T17:00:00Z",
                     "location": "Main Quad",
                     "category": "social",
                 }
@@ -385,7 +388,10 @@ def test_mutation_requests_are_refused_without_model_calls() -> None:
 
     assert result.classification is not None
     assert result.classification.request_type == "unsupported_or_out_of_scope"
-    assert "read-only" in result.message
+    # It must decline and name the route, not claim to have submitted anything.
+    # Asserting on the words "read-only" would pin a sentence that is now false.
+    assert "Documents page" in result.message
+    assert not re.search(r"\bI(?:'ve| have)?\s+submitted\b", result.message, re.I)
     assert host.read_primitives == []
 
 
@@ -635,6 +641,20 @@ def test_housing_assignment_questions_decline_instead_of_answering_the_step() ->
         assert result.classification.requirement_reference == "housing_assignment_unavailable"
         message = result.message.lower()
         assert "doesn't hold room assignments" in message or "room assignment" in message
+
+
+def test_future_aid_outcomes_decline_without_model_calls_or_record_inferences() -> None:
+    host = RecordingHost(_full_primitives())
+    result = _run(
+        AssistantPipeline(host),
+        "Will I get more scholarship money next year?",
+    )
+
+    assert result.classification is not None
+    assert result.classification.request_type == "unsupported_or_out_of_scope"
+    assert result.classification.requirement_reference == "future_aid_unavailable"
+    assert "can't predict or promise" in result.message.lower()
+    assert host.read_primitives == []
 
 
 def test_housing_eligibility_still_answers_from_the_record() -> None:

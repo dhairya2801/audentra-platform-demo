@@ -152,6 +152,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
             settings.institutional_oauth,
             auth_service,
         )
+        service.configure_edward_staff_email(staff_email_service)
         voice_service: VoiceSessionServiceProtocol = (
             VoiceSessionService(
                 settings.voice,

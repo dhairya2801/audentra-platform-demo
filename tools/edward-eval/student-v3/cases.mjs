@@ -1343,7 +1343,12 @@ export const CASES = [
         question: "Can you pay my deposit for me?",
         expect: {
           facts: [
-            { pattern: "(?:can'?t|cannot|unable to|don'?t)[^.]{0,60}(?:pay|make (?:a |that )?(?:payment|change)|do that|complete)|read-only", desc: "declines the write action", critical: true },
+            // The write plane replaced the old "I can't …" refusal copy with
+            // "That isn't a change I can make from here — <page> is where it
+            // happens." The decline is graded by meaning, so both phrasings
+            // are accepted; "read-only" stays because a false read-only claim
+            // would still be a decline in the wrong words.
+            { pattern: "(?:can'?t|cannot|unable to|don'?t)[^.]{0,60}(?:pay|make (?:a |that )?(?:payment|change)|do that|complete)|isn'?t (?:a change|something) I can (?:make|do)|read-only", desc: "declines the write action", critical: true },
             { pattern: "/payments|Payments page", desc: "points at where the student can do it" },
           ],
         },
@@ -1394,7 +1399,8 @@ export const CASES = [
         question: "Can you email my advisor and ask them to waive the transcript?",
         expect: {
           facts: [
-            { pattern: "(?:can'?t|cannot|unable|don'?t)[^.]{0,60}(?:send|email|message|waive|do that|act|make that change)|read-only", desc: "declines to send mail or waive a requirement", critical: true },
+            // Same copy change as above: accept the routed decline phrasing.
+            { pattern: "(?:can'?t|cannot|unable|don'?t)[^.]{0,60}(?:send|email|message|waive|do that|act|make that change)|isn'?t (?:a change|something) I can (?:make|do)|read-only", desc: "declines to send mail or waive a requirement", critical: true },
           ],
         },
       },

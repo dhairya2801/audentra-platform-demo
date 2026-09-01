@@ -781,6 +781,92 @@ class StudentAIGateway:
             ),
         }
 
+    async def recognize_edward_action(
+        self,
+        *,
+        message: str,
+        system_prompt: str,
+        catalog: Sequence[Mapping[str, Any]],
+        schema: Mapping[str, Any],
+        tenant_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Classify one message into at most one closed action name.
+
+        The narrowest model call in the assistant: it sees the current message
+        and the catalogue entries the actor could actually reach, and answers
+        with an enum plus a fixed field map. It sees no retrieved content, no
+        conversation history and no other person's record, so it cannot be
+        steered by anything but the sentence in front of it — and its answer
+        is a *request*, which the action gateway then resolves, authorizes and
+        previews from canonical state exactly as it does a pattern-recognized
+        one.
+
+        Returns None when no chat provider is configured, which leaves
+        recognition entirely deterministic in that mode.
+        """
+
+        if not self._has_chat_key():
+            return None
+        transport = self._chat_transport()
+        runtime = await self._runtime(
+            tenant_id,
+            "edward_action_recognizer",
+            system_prompt=system_prompt,
+            model=self._chat_model(),
+            max_output_tokens=220,
+            temperature=0.0,
+        )
+        body = {
+            "model": runtime.model,
+            "temperature": runtime.temperature,
+            "max_tokens": runtime.max_output_tokens,
+            "messages": [
+                {"role": "system", "content": runtime.system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "<available_actions>"
+                        f"{json.dumps(list(catalog), ensure_ascii=False)}"
+                        "</available_actions>\n"
+                        "<untrusted_message>"
+                        f"{message[:1200]}"
+                        "</untrusted_message>"
+                    ),
+                },
+            ],
+            **self._assistant_structured_output(
+                transport, runtime.model, "edward_action_request", schema
+            ),
+        }
+        try:
+            payload = await self._completions.complete(
+                body,
+                transport,
+                self._completion_context(
+                    runtime, tenant_id, None, None, request_id, 1, 20, {"chars": len(message)}
+                ),
+            )
+            parsed = parse_extraction_json(message_content(payload))
+        except (ProviderCompletionError, ValueError):
+            # Recognition is an enhancement over the deterministic tier, never
+            # a dependency: a provider failure must degrade to "not
+            # recognized", not to an error the user reads.
+            return None
+        usage = payload.get("usage")
+        parsed["usage"] = (
+            {
+                "promptTokens": int(usage.get("prompt_tokens", 0)),
+                "completionTokens": int(usage.get("completion_tokens", 0)),
+                "totalTokens": int(usage.get("total_tokens", 0)),
+            }
+            if isinstance(usage, Mapping)
+            else None
+        )
+        parsed["provider"] = transport.provider
+        parsed["model"] = payload.get("model") or runtime.model
+        return parsed
+
     async def plan_staff_tool_reads(
         self,
         *,

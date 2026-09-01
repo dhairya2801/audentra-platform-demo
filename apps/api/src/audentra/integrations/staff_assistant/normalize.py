@@ -28,7 +28,10 @@ _UUID_PATTERN = re.compile(
 # token and the pipeline resolves it — student external reference first,
 # work item second.
 _REFERENCE_TOKEN = re.compile(r"\b([A-Z]{2,6}-[A-Z0-9][A-Z0-9._-]{0,12})\b")
-_WORK_ITEM_KEY = re.compile(r"\b([A-Z]{2,6}-\d{1,6})\b")
+#: People type "ast-00507" from a phone as readily as the uppercase key; the
+#: canonical form is restored on extraction. Mixed case ("Top-10") stays out —
+#: that is prose, not a key.
+_WORK_ITEM_KEY = re.compile(r"\b([A-Z]{2,6}-\d{1,6}|[a-z]{2,6}-\d{1,6})\b")
 
 # Words that start sentences or commands and must never be read as a name.
 _NAME_STOPWORDS = frozenset(
@@ -273,7 +276,12 @@ _DRAFT_REQUEST = re.compile(
     r"\b(?:draft|compose|write(?:\s+me)?(?:\s+up)?|prepare|prep|give me|put together"
     r"|make me)\b.{0,60}"
     r"\b(?:email|e-mail|message|sms|text|reply|response|note|talking points?"
-    r"|call (?:script|points|notes)|outreach)\b",
+    r"|call (?:script|points|notes)|outreach)\b"
+    # "Email Elena about her aid verification" names a recipient and a subject
+    # and no draft exists yet. Edward cannot send, so the only thing that
+    # sentence can mean is "write it" — and answering "I need a draft first"
+    # to a request that *is* the draft request wastes a turn.
+    r"|\b(?:e-?mail|message|write to)\s+(?-i:[A-Z][a-z]+)\b[^.!?]{0,40}\babout\b",
     re.IGNORECASE,
 )
 
@@ -299,6 +307,10 @@ class NormalizedStaffRequest:
     reference_token: str | None
     work_item_key: str | None
     action_kind: str | None
+    #: True when the write plane recognized a supported action for this turn.
+    #: Classification then resolves entities normally instead of answering with
+    #: an action boundary the action plane is about to replace anyway.
+    action_is_supported: bool
     is_draft_request: bool
 
 
@@ -307,6 +319,7 @@ def normalize_staff_request(
     *,
     history: Sequence[Mapping[str, str]] = (),
     history_limit: int = DEFAULT_HISTORY_LIMIT,
+    action_is_supported: bool = False,
 ) -> NormalizedStaffRequest:
     limit = max(0, min(history_limit, 12))
     text = _normalize_text(message, MAX_MESSAGE_CHARACTERS)
@@ -344,6 +357,7 @@ def normalize_staff_request(
         reference_token=_extract_reference_token(text),
         work_item_key=_extract_work_item_key(text),
         action_kind=action_kind,
+        action_is_supported=action_is_supported,
         is_draft_request=is_draft,
     )
 
@@ -425,7 +439,7 @@ def _extract_reference_token(text: str) -> str | None:
 
 def _extract_work_item_key(text: str) -> str | None:
     match = _WORK_ITEM_KEY.search(text)
-    return match.group(1) if match else None
+    return match.group(1).upper() if match else None
 
 
 def _normalize_text(value: str | None, maximum: int) -> str:

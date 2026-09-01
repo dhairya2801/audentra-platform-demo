@@ -41,6 +41,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     # The action refusal is deterministic and reads nothing: a refusal that
     # reads records invites the reply to become the action's dry run.
     "action_request": (),
+    "supported_action_request": (),
     "unsupported_metric": (),
     "draft_email": (
         "getStudentStaffSummary",

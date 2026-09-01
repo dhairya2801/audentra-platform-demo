@@ -250,8 +250,19 @@ async def test_conversations_do_not_leak_between_staff_members() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Read-only guarantees
+# Write-safety guarantees
 # ---------------------------------------------------------------------------
+
+#: Prose that would tell a staff member a side effect already happened. Edward
+#: may only say this when the turn holds a matching server-issued receipt, so
+#: on a turn that proposed nothing it must never appear.
+_CLAIMS_A_COMPLETED_ACTION = re.compile(
+    r"\bI(?:'ve| have)?\s+(?:just\s+)?(?:sent|emailed|assigned|escalated|created|opened"
+    r"|scheduled|booked|updated|changed|marked|closed|completed|submitted)\b"
+    r"|\b(?:has|have) been (?:sent|assigned|escalated|created|scheduled|updated|changed"
+    r"|marked|closed|completed|submitted)\b",
+    re.I,
+)
 
 
 @pytest.mark.anyio
@@ -277,7 +288,11 @@ async def test_action_requests_never_mutate(message: str) -> None:
         "messages": deepcopy(service.store.messages),
     }
     result = await _ask(service, message)
-    assert "read-only" in result["message"] or "can't" in result["message"].lower()
+    # The guarantee is that nothing was written and nothing claims otherwise —
+    # not that the answer contains the words "read-only", which stopped being
+    # true when the write plane shipped and made this assertion enforce a
+    # false sentence.
+    assert not _CLAIMS_A_COMPLETED_ACTION.search(result["message"])
     assert service.store.work_items == snapshot["work_items"]
     assert service.store.payments == snapshot["payments"]
     assert service.store.documents == snapshot["documents"]

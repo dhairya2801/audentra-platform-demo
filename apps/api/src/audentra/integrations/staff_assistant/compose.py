@@ -50,8 +50,10 @@ _CAPABILITY_MESSAGE = (
     "recorded communications, support inquiries, and the deterministic "
     "attention signals. I can recommend next steps and draft emails, SMS, or "
     "call talking points for your review. I can also prioritize recent mail "
-    "from mailboxes you are authorized to read. I'm read-only: I never send, "
-    "assign, escalate, or change records."
+    "from mailboxes you are authorized to read. I can also make changes: create "
+    "a follow-up on a student you advise, update a work item you own, and prepare "
+    "an email for a final send review. Every change is previewed first and nothing "
+    "happens until you confirm it — and I never send an email myself."
 )
 
 _UNSUPPORTED_METRIC_MESSAGES: dict[str, str] = {
@@ -132,40 +134,48 @@ _UNSUPPORTED_METRIC_MESSAGES: dict[str, str] = {
     ),
 }
 
+# What Edward cannot do, and what actually does it — never "I'm read-only",
+# which stopped being true when the write plane shipped and was never
+# informative in the first place. The catalogue in
+# `audentra.domain.edward_action_catalog` owns the same knowledge for the
+# pre-pipeline responder; these are the composer's fallbacks for a turn that
+# was classified as an action request but recognized as no supported action.
 _ACTION_MESSAGES: dict[str, tuple[str, str]] = {
-    # kind -> (what I can't do, the read-only offer)
+    # kind -> (the specific limit, the route that works)
     "send_message": (
-        "I can't send messages — I'm read-only in this version.",
-        "I can draft the email or SMS for you to review and send yourself; "
-        "just ask me to draft it.",
+        "I don't send messages myself — an email leaves the institution, so a person confirms it.",
+        "Ask me to draft it and then prepare it: you get the exact text, the sender and "
+        "the recipient, and one final send confirmation.",
     ),
     "place_call": (
-        "I can't place calls — I'm read-only in this version.",
-        "I can prepare call talking points grounded in the student's record.",
+        "I can't place a call.",
+        "I can prepare talking points from the student's record, and log the follow-up afterwards.",
     ),
     "create_task": (
-        "I can't create tasks — I'm read-only in this version.",
-        "You can create it from the Action Center; I can summarize the case "
-        "so the task writes itself.",
+        "I can create a follow-up, but I need to know which student it is for.",
+        "Name the student and I'll show you exactly what the task would say before "
+        "anything is created.",
     ),
     "assign": (
-        "I can't assign or reassign work — I'm read-only in this version.",
-        "Assignment happens in the Action Center; I can tell you who "
-        "currently owns the student's open cases.",
+        "I can move work to you, but not onto a colleague's queue.",
+        "Say \"assign it to me\" with the item's key and I'll preview it; reassigning "
+        "someone else happens in the Action Center, where their load is visible.",
     ),
     "escalate": (
-        "I can't escalate cases — I'm read-only in this version.",
-        "Escalation is a checkbox on the work item; I can lay out the "
-        "evidence you'd escalate with.",
+        "Escalation isn't one of the fields I can set.",
+        "It's a flag on the work item itself. I can change an item's status, owner, "
+        "follow-up date and next step, and I can lay out the evidence you'd escalate with.",
     ),
     "update_record": (
-        "I can't change records — I'm read-only in this version.",
-        "Record changes happen in the portal workflows; I can show you the "
-        "current state and what would clear it.",
+        "I can't set a payment or a document decision from chat — those states come from "
+        "the systems that produce them.",
+        "I can update the work item that tracks it: status, owner, follow-up date and "
+        "next step. Give me its key and I'll preview the change.",
     ),
     "schedule": (
-        "I can't schedule appointments — I'm read-only in this version.",
-        "I can show existing appointments and draft the outreach proposing a time.",
+        "I can't book an appointment.",
+        "Booking happens on the student's advising page; I can show you the open slots "
+        "and log a follow-up so it isn't forgotten.",
     ),
 }
 
@@ -779,8 +789,9 @@ def _compose_action_request(
     boundary, offer = _ACTION_MESSAGES.get(
         str(classification.reference or ""),
         (
-            "I can't perform actions — I'm read-only in this version.",
-            "I can retrieve, explain, and draft; the action itself happens in the portal.",
+            "That isn't one of the changes I can make.",
+            "I can create follow-ups, update work items you own, and prepare an email for "
+            "a final send review — each one previewed before anything happens.",
         ),
     )
     message = f"{boundary} {offer}"
@@ -4156,6 +4167,7 @@ _COMPOSERS = {
     "greeting": _compose_greeting,
     "capability_overview": _compose_capabilities,
     "action_request": _compose_action_request,
+    "supported_action_request": _compose_action_request,
     "unsupported_metric": _compose_unsupported_metric,
     "draft_email": _compose_draft_email,
     "draft_sms": _compose_draft_sms,

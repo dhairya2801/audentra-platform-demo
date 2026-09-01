@@ -116,7 +116,11 @@ class PostgresStaffAssistantRepository:
         bounded_limit = max(1, min(int(limit or 10), 25))
         tokens = [token for token in re.split(r"\s+", (query or "").strip()) if token][:5]
         clauses: list[str] = []
-        params: dict[str, Any] = {"tenant_id": _uuid(auth.tenant_id), "limit": bounded_limit}
+        params: dict[str, Any] = {
+            "tenant_id": _uuid(auth.tenant_id),
+            "limit": bounded_limit,
+            "viewer_staff_id": _uuid(auth.actor_id),
+        }
         for index, token in enumerate(tokens):
             key = f"token_{index}"
             params[key] = f"%{_escape_like(token)}%"
@@ -148,6 +152,13 @@ class PostgresStaffAssistantRepository:
             SELECT student.id, student.external_ref, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
+              EXISTS (
+                SELECT 1 FROM {self._table("student_staff_assignment")} AS viewer_assignment
+                WHERE viewer_assignment.tenant_id = student.tenant_id
+                  AND viewer_assignment.student_id = student.id
+                  AND viewer_assignment.staff_member_id = :viewer_staff_id
+                  AND viewer_assignment.ended_at IS NULL
+              ) AS on_caseload,
               student.class_year,
               COALESCE(offer_program.name, 'Program not assigned') AS program_name,
               offer_program.status AS offer_status,
@@ -183,6 +194,10 @@ class PostgresStaffAssistantRepository:
             "externalRef": _optional_text(row["external_ref"]),
             "name": f"{row['first_name']} {row['last_name']}",
             "preferredName": str(row["preferred_name"]),
+            # Whether the student is on the *viewing* staff member's active
+            # caseload. Write-action target resolution narrows same-name
+            # candidates with this; read answers are unchanged by it.
+            "onCaseload": bool(row["on_caseload"]),
             "programName": str(row["program_name"]),
             "classYear": int(row["class_year"]),
             "offerStatus": _optional_text(row["offer_status"]),
@@ -212,7 +227,11 @@ class PostgresStaffAssistantRepository:
                 (
                     await connection.execute(
                         text(self._roster_search_sql(where, limit_clause="LIMIT 1")),
-                        {"tenant_id": _uuid(auth.tenant_id), "external_ref": ref},
+                        {
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "external_ref": ref,
+                            "viewer_staff_id": _uuid(auth.actor_id),
+                        },
                     )
                 )
                 .mappings()
@@ -277,6 +296,7 @@ class PostgresStaffAssistantRepository:
                         {
                             "tenant_id": _uuid(auth.tenant_id),
                             "ids": [_uuid(student_id) for student_id in top_ids],
+                            "viewer_staff_id": _uuid(auth.actor_id),
                         },
                     )
                 )
@@ -1342,7 +1362,7 @@ class PostgresStaffAssistantRepository:
         sql = f"""
             SELECT id, conversation_id, role, content, client_message_id, request_id,
                    provider, model, usage, blocks, context_receipts,
-                   referenced_student_id, created_at
+                   action_intents, action_receipts, referenced_student_id, created_at
             FROM {self._table("staff_assistant_message")}
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND conversation_id = :conversation_id
@@ -1366,6 +1386,9 @@ class PostgresStaffAssistantRepository:
         return {
             "conversationId": conversation_id,
             "activeStudentId": _optional_uuid_text(conversation["active_student_id"]),
+            "activeCohortFilter": _json_mapping(conversation.get("active_cohort_filter"))
+            if conversation.get("active_cohort_filter") is not None
+            else None,
             "messages": [_map_staff_message(row) for row in rows],
         }
 
@@ -1382,7 +1405,7 @@ class PostgresStaffAssistantRepository:
         _require_staff(auth)
         conversation = await self._conversation_row(auth, conversation_id)
         if conversation is None:
-            return {"history": [], "activeStudentId": None}
+            return {"history": [], "activeStudentId": None, "activeCohortFilter": None}
         sql = f"""
             SELECT role, content FROM {self._table("staff_assistant_message")}
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
@@ -1411,7 +1434,53 @@ class PostgresStaffAssistantRepository:
                 {"role": str(row["role"]), "content": str(row["content"])} for row in reversed(rows)
             ],
             "activeStudentId": _optional_uuid_text(conversation["active_student_id"]),
+            "activeCohortFilter": _json_mapping(conversation.get("active_cohort_filter"))
+            if conversation.get("active_cohort_filter") is not None
+            else None,
         }
+
+    async def get_recent_email_draft(
+        self, auth: AuthContext, conversation_id: str
+    ) -> JsonDict | None:
+        """Return the latest server-stored email draft block for this actor.
+
+        Draft text is untrusted content. The action gateway presents it for
+        review and the canonical mail service resolves the recipient again.
+        """
+
+        _require_staff(auth)
+        sql = f"""
+            SELECT blocks
+            FROM {self._table("staff_assistant_message")}
+            WHERE tenant_id=:tenant_id AND staff_member_id=:staff_member_id
+              AND conversation_id=:conversation_id AND role='assistant'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 12
+        """
+        async with self._engine.connect() as connection:
+            rows = (
+                (
+                    await connection.execute(
+                        text(sql),
+                        {
+                            "tenant_id": _uuid(auth.tenant_id),
+                            "staff_member_id": _uuid(auth.actor_id),
+                            "conversation_id": _uuid(conversation_id),
+                        },
+                    )
+                )
+                .mappings()
+                .all()
+            )
+        for row in rows:
+            for block in _json_list(row["blocks"]):
+                if (
+                    isinstance(block, Mapping)
+                    and block.get("type") == "draft"
+                    and block.get("channel") == "email"
+                ):
+                    return dict(block)
+        return None
 
     async def find_exchange_by_client_id(
         self, auth: AuthContext, client_message_id: str
@@ -1453,7 +1522,7 @@ class PostgresStaffAssistantRepository:
         assistant_sql = f"""
             SELECT id, conversation_id, role, content, client_message_id, request_id,
                    provider, model, usage, blocks, context_receipts,
-                   referenced_student_id, created_at
+                   action_intents, action_receipts, referenced_student_id, created_at
             FROM {self._table("staff_assistant_message")}
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND conversation_id = :conversation_id
@@ -1489,6 +1558,8 @@ class PostgresStaffAssistantRepository:
             "model": assistant.get("model"),
             "usage": assistant.get("usage"),
             "contextReceipts": assistant.get("contextReceipts", []),
+            "actionIntents": assistant.get("actionIntents", []),
+            "actionReceipts": assistant.get("actionReceipts", []),
         }
 
     async def append_exchange(
@@ -1502,6 +1573,8 @@ class PostgresStaffAssistantRepository:
         request_id: str,
         referent_action: str = "set",
         active_student_id: str | None = None,
+        active_cohort_filter: Mapping[str, Any] | None = None,
+        cohort_action: str = "keep",
     ) -> JsonDict:
         """Atomically create/reuse a conversation and append one replay-safe exchange."""
 
@@ -1520,12 +1593,14 @@ class PostgresStaffAssistantRepository:
             INSERT INTO {self._table("staff_assistant_message")} (
               id, tenant_id, conversation_id, staff_member_id, exchange_id,
               role, content, client_message_id, request_id, provider, model,
-              usage, blocks, context_receipts, referenced_student_id
+              usage, blocks, context_receipts, referenced_student_id,
+              action_intents, action_receipts
             ) VALUES (
               :id, :tenant_id, :conversation_id, :staff_member_id, :exchange_id,
               :role, :content, :client_message_id, :request_id, :provider, :model,
               CAST(:usage AS jsonb), CAST(:blocks AS jsonb),
-              CAST(:context_receipts AS jsonb), :referenced_student_id
+              CAST(:context_receipts AS jsonb), :referenced_student_id,
+              CAST(:action_intents AS jsonb), CAST(:action_receipts AS jsonb)
             )
         """
         update_sql = f"""
@@ -1544,6 +1619,15 @@ class PostgresStaffAssistantRepository:
                     :active_student_id, active_student_id
                   )
                   ELSE active_student_id
+                END,
+                active_cohort_filter = CASE
+                  WHEN :cohort_action = 'clear' THEN NULL
+                  WHEN :cohort_action = 'set' THEN CAST(:active_cohort_filter AS jsonb)
+                  ELSE active_cohort_filter
+                END,
+                active_cohort_fingerprint = CASE
+                  WHEN :cohort_action IN ('clear', 'set') THEN NULL
+                  ELSE active_cohort_fingerprint
                 END
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND id = :conversation_id
@@ -1625,6 +1709,8 @@ class PostgresStaffAssistantRepository:
                     "usage": None,
                     "blocks": None,
                     "context_receipts": "[]",
+                    "action_intents": "[]",
+                    "action_receipts": "[]",
                 },
             )
             await connection.execute(
@@ -1640,6 +1726,8 @@ class PostgresStaffAssistantRepository:
                     "usage": _json_or_none(assistant_message.get("usage")),
                     "blocks": _json_or_none(assistant_message.get("blocks")),
                     "context_receipts": json.dumps(assistant_message.get("contextReceipts") or []),
+                    "action_intents": json.dumps(assistant_message.get("actionIntents") or []),
+                    "action_receipts": json.dumps(assistant_message.get("actionReceipts") or []),
                 },
             )
             await connection.execute(
@@ -1650,6 +1738,8 @@ class PostgresStaffAssistantRepository:
                     "conversation_id": _uuid(conversation_id),
                     "active_student_id": carried,
                     "referent_action": referent_action,
+                    "active_cohort_filter": json.dumps(active_cohort_filter or {}),
+                    "cohort_action": cohort_action,
                 },
             )
         return {
@@ -1709,7 +1799,7 @@ class PostgresStaffAssistantRepository:
     ) -> Mapping[Any, Any] | None:
         lock = " FOR UPDATE" if for_update else ""
         sql = f"""
-            SELECT id, active_student_id
+            SELECT id, active_student_id, active_cohort_filter, active_cohort_fingerprint
             FROM {self._table("staff_assistant_conversation")}
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND id = :conversation_id{lock}
@@ -1768,6 +1858,8 @@ def _map_staff_message(row: Mapping[Any, Any]) -> JsonDict:
         "contextReceipts": row["context_receipts"]
         if isinstance(row["context_receipts"], list)
         else [],
+        "actionIntents": _json_list(row.get("action_intents")),
+        "actionReceipts": _json_list(row.get("action_receipts")),
         "referencedStudentId": _optional_uuid_text(row["referenced_student_id"]),
         "createdAt": _iso(row["created_at"]),
     }
