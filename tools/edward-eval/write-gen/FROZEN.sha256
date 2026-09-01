@@ -1,0 +1,22 @@
+b69d3a7f1bc3d4ed253839ba446e203e3a9813ef23c499cc51c65ebbe862f304  cases.mjs
+6a57effcf8c5d9f1d435bfd062c3119faa274d924f0b541e47b3a41ea504e4bd  cases/ambiguity.mjs
+84f8b3ef833184bbc671bc50c493cbeea8fa0118a1a8eecb91ce44f2862b2677  cases/blockers.mjs
+fcdb58854f119c65831d0c0e3a83fcd51447893ac0562b4df3f04572ee89dc5d  cases/cohort.mjs
+922317215186660be4333333e97adbb66997b2e0182036292d023d841f8085e9  cases/colloquial.mjs
+ad8266f0e365841ea561604fb69ee099929f862bffd601a51ef2064b934d70d3  cases/common.mjs
+9ed10a34d61d739339f4c4cb44d381ad5b6bd0fd96bf092fe1d36e64d6b86846  cases/compound.mjs
+0a64a0fddf9f168cd1e75f6fee49b6c72663d36976eb16c6f13cbf9c4879babc  cases/context.mjs
+ef1423ed6d992e8762821b434608f6c2c019e775cad09708cb7aef61d65e6a90  cases/delegation.mjs
+2f79dfe8ae3a5ad922b856a30859b526c96b5e7ca30805e980f8311220229810  cases/entity.mjs
+0f0b7715ee94b3c30347c7f8118bc683bf33a791b23336aada3da1784a338d30  cases/injection.mjs
+265dfd8a3b59b2b39f902c08eff25106c96ef15e51568b6615b15d0d5f775381  cases/integrity.mjs
+e2ba7e11a2f22b59a21a0cda3fe2b92a67be9f96d8520ef81e751f4d4196a4d6  cases/parity.mjs
+97ee89c4382cdcade222a0bae669d41eb19ac4378a43c939e52ab9a5cbf69d10  cases/permissions.mjs
+d0e7dc3e2a477feb25b0cc107782fceca06cd794d6dd906c8686363e01366f4f  cases/reason.mjs
+54a681ce7522b237fe16e0f746241090d5525924b5bcc618066343589915f871  cases/tier1.mjs
+36cea87f09941d267ef60d0f0ca6767eff7c8aae64cf4b9ce4957a1d158e38e7  cases/undo.mjs
+90ad4db9bc27035a99571161d73a391b5d073e0dd6811c4f42bf18a3e740068f  cases/unsupported.mjs
+7cd0d5e06f20635d2c0b888fdb7982ae58a653784bb36f8a9c8f3983be6b23f6  fixtures-gen.mjs
+0199c438b1beee576fd375c9fe1154216835b0116733bb66ea3d558eef5c81d5  grade-gen.mjs
+95b26a068b664b59f5bad9037b56a83735454c4739d4259b3078f8af90ced2f1  run.mjs
+frozen-at: 2026-09-01T19:31:56Z (revision 3: post-first-contact documented corrections — probe fixes [cohort rowsCreated leg, expire SQL, drift processor], data-expectation corrections [g-int-002 status vocab, g-int-010 fail-closed, g-coh-006 offer semantics, g-cmp-002 batch-state, g-uns-002/g-und-008/g-inj-006 grader-FP narrowing]. Case QUESTIONS unchanged throughout.)
