@@ -94,7 +94,13 @@ async function main() {
   process.stdout.write(`resetting ${db.databaseName()} … `);
   execFileSync("bash", [join(HERE, "..", "write", "reset-db.sh")], { stdio: "pipe" });
   process.stdout.write("done\n");
-  const context = db.resolveFixtures({ staff: STAFF, students: STUDENTS, workItems: {} });
+  const context = db.resolveFixtures({
+    staff: STAFF,
+    students: STUDENTS,
+    // resolveFixtures builds an IN () clause per kind and cannot take an
+    // empty map; one real key satisfies it.
+    workItems: { ownTodo: "AST-00183" },
+  });
   const results = [];
   for (const [index, probe] of PROBES.entries()) {
     const [kind, key] = probe.actor;
