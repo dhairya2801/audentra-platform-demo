@@ -74,6 +74,7 @@ from audentra.contracts.responses import ApiErrorEnvelope
 from audentra.core.assistant_execution import (
     ASSISTANT_EXECUTION_MODE_HEADER,
     DEFAULT_ASSISTANT_EXECUTION,
+    READ_PLANNER_HEADER,
     ResolvedAssistantExecutionMode,
     lab_execution_controls_enabled,
     resolve_assistant_execution_mode,
@@ -170,6 +171,7 @@ def _assistant_execution_mode(request: Request) -> ResolvedAssistantExecutionMod
             environment=settings.environment,
             assistant_trace_debug_enabled=settings.assistant_trace_debug_enabled,
         ),
+        read_planner_raw=request.headers.get(READ_PLANNER_HEADER),
     )
 
 
@@ -2807,6 +2809,30 @@ async def get_staff_assistant_conversation_messages(
         operation="staff.get_assistant_conversation_messages",
         auth=auth,
         path_params={"conversationId": _uuid(conversation_id)},
+    )
+
+
+@router.get("/v1/staff/students", status_code=200, response_model=None)
+async def search_staff_students(
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    query: Annotated[str | None, Query(max_length=120)] = None,
+    student_id: Annotated[str | None, Query(alias="studentId", max_length=64)] = None,
+    limit: Annotated[str | None, Query(max_length=6)] = None,
+) -> object:
+    """One bounded page of the tenant roster, searched server-side (max 200)."""
+
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.search_students",
+        auth=auth,
+        query_params={
+            key: value
+            for key, value in {"query": query, "studentId": student_id, "limit": limit}.items()
+            if value is not None
+        },
     )
 
 

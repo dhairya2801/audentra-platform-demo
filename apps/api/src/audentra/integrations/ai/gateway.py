@@ -53,6 +53,22 @@ class GatewaySettings:
     openai_model: str = "gpt-4o-mini"
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
+    # Reasoning-model generation controls (gpt-5.x family). `reasoning_effort`
+    # is the default for every assistant operation; `reasoning_effort_overrides`
+    # is a comma-separated "operation=effort" list so a deployment can, for
+    # example, keep the recognizer at "none" while the read planner reasons.
+    # Ignored for models that do not accept the parameter.
+    reasoning_effort: str = "none"
+    reasoning_effort_overrides: str = ""
+    # Deployment default for who plans reads (see core.assistant_execution
+    # .ReadPlanner): deterministic | hybrid | model.
+    read_planner: str = "hybrid"
+    # Per-operation model overrides, "operation=model,operation=model": lets a
+    # deployment keep the enum-style write recognizer on a cheap model while
+    # the read loop and composer run on a reasoning model.
+    model_overrides: str = ""
+    # Plan rounds the model read loop may take before the answer is forced.
+    read_loop_max_rounds: int = 3
     openrouter_document_model: str = "qwen/qwen3.7-flash"
     openrouter_transcription_model: str = "openai/whisper-large-v3"
     app_url: str = "http://localhost:3000"
@@ -85,8 +101,10 @@ ASSISTANT_ANSWER_SYSTEM_PROMPT = "\n".join(
         "Hard rules:",
         "- Use only the supplied facts. Never introduce a date, amount, deadline, office, email, "
         "phone number, link, or status that is not in them.",
-        "- You are read-only. Never say or imply that you submitted, paid, updated, scheduled, "
-        "cancelled, or fixed anything, and never offer to.",
+        "- This reply only reads. Never say or imply that you submitted, paid, updated, "
+        "scheduled, cancelled, or fixed anything. Do not describe yourself as read-only or "
+        "unable to make changes either: changes go through a separate confirmation step, "
+        "so simply answer the question from the facts.",
         "- Never discuss any student other than this one, and never repeat internal identifiers.",
         "- If a source is listed as not verifiable, say plainly which part you could not check "
         "rather than guessing.",
@@ -201,8 +219,10 @@ STAFF_ASSISTANT_ANSWER_SYSTEM_PROMPT = "\n".join(
         "Hard rules:",
         "- Use only the supplied facts. Never introduce a date, amount, deadline, office, "
         "email, phone number, link, score, or status that is not in them.",
-        "- You are read-only. Never say or imply that you sent, assigned, escalated, "
-        "created, scheduled, updated, approved, or changed anything, and never offer to.",
+        "- This reply only reads. Never say or imply that you sent, assigned, escalated, "
+        "created, scheduled, updated, approved, or changed anything. Do not describe "
+        "yourself as read-only or unable to make changes either: changes go through a "
+        "separate server-verified confirmation step, so answer the question from the facts.",
         "- Never state or imply a melt risk, enrollment probability, recovery likelihood, "
         "risk score, or email open/click — no such data exists. If the facts include "
         "rule-based attention signals, present them as exactly that: rules with reasons, "
@@ -453,7 +473,7 @@ class StudentAIGateway:
             tenant_id,
             "assistant_composer",
             system_prompt=ASSISTANT_ANSWER_SYSTEM_PROMPT,
-            model=self._chat_model(),
+            model=self._chat_model("assistant_composer"),
             max_output_tokens=380,
             temperature=0.2,
         )
@@ -478,8 +498,7 @@ class StudentAIGateway:
             user_content += f"\n\nReviewer feedback on your previous attempt:\n{feedback}"
         body = {
             "model": runtime.model,
-            "temperature": runtime.temperature,
-            "max_tokens": runtime.max_output_tokens,
+            **self._generation_parameters(runtime),
             "messages": [
                 {"role": "system", "content": runtime.system_prompt},
                 {"role": "user", "content": user_content},
@@ -560,7 +579,7 @@ class StudentAIGateway:
             tenant_id,
             "assistant_planner",
             system_prompt=ASSISTANT_TOOL_PLANNING_SYSTEM_PROMPT,
-            model=self._chat_model(),
+            model=self._chat_model("assistant_planner"),
             max_output_tokens=520,
             temperature=0.0,
         )
@@ -580,8 +599,7 @@ class StudentAIGateway:
         }
         body = {
             "model": runtime.model,
-            "temperature": runtime.temperature,
-            "max_tokens": runtime.max_output_tokens,
+            **self._generation_parameters(runtime),
             "messages": [
                 {"role": "system", "content": runtime.system_prompt},
                 {
@@ -633,6 +651,7 @@ class StudentAIGateway:
                     },
                     "required": [
                         "requestType",
+                        "facet",
                         "additionalRequestTypes",
                         "confidence",
                         "requirementReference",
@@ -702,7 +721,7 @@ class StudentAIGateway:
             tenant_id,
             "staff_assistant_composer",
             system_prompt=STAFF_ASSISTANT_ANSWER_SYSTEM_PROMPT,
-            model=self._chat_model(),
+            model=self._chat_model("staff_assistant_composer"),
             max_output_tokens=420,
             temperature=0.2,
         )
@@ -727,8 +746,7 @@ class StudentAIGateway:
             user_content += f"\n\nReviewer feedback on your previous attempt:\n{feedback}"
         body = {
             "model": runtime.model,
-            "temperature": runtime.temperature,
-            "max_tokens": runtime.max_output_tokens,
+            **self._generation_parameters(runtime),
             "messages": [
                 {"role": "system", "content": runtime.system_prompt},
                 {"role": "user", "content": user_content},
@@ -813,14 +831,13 @@ class StudentAIGateway:
             tenant_id,
             "edward_action_recognizer",
             system_prompt=system_prompt,
-            model=self._chat_model(),
+            model=self._chat_model("edward_action_recognizer"),
             max_output_tokens=220,
             temperature=0.0,
         )
         body = {
             "model": runtime.model,
-            "temperature": runtime.temperature,
-            "max_tokens": runtime.max_output_tokens,
+            **self._generation_parameters(runtime),
             "messages": [
                 {"role": "system", "content": runtime.system_prompt},
                 {
@@ -894,7 +911,7 @@ class StudentAIGateway:
             tenant_id,
             "staff_assistant_planner",
             system_prompt=STAFF_ASSISTANT_TOOL_PLANNING_SYSTEM_PROMPT,
-            model=self._chat_model(),
+            model=self._chat_model("staff_assistant_planner"),
             max_output_tokens=560,
             temperature=0.0,
         )
@@ -912,8 +929,7 @@ class StudentAIGateway:
         }
         body = {
             "model": runtime.model,
-            "temperature": runtime.temperature,
-            "max_tokens": runtime.max_output_tokens,
+            **self._generation_parameters(runtime),
             "messages": [
                 {"role": "system", "content": runtime.system_prompt},
                 {
@@ -934,6 +950,10 @@ class StudentAIGateway:
                     "additionalProperties": False,
                     "properties": {
                         "requestType": {"type": "string", "enum": request_types},
+                        # A sub-reference for the staff intents that carry one
+                        # (which workload facet, which metric): free text the
+                        # validator only ever stores as a label.
+                        "facet": {"type": ["string", "null"], "maxLength": 80},
                         "additionalRequestTypes": {
                             "type": "array",
                             "maxItems": 2,
@@ -1125,6 +1145,107 @@ class StudentAIGateway:
         parsed["provider"] = transport.provider
         parsed["model"] = payload.get("model") or runtime.model
         return parsed
+
+    async def run_read_loop_step(
+        self,
+        *,
+        messages: Sequence[Mapping[str, str]],
+        schema: Mapping[str, Any],
+        actor: str = "student",
+        tenant_id: str | None = None,
+        subject_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """One step of the model-planned read loop (see assistant/read_loop.py).
+
+        The model sees the loop's own system prompt, the tool catalog, the
+        turn's context and the results of earlier steps, and answers with a
+        strict JSON step: reads to run next, or the final written answer. The
+        caller validates every read and guards the answer; nothing here is
+        trusted. Returns None when no chat provider is configured.
+        """
+
+        if not self._has_chat_key():
+            return None
+        transport = self._chat_transport()
+        system_prompt = str(messages[0]["content"]) if messages else ""
+        runtime = await self._runtime(
+            tenant_id,
+            "assistant_read_loop",
+            system_prompt=system_prompt,
+            model=self._chat_model("assistant_read_loop"),
+            max_output_tokens=900,
+            temperature=0.0,
+        )
+        body = {
+            "model": runtime.model,
+            **self._generation_parameters(runtime),
+            "messages": [
+                {"role": "system", "content": runtime.system_prompt},
+                *[
+                    {"role": str(item["role"]), "content": str(item["content"])}
+                    for item in list(messages)[1:]
+                ],
+            ],
+            **self._assistant_structured_output(
+                transport, runtime.model, f"{actor}_assistant_read_loop_step", schema
+            ),
+        }
+        payload = await self._completions.complete(
+            body,
+            transport,
+            self._completion_context(
+                runtime,
+                tenant_id,
+                subject_id,
+                None,
+                request_id,
+                1,
+                60,
+                {"messages": len(list(messages))},
+            ),
+        )
+        parsed = parse_extraction_json(message_content(payload))
+        usage = payload.get("usage")
+        parsed["usage"] = (
+            {
+                "promptTokens": int(usage.get("prompt_tokens", 0)),
+                "completionTokens": int(usage.get("completion_tokens", 0)),
+                "totalTokens": int(usage.get("total_tokens", 0)),
+            }
+            if isinstance(usage, Mapping)
+            else None
+        )
+        parsed["provider"] = transport.provider
+        parsed["model"] = payload.get("model") or runtime.model
+        return parsed
+
+    def _generation_parameters(self, runtime: RuntimeConfig) -> dict[str, Any]:
+        """Sampling/limit parameters shaped for the model family.
+
+        The gpt-5.x reasoning family rejects `max_tokens` (it wants
+        `max_completion_tokens`) and any `temperature` other than the default,
+        and it accepts `reasoning_effort`. Older chat models keep the classic
+        pair. The output budget for a reasoning model is widened when the
+        effort is above "none", because reasoning tokens are billed against
+        the same completion limit as the visible JSON answer.
+        """
+
+        if not _is_reasoning_model(runtime.model):
+            return {
+                "temperature": runtime.temperature,
+                "max_tokens": runtime.max_output_tokens,
+            }
+        effort = self._reasoning_effort_for(str(runtime.operation))
+        budget = runtime.max_output_tokens
+        if effort != "none":
+            budget = max(budget, 512) + _REASONING_HEADROOM_TOKENS.get(effort, 2_000)
+        return {"max_completion_tokens": budget, "reasoning_effort": effort}
+
+    def _reasoning_effort_for(self, operation: str) -> str:
+        overrides = _parse_effort_overrides(self._settings.reasoning_effort_overrides)
+        effort = overrides.get(operation) or self._settings.reasoning_effort or "none"
+        return effort if effort in _REASONING_EFFORTS else "none"
 
     def _assistant_structured_output(
         self,
@@ -1676,10 +1797,22 @@ class StudentAIGateway:
             return openai_transport(self._settings.openai_api_key)
         return self._openrouter()
 
-    def _chat_model(self) -> str:
+    def _chat_model(self, operation: str | None = None) -> str:
+        if operation:
+            override = _parse_model_overrides(self._settings.model_overrides).get(operation)
+            if override:
+                return override
         if self._settings.openai_api_key.strip():
             return self._settings.openai_model or "gpt-4o-mini"
         return self._settings.openrouter_model
+
+    @property
+    def default_read_planner(self) -> str:
+        return self._settings.read_planner or "deterministic"
+
+    @property
+    def read_loop_max_rounds(self) -> int:
+        return max(1, min(int(self._settings.read_loop_max_rounds or 3), 6))
 
     def _has_chat_key(self) -> bool:
         return bool(
@@ -1893,6 +2026,49 @@ _STRICT_JSON_SCHEMA_MODELS = frozenset(
         "gpt-5.6-luna-pro",
     }
 )
+
+
+_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh"})
+# Extra completion budget when a reasoning model is allowed to think: the
+# visible answer stays small, the thinking does not.
+_REASONING_HEADROOM_TOKENS: Mapping[str, int] = {
+    "low": 1_500,
+    "medium": 4_000,
+    "high": 8_000,
+    "xhigh": 12_000,
+}
+_REASONING_MODEL_PREFIXES = ("gpt-5", "openai/gpt-5", "o1", "o3", "o4", "openai/o1", "openai/o3")
+
+
+def _is_reasoning_model(model: str) -> bool:
+    """Whether the model takes the gpt-5-era generation parameters."""
+
+    name = model.strip().lower()
+    return any(name.startswith(prefix) for prefix in _REASONING_MODEL_PREFIXES)
+
+
+def _parse_model_overrides(raw: str) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for entry in (raw or "").split(","):
+        if "=" not in entry:
+            continue
+        operation, _, model = entry.partition("=")
+        if operation.strip() and model.strip():
+            overrides[operation.strip()] = model.strip()
+    return overrides
+
+
+def _parse_effort_overrides(raw: str) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for entry in (raw or "").split(","):
+        if "=" not in entry:
+            continue
+        operation, _, effort = entry.partition("=")
+        operation = operation.strip()
+        effort = effort.strip().lower()
+        if operation and effort in _REASONING_EFFORTS:
+            overrides[operation] = effort
+    return overrides
 
 
 def _supports_strict_json_schema(model: str) -> bool:

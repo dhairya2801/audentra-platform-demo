@@ -498,7 +498,12 @@ _RECALL_QUESTION = re.compile(
     # when they doubt it, and missing it sent the question to a read plane
     # that answered "No, that did not go through" about a committed change.
     # Found by browser E2E.
-    r"|\bdid (?:that|it) (?:actually |really |even )?(?:go through|work|happen|save|get created)\b"
+    r"|\b(?:did|has|is) (?:that|it|this|the change|my change|the update)\s+"
+    r"(?:actually |really |even |already )?(?:go|gone|went) (?:through|thru)\b"
+    r"|\bdid (?:that|it|this|the change) (?:actually |really |even )?"
+    r"(?:work|happen|save|stick|take|apply|get (?:created|saved|applied))\b"
+    r"|\bis (?:that|it|this|the change) (?:actually |really )?(?:saved|applied|in|done now)\b"
+    r"|\bdid (?:you|edward) (?:actually |really )?(?:save|apply) (?:that|it|this)\b"
     r"|\bwhere did (?:that|it) (?:end up|go)\b"
     r"|\bhas it (?:gone out|been sent|sent)\b"
     r"|\bwhat have you changed\b|\bwhat did you change\b"
@@ -562,7 +567,7 @@ def _describe_receipt(receipt: Mapping[str, Any]) -> str:
                 if isinstance(item, Mapping)
             ]
             if parts:
-                return f"changed your {', and your '.join(parts)}"
+                return f"changed {', and '.join(parts)}"
         return "updated your profile"
     if action == "student.support.contact":
         return "opened a support request — someone from the team picks it up from there"

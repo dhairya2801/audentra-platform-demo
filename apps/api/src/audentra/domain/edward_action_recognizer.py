@@ -75,7 +75,7 @@ class SemanticActionRequest:
     #: pending or repeated action from this conversation's own server state,
     #: "model" when tier 1 did. Recorded on the trace so a recognition
     #: regression can be attributed to the stage that caused it.
-    source: Literal["pattern", "continuation", "model"] = "pattern"
+    source: Literal["pattern", "continuation", "model", "pattern+model"] = "pattern"
 
 
 # ---------------------------------------------------------------------------
@@ -222,9 +222,7 @@ def question_sentences(text: str) -> str:
     refusal. Handing it only the question gets the question answered."""
 
     return " ".join(
-        part
-        for part in _sentences(text)
-        if _QUESTION_SENTENCE.match(part) or part.endswith("?")
+        part for part in _sentences(text) if _QUESTION_SENTENCE.match(part) or part.endswith("?")
     )
 
 
@@ -258,7 +256,11 @@ def is_pure_question(text: str) -> bool:
 # Vocabulary shared by several patterns. Institutions name the same object
 # differently; the object is what matters.
 _TASK_NOUN = r"(?:follow[- ]?ups?|tasks?|work items?|items?|tickets?|to-?dos?|reminders?|notes?)"
-_CREATE_VERB = r"(?:create|add|make|open|log|raise|queue|set ?up|put|start|file|book in|flag)"
+# "open" creates only as a verb: "open a task", never "open items" / "open work".
+_CREATE_VERB = (
+    r"(?:create|add|make|open(?!\s+(?:items?|tasks?|work|cases?|follow|blocking|"
+    r"requirements?|questions?))|log|raise|queue|set ?up|put|start|file|book in|flag)"
+)
 
 _PREFERRED_NAME = re.compile(
     r"\b(?:change|set|update|make|put|correct|fix)\b[^.!?]{0,40}?\bmy\s+"
@@ -344,7 +346,11 @@ _REQUIREMENT_DONE = re.compile(
 
 _CREATE_FOLLOW_UP = re.compile(
     rf"\b{_CREATE_VERB}\b[^.!?]{{0,40}}?\b{_TASK_NOUN}\b"
-    rf"|\b{_TASK_NOUN}\b[^.!?]{{0,24}}\b(?:for|on|about)\b"
+    # A noun-led request only at the start of the sentence ("follow-up for
+    # Yusuf", "a task on Rosa"); "tasks on my board that are in progress" and
+    # "her open item count" are reads.
+    rf"|^\W*(?:a |an |another |new )?{_TASK_NOUN}\b[^.!?]{{0,24}}\b(?:for|on|about)\b"
+    r"(?!\s+(?:my|the|your|our) (?:board|queue|plate|list|desk|record|caseload))"
     r"|\badd\b[^.!?]{0,40}\bto my (?:list|queue|plate|to-?do)\b"
     r"|\bput\b[^.!?]{0,40}\bon my (?:list|queue|plate|to-?do)\b"
     r"|\bremind me to\b"
@@ -540,6 +546,30 @@ def parse_student_action(text: str) -> SemanticActionRequest | None:
     return None
 
 
+_PREFERENCE_CUES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("preferredName", re.compile(r"\b(?:preferred |first |nick)?name\b|\bcall me\b", re.I)),
+    ("pronouns", re.compile(r"\bpronouns?\b", re.I)),
+    ("mobilePhone", re.compile(r"\b(?:mobile|phone|cell|number)\b", re.I)),
+    (
+        "communicationPreference",
+        re.compile(r"\b(?:text me|email me|by (?:text|sms|email))\b", re.I),
+    ),
+)
+
+
+def preference_fields_incomplete(message: str, fields: Mapping[str, Any]) -> bool:
+    """Whether the message names a preference the tier-0 patterns did not parse.
+
+    "What's my preferred name right now? change it to Lucy and set my pronouns
+    to she/her" parses the pronouns and loses the name, because "change it"
+    has no noun for the pattern to anchor on. Tier 0 must not quietly keep
+    half a request: when a cue for an unparsed field is present, the caller
+    consults tier 1 and merges the missing fields.
+    """
+
+    return any(name not in fields and cue.search(message) for name, cue in _PREFERENCE_CUES)
+
+
 def actionable_text(text: str) -> str:
     """The message minus its pure-question sentences.
 
@@ -559,6 +589,21 @@ def actionable_text(text: str) -> str:
         )
     ]
     return " ".join(kept) if kept else text
+
+
+# "Count the escalated items on the board", "show me the tasks on Rosa's
+# record": a read verb up front with no create verb anywhere is a read, even
+# though "items on" / "tasks for" look like the tail of a creation request.
+_READ_LEAD_IN = re.compile(
+    r"^\s*(?:count|show|list|find|pull(?: up)?|give me|get me|tell me|which|what|how many|"
+    r"who|summari[sz]e|display|check|look up|search)\b",
+    re.I,
+)
+_HAS_CREATE_VERB = re.compile(rf"\b{_CREATE_VERB}\b", re.I)
+
+
+def _read_only_lead_in(message: str) -> bool:
+    return bool(_READ_LEAD_IN.match(message)) and not _HAS_CREATE_VERB.search(message)
 
 
 def parse_staff_action(text: str) -> SemanticActionRequest | None:
@@ -593,7 +638,7 @@ def parse_staff_action(text: str) -> SemanticActionRequest | None:
         return SemanticActionRequest(
             "operations.work_item.update", _work_update_fields(message), 0.94
         )
-    if _CREATE_FOLLOW_UP.search(message):
+    if _CREATE_FOLLOW_UP.search(message) and not _read_only_lead_in(message):
         action: ActionName = (
             "operations.cohort.create_follow_ups"
             if _COHORT_REFERENCE.search(message)
@@ -1085,6 +1130,7 @@ __all__ = [
     "named_day",
     "parse_staff_action",
     "parse_student_action",
+    "preference_fields_incomplete",
     "recognize_with_model",
     "recognizer_catalog",
     "recognizer_schema",

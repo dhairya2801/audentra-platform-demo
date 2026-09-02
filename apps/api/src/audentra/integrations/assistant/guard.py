@@ -295,6 +295,29 @@ _PENDING_QUALIFIER = re.compile(
 )
 
 
+def ungrounded_tokens(answer: str, evidence_texts: Sequence[str]) -> dict[str, list[str]]:
+    """Which numbers, dates and contacts in `answer` the evidence does not carry.
+
+    Diagnostic companion to `guard_grounded_answer`: the guard only says
+    *that* a claim was ungrounded; traces and evals need to see *which*.
+    """
+
+    corpus = "\n".join(evidence_texts).lower()
+    lowered = re.sub(r"\s+", " ", answer).strip().lower()
+    allowed_dates = _collect_dates(corpus)
+    allowed_numbers = _collect_numbers(_mask_dates_and_contacts(corpus))
+    allowed_contacts = _collect_contacts(corpus)
+    return {
+        "contacts": sorted(c for c in _collect_contacts(lowered) if c not in allowed_contacts),
+        "dates": sorted(d for d in _collect_dates(lowered) if d not in allowed_dates),
+        "numbers": sorted(
+            n
+            for n in _collect_numbers(_mask_dates_and_contacts(lowered))
+            if n not in allowed_numbers
+        ),
+    }
+
+
 def _detect_pay_again_instruction(lowered: str) -> bool:
     for sentence in re.split(r"[.!?]", lowered):
         if _PAY_INSTRUCTION.search(sentence) and not _PENDING_QUALIFIER.search(sentence):

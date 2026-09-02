@@ -38,6 +38,7 @@ TOOL_NAMES = (
     "getStudentAccountSummary",
     "getAcademicStanding",
     "getStudentAppointments",
+    "getStudentAdvising",
     "getAcademicPlan",
     "getCampusLife",
     "getStudentMessages",
@@ -69,6 +70,7 @@ TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "getRegistrationStatus": "student_state",
     "getStudentAccountSummary": "student_state",
     "getStudentAppointments": "student_state",
+    "getStudentAdvising": "student_state",
     "getAcademicPlan": "student_state",
     "getCampusLife": "institution_knowledge",
     "getStudentMessages": "student_state",
@@ -112,8 +114,9 @@ TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "dates, prerequisites, responsible office, and submitted responses."
     ),
     "getDocumentStatuses": (
-        "Read uploaded documents with their review status, extraction outcome, "
-        "and any staff decision."
+        "Read the documents the student has actually uploaded, with review status, "
+        "extraction outcome, and any staff decision. Uploads only: which documents "
+        "are still required or missing comes from getOnboardingChecklist."
     ),
     "getStudentSupportRequests": (
         "Read the student's own support conversations and the latest reply on each."
@@ -158,6 +161,16 @@ TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Read scheduled advising, orientation, financial-aid, and housing "
         "appointments, plus where the student can book one."
     ),
+    "getStudentAdvising": (
+        "Read who advises the student: the primary adviser and every other "
+        "assigned staff member (admissions counselor, financial-aid counselor, "
+        "international adviser, housing coordinator) with their role, title, "
+        "institutional email, office location and whether they can be booked "
+        "right now — plus the next open slot and any advising gap (no primary "
+        "adviser, adviser on leave or departed, no open slots). Use this for "
+        "'who is my adviser', 'how do I reach my counselor', and 'when could I "
+        "meet them' questions."
+    ),
     "getAcademicPlan": (
         "Read the student's academic program and planned courses, including "
         "missing prerequisites and suggested exemptions."
@@ -187,6 +200,7 @@ RECEIPT_SOURCES: Mapping[str, str] = {
     "getRegistrationStatus": "registration",
     "getStudentAccountSummary": "account",
     "getStudentAppointments": "appointments",
+    "getStudentAdvising": "appointments",
     "getAcademicPlan": "academics",
     "getCampusLife": "campus_life",
     "getStudentMessages": "messages",
@@ -198,7 +212,12 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     # the answer to become a status report.
     "greeting": ("getStudentProfile",),
     "capability_overview": (),
-    "general_help": ("getOnboardingChecklist", "getEnrollmentHolds", "getStudentDeadlines"),
+    "general_help": (
+        "getOnboardingChecklist",
+        "getEnrollmentHolds",
+        "getStudentDeadlines",
+        "getStudentAdvising",
+    ),
     "remaining_steps": ("getOnboardingChecklist",),
     "completed_steps": ("getOnboardingChecklist",),
     "next_action": ("getOnboardingChecklist", "getEnrollmentHolds", "getStudentDeadlines"),
@@ -211,7 +230,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "support_requests": ("getStudentSupportRequests", "getSupportOptions"),
     "holds_and_blockers": ("getEnrollmentHolds",),
     "deadlines": ("getStudentDeadlines",),
-    "request_support": ("getSupportOptions", "getStudentSupportRequests"),
+    "request_support": ("getSupportOptions", "getStudentSupportRequests", "getStudentAdvising"),
     "aid_status": ("getFinancialAidStatus",),
     "aid_remaining_steps": ("getFinancialAidStatus",),
     "aid_incomplete_reason": ("getFinancialAidStatus",),
@@ -225,7 +244,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     # is unanswerable from the aid record alone.
     "aid_coverage": ("getFinancialAidSummary", "getStudentAccountSummary"),
     "aid_next_action": ("getFinancialAidStatus",),
-    "aid_support": ("getFinancialAidStatus", "getFinancialAidSupportOptions"),
+    "aid_support": ("getFinancialAidStatus", "getFinancialAidSupportOptions", "getStudentAdvising"),
     "housing_status": ("getStudentHousingStatus",),
     # Navigation answers name a page *and* what it currently shows, so the
     # destination's own read comes along. The checklist is the shared
@@ -234,7 +253,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "housing_options": ("getHousingOptions",),
     "housing_remaining_steps": ("getStudentHousingStatus",),
     "housing_next_action": ("getStudentHousingStatus", "getStudentDeadlines"),
-    "housing_support": ("getStudentHousingStatus", "getSupportOptions"),
+    "housing_support": ("getStudentHousingStatus", "getSupportOptions", "getStudentAdvising"),
     "housing_eligibility": (
         "getStudentHousingEligibility",
         "getStudentHousingStatus",
@@ -257,7 +276,7 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
         "getEnrollmentState",
         "getEnrollmentHolds",
     ),
-    "appointments": ("getStudentAppointments",),
+    "appointments": ("getStudentAppointments", "getStudentAdvising"),
     "academic_plan": ("getAcademicPlan",),
     "campus_life": ("getCampusLife",),
     "messages_unread": ("getStudentMessages",),

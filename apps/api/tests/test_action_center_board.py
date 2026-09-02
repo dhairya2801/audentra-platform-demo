@@ -319,6 +319,57 @@ def _staff_auth() -> AuthContext:
     )
 
 
+def test_scope_counts_split_the_board_into_mine_team_and_everyone() -> None:
+    result = evaluate_board(
+        _board(), ActionCenterQuery(), now=NOW, actor_id=ME, component="Registrar"
+    )
+    scopes = result["scopes"]
+    assert scopes["component"] == "Registrar"
+    # Two of the six open items are Marcus's; every open item is Registrar work.
+    assert scopes["mine"]["open"] == 2
+    assert scopes["mine"]["overdue"] == 1
+    assert scopes["mine"]["stale"] == 1
+    assert scopes["mine"]["students"] == 1
+    # MED-AWAY is Financial Aid work: the component scope excludes it.
+    assert scopes["myComponent"]["open"] == 5
+    assert scopes["all"]["open"] == 6
+    assert scopes["all"]["urgent"] == 2 and scopes["all"]["done"] == 1
+    assert set(scopes["mine"]) == {
+        "todo",
+        "inProgress",
+        "followUpRequired",
+        "blocked",
+        "done",
+        "cancelled",
+        "open",
+        "overdue",
+        "dueToday",
+        "urgent",
+        "escalated",
+        "stale",
+        "unassigned",
+        "students",
+    }
+    # A reader outside every component still gets tenant-wide figures.
+    nowhere = evaluate_board(_board(), ActionCenterQuery(), now=NOW, actor_id=None)["scopes"]
+    assert nowhere["component"] is None
+    assert nowhere["mine"]["open"] == 0 and nowhere["myComponent"]["open"] == 0
+    assert nowhere["all"]["open"] == 6
+
+
+def test_attention_order_reads_escalated_then_overdue_then_priority() -> None:
+    board = _board()
+    escalated = _item("MED-ESCALATED", priority="medium", due_days=9)
+    escalated["escalated"] = True
+    board.append(escalated)
+    result = evaluate_board(board, ActionCenterQuery(sort="attention"), now=NOW, actor_id=ME)
+    keys = [item["key"] for item in result["items"]]
+    assert keys[0] == "MED-ESCALATED"
+    assert keys[1] == "URGENT-OVERDUE"
+    assert keys.index("HIGH-STALE") > keys.index("URGENT-LATER")
+    assert parse_action_center_query({"sort": "attention"}).sort == "attention"
+
+
 def test_memory_store_serves_the_same_bounded_shape() -> None:
     store = InMemoryPlatformStore()
     board = store.get_action_center(_staff_auth(), parse_action_center_query({"limit": "1"}))

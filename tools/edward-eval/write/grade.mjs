@@ -1,3 +1,4 @@
+import { foldTypography } from "../src/typography.mjs";
 /**
  * Deterministic grading for the write suite.
  *
@@ -66,7 +67,7 @@ export function answerCorpus(payload) {
     add(block?.subject);
     add(block?.body);
   }
-  return parts.join("\n");
+  return foldTypography(parts.join("\n"));
 }
 
 /**

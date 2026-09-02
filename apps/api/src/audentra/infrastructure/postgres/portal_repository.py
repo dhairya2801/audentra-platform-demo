@@ -788,6 +788,10 @@ def _map_profile(row: Mapping[str, Any]) -> JsonDict:
         item["firstName"] = row["first_name"]
     if row.get("last_name"):
         item["lastName"] = row["last_name"]
+    # The university-facing student number (SIS/registrar reference). The
+    # internal UUID stays `studentId`; a student should never have to quote it.
+    if row.get("external_ref"):
+        item["externalRef"] = str(row["external_ref"])
     if row.get("email"):
         item.update(
             {
@@ -3640,6 +3644,7 @@ class PostgresPortalRepository:
         row = await self._one(
             """
             SELECT sp.student_id, sp.preferred_name, p.first_name, p.last_name,
+                   s.external_ref,
                    ca.email_normalized AS email,
                    ca.email_verified_at IS NOT NULL AS email_verified,
                    ca.phone_verified_at IS NOT NULL AS phone_verified,

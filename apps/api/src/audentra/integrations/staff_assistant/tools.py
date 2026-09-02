@@ -1144,7 +1144,10 @@ async def _tool_staff_team(
 async def _tool_staff_caseload(
     host: StaffAssistantToolHost, arguments: JsonDict, now: datetime
 ) -> JsonDict:
-    role = arguments.get("role") or "primary_advisor"
+    # No role means every current assignment this person holds: a financial-aid
+    # counselor's "my students" are their financial-aid assignments, not a
+    # primary-adviser caseload they were never given.
+    role = arguments.get("role") or None
     caseload = await _primitive(
         host, "staff_caseload", staff_member_id=str(arguments["staffId"]), role=role
     )
@@ -1174,7 +1177,7 @@ async def _tool_staff_caseload(
     statuses = [str(_mapping(i.get("advising")).get("status") or "none") for i in items]
     return {
         "staff": dict(_mapping(data.get("staff"))),
-        "role": role,
+        "role": role or "all_assignment_roles",
         "filters": {
             key: arguments.get(key)
             for key in ("advisingStatus", "depositState", "withOpenWork", "withOverdueWork")

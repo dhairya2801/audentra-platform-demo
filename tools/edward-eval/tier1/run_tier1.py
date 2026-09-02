@@ -297,7 +297,11 @@ async def main() -> None:
 
     latencies.sort()
     n = len(CHALLENGES)
-    price = totals["prompt_tokens"] * 0.15e-6 + totals["completion_tokens"] * 0.6e-6
+    prices = {"gpt-4o-mini": (0.15e-6, 0.6e-6), "gpt-5.6-luna": (0.2e-6, 1.2e-6)}
+    prompt_price, completion_price = prices.get(
+        os.environ.get("OPENAI_MODEL", "gpt-4o-mini"), (0.2e-6, 1.2e-6)
+    )
+    price = totals["prompt_tokens"] * prompt_price + totals["completion_tokens"] * completion_price
     summary = {
         "cases": n,
         "tier0": {

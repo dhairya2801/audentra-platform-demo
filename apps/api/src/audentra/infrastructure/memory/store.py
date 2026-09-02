@@ -1221,7 +1221,14 @@ class InMemoryPlatformStore:
             item = _clone(raw)
             item["signals"] = derive_signals(item, now=now, owner_risk=None)
             items.append(item)
-        board = evaluate_board(items, query, now=now, actor_id=auth.actor_id)
+        viewer = next((x for x in self.staff_members if x["id"] == auth.actor_id), None)
+        board = evaluate_board(
+            items,
+            query,
+            now=now,
+            actor_id=auth.actor_id,
+            component=str(viewer["component"]) if viewer else None,
+        )
         board["staff"] = _clone(self.staff_members)
         board["generatedAt"] = _now()
         return board

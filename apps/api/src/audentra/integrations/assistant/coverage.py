@@ -103,6 +103,8 @@ _DOMAIN_ANSWERING_TOOLS: dict[str, tuple[str, ...]] = {
     "academics": ("getAcademicPlan", "getAcademicStanding"),
     "campus": ("getCampusLife",),
     "checklist": ("getOnboardingChecklist", "getEnrollmentState"),
+    "advising": ("getStudentAdvising",),
+    "appointments": ("getStudentAppointments",),
 }
 
 # Two additional intents is the platform-wide bound on one turn (the operator

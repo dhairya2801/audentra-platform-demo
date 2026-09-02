@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime, time, timedelta
 from typing import Any, Protocol, cast
@@ -37,6 +37,9 @@ LOGGER = logging.getLogger(__name__)
 INTENT_TTL = timedelta(minutes=15)
 EXECUTION_LEASE = timedelta(minutes=2)
 MAXIMUM_COHORT_ACTION_SIZE = 25
+# Requirements nothing further can happen to; a follow-up "about" one of these
+# is about something else.
+_SETTLED_REQUIREMENT_STATUSES = {"completed", "waived", "not_applicable", "expired", "cancelled"}
 _ACTIONABLE_REQUIREMENT_STATUSES = {
     # Relational lifecycle plus the compatible memory/eval vocabulary.
     "ready",
@@ -1341,9 +1344,30 @@ class EdwardActionGateway:
                 str(item.get("dueAt") or "9999"),
             )
         )
+        # A named subject may point at any requirement that is still open —
+        # including one under review ("chase the registrar about her
+        # transcript"), which the student cannot act on but staff can. Only
+        # the *unnamed* default narrows to what the student must still do.
+        still_open = [
+            item
+            for item in requirements
+            if str(item.get("status")) not in _SETTLED_REQUIREMENT_STATUSES
+        ]
         chosen = (
-            _match_requirement(subject, None, actionable, require_unique=False) if subject else None
+            _match_requirement(
+                subject,
+                None,
+                still_open,
+                require_unique=False,
+                statuses={str(item.get("status")) for item in still_open},
+            )
+            if subject and still_open
+            else None
         )
+        if chosen is not None and not _mentions(subject or "", chosen):
+            # `_match_requirement` hands back the only open item when nothing
+            # mentions it; that is the caller's warning to raise, not a match.
+            chosen = None
         return (
             dict(student),
             chosen or (actionable[0] if actionable else None),
@@ -1821,10 +1845,16 @@ def _match_requirement(
     requirements: Sequence[JsonDict],
     *,
     require_unique: bool,
+    statuses: Collection[str] = _ACTIONABLE_REQUIREMENT_STATUSES,
 ) -> JsonDict | None:
-    actionable = [
-        item for item in requirements if str(item.get("status")) in _ACTIONABLE_REQUIREMENT_STATUSES
-    ]
+    """The requirement the message names, from those in `statuses`.
+
+    Callers matching a *named* subject pass every still-open status so an
+    item under review can be the target; the unnamed default keeps to what
+    the student must still act on.
+    """
+
+    actionable = [item for item in requirements if str(item.get("status")) in statuses]
     haystack = f"{message} {page_path or ''}".lower()
     normalized_haystack = re.sub(r"[_/-]+", " ", haystack)
     exact_matches = [

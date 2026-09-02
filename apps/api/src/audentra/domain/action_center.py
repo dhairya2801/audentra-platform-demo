@@ -28,7 +28,11 @@ PRIORITY_RANK: dict[str, int] = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 
 STATUS_SCOPES: tuple[str, ...] = ("open", "closed", "all")
 DUE_WINDOWS: tuple[str, ...] = ("all", "overdue", "today", "seven_days", "no_due")
-SORT_ORDERS: tuple[str, ...] = ("priority", "due", "updated", "created", "stale")
+SORT_ORDERS: tuple[str, ...] = ("priority", "due", "updated", "created", "stale", "attention")
+# The three ways a member reads the board: their own queue, their component's,
+# or the whole institution. Counts are served for all three so a scope switch
+# never has to load pages to label itself.
+BOARD_SCOPES: tuple[str, ...] = ("mine", "myComponent", "all")
 OWNER_RISKS: tuple[str, ...] = ("departed", "on_leave", "away")
 # Groupings a summary can bucket by. The vocabulary is shared by the SQL
 # summary and the in-memory reference implementation.
@@ -403,6 +407,13 @@ def sort_key(item: Mapping[str, Any], sort: str) -> tuple[Any, ...]:
         return (closed, created, identity)
     if sort == "stale":
         return (closed, updated, identity)
+    if sort == "attention":
+        # What needs a person first: escalated, then overdue, then priority,
+        # then the nearest due date. The personal queue reads in this order.
+        signals = _signals_of(item)
+        overdue = 1 if signals.get("overdue") else 0
+        escalated = 1 if item.get("escalated") else 0
+        return (closed, -escalated, -overdue, priority, due, -updated, identity)
     return (closed, priority, due, -updated, identity)
 
 
@@ -472,6 +483,117 @@ def count_board(items: Iterable[Mapping[str, Any]]) -> BoardCounts:
         counts.unassigned += int(bool(signals.get("unassigned")))
         counts.owner_risk += int(bool(signals.get("ownerRisk")))
     return counts
+
+
+@dataclass(slots=True)
+class ScopeCounts:
+    """Counts for one reading scope of the board (mine / my component / all).
+
+    Status counts cover the whole scope; ``open`` onwards describe open work
+    only. ``due_today`` is the calendar day, past or not, like the filter.
+    """
+
+    todo: int = 0
+    in_progress: int = 0
+    follow_up_required: int = 0
+    blocked: int = 0
+    done: int = 0
+    cancelled: int = 0
+    open: int = 0
+    overdue: int = 0
+    due_today: int = 0
+    urgent: int = 0
+    escalated: int = 0
+    stale: int = 0
+    unassigned: int = 0
+    students: int = 0
+
+    def public(self) -> dict[str, int]:
+        return {
+            "todo": self.todo,
+            "inProgress": self.in_progress,
+            "followUpRequired": self.follow_up_required,
+            "blocked": self.blocked,
+            "done": self.done,
+            "cancelled": self.cancelled,
+            "open": self.open,
+            "overdue": self.overdue,
+            "dueToday": self.due_today,
+            "urgent": self.urgent,
+            "escalated": self.escalated,
+            "stale": self.stale,
+            "unassigned": self.unassigned,
+            "students": self.students,
+        }
+
+
+def count_scope(items: Iterable[Mapping[str, Any]], *, now: datetime) -> ScopeCounts:
+    """Reference scope counts over already-signalled items."""
+
+    counts = ScopeCounts()
+    students: set[str] = set()
+    for item in items:
+        status = str(item.get("status"))
+        if status == "todo":
+            counts.todo += 1
+        elif status == "in_progress":
+            counts.in_progress += 1
+        elif status == "follow_up_required":
+            counts.follow_up_required += 1
+        elif status == "blocked":
+            counts.blocked += 1
+        elif status == "done":
+            counts.done += 1
+        elif status == "cancelled":
+            counts.cancelled += 1
+        if status not in OPEN_WORK_STATUSES:
+            continue
+        counts.open += 1
+        signals = _signals_of(item)
+        counts.overdue += int(bool(signals.get("overdue")))
+        counts.due_today += int(is_due_today(item.get("dueAt"), now))
+        counts.urgent += int(str(item.get("priority")) == "urgent")
+        counts.escalated += int(bool(item.get("escalated")))
+        counts.stale += int(bool(signals.get("stale")))
+        counts.unassigned += int(bool(signals.get("unassigned")))
+        student = item.get("student") if isinstance(item.get("student"), Mapping) else None
+        if student and student.get("id"):
+            students.add(str(student["id"]))
+    counts.students = len(students)
+    return counts
+
+
+def scope_board(
+    items: Iterable[Mapping[str, Any]],
+    *,
+    now: datetime,
+    actor_id: str | None,
+    component: str | None,
+) -> dict[str, Any]:
+    """Counts for the reader's three scopes, computed in one pass.
+
+    ``mine`` is work assigned to the reader, ``myComponent`` is the work of the
+    reader's component (the item's component, not the owner's), ``all`` is the
+    tenant. Nothing is derived from a page: a client renders the scope switch
+    and the sidebar badge from these alone.
+    """
+
+    mine: list[Mapping[str, Any]] = []
+    team: list[Mapping[str, Any]] = []
+    everything: list[Mapping[str, Any]] = []
+    for item in items:
+        everything.append(item)
+        assignee = item.get("assignee") if isinstance(item.get("assignee"), Mapping) else None
+        if actor_id is not None and assignee and str(assignee.get("id")) == str(actor_id):
+            mine.append(item)
+        if component is not None and str(item.get("component") or "") == component:
+            team.append(item)
+    return {
+        "component": component,
+        "mine": count_scope(mine, now=now).public(),
+        "myComponent": count_scope(team, now=now).public(),
+        "all": count_scope(everything, now=now).public(),
+    }
 
 
 @dataclass(slots=True)
@@ -548,6 +670,7 @@ def evaluate_board(
     *,
     now: datetime,
     actor_id: str | None,
+    component: str | None = None,
 ) -> dict[str, Any]:
     """Reference evaluation of a query over already-signalled items."""
 
@@ -569,6 +692,7 @@ def evaluate_board(
             "distinctStudents": len(students),
         },
         "counts": count_board(items).public(),
+        "scopes": scope_board(items, now=now, actor_id=actor_id, component=component),
         "facets": facet_board(items),
         "query": query.public(),
     }

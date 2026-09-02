@@ -14,6 +14,7 @@ bound server-side after validation.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -21,8 +22,21 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from audentra.core.assistant_execution import ReadPlanner, resolve_read_planner
 from audentra.integrations.assistant.blocks import describe_blocks_for_prompt, text_block
+from audentra.integrations.assistant.guard import ungrounded_tokens
+from audentra.integrations.assistant.read_loop import (
+    LoopCall,
+    LoopTool,
+    ReadLoopResult,
+    run_read_loop,
+)
 from audentra.integrations.assistant.trace import AssistantTurnTrace
+from audentra.integrations.staff_assistant.catalog import (
+    STAFF_TOOL_ARGUMENTS,
+    STAFF_TOOL_DESCRIPTIONS,
+    STAFF_TOOL_NAMES,
+)
 from audentra.integrations.staff_assistant.classify import (
     STAFF_REQUIRED_REQUEST_TYPES,
     STUDENT_REQUIRED_REQUEST_TYPES,
@@ -62,10 +76,12 @@ from audentra.integrations.staff_assistant.planner import (
 from audentra.integrations.staff_assistant.scope import (
     STUDENT_SCOPE,
     has_explicit_entity,
+    is_globally_scoped,
     may_inherit_referent,
     referent_action,
     refers_back,
     scope_of,
+    uses_singular_anaphora,
 )
 from audentra.integrations.staff_assistant.tools import (
     DEFAULT_STAFF_TOOL_TIMEOUT_SECONDS,
@@ -79,6 +95,33 @@ JsonDict = dict[str, Any]
 
 ModelComposer = Callable[..., Awaitable[Mapping[str, Any] | None]]
 ModelPlanner = Callable[..., Awaitable[Mapping[str, Any] | None]]
+ReadLoopStep = Callable[..., Awaitable[Mapping[str, Any] | None]]
+
+# The staff read loop leaves these to the deterministic composer: refusals,
+# drafts (reviewed text), mailbox content (never forwarded to a rewrite
+# model) and the yes/no membership statement.
+_LOOP_SKIP_REQUEST_TYPES = frozenset(
+    {
+        "greeting",
+        "capability_overview",
+        "action_request",
+        "supported_action_request",
+        "unsupported_metric",
+        "unsupported_or_out_of_scope",
+        "draft_email",
+        "draft_sms",
+        "draft_call_points",
+        "mailbox_read",
+        "not_found",
+    }
+)
+_LOOP_HYBRID_REQUEST_TYPES = frozenset({"general_question"})
+
+# Identity arguments the model never supplies; the executor binds them from
+# the turn's handles (see `_bind_loop_arguments`).
+_LOOP_IDENTITY_ARGUMENTS = frozenset(
+    {"studentId", "staffId", "staffIds", "workItemId", "inquiryId"}
+)
 
 # Intents whose deterministic answer is the deliverable: refusals stay
 # canned, and a draft is reviewed text — a model rewrite of either could only
@@ -185,10 +228,20 @@ class StaffAssistantPipeline:
         model_planner: ModelPlanner | None = None,
         tool_timeout_seconds: float = DEFAULT_STAFF_TOOL_TIMEOUT_SECONDS,
         now: Callable[[], datetime] | None = None,
+        read_loop_step: ReadLoopStep | None = None,
+        read_planner: str | ReadPlanner | None = None,
+        read_loop_max_rounds: int = 3,
     ) -> None:
         self._host = host
         self._model_composer = model_composer
         self._model_planner = model_planner
+        self._read_loop_step = read_loop_step
+        self._read_planner = (
+            read_planner
+            if isinstance(read_planner, ReadPlanner)
+            else resolve_read_planner(read_planner)
+        )
+        self._read_loop_max_rounds = max(1, min(int(read_loop_max_rounds), 6))
         self._tool_timeout_seconds = tool_timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
 
@@ -254,6 +307,9 @@ class StaffAssistantPipeline:
 
         stage_started = time.perf_counter()
         classification = classify_staff_request(request, entities)
+        classification = _rescope_pronoun_follow_up(
+            classification, request, entities, context_student_id
+        )
         tool_selection_source = "deterministic" if classification is not None else None
         ambiguity_answer = self._entity_ambiguity_answer(classification, entities, request)
         if ambiguity_answer is not None:
@@ -328,6 +384,31 @@ class StaffAssistantPipeline:
             tool_selection_source = "deterministic"
         student_resolved = resolution.student_id is not None
         staff_resolved = bool(entities.staff) or identity is not None
+
+        if trace is not None:
+            trace.read_planner = self._read_planner.value
+        # --- Model read loop -------------------------------------------------
+        # Runs after identity, entities and the referent are settled, so every
+        # identity argument the loop binds is one the deterministic resolver
+        # validated. A loop that answers returns here; otherwise the turn
+        # continues on the deterministic route with the reason recorded.
+        if (
+            self._read_loop_step is not None
+            and not request.action_is_supported
+            and self._loop_applies(classification, request.text)
+        ):
+            loop_response = await self._run_read_loop(
+                request,
+                classification,
+                resolution,
+                entities,
+                identity,
+                execution,
+                failure_codes,
+                trace,
+            )
+            if loop_response is not None:
+                return loop_response
 
         # --- Planning -------------------------------------------------------
         planned_calls: list[PlannedToolCall] | None = None
@@ -489,6 +570,18 @@ class StaffAssistantPipeline:
         # follow-up has an antecedent, without the queue answer itself
         # claiming to be about a student.
         queue_referent = _queue_head_student_id(classification, state)
+        # A refusal or canned answer about a named student ("what's Petra's
+        # melt risk?") still puts Petra on the table: the resolver placed her,
+        # the answer read nothing, and the follow-up should not have to name
+        # her again.
+        entity_referent_id = entity_referent_name = None
+        if (
+            resolution.student_id is None
+            and len(entities.students) == 1
+            and classification.request_type == "unsupported_metric"
+        ):
+            entity_referent_id = str(entities.students[0].id)
+            entity_referent_name = entities.students[0].name
 
         # --- Compose + optional rewrite ---------------------------------------
         stage_started = time.perf_counter()
@@ -524,6 +617,12 @@ class StaffAssistantPipeline:
             resolution.student_id is not None and not has_explicit_entity(request)
         )
         composer_question = request.resolved_text if continues_prior_turn else request.text
+        draft = ComposedStaffAnswer(
+            message=draft.message,
+            blocks=draft.blocks,
+            evidence_texts=[_today_line(self._now()), *draft.evidence_texts],
+            required_phrases=draft.required_phrases,
+        )
         message_text, blocks, provider, model, usage = await self._maybe_rewrite(
             classification, composer_question, draft, failure_codes, trace=trace
         )
@@ -545,20 +644,350 @@ class StaffAssistantPipeline:
             classification=classification,
             derived=state,
             failure_codes=failure_codes,
-            resolved_student_id=resolution.student_id,
-            resolved_student_name=resolution.student_name,
+            resolved_student_id=resolution.student_id or entity_referent_id,
+            resolved_student_name=resolution.student_name or entity_referent_name,
             referent_action=(
                 "set"
-                if (resolution.student_id or queue_referent)
+                if (resolution.student_id or entity_referent_id or queue_referent)
                 else referent_action(
                     resolved_student_id=None,
                     request_type=classification.request_type,
                 )
             ),
-            next_referent_student_id=resolution.student_id or queue_referent,
+            next_referent_student_id=resolution.student_id or entity_referent_id or queue_referent,
             identity=identity,
             entities=entities,
         )
+
+    # ------------------------------------------------------------------
+    # Model read loop
+    # ------------------------------------------------------------------
+
+    def _loop_applies(self, classification: StaffClassification | None, text: str = "") -> bool:
+        if self._read_planner is ReadPlanner.DETERMINISTIC:
+            return False
+        if classification is None:
+            return True
+        if classification.request_type in _LOOP_SKIP_REQUEST_TYPES:
+            return False
+        if self._read_planner is ReadPlanner.MODEL:
+            return True
+        if (
+            classification.source == "safe_fallback"
+            or classification.request_type in _LOOP_HYBRID_REQUEST_TYPES
+        ):
+            return True
+        # A question that spans two or more domains ("does she have an
+        # appointment with her adviser before her earliest overdue
+        # requirement") is a single-intent route for the classifier and a
+        # cross-source read for the loop.
+        # Aggregates and cohort searches carry a deterministic filter parsed
+        # from the question ("overdue document reviews in the Registrar's
+        # office"); the classifier's SQL-backed count beats a model reading a
+        # filtered page, so those stay deterministic even when two domain
+        # words appear.
+        if classification.request_type in _AGGREGATE_REQUEST_TYPES:
+            return False
+        return len(_domains_mentioned(text)) >= 2
+
+    async def _run_read_loop(
+        self,
+        request: NormalizedStaffRequest,
+        classification: StaffClassification | None,
+        resolution: StaffAssistantPipeline._Resolution,
+        entities: EntityResolution,
+        identity: StaffIdentity | None,
+        execution: StaffToolExecution,
+        failure_codes: list[str],
+        trace: AssistantTurnTrace | None,
+    ) -> StaffAssistantPipelineResult | None:
+        """Model-planned staff reads with server-bound identity, guarded.
+
+        Handles the model may use: ``student`` (the resolved referent),
+        ``me`` (the signed-in member), ``staff:N`` (colleagues the entity
+        resolver placed) and a work-item key. The executor maps handles to
+        identifiers; a raw identifier or an unbound handle rejects the call
+        with a visible reason rather than a guessed read.
+        """
+
+        assert self._read_loop_step is not None
+        stage_started = time.perf_counter()
+        handles: dict[str, str] = {}
+        if resolution.student_id:
+            handles["student"] = str(resolution.student_id)
+        if self._host.staff_member_id:
+            handles["me"] = str(self._host.staff_member_id)
+        staff_handles: list[JsonDict] = []
+        for index, member in enumerate(entities.staff[:4], start=1):
+            handles[f"staff:{index}"] = str(member.id)
+            staff_handles.append({"handle": f"staff:{index}", "name": member.name})
+        host = self._host
+        timeout = self._tool_timeout_seconds
+        moment = self._now()
+        discovered: dict[str, JsonDict] = {}
+
+        async def executor(calls: Sequence[LoopCall]) -> None:
+            planned: list[tuple[LoopCall, PlannedToolCall]] = []
+            for call in calls:
+                if call.status != "planned":
+                    continue
+                bound = await self._bind_loop_arguments(call, handles)
+                if bound is None:
+                    continue
+                planned.append((call, bound))
+            if not planned:
+                return
+            round_result = await execute_staff_tool_reads(
+                [bound for _, bound in planned],
+                host,
+                timeout_seconds=timeout,
+                now=moment,
+                receipt_offset=len(execution.receipts),
+            )
+            _merge_execution(execution, round_result)
+            rejected = {item["tool"]: item for item in round_result.rejected_arguments}
+            for call, bound in planned:
+                read = round_result.reads.get(bound.tool)
+                if read is None:
+                    call.status = "rejected"
+                    problem = rejected.get(bound.tool)
+                    call.reason = str(problem.get("detail")) if problem else "not_executed"
+                    continue
+                call.status = str(read.get("status", "unavailable"))
+                call.reason = read.get("reason")
+                call.result = read.get("data")
+                call.duration_ms = read.get("durationMs")
+                # A canonical roster search that found exactly one student
+                # binds the `student` handle for the rest of the turn — the
+                # identifier still comes from the search result, never from
+                # the model — so a name the entity resolver did not catch
+                # (lower-case, a nickname) can still be read about.
+                if (
+                    bound.tool == "searchStudents"
+                    and "student" not in handles
+                    and call.status == "available"
+                    and isinstance(call.result, Mapping)
+                ):
+                    items = _search_items(call.result)
+                    quality = str(call.result.get("matchQuality") or "exact")
+                    if len(items) == 1 and items[0].get("id") and quality != "fuzzy":
+                        handles["student"] = str(items[0]["id"])
+                        discovered["student"] = {
+                            "id": str(items[0]["id"]),
+                            "name": str(
+                                items[0].get("preferredName") or items[0].get("name") or ""
+                            ),
+                        }
+
+        tools = [
+            LoopTool(
+                name=name,
+                description=STAFF_TOOL_DESCRIPTIONS.get(name, ""),
+                arguments=_describe_loop_arguments(name),
+                identity_arguments=tuple(
+                    arg
+                    for arg in STAFF_TOOL_ARGUMENTS.get(name, {})
+                    if arg in _LOOP_IDENTITY_ARGUMENTS
+                ),
+            )
+            for name in STAFF_TOOL_NAMES
+        ]
+        context: JsonDict = {
+            "actor": "staff",
+            "today": moment.date().isoformat(),
+            "signedIn": identity.describe() if identity is not None else None,
+            "handles": {
+                "me": "the signed-in staff member" if "me" in handles else None,
+                "student": (
+                    f"{resolution.student_name} (the student this turn is about)"
+                    if resolution.student_id
+                    else "no student is resolved for this turn; searchStudents first "
+                    "if the question names one, or ask the person to name one"
+                ),
+                "staff": staff_handles or None,
+            },
+            "resolvedEntities": entities.as_trace(),
+            "cohortFilterVocabulary": _COHORT_FILTER_GUIDE,
+        }
+        result: ReadLoopResult = await run_read_loop(
+            question=request.resolved_text if request.is_follow_up else request.text,
+            history=request.history,
+            context=context,
+            tools=tools,
+            model_step=self._read_loop_step,
+            executor=executor,
+            max_rounds=self._read_loop_max_rounds,
+        )
+        if trace is not None:
+            for call in result.calls:
+                trace.add_tool_call(
+                    tool=call.tool,
+                    status=call.status,
+                    duration_ms=call.duration_ms,
+                    reason=call.reason,
+                    result=call.result,
+                    round_name=f"loop-{call.round_index + 1}",
+                    arguments=call.arguments,
+                )
+            for entry in result.model_calls:
+                trace.add_model_call(
+                    operation=str(entry.get("operation") or "assistant_read_loop"),
+                    attempt=int(entry.get("attempt") or 1),
+                    duration_ms=float(entry.get("durationMs") or 0),
+                    outcome=str(entry.get("outcome") or "step"),
+                    provider=entry.get("provider"),
+                    model=entry.get("model"),
+                    usage=entry.get("usage"),
+                    detail=entry.get("detail"),
+                )
+        state = derive_staff_state(execution)
+        state.search_results = state.search_results or resolution.search_results
+        verdict = None
+        if result.answer:
+            evidence = list(result.evidence_texts)
+            if identity is not None:
+                evidence.append(identity.describe())
+            verdict = guard_staff_grounded_answer(answer=result.answer, evidence_texts=evidence)
+        accepted = verdict is not None and verdict.accepted
+        guard_label = (
+            "accepted"
+            if accepted
+            else (verdict.reason_code if verdict is not None else result.outcome)
+        )
+        if trace is not None:
+            trace.read_loop = {
+                "rounds": result.rounds,
+                "outcome": result.outcome,
+                "reads": [call.tool for call in result.calls],
+                "reasoning": result.reasoning[-3:],
+                "guard": guard_label,
+                **(
+                    {
+                        "ungrounded": ungrounded_tokens(result.answer, result.evidence_texts),
+                        "rejectedAnswer": result.answer[:600],
+                    }
+                    if result.answer and not accepted
+                    else {}
+                ),
+            }
+            trace.add_stage(
+                "read_loop",
+                (time.perf_counter() - stage_started) * 1_000,
+                rounds=result.rounds,
+                outcome=guard_label,
+            )
+        if not accepted:
+            failure_codes.append(f"read_loop_fallback:{guard_label}")
+            return None
+        assert verdict is not None
+        resolved = classification or StaffClassification(
+            "general_question", 0.6, source="model_loop"
+        )
+        last_call = next(
+            (entry for entry in reversed(result.model_calls) if entry.get("model")), None
+        )
+        usage_total = _sum_usage(result.model_calls)
+        queue_referent = _queue_head_student_id(resolved, state)
+        found = discovered.get("student")
+        student_id = resolution.student_id or (found["id"] if found else None)
+        student_name = resolution.student_name or (found["name"] if found else None)
+        if trace is not None:
+            trace.classification = _classification_dict(resolved)
+            trace.tool_selection_source = "model_loop"
+            trace.selected_tools = list(dict.fromkeys(call.tool for call in result.calls))
+            trace.evidence = list(result.evidence_texts[:48])
+            trace.provider = str((last_call or {}).get("provider") or "openai")
+            trace.model = (last_call or {}).get("model")
+            trace.usage = usage_total
+            trace.response_source = "model_loop"
+            trace.failure_codes = list(failure_codes)
+            trace.final_message = verdict.answer
+        return StaffAssistantPipelineResult(
+            message=verdict.answer,
+            blocks=[text_block(verdict.answer)],
+            provider=str((last_call or {}).get("provider") or "openai"),
+            model=(last_call or {}).get("model"),
+            usage=usage_total,
+            context_receipts=_receipt_sources(execution.receipts),
+            classification=resolved,
+            derived=state,
+            failure_codes=failure_codes,
+            resolved_student_id=student_id,
+            resolved_student_name=student_name,
+            referent_action=(
+                "set"
+                if (student_id or queue_referent)
+                else referent_action(resolved_student_id=None, request_type=resolved.request_type)
+            ),
+            next_referent_student_id=student_id or queue_referent,
+            identity=identity,
+            entities=entities,
+        )
+
+    async def _bind_loop_arguments(
+        self, call: LoopCall, handles: Mapping[str, str]
+    ) -> PlannedToolCall | None:
+        """Replace handles with validated identifiers; refuse anything else."""
+
+        schema = STAFF_TOOL_ARGUMENTS.get(call.tool, {})
+        arguments: JsonDict = {}
+        for name, value in call.arguments.items():
+            if name not in schema:
+                call.status, call.reason = "rejected", f"unknown argument {name}"
+                return None
+            if name not in _LOOP_IDENTITY_ARGUMENTS:
+                arguments[name] = value
+                continue
+            if name == "staffIds":
+                if isinstance(value, str):
+                    value = [item.strip() for item in value.split(",")]
+                if not isinstance(value, list):
+                    call.status, call.reason = "rejected", "staffIds must be a list of handles"
+                    return None
+                ids: list[str] = []
+                for handle in value:
+                    resolved_id = handles.get(str(handle))
+                    if resolved_id is None:
+                        call.status, call.reason = "rejected", f"unbound handle {handle}"
+                        return None
+                    ids.append(resolved_id)
+                arguments[name] = ids
+                continue
+            if name == "workItemId":
+                key = str(value).strip().upper()
+                found = None
+                if self._host.supports("work_item_by_key"):
+                    try:
+                        found = await self._host.read("work_item_by_key", key=key)
+                    except Exception:
+                        found = None
+                if not found or not found.get("id"):
+                    call.status, call.reason = "rejected", f"no work item with key {key}"
+                    return None
+                arguments[name] = str(found["id"])
+                continue
+            resolved_id = handles.get(str(value))
+            if resolved_id is None:
+                call.status, call.reason = "rejected", f"unbound handle {value}"
+                return None
+            arguments[name] = resolved_id
+        # Identity arguments the model omitted default to the obvious handle:
+        # a student tool reads the resolved student, a staff tool reads "me".
+        for name in schema:
+            if name in arguments or name not in _LOOP_IDENTITY_ARGUMENTS:
+                continue
+            fallback = None
+            if name == "studentId":
+                fallback = handles.get("student")
+            elif name == "staffId":
+                fallback = handles.get("staff:1") or handles.get("me")
+            if fallback is None:
+                if schema[name].get("optional"):
+                    continue
+                call.status, call.reason = "rejected", f"{name} has no bound handle this turn"
+                return None
+            arguments[name] = fallback
+        return PlannedToolCall(tool=call.tool, arguments=arguments)
 
     # ------------------------------------------------------------------
     # Identity and entities
@@ -690,6 +1119,12 @@ class StaffAssistantPipeline:
         """
 
         if classification is not None and classification.request_type in _NO_RESOLUTION_TYPES:
+            return None
+        if request.reference_token:
+            # "Lucia Zephyrine SYN-001278" — the pasted ID is decisive; referent
+            # resolution looks it up on the roster (then the work-item
+            # namespace), and a same-name list would only ask what the message
+            # already said.
             return None
         if entities.staff or entities.students:
             # Something resolved; the remaining ambiguities (if any) are
@@ -1646,3 +2081,181 @@ def _nobody_found_answer(name: str, staff_context: bool) -> ComposedStaffAnswer:
         "roster. A full name works best; I can also look up a student ID."
     )
     return ComposedStaffAnswer(message=message, blocks=[text_block(message)])
+
+
+_COHORT_FILTER_GUIDE = (
+    "findStudents/summarizeStudents `filter` object keys: query, program, classYear, "
+    "offerStatus (offered|accepted|declined|expired), depositState (paid|pending|unpaid), "
+    "onboardingStatus (not_started|in_progress|completed), requirementCode, "
+    "requirementState (open|blocked|in_review|complete|overdue|due_soon|any), "
+    "documentCategory, documentState (missing|submitted|under_review|accepted|rejected), "
+    "aidDocumentState (outstanding|verified|action_required|in_review), housingState "
+    "(blocked|actionable|selected|no_step), hasOpenWorkItem, hasOverdueRequirement, "
+    "hasOpenBlockingRequirement (booleans), residencyStatus, citizenshipStatus, "
+    "adviserState (none|assigned|active|on_leave|departed). summarizeStudents groupBy: "
+    "offer_status|deposit_state|onboarding_status|program|class_year|assigned_staff|"
+    "blocking_requirement|housing_state|primary_adviser|adviser_state."
+)
+
+
+_AGGREGATE_REQUEST_TYPES = frozenset(
+    {
+        "queue_aggregate",
+        "cohort_aggregate",
+        "cohort_search",
+        "department_operations",
+        "inquiry_aggregate",
+        "work_queue",
+        "attention_ranking",
+    }
+)
+
+# Staff-question domains; two or more in one message marks a cross-source ask.
+_STAFF_DOMAIN_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "appointments",
+        re.compile(r"\bappointments?\b|\bmeetings?\b|\bbooked\b|\bcalendar\b|\bslots?\b", re.I),
+    ),
+    (
+        "requirements",
+        re.compile(
+            r"\brequirements?\b|\boverdue\b|\bdeadlines?\b|\bblock(?:ed|ing|ers?)\b"
+            r"|\bwaiting on\b|\bmissing\b",
+            re.I,
+        ),
+    ),
+    ("documents", re.compile(r"\bdocuments?\b|\btranscript\b|\bimmuni\w*\b|\bupload\w*\b", re.I)),
+    (
+        "ownership",
+        re.compile(
+            r"\bown(?:s|er|ed)?\b|\bhandl(?:es|ing)\b|\bassigned to\b|\bresponsible\b", re.I
+        ),
+    ),
+    (
+        "advising",
+        re.compile(
+            r"\badvis(?:e|o)rs?\b|\bcounsel(?:l)?ors?\b|\bcoordinator\b|\bon leave\b"
+            r"|\bbook(?:able|ed)?\b",
+            re.I,
+        ),
+    ),
+    (
+        "queue",
+        re.compile(
+            r"\bmy (?:queue|plate|board|items?|tasks?|work)\b|\burgent\b|\bescalated\b"
+            r"|\baction cent(?:er|re)\b",
+            re.I,
+        ),
+    ),
+    ("financial", re.compile(r"\bdeposit\b|\bfinancial\b|\baid\b|\bbalance\b|\bpaid\b", re.I)),
+)
+
+
+def _domains_mentioned(text: str) -> list[str]:
+    return [name for name, pattern in _STAFF_DOMAIN_HINTS if pattern.search(text)]
+
+
+# Queue/cohort intents a singular pronoun can pull back onto the active student.
+_PRONOUN_RESCOPE: Mapping[str, str] = {
+    "queue_aggregate": "student_action_center",
+    "work_queue": "student_action_center",
+    "cohort_search": "student_overview",
+    "cohort_aggregate": "student_overview",
+    "attention_ranking": "student_overview",
+}
+_OWNER_WORDS = re.compile(
+    r"\b(?:own|owns|owner|owned|handling|handles|assigned|responsible)\b", re.I
+)
+
+
+def _rescope_pronoun_follow_up(
+    classification: StaffClassification | None,
+    request: NormalizedStaffRequest,
+    entities: EntityResolution,
+    context_student_id: str | None,
+) -> StaffClassification | None:
+    """ "who owns her housing item?" after a turn about Noor is about Noor.
+
+    The queue classifier sees "item" and files the turn under the queue; the
+    pronoun says otherwise. With an active student on the conversation, no
+    entity of its own and no global-scope language, a singular pronoun moves
+    the turn back into student scope so the referent inherits.
+    """
+
+    if classification is None or context_student_id is None:
+        return classification
+    target = _PRONOUN_RESCOPE.get(classification.request_type)
+    if target is None or entities.students or entities.staff or has_explicit_entity(request):
+        return classification
+    if not uses_singular_anaphora(request) or is_globally_scoped(request):
+        return classification
+    if _OWNER_WORDS.search(request.text):
+        target = "student_ownership"
+    return StaffClassification(
+        target,
+        classification.confidence,
+        source="pronoun_rescope",
+        reference=classification.reference,
+    )
+
+
+def _describe_loop_arguments(tool: str) -> str:
+    """One line per argument: name, kind, allowed values, and which handle binds it."""
+
+    schema = STAFF_TOOL_ARGUMENTS.get(tool, {})
+    if not schema:
+        return "none"
+    parts: list[str] = []
+    for name, spec in schema.items():
+        kind = str(spec.get("kind"))
+        if name in _LOOP_IDENTITY_ARGUMENTS:
+            handle = {
+                "studentId": "handle `student`",
+                "staffId": "handle `me` or `staff:N`",
+                "staffIds": "list of handles",
+                "workItemId": "a work-item key such as AST-01234",
+                "inquiryId": "not available through this loop",
+            }[name]
+            parts.append(f"{name}: {handle}")
+            continue
+        detail = kind
+        if kind == "enum":
+            detail = "one of " + "|".join(str(v) for v in spec.get("values", ()))
+        elif kind == "int":
+            detail = f"integer {spec.get('minimum', 1)}-{spec.get('maximum', 100)}"
+        elif kind == "cohort_filter":
+            detail = "object (see cohortFilterVocabulary in context)"
+        optional = " (optional)" if spec.get("optional") else ""
+        parts.append(f"{name}: {detail}{optional}")
+    handle_examples: Mapping[str, Any] = {
+        "studentId": "student",
+        "staffId": "me",
+        "staffIds": ["me"],
+        "workItemId": "AST-01234",
+    }
+    example = {name: handle_examples[name] for name in schema if name in handle_examples}
+    if example:
+        parts.append("example arguments string: " + json.dumps(example))
+    return "; ".join(parts)
+
+
+def _sum_usage(model_calls: Sequence[Mapping[str, Any]]) -> JsonDict | None:
+    prompt = completion = total = 0
+    seen = False
+    for entry in model_calls:
+        usage = entry.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        seen = True
+        prompt += int(usage.get("promptTokens") or 0)
+        completion += int(usage.get("completionTokens") or 0)
+        total += int(usage.get("totalTokens") or 0)
+    if not seen:
+        return None
+    return {"promptTokens": prompt, "completionTokens": completion, "totalTokens": total}
+
+
+def _today_line(now: datetime) -> str:
+    return (
+        f"Today is {now:%A %d %B %Y} (ISO {now:%Y-%m-%d}); dates before this have already passed."
+    )

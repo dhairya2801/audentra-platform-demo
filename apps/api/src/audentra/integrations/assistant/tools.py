@@ -1170,6 +1170,58 @@ async def _tool_appointments(host: AssistantToolHost, now: datetime) -> JsonDict
     return result
 
 
+async def _tool_advising(host: AssistantToolHost, now: datetime) -> JsonDict:
+    """The student's assigned advisers and whether each can be booked.
+
+    The portal's Advising page and the appointments booking drawer read the
+    same projection, so Edward names the same adviser, email and next open
+    slot the student sees on screen. Staff phone numbers do not exist in the
+    schema and are deliberately absent.
+    """
+
+    advising = await _primitive(host, "advising")
+
+    def person(entry: Any) -> JsonDict | None:
+        if not isinstance(entry, Mapping):
+            return None
+        staff = _mapping(entry.get("staff"))
+        availability = _mapping(entry.get("availability"))
+        return {
+            "role": str(entry.get("role") or "").replace("_", " "),
+            "name": staff.get("name"),
+            "title": staff.get("title"),
+            "email": staff.get("email"),
+            "component": staff.get("component"),
+            "officeLocation": staff.get("officeLocation"),
+            "employmentStatus": staff.get("employmentStatus"),
+            "leaveUntil": staff.get("leaveUntil"),
+            "assignedAt": entry.get("assignedAt"),
+            "bookable": availability.get("bookable"),
+            "availabilityReason": availability.get("reason"),
+            "nextOpenSlotAt": availability.get("nextOpenSlotAt"),
+        }
+
+    advisers = [
+        record
+        for record in (person(item) for item in _sequence(advising.get("advisers")))
+        if record is not None
+    ]
+    primary = person(advising.get("primaryAdviser"))
+    return {
+        "primaryAdviser": primary,
+        "advisers": advisers,
+        "total": len(advisers),
+        "gaps": [
+            {"code": _mapping(gap).get("code"), "message": _mapping(gap).get("message")}
+            for gap in _sequence(advising.get("gaps"))
+            if isinstance(gap, Mapping)
+        ],
+        "advisingRequirement": _mapping(advising.get("advising")) or None,
+        "bookingHref": "/appointments",
+        "asOf": now.isoformat(),
+    }
+
+
 _TOOL_IMPLEMENTATIONS: Mapping[
     str, Callable[[AssistantToolHost, datetime], Awaitable[JsonDict]]
 ] = {
@@ -1193,6 +1245,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getStudentAccountSummary": _tool_account,
     "getAcademicStanding": _tool_academic_standing,
     "getStudentAppointments": _tool_appointments,
+    "getStudentAdvising": _tool_advising,
     "getAcademicPlan": _tool_academics,
     "getCampusLife": _tool_campus_life,
     "getStudentMessages": _tool_messages,

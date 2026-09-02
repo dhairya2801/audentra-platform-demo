@@ -285,6 +285,19 @@ class RuntimeSettings:
                 openrouter_api_key=values.get("OPENROUTER_API_KEY", "").strip(),
                 openrouter_model=values.get("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip()
                 or "openai/gpt-4o-mini",
+                reasoning_effort=(
+                    values.get("EDWARD_REASONING_EFFORT", "none").strip().lower() or "none"
+                ),
+                reasoning_effort_overrides=values.get(
+                    "EDWARD_REASONING_EFFORT_OVERRIDES", ""
+                ).strip(),
+                read_planner=(
+                    values.get("EDWARD_READ_PLANNER", "hybrid").strip().lower() or "hybrid"
+                ),
+                model_overrides=values.get("EDWARD_MODEL_OVERRIDES", "").strip(),
+                read_loop_max_rounds=_bounded_int(
+                    values, ("EDWARD_READ_LOOP_MAX_ROUNDS",), 3, 1, 6
+                ),
                 openrouter_document_model=values.get(
                     "OPENROUTER_DOCUMENT_MODEL", "qwen/qwen3.7-flash"
                 ).strip()

@@ -675,6 +675,33 @@ def test_action_center_read_maps_staff_history_and_operational_counts() -> None:
                     }
                 ]
             )
+        if "AS viewer_component" in sql:
+            # Scope counts: one aggregate over the tenant, three predicates.
+            assert values["viewer_id"] == UUID(STAFF_ID)
+            assert "item.assignee_id = :viewer_id" in sql
+            assert "item.component = (SELECT viewer.component" in sql
+            assert "LIMIT" not in sql
+            row: dict[str, object] = {"viewer_component": "Registrar"}
+            for scope, open_count in (("mine", 1), ("team", 1), ("all", 1)):
+                row.update(
+                    {
+                        f"{scope}_todo": 0,
+                        f"{scope}_in_progress": 0,
+                        f"{scope}_follow_up_required": 0,
+                        f"{scope}_blocked": open_count,
+                        f"{scope}_done": 0,
+                        f"{scope}_cancelled": 0,
+                        f"{scope}_open": open_count,
+                        f"{scope}_overdue": 0,
+                        f"{scope}_due_today": 0,
+                        f"{scope}_urgent": open_count,
+                        f"{scope}_escalated": open_count,
+                        f"{scope}_stale": 0,
+                        f"{scope}_unassigned": 0,
+                        f"{scope}_students": open_count,
+                    }
+                )
+            return FakeResult([row])
         if "GROUP BY item.component" in sql:
             return FakeResult(
                 [
@@ -790,6 +817,12 @@ def test_action_center_read_maps_staff_history_and_operational_counts() -> None:
         "unassigned": 0,
         "ownerRisk": 0,
     }
+    scopes = cast(dict[str, object], center["scopes"])
+    assert scopes["component"] == "Registrar"
+    assert cast(dict[str, int], scopes["mine"])["open"] == 1
+    assert cast(dict[str, int], scopes["myComponent"])["escalated"] == 1
+    assert cast(dict[str, int], scopes["all"])["students"] == 1
+    assert cast(dict[str, int], scopes["all"])["dueToday"] == 0
     assert center["page"] == {
         "limit": 50,
         "offset": 0,
@@ -879,31 +912,15 @@ def test_canonical_roster_includes_students_without_risk_or_work_rows() -> None:
         assert "FROM public.student AS student" in sql
         assert "LEFT JOIN public.student_onboarding AS onboarding" in sql
         assert "item.status NOT IN ('done', 'cancelled')" in sql
-        assert values == {"tenant_id": UUID(TENANT_ID)}
-        return FakeResult(
-            [
-                {
-                    "id": UUID(STUDENT_ID),
-                    "first_name": "Casey",
-                    "last_name": "Rivera",
-                    "preferred_name": "Casey",
-                    "program_name": "Computer Science",
-                    "class_year": 2027,
-                    "onboarding_status": "in_progress",
-                    "onboarding_step": "housing",
-                    "onboarding_completed": 2,
-                    "requirement_completed": 0,
-                    "requirement_total": 0,
-                    "last_activity_at": NOW,
-                    "work_item_id": None,
-                    "work_title": None,
-                    "work_description": None,
-                    "assignee_id": None,
-                    "selected_channel": None,
-                    "work_priority": None,
-                }
-            ]
-        )
+        assert "assignment.role = 'primary_advisor'" in sql
+        assert ":pattern" not in sql
+        assert values == {
+            "tenant_id": UUID(TENANT_ID),
+            "viewer_id": UUID(STAFF_ID),
+            "now": NOW,
+            "limit": 1000,
+        }
+        return FakeResult([_roster_row()])
 
     connection = FakeConnection(handler)
     repository = PostgresStaffRepository(
@@ -914,8 +931,14 @@ def test_canonical_roster_includes_students_without_risk_or_work_rows() -> None:
 
     assert len(roster) == 1
     assert roster[0]["name"] == "Casey Rivera"
+    assert roster[0]["externalRef"] == "SYN-000101"
+    assert roster[0]["termName"] == "Fall 2027"
+    assert roster[0]["campusName"] == "Main Campus"
+    assert roster[0]["primaryAdviser"] is None
+    assert roster[0]["openWorkItems"] == 0
+    assert roster[0]["overdueWorkItems"] == 0
     journey = cast(dict[str, object], roster[0]["journey"])
-    risk = cast(dict[str, object], roster[0]["risk"])
+    attention = cast(dict[str, object], roster[0]["attention"])
     recommended_action = cast(dict[str, object], roster[0]["recommendedAction"])
     assert journey == {
         "stage": "Onboarding",
@@ -923,8 +946,161 @@ def test_canonical_roster_includes_students_without_risk_or_work_rows() -> None:
         "totalTasks": 8,
         "lastActivityAt": "2026-07-24T12:00:00.000Z",
     }
-    assert risk["modelVersion"] == "not-evaluated"
+    # Nothing is invented for a student with no signals: no score, no band.
+    assert attention == {
+        "level": "none",
+        "signals": [],
+        "evaluatedAt": "2026-07-24T12:00:00.000Z",
+    }
+    assert "risk" not in roster[0]
     assert recommended_action["taskId"] is None
+
+
+def _roster_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": UUID(STUDENT_ID),
+        "external_ref": "SYN-000101",
+        "first_name": "Casey",
+        "last_name": "Rivera",
+        "preferred_name": "Casey",
+        "program_name": "Computer Science",
+        "term_name": "Fall 2027",
+        "campus_name": "Main Campus",
+        "class_year": 2027,
+        "onboarding_status": "in_progress",
+        "onboarding_step": "housing",
+        "onboarding_completed": 2,
+        "requirement_completed": 0,
+        "requirement_total": 0,
+        "requirement_overdue": 0,
+        "requirement_blocking_open": 0,
+        "work_open": 0,
+        "work_overdue": 0,
+        "work_escalated": 0,
+        "primary_adviser_id": None,
+        "primary_adviser_name": None,
+        "last_activity_at": NOW,
+        "work_item_id": None,
+        "work_title": None,
+        "work_description": None,
+        "assignee_id": None,
+        "selected_channel": None,
+        "work_priority": None,
+        "match_count": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_roster_attention_is_counted_from_canonical_rows_never_scored() -> None:
+    def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        return FakeResult(
+            [
+                _roster_row(
+                    onboarding_status="completed",
+                    requirement_completed=3,
+                    requirement_total=8,
+                    requirement_overdue=2,
+                    requirement_blocking_open=4,
+                    work_open=3,
+                    work_overdue=1,
+                    work_escalated=0,
+                    work_item_id=UUID(WORK_ITEM_ID),
+                    work_title="Chase the transcript",
+                    work_description="The registrar is waiting on the official copy.",
+                    assignee_id=UUID(STAFF_ID),
+                    selected_channel="email",
+                    work_priority="high",
+                )
+            ]
+        )
+
+    connection = FakeConnection(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, FakeEngine(connection)), FakeStudentReader(), clock=lambda: NOW
+    )
+
+    roster = asyncio.run(repository.get_student_roster(staff_auth()))
+
+    student = roster[0]
+    assert student["openWorkItems"] == 3
+    assert student["overdueWorkItems"] == 1
+    attention = cast(dict[str, object], student["attention"])
+    assert attention["level"] == "urgent"
+    assert [
+        cast(dict[str, object], signal)["code"]
+        for signal in cast(list[object], attention["signals"])
+    ] == [
+        "overdue_requirements",
+        "overdue_work",
+        "blocking_requirements_open",
+        "no_primary_adviser",
+    ]
+    assert cast(dict[str, object], student["recommendedAction"])["recommendedToday"] is True
+
+
+def test_student_search_matches_the_whole_tenant_server_side() -> None:
+    def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        if "COUNT(*) AS total FROM public.student" in sql:
+            assert values == {"tenant_id": UUID(TENANT_ID)}
+            return FakeResult([{"total": 2577}])
+        assert "ILIKE :pattern" in sql
+        assert values == {
+            "tenant_id": UUID(TENANT_ID),
+            "viewer_id": UUID(STAFF_ID),
+            "now": NOW,
+            "limit": 25,
+            "pattern": "%Riv\\_era%",
+        }
+        return FakeResult([_roster_row(match_count=7)])
+
+    connection = FakeConnection(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, FakeEngine(connection)), FakeStudentReader(), clock=lambda: NOW
+    )
+
+    result = asyncio.run(
+        repository.search_students(staff_auth(), query="  Riv_era ", student_id=None, limit=25)
+    )
+
+    assert result["total"] == 7
+    assert result["cohortTotal"] == 2577
+    assert result["query"] == "Riv_era"
+    assert result["limit"] == 25
+    assert cast(list[object], result["items"])[0]["name"] == "Casey Rivera"  # type: ignore[index]
+
+
+def test_student_search_refuses_non_staff_and_clamps_the_limit() -> None:
+    def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        if "COUNT(*) AS total FROM public.student" in sql:
+            return FakeResult([{"total": 0}])
+        assert values["limit"] == 200
+        assert "student.id = :student_id" in sql
+        return FakeResult([])
+
+    connection = FakeConnection(handler)
+    repository = PostgresStaffRepository(
+        cast(AsyncEngine, FakeEngine(connection)), FakeStudentReader(), clock=lambda: NOW
+    )
+
+    with pytest.raises(ApiError):
+        asyncio.run(
+            repository.search_students(
+                staff_auth(actor_type="student"), query=None, student_id=None, limit=5
+            )
+        )
+
+    result = asyncio.run(
+        repository.search_students(staff_auth(), query=None, student_id=STUDENT_ID, limit=9999)
+    )
+    assert result == {
+        "items": [],
+        "total": 0,
+        "cohortTotal": 0,
+        "query": "",
+        "limit": 200,
+        "generatedAt": "2026-07-24T12:00:00.000Z",
+    }
 
 
 def test_lazy_document_work_items_preserve_component_and_priority_routing() -> None:

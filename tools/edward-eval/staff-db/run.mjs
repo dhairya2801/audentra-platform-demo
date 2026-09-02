@@ -19,6 +19,7 @@
  * Writes transcript.json + summary.json under artifacts/runs/<batch>/.
  */
 
+import { foldTypography } from "../src/typography.mjs";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,8 +51,10 @@ const GROUND_TRUTH_PATH =
   join(REPO_ROOT, "artifacts", "staff-db-eval", "ground-truth.json");
 
 // gpt-4o-mini pricing (USD per token), for the spend report.
-const PRICE_PROMPT = 0.15e-6;
-const PRICE_COMPLETION = 0.6e-6;
+import { pricingForModel } from "../src/pricing.mjs";
+const PRICING = pricingForModel();
+const PRICE_PROMPT = PRICING.input;
+const PRICE_COMPLETION = PRICING.output;
 
 function parseArgs(argv) {
   const args = {
@@ -142,11 +145,16 @@ function resolveExpectedStudent(reference, truth) {
 // HTTP driver
 // ---------------------------------------------------------------------------
 
+// READ_PLANNER=deterministic|hybrid|model asks the host (Lab controls on) to
+// plan reads that way for every turn, so one host can serve an A/B.
+const READ_PLANNER = process.env.READ_PLANNER || null;
+
 function staffHeaders() {
   return {
     "content-type": "application/json",
     "x-demo-actor-type": "staff",
     "x-demo-actor-id": STAFF_ACTOR_ID,
+    ...(READ_PLANNER ? { "x-edward-read-planner": READ_PLANNER } : {}),
   };
 }
 
@@ -194,7 +202,7 @@ function blockText(block) {
 
 function answerCorpus(payload) {
   const blocks = Array.isArray(payload.blocks) ? payload.blocks : [];
-  return [payload.message ?? "", ...blocks.map(blockText)].join("\n");
+  return foldTypography([payload.message ?? "", ...blocks.map(blockText)].join("\n"));
 }
 
 function matchFact(fact, corpus, truth) {

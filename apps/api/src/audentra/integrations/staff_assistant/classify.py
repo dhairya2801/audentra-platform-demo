@@ -1402,6 +1402,12 @@ def _queue_filters_from_text(text: str, entities: EntityResolution | None) -> di
         group_by = "status"
     if group_by:
         filters["groupBy"] = group_by
+    if re.search(
+        r"\boldest\b|\blongest\b|\bwaiting (?:the )?longest\b|\bbeen (?:there|open) longest\b",
+        text,
+        re.I,
+    ):
+        filters["sort"] = "oldest"
     return filters
 
 

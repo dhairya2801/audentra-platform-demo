@@ -21,6 +21,7 @@
  * composition) is derived per failing turn from that evidence.
  */
 
+import { foldTypography } from "../src/typography.mjs";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,8 +38,10 @@ const GROUND_TRUTH_PATH =
   process.env.STAFF_EVAL_GROUND_TRUTH ??
   join(REPO_ROOT, "artifacts", "university-eval", "ground-truth.json");
 const DEFAULT_ACTOR = "SYN-STF-ADV-DIR";
-const PRICE_PROMPT = 0.15e-6;
-const PRICE_COMPLETION = 0.6e-6;
+import { pricingForModel } from "../src/pricing.mjs";
+const PRICING = pricingForModel();
+const PRICE_PROMPT = PRICING.input;
+const PRICE_COMPLETION = PRICING.output;
 
 function parseArgs(argv) {
   const args = {
@@ -176,11 +179,16 @@ function actorId(ref, truth) {
 // HTTP driver
 // ---------------------------------------------------------------------------
 
+// READ_PLANNER=deterministic|hybrid|model asks the host (Lab controls on) to
+// plan reads that way for every turn, so one host can serve an A/B.
+const READ_PLANNER = process.env.READ_PLANNER || null;
+
 function staffHeaders(actor) {
   return {
     "content-type": "application/json",
     "x-demo-actor-type": "staff",
     "x-demo-actor-id": actor,
+    ...(READ_PLANNER ? { "x-edward-read-planner": READ_PLANNER } : {}),
   };
 }
 
@@ -239,7 +247,7 @@ function blockText(block) {
 
 function answerCorpus(payload) {
   const blocks = Array.isArray(payload.blocks) ? payload.blocks : [];
-  return [payload.message ?? "", ...blocks.map(blockText)].join("\n");
+  return foldTypography([payload.message ?? "", ...blocks.map(blockText)].join("\n"));
 }
 
 function matchFact(fact, corpus, truth) {
@@ -458,16 +466,31 @@ for (const testCase of cases) {
       completionTokens += call.usage?.completionTokens ?? 0;
     }
     const evidenceText = (trace?.evidence ?? []).join("\n");
-    const graded =
-      status === 200
-        ? gradeTurn(turn, payload, trace, truth)
-        : { grade: "FAIL", failures: [{ kind: "http", detail: String(status) }], softMisses: [] };
+    let graded;
+    try {
+      graded =
+        status === 200
+          ? gradeTurn(turn, payload, trace, truth)
+          : { grade: "FAIL", failures: [{ kind: "http", detail: String(status) }], softMisses: [] };
+    } catch (error) {
+      // A time-relative expectation whose ground truth no longer exists (an
+      // absence that has ended, a deadline that has passed) cannot be graded
+      // today. Record it as SKIP rather than aborting the whole batch; the
+      // report shows the count so drift stays visible.
+      if (!/Ground truth missing/.test(String(error?.message))) throw error;
+      graded = {
+        grade: "SKIP",
+        failures: [{ kind: "ground_truth_unavailable", detail: String(error.message) }],
+        softMisses: [],
+      };
+    }
     const failureClass =
       graded.grade === "FAIL"
         ? classifyFailure(turn, graded.failures, trace, evidenceText, truth)
         : null;
     if (graded.grade === "FAIL") caseGrade = "FAIL";
     else if (graded.grade === "PARTIAL" && caseGrade === "PASS") caseGrade = "PARTIAL";
+    else if (graded.grade === "SKIP" && caseGrade === "PASS") caseGrade = "SKIP";
     const calls = toolCalls(trace);
     turnRecords.push({
       question: resolveQuestion(turn.question, truth),
@@ -532,7 +555,7 @@ for (const testCase of cases) {
 
 const byCategory = {};
 for (const record of records) {
-  const bucket = (byCategory[record.category] ??= { cases: 0, PASS: 0, PARTIAL: 0, FAIL: 0 });
+  const bucket = (byCategory[record.category] ??= { cases: 0, PASS: 0, PARTIAL: 0, FAIL: 0, SKIP: 0 });
   bucket.cases += 1;
   bucket[record.grade] += 1;
 }
@@ -550,9 +573,15 @@ const summary = {
   turns: allTurns.length,
   PASS: records.filter((r) => r.grade === "PASS").length,
   PARTIAL: records.filter((r) => r.grade === "PARTIAL").length,
+  SKIP: records.filter((r) => r.grade === "SKIP").length,
   FAIL: records.filter((r) => r.grade === "FAIL").length,
-  passRate: records.length ? records.filter((r) => r.grade === "PASS").length / records.length : 0,
-  turnPassRate: allTurns.length ? allTurns.filter((t) => t.grade === "PASS").length / allTurns.length : 0,
+  // SKIP (ground truth no longer exists today) is excluded from both denominators.
+  passRate: records.filter((r) => r.grade !== "SKIP").length
+    ? records.filter((r) => r.grade === "PASS").length / records.filter((r) => r.grade !== "SKIP").length
+    : 0,
+  turnPassRate: allTurns.filter((t) => t.grade !== "SKIP").length
+    ? allTurns.filter((t) => t.grade === "PASS").length / allTurns.filter((t) => t.grade !== "SKIP").length
+    : 0,
   byCategory,
   failureClasses,
   latency: {
@@ -578,7 +607,7 @@ writeFileSync(join(outDir, "summary.json"), JSON.stringify(summary, null, 2));
 const lines = [
   `# ${args.batch}`,
   "",
-  `${summary.PASS} PASS / ${summary.PARTIAL} PARTIAL / ${summary.FAIL} FAIL of ${summary.cases} cases (${(summary.passRate * 100).toFixed(1)}% pass; ${(summary.turnPassRate * 100).toFixed(1)}% of ${summary.turns} turns)`,
+  `${summary.PASS} PASS / ${summary.PARTIAL} PARTIAL / ${summary.FAIL} FAIL / ${summary.SKIP} SKIP of ${summary.cases} cases (${(summary.passRate * 100).toFixed(1)}% pass; ${(summary.turnPassRate * 100).toFixed(1)}% of ${summary.turns} turns)`,
   `latency p50 ${summary.latency.p50} ms · p90 ${summary.latency.p90} ms · max ${summary.latency.max} ms · timeouts ${summary.latency.timeouts} · turns >4 s ${summary.latency.over4s}`,
   `spend ${summary.spend.modelCalls} model calls · $${summary.spend.estimatedUsd}`,
   "",

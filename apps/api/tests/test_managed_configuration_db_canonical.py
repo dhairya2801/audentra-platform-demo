@@ -214,13 +214,28 @@ def test_workspace_is_composed_from_canonical_inputs_without_mutable_history() -
         "id": STUDENT_ID,
         "assignedStaffId": STAFF_ID,
         "recommendedAction": recommendation,
-        "risk": {"score": 91, "band": "critical"},
+        "openWorkItems": 1,
+        "overdueWorkItems": 1,
+        "attention": {
+            "level": "urgent",
+            "signals": [
+                {"code": "escalated_work", "label": "1 escalated staff action", "count": 1}
+            ],
+            "evaluatedAt": "2028-01-02T03:04:05.000Z",
+        },
     }
     workspace = compose_staff_workspace(
         _auth(),
         action_center={
             "staff": [{"id": STAFF_ID, "name": "Priya Shah"}],
-            "items": [{"id": "work-1", "status": "in_progress"}],
+            "items": [
+                {
+                    "id": "work-1",
+                    "status": "in_progress",
+                    "assignee": {"id": STAFF_ID},
+                    "student": {"id": STUDENT_ID},
+                }
+            ],
         },
         student={"student": {"id": STUDENT_ID, "name": "Alex Morgan"}},
         campus_life={"events": [{"id": "event-1"}], "clubs": [{"id": "club-1"}]},
@@ -235,12 +250,36 @@ def test_workspace_is_composed_from_canonical_inputs_without_mutable_history() -
     )
 
     assert workspace["currentStaff"]["id"] == STAFF_ID
+    # The personal queue is the reader's own open work from the board read,
+    # never a roster derivation; counts fall back to the page when a store
+    # serves no SQL scope counts.
+    assert workspace["personalActionCenter"]["tasks"] == [
+        {
+            "id": "work-1",
+            "status": "in_progress",
+            "assignee": {"id": STAFF_ID},
+            "student": {"id": STUDENT_ID},
+        }
+    ]
+    assert workspace["personalActionCenter"]["students"] == [cohort_student]
     assert workspace["personalActionCenter"]["counts"] == {
-        "studentsToday": 1,
-        "critical": 1,
-        "highRisk": 0,
+        "open": 1,
+        "overdue": 0,
+        "dueToday": 0,
+        "urgent": 0,
+        "escalated": 0,
+        "todo": 0,
         "inProgress": 1,
-        "completed": 0,
+        "followUpRequired": 0,
+        "blocked": 0,
+        "stale": 0,
+        "students": 1,
+    }
+    assert workspace["personalActionCenter"]["queue"] == {
+        "total": 1,
+        "limit": 1,
+        "hasMore": False,
+        "sort": "attention",
     }
     assert workspace["student"]["operation"] == cohort_student
     assert workspace["inquiries"][0]["assignee"]["id"] == STAFF_ID

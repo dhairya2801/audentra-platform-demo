@@ -120,7 +120,8 @@ _NON_NAME_PHRASES = re.compile(
 )
 
 _STAFF_CONTEXT = re.compile(
-    r"\badvis(?:e|es|ing|ees?)\b(?!\s+(?:appointment|session|meeting|slot|hold))|\badvis(?:er|or)s?\b(?:'s)?(?!\s+(?:is|are|assigned|listed|has|have)\b)"
+    r"\badvis(?:e|es|ing|ees?)\b(?!\s+(?:appointment|session|meeting|slot|hold))"
+    r"|\badvis(?:er|or)s?\b(?:'s)?(?!\s+(?:is|are|assigned|listed|has|have)\b)"
     r"|\bcaseload\b|\bcap\b|\bslots?\b|\bavailab\w*\b|\bavailable\b|\bcalendar\b|\bbookable\b"
     r"|\bhours\b|\bwork items?\b|\bqueue\b|\bworkload\b|\bbacklog\b|\bopen items?\b"
     r"|\boverdue items?\b|\bin progress\b|\bmanager\b|\breports? to\b|\breport(?:s|ing)? to\b"
@@ -144,7 +145,8 @@ _STUDENT_CONTEXT = re.compile(
     r"\bblock(?:ed|ing|ers?)\b|\bdeposit\b|\btranscript\b|\bimmuni\w*\b|\brequirements?\b"
     r"|\bdocuments?\b|\bonboarding\b|\bfafsa\b|\bhousing (?:preference|plan|state)\b|\bchecklist\b"
     r"|\bholds?\b|\bwaiting on\b|\benroll\w*\b|\bcounsel(?:l)?ors? (?:is|are|assigned)\b"
-    r"|\badvis(?:er|or) (?:is|listed)\b|\bwho is \w+(?: \w+)?'s advis(?:er|or)\b|\bwritten to us\b"
+    r"|\badvis(?:er|or) (?:is|listed)\b|\b\w+(?: \w+)?'s (?:academic "
+    r"|primary )?advis(?:er|or)\b|\bwritten to us\b"
     r"|\binquir\w*\b|\ball set\b|\bsituation\b|\bmissing\b|\boutstanding\b|\bnext appointment\b"
     r"|\bupcoming appointment\b|\bmeeting on\b|\bbook an? (?:advising )?appointment\b"
     r"|\bfind an? (?:advising )?slot\b|\bpaid\b|\bbalance\b|\bpull up\b|\bshow me\b"
@@ -166,7 +168,8 @@ _STUDENT_CONTEXT_SPECIFIC = re.compile(
     r"\bblock(?:ed|ing|ers?)\b|\bdeposit\b|\btranscript\b|\bimmuni\w*\b|\brequirements?\b"
     r"|\bdocuments?\b|\bonboarding\b|\bfafsa\b|\bchecklist\b|\bholds?\b|\bwaiting on\b"
     r"|\benroll\w*\b"
-    r"|\badvis(?:er|or) (?:is|listed)\b|\bwho is \w+(?: \w+)?'s advis(?:er|or)\b|\bwritten to us\b"
+    r"|\badvis(?:er|or) (?:is|listed)\b|\b\w+(?: \w+)?'s (?:academic "
+    r"|primary )?advis(?:er|or)\b|\bwritten to us\b"
     r"|\binquir\w*\b"
     r"|\ball set\b|\bsituation\b|\bmissing\b|\boutstanding\b|\bnext appointment\b"
     r"|\bupcoming appointment\b"
@@ -191,7 +194,8 @@ _SELF_TEAM = re.compile(
 _POSSESSIVE = re.compile(r"(?:'s|\u2019s|s')$")
 
 _LEADING_REFERENCE = re.compile(
-    r"\b(?:to|about|for|with|from|on|regarding|does|do|did|is|was|of|by|and|or|than|vs\.?|versus|between)\s+"
+    r"\b(?:to|about|for|with|from|on|regarding|does|do|did|is|was|of|by|and|or|than"
+    r"|vs\.?|versus|between)\s+"
     r"([A-Z][a-z]{2,})(?:'s|\u2019s)?\b"
 )
 _VERB_LED = re.compile(
@@ -204,8 +208,11 @@ _STUDENT_ID_TOKEN = re.compile(r"\b[A-Z]{2,6}-[A-Z0-9][A-Z0-9._-]{0,12}\b")
 @dataclass(frozen=True)
 class Mention:
     text: str
-    kind_hint: str  # "person" | "department" | "self_team"
+    kind_hint: str  # "person" | "department" | "self_team" | "student_id"
     possessive: bool = False
+    #: A lower-case candidate ("petra oakenshaw") that only counts if the
+    #: roster or directory has an exact match; never reported as not found.
+    speculative: bool = False
 
 
 @dataclass
@@ -335,7 +342,8 @@ def extract_mentions(text: str, components: Sequence[str] = ()) -> list[Mention]
             )
     scrubbed = _STUDENT_ID_TOKEN.sub(lambda m: " " * len(m.group(0)), scrubbed)
     for match in re.finditer(
-        r"\b([A-Z][a-z]+(?:[-'\u2019][A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'\u2019][A-Z][a-z]+)?)+)(\u2019s|'s)?\b",
+        r"\b([A-Z][a-z]+(?:[-'\u2019][A-Z][a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'\u2019][A-Z][a-z]+)?)+)(\u2019s"
+        r"|'s)?\b",
         scrubbed,
     ):
         words = match.group(1).split()
@@ -365,7 +373,354 @@ def extract_mentions(text: str, components: Sequence[str] = ()) -> list[Mention]
         if any(word.lower() in m.text.lower().split() for m in mentions if m.kind_hint == "person"):
             continue
         add(word, "person", True)
+    # A pasted student reference ("SYN-001278") is a mention in its own
+    # right; the resolver looks it up on the roster before the work-item
+    # namespace gets a chance.
+    for token in _STUDENT_ID_TOKEN.findall(text):
+        add(token.upper(), "student_id")
+    # People type names in lower case from a phone. When nothing capitalised
+    # was found, lower-case word pairs (and possessive single words) become
+    # speculative mentions: they resolve only on an exact roster or directory
+    # hit and are otherwise dropped silently, so ordinary prose never turns
+    # into a "nobody named X" answer.
+    if not any(m.kind_hint == "person" for m in mentions):
+        for candidate in _speculative_name_candidates(scrubbed):
+            mentions.append(Mention(candidate, "person", False, speculative=True))
     return mentions
+
+
+# Ordinary words that never form a person's name in a staff question; the
+# normalizer's stopwords cover the rest.
+_COMMON_WORDS = frozenset(
+    [
+        "leave",
+        "right",
+        "now",
+        "well",
+        "soon",
+        "late",
+        "early",
+        "ever",
+        "never",
+        "actually",
+        "really",
+        "quite",
+        "very",
+        "much",
+        "little",
+        "long",
+        "short",
+        "back",
+        "over",
+        "under",
+        "out",
+        "off",
+        "away",
+        "ago",
+        "past",
+        "due",
+        "date",
+        "time",
+        "day",
+        "days",
+        "month",
+        "year",
+        "week",
+        "weeks",
+        "vacation",
+        "sick",
+        "holiday",
+        "office",
+        "hours",
+        "queue",
+        "about",
+        "accepted",
+        "accounts",
+        "action",
+        "admission",
+        "admissions",
+        "advisee",
+        "advisees",
+        "adviser",
+        "advisers",
+        "advisor",
+        "advisors",
+        "after",
+        "afternoon",
+        "again",
+        "aid",
+        "all",
+        "already",
+        "also",
+        "and",
+        "another",
+        "answer",
+        "any",
+        "anyone",
+        "anything",
+        "appointment",
+        "appointments",
+        "are",
+        "assign",
+        "assigned",
+        "availability",
+        "available",
+        "before",
+        "between",
+        "blocked",
+        "blocker",
+        "blockers",
+        "blocking",
+        "board",
+        "calendar",
+        "call",
+        "can",
+        "case",
+        "caseload",
+        "cases",
+        "center",
+        "centre",
+        "check",
+        "class",
+        "contact",
+        "could",
+        "counsellor",
+        "counselor",
+        "counselors",
+        "count",
+        "deadline",
+        "deadlines",
+        "department",
+        "deposit",
+        "desk",
+        "detail",
+        "details",
+        "did",
+        "do",
+        "document",
+        "documents",
+        "does",
+        "done",
+        "during",
+        "each",
+        "email",
+        "enrollment",
+        "enrolment",
+        "evening",
+        "every",
+        "everything",
+        "fall",
+        "financial",
+        "find",
+        "first",
+        "for",
+        "from",
+        "get",
+        "give",
+        "had",
+        "handle",
+        "handles",
+        "handling",
+        "has",
+        "have",
+        "health",
+        "hello",
+        "help",
+        "her",
+        "here",
+        "hey",
+        "hi",
+        "him",
+        "his",
+        "housing",
+        "how",
+        "info",
+        "information",
+        "international",
+        "into",
+        "is",
+        "it",
+        "item",
+        "items",
+        "its",
+        "just",
+        "last",
+        "latest",
+        "list",
+        "look",
+        "mail",
+        "many",
+        "may",
+        "me",
+        "meeting",
+        "meetings",
+        "member",
+        "members",
+        "message",
+        "might",
+        "missing",
+        "more",
+        "morning",
+        "most",
+        "much",
+        "my",
+        "new",
+        "newest",
+        "next",
+        "nothing",
+        "number",
+        "office",
+        "ok",
+        "okay",
+        "old",
+        "oldest",
+        "onboarding",
+        "one",
+        "ones",
+        "only",
+        "onto",
+        "open",
+        "other",
+        "our",
+        "outstanding",
+        "overdue",
+        "own",
+        "owner",
+        "owns",
+        "phone",
+        "picture",
+        "plate",
+        "please",
+        "profile",
+        "program",
+        "pull",
+        "question",
+        "queue",
+        "recent",
+        "recently",
+        "record",
+        "records",
+        "registrar",
+        "rejected",
+        "requirement",
+        "requirements",
+        "review",
+        "reviewed",
+        "reviewing",
+        "rough",
+        "second",
+        "see",
+        "send",
+        "sense",
+        "services",
+        "should",
+        "show",
+        "since",
+        "slot",
+        "slots",
+        "some",
+        "someone",
+        "something",
+        "spring",
+        "staff",
+        "state",
+        "status",
+        "still",
+        "student",
+        "students",
+        "summary",
+        "summer",
+        "support",
+        "task",
+        "tasks",
+        "team",
+        "tell",
+        "text",
+        "than",
+        "thank",
+        "thanks",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "third",
+        "this",
+        "those",
+        "today",
+        "todo",
+        "tomorrow",
+        "total",
+        "transcript",
+        "until",
+        "urgent",
+        "us",
+        "verification",
+        "verified",
+        "verify",
+        "was",
+        "week",
+        "were",
+        "what",
+        "when",
+        "where",
+        "whether",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "will",
+        "with",
+        "work",
+        "would",
+        "year",
+        "yesterday",
+        "yet",
+        "you",
+        "your",
+    ]
+)
+
+
+def _speculative_name_candidates(scrubbed: str, limit: int = 3) -> list[str]:
+    """Lower-case word pairs (and possessive single words) that could be names.
+
+    A sliding window over the tokens — not a regex scan — so "which of petra
+    oakenshaw's items" still offers "petra oakenshaw" after "of petra" is
+    rejected as ordinary prose.
+    """
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def consider(candidate: str) -> None:
+        key = candidate.lower()
+        if key in seen or len(candidates) >= limit:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    def plausible(word: str, minimum: int) -> bool:
+        return (
+            len(word) >= minimum
+            and word.isalpha()
+            and word not in _COMMON_WORDS
+            and word not in _NAME_STOPWORDS
+        )
+
+    tokens = re.findall(r"[a-z]+(?:[-'\u2019][a-z]+)?(?:'s|\u2019s)?", scrubbed.lower())
+    words = [re.sub(r"(?:'s|\u2019s)$", "", token) for token in tokens]
+    for index in range(len(words) - 1):
+        first, second = words[index], words[index + 1]
+        if plausible(first, 2) and plausible(second, 3):
+            consider(f"{first} {second}")
+    for token, word in zip(tokens, words, strict=True):
+        if token != word and plausible(word, 3) and not any(word in c.split() for c in candidates):
+            consider(word)
+    return candidates
 
 
 def has_staff_context(text: str) -> bool:
@@ -452,6 +807,14 @@ async def resolve_entities(
                     ResolvedEntity("department", component, component, mention.text)
                 )
             continue
+        if mention.kind_hint == "student_id":
+            found = await read("searchStudents", {"externalRef": mention.text})
+            items = [dict(i) for i in _items(found)]
+            if len(items) == 1 and not any(
+                str(student.id) == str(items[0].get("id")) for student in resolution.students
+            ):
+                _add_students(resolution, items, mention)
+            continue
         if mention.kind_hint != "person":
             continue
         await _resolve_person(
@@ -506,6 +869,9 @@ async def _resolve_person(
         # exact when nothing exact exists ("Toby Quillfeather").
         student_exact = student_items
 
+    if mention.speculative and not staff_hits and not student_exact:
+        # A lower-case guess that matched nobody exactly is just prose.
+        return
     staff_unique = len(staff_hits) == 1
     if staff_hits and not student_exact:
         if staff_unique:
@@ -524,7 +890,11 @@ async def _resolve_person(
             _STUDENT_CONTEXT_SPECIFIC.search(_GENERIC_LOOKUP.sub(" ", resolution_text(resolution)))
         )
         wants_staff = resolution.staff_context and not specific_student_context
-        wants_student = specific_student_context and not resolution.staff_context
+        # A student-side fact in the question ("latest enrollment status for
+        # Greta Everlyn", "who is Greta Everlyn's academic adviser") settles a
+        # tie in the roster's favour unless the name is followed by a
+        # staff-side noun (handled below).
+        wants_student = specific_student_context
         # "Elena Larkspur's advisees", "of Vera's students", "book Junia":
         # a possessive followed by a staff-side noun, or a booking verb
         # before the name, is unmistakably about the colleague.
@@ -532,7 +902,9 @@ async def _resolve_person(
         possessive_staff = re.search(
             rf"{name_pattern}(?:'s|\u2019s)\s+(?:advisees|students|caseload|work|items|queue|slots?"
             r"|calendar|appointments|team|manager|availability|next|advising|overdue|open|hours"
-            r"|title|role|status|workload|reports|direct)\b",
+            r"|title|role|status|workload|reports|direct|schedule|day|week|morning|afternoon"
+            r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|phone|email|office"
+            r"|extension|desk|time off|leave|vacation)\b",
             resolution_text(resolution),
             re.I,
         ) or re.search(
@@ -612,6 +984,13 @@ def _add_students(
                 Ambiguity(mention.text, [], [dict(i) for i in in_scope], "several_students")
             )
             return
+    if len(items) > 1:
+        # An inline qualifier — "the one in Economics", "(the Economics one)",
+        # "class of 2031", a pasted ID — picks among same-name candidates
+        # deterministically from the candidates' own canonical fields.
+        qualified = _qualified_candidates(resolution.text, items)
+        if len(qualified) == 1:
+            items = qualified
     if len(items) == 1:
         item = items[0]
         resolution.students.append(
@@ -628,6 +1007,21 @@ def _add_students(
     resolution.ambiguities.append(
         Ambiguity(mention.text, [], [dict(i) for i in items], "several_students")
     )
+
+
+def _qualified_candidates(text: str, items: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    lowered = text.lower()
+    matches: list[Mapping[str, Any]] = []
+    for item in items:
+        program = str(item.get("program") or item.get("programName") or "").lower()
+        class_year = str(item.get("classYear") or "")
+        external = str(item.get("externalRef") or "").lower()
+        hit = bool(program) and program in lowered
+        hit = hit or bool(class_year and re.search(rf"\b{re.escape(class_year)}\b", lowered))
+        hit = hit or (bool(external) and external in lowered)
+        if hit:
+            matches.append(item)
+    return matches
 
 
 def _items(value: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:

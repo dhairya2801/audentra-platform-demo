@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from audentra.core.assistant_execution import ReadPlanner, resolve_read_planner
 from audentra.integrations.assistant.blocks import (
     describe_blocks_for_prompt,
     render_blocks_as_text,
@@ -30,16 +31,28 @@ from audentra.integrations.assistant.coverage import (
     resolve_coverage_gate_mode,
 )
 from audentra.integrations.assistant.derive import DerivedState, derive_student_state
-from audentra.integrations.assistant.guard import build_causal_guards, guard_grounded_answer
+from audentra.integrations.assistant.guard import (
+    build_causal_guards,
+    guard_grounded_answer,
+    ungrounded_tokens,
+)
 from audentra.integrations.assistant.planner import (
     REQUIREMENT_GATE_CODES,
+    TOOL_DESCRIPTIONS,
     resolve_dependency_reads,
     select_tool_reads,
     validate_model_tool_plan,
 )
+from audentra.integrations.assistant.read_loop import (
+    LoopCall,
+    LoopTool,
+    ReadLoopResult,
+    run_read_loop,
+)
 from audentra.integrations.assistant.tools import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
     AssistantToolHost,
+    ToolExecution,
     execute_tool_reads,
 )
 from audentra.integrations.assistant.trace import AssistantTurnTrace
@@ -48,6 +61,23 @@ JsonDict = dict[str, Any]
 
 ModelComposer = Callable[..., Awaitable[Mapping[str, Any] | None]]
 ModelPlanner = Callable[..., Awaitable[Mapping[str, Any] | None]]
+ReadLoopStep = Callable[..., Awaitable[Mapping[str, Any] | None]]
+
+# Intents whose deterministic answer is the deliverable even when the model
+# read loop is on: greetings and refusals read nothing, and a rewrite could
+# only soften a boundary.
+_LOOP_SKIP_REQUEST_TYPES = frozenset(
+    {
+        "greeting",
+        "capability_overview",
+        "conversational_ack",
+        "assistant_identity",
+        "unsupported_or_out_of_scope",
+    }
+)
+# In hybrid mode the classifier keeps every confident, well-covered intent;
+# the loop takes the turns that used to land on the broad safe fallback.
+_LOOP_HYBRID_REQUEST_TYPES = frozenset({"general_question", "general_help"})
 
 
 @dataclass
@@ -74,10 +104,20 @@ class AssistantPipeline:
         tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
         now: Callable[[], datetime] | None = None,
         coverage_gate: str | None = None,
+        read_loop_step: ReadLoopStep | None = None,
+        read_planner: str | ReadPlanner | None = None,
+        read_loop_max_rounds: int = 3,
     ) -> None:
         self._host = host
         self._model_composer = model_composer
         self._model_planner = model_planner
+        self._read_loop_step = read_loop_step
+        self._read_planner = (
+            read_planner
+            if isinstance(read_planner, ReadPlanner)
+            else resolve_read_planner(read_planner)
+        )
+        self._read_loop_max_rounds = max(1, min(int(read_loop_max_rounds), 6))
         self._tool_timeout_seconds = tool_timeout_seconds
         self._now = now or (lambda: datetime.now(UTC))
         # The full-request coverage gate, `augment` by default: a confident
@@ -160,6 +200,20 @@ class AssistantPipeline:
                     supplements=list(assessment.supplements) or None,
                     droppedDomains=list(assessment.dropped_domains) or None,
                 )
+        if trace is not None:
+            trace.read_planner = self._read_planner.value
+        # The model read loop (hybrid: the turns the classifier could not
+        # place; model: every readable turn). A loop that answers returns
+        # here; one that fails or is guard-rejected falls through to the
+        # deterministic route with the reason recorded.
+        if (
+            self._read_loop_step is not None
+            and not request.is_mutation_request
+            and self._loop_applies(classification)
+        ):
+            loop_response = await self._run_read_loop(request, classification, failure_codes, trace)
+            if loop_response is not None:
+                return loop_response
         if (
             classification is None
             and self._model_planner is not None
@@ -281,6 +335,10 @@ class AssistantPipeline:
                     tools=list(second.executed_tools),
                 )
 
+        # Advising is context on the support routes; when that read is not
+        # available (some hosts never expose it) the answer must not become
+        # an apology about the adviser record.
+        _prune_context_unavailability(state, classification)
         preferred_name = None
         if state.profile is not None:
             raw = state.profile.get("preferredName")
@@ -296,6 +354,13 @@ class AssistantPipeline:
             trace.evidence = list(draft.evidence_texts)
 
         stage_started = time.perf_counter()
+        # The composer reasons about "this week", "before Friday" and "already
+        # passed" only if it knows today; the draft's facts never carry it.
+        draft = ComposedAnswer(
+            message=draft.message,
+            blocks=draft.blocks,
+            evidence_texts=[_today_line(self._now()), *draft.evidence_texts],
+        )
         message_text, blocks, provider, model, usage = await self._maybe_rewrite(
             classification, request.resolved_text, state, draft, failure_codes, trace=trace
         )
@@ -318,6 +383,207 @@ class AssistantPipeline:
                 {"source": receipt["source"]} for receipt in _unique_sources(execution.receipts)
             ],
             classification=classification,
+            derived=state,
+            failure_codes=failure_codes,
+        )
+
+    def _loop_applies(self, classification: Classification | None) -> bool:
+        if self._read_planner is ReadPlanner.DETERMINISTIC:
+            return False
+        if classification is None:
+            return True
+        if classification.request_type in _LOOP_SKIP_REQUEST_TYPES:
+            return False
+        if self._read_planner is ReadPlanner.MODEL:
+            return True
+        return (
+            classification.source == "safe_fallback"
+            or classification.request_type in _LOOP_HYBRID_REQUEST_TYPES
+        )
+
+    async def _run_read_loop(
+        self,
+        request: Any,
+        classification: Classification | None,
+        failure_codes: list[str],
+        trace: AssistantTurnTrace | None,
+    ) -> AssistantPipelineResult | None:
+        """Model-planned reads over the student's own record, guarded.
+
+        Student tools take no arguments and read only the signed-in student,
+        so the loop's identity discipline is trivially satisfied: the host
+        binds the student before any tool exists. The model chooses *which*
+        records to read and writes the answer from them; the claim guard
+        checks that answer against the flattened results exactly as it checks
+        a rewrite against deterministic evidence.
+        """
+
+        assert self._read_loop_step is not None
+        stage_started = time.perf_counter()
+        execution = ToolExecution()
+        host = self._host
+        timeout = self._tool_timeout_seconds
+        moment = self._now()
+
+        async def executor(calls: Sequence[LoopCall]) -> None:
+            fresh = [
+                call.tool
+                for call in calls
+                if call.status == "planned" and call.tool not in execution.reads
+            ]
+            if fresh:
+                round_result = await execute_tool_reads(
+                    list(dict.fromkeys(fresh)),
+                    host,
+                    timeout_seconds=timeout,
+                    now=moment,
+                    receipt_offset=len(execution.receipts),
+                )
+                execution.reads.update(round_result.reads)
+                execution.receipts.extend(round_result.receipts)
+                execution.executed_tools.extend(round_result.executed_tools)
+                execution.unavailable_data.extend(round_result.unavailable_data)
+            for call in calls:
+                if call.status != "planned":
+                    continue
+                read = execution.reads.get(call.tool)
+                if read is None:
+                    call.status, call.reason = "unavailable", "not_supported"
+                    continue
+                call.status = str(read.get("status", "unavailable"))
+                call.reason = read.get("reason")
+                call.result = read.get("data")
+                call.duration_ms = read.get("durationMs")
+
+        tools = [
+            LoopTool(name=name, description=description)
+            for name, description in TOOL_DESCRIPTIONS.items()
+        ]
+        context = {
+            "actor": "student",
+            "today": moment.date().isoformat(),
+            "page": {"path": request.page_path, "label": request.page_label},
+            "identity": (
+                "Every tool reads the signed-in student's own record; no tool takes arguments."
+            ),
+        }
+        result: ReadLoopResult = await run_read_loop(
+            question=request.resolved_text,
+            history=request.history,
+            context=context,
+            tools=tools,
+            model_step=self._read_loop_step,
+            executor=executor,
+            max_rounds=self._read_loop_max_rounds,
+        )
+        if trace is not None:
+            for call in result.calls:
+                trace.add_tool_call(
+                    tool=call.tool,
+                    status=call.status,
+                    duration_ms=call.duration_ms,
+                    reason=call.reason,
+                    result=call.result,
+                    round_name=f"loop-{call.round_index + 1}",
+                )
+            for entry in result.model_calls:
+                trace.add_model_call(
+                    operation=str(entry.get("operation") or "assistant_read_loop"),
+                    attempt=int(entry.get("attempt") or 1),
+                    duration_ms=float(entry.get("durationMs") or 0),
+                    outcome=str(entry.get("outcome") or "step"),
+                    provider=entry.get("provider"),
+                    model=entry.get("model"),
+                    usage=entry.get("usage"),
+                    detail=entry.get("detail"),
+                )
+        state = derive_student_state(execution)
+        verdict = None
+        if result.answer:
+            disbursements = (state.financial_aid or {}).get("disbursements")
+            verdict = guard_grounded_answer(
+                answer=result.answer,
+                evidence_texts=result.evidence_texts,
+                causal_guards=build_causal_guards(
+                    registration_gates=state.registration_gates or None,
+                    housing_gates=(
+                        (state.housing_eligibility or {}).get("gates")
+                        if state.housing_eligibility
+                        else None
+                    ),
+                    disbursement_gates=(disbursements or {}).get("gates")
+                    if disbursements
+                    else None,
+                ),
+                document_states=state.document_states,
+                no_official_holds=(
+                    "getEnrollmentHolds" in state.available_reads and not state.official_holds
+                ),
+                unavailable_sources=[str(item.get("source")) for item in state.unavailable_data],
+                deposit_payment_pending=bool((state.account or {}).get("depositPaymentPending")),
+            )
+        accepted = verdict is not None and verdict.accepted
+        loop_trace = {
+            "rounds": result.rounds,
+            "outcome": result.outcome,
+            "reads": [call.tool for call in result.calls],
+            "reasoning": result.reasoning[-3:],
+            "guard": (
+                "accepted"
+                if accepted
+                else (verdict.reason_code if verdict is not None else result.outcome)
+            ),
+        }
+        if result.answer and not accepted:
+            loop_trace["ungrounded"] = ungrounded_tokens(result.answer, result.evidence_texts)
+            loop_trace["rejectedAnswer"] = result.answer[:600]
+        if trace is not None:
+            trace.read_loop = loop_trace
+            trace.add_stage(
+                "read_loop",
+                (time.perf_counter() - stage_started) * 1_000,
+                rounds=result.rounds,
+                outcome=loop_trace["guard"],
+            )
+        if not accepted:
+            failure_codes.append(f"read_loop_fallback:{loop_trace['guard']}")
+            return None
+        assert verdict is not None
+        last_call = next(
+            (entry for entry in reversed(result.model_calls) if entry.get("model")), None
+        )
+        usage_total = _sum_usage(result.model_calls)
+        resolved = classification or Classification(
+            _intent_for_reads([call.tool for call in result.calls]), 0.6, source="model_loop"
+        )
+        if trace is not None:
+            trace.classification = {
+                "requestType": resolved.request_type,
+                "confidence": resolved.confidence,
+                "source": resolved.source,
+                "additionalRequestTypes": list(resolved.additional_request_types),
+                "requirementReference": resolved.requirement_reference,
+            }
+            trace.tool_selection_source = "model_loop"
+            trace.selected_tools = list(dict.fromkeys(call.tool for call in result.calls))
+            trace.evidence = list(result.evidence_texts[:48])
+            trace.provider = str((last_call or {}).get("provider") or "openai")
+            trace.model = (last_call or {}).get("model")
+            trace.usage = usage_total
+            trace.response_source = "model_loop"
+            trace.failure_codes = list(failure_codes)
+            trace.final_message = verdict.answer
+        return AssistantPipelineResult(
+            message=verdict.answer,
+            blocks=[{"type": "text", "fallbackText": verdict.answer, "text": verdict.answer}],
+            provider=str((last_call or {}).get("provider") or "openai"),
+            model=(last_call or {}).get("model"),
+            usage=usage_total,
+            suggested_actions=list(state.suggested_actions),
+            context_receipts=[
+                {"source": receipt["source"]} for receipt in _unique_sources(execution.receipts)
+            ],
+            classification=resolved,
             derived=state,
             failure_codes=failure_codes,
         )
@@ -562,6 +828,76 @@ def _open_gate_codes(state: DerivedState) -> list[str]:
     return codes
 
 
+# The read that names a loop turn's intent, for traces and evals that key on
+# request types: the first tool the model chose owns the question.
+_INTENT_BY_READ: Mapping[str, str] = {
+    "getCampusLife": "campus_life",
+    "getDocumentStatuses": "document_status",
+    "getStudentDeadlines": "deadlines",
+    "getEnrollmentHolds": "holds_and_blockers",
+    "getOnboardingChecklist": "remaining_steps",
+    "getEnrollmentState": "enrollment_state",
+    "getStudentAdvising": "appointments",
+    "getStudentAppointments": "appointments",
+    "getStudentAccountSummary": "student_account",
+    "getFinancialAidStatus": "aid_status",
+    "getFinancialAidSummary": "aid_summary",
+    "getAidDisbursements": "aid_disbursement",
+    "getStudentHousingStatus": "housing_status",
+    "getStudentHousingEligibility": "housing_eligibility",
+    "getRegistrationStatus": "registration_status",
+    "getAcademicStanding": "academic_standing",
+    "getAcademicPlan": "academic_plan",
+    "getStudentMessages": "messages_unread",
+    "getStudentProfile": "personal_information",
+    "getOnboardingResponses": "personal_information",
+    "getStudentSupportRequests": "support_requests",
+    "getSupportOptions": "request_support",
+}
+
+
+def _intent_for_reads(tools: Sequence[str]) -> str:
+    for tool in tools:
+        if tool in _INTENT_BY_READ:
+            return _INTENT_BY_READ[tool]
+    return "general_question"
+
+
+# Reads that are context on some routes: their unavailability is not the
+# answer there ("how do I get help from a real person" names support, not the
+# adviser record).
+_CONTEXT_ONLY_READS: Mapping[str, frozenset[str]] = {
+    "getStudentAdvising": frozenset(
+        {"request_support", "general_help", "support", "housing_support", "aid_support"}
+    ),
+}
+
+
+def _prune_context_unavailability(state: DerivedState, classification: Classification) -> None:
+    state.unavailable_data = [
+        item
+        for item in state.unavailable_data
+        if classification.request_type
+        not in _CONTEXT_ONLY_READS.get(str(item.get("source")), frozenset())
+    ]
+
+
+def _sum_usage(model_calls: Sequence[Mapping[str, Any]]) -> JsonDict | None:
+    prompt = completion = total = 0
+    seen = False
+    for entry in model_calls:
+        usage = entry.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        seen = True
+        prompt += int(usage.get("promptTokens") or 0)
+        completion += int(usage.get("completionTokens") or 0)
+        total += int(usage.get("totalTokens") or 0)
+    if not seen:
+        return None
+    return {"promptTokens": prompt, "completionTokens": completion, "totalTokens": total}
+
+
 def _unique_sources(receipts: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
     seen: set[str] = set()
     unique: list[Mapping[str, Any]] = []
@@ -578,3 +914,9 @@ def render_transcript_message(message: str, blocks: Sequence[Mapping[str, Any]])
 
     rendered = render_blocks_as_text(blocks)
     return rendered if rendered else message
+
+
+def _today_line(now: datetime) -> str:
+    return (
+        f"Today is {now:%A %d %B %Y} (ISO {now:%Y-%m-%d}); dates before this have already passed."
+    )

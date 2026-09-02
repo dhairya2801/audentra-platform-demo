@@ -57,6 +57,99 @@ _WORK_ITEM_STATUSES = {
 }
 _TERMINAL_WORK_ITEM_STATUSES = {"done", "cancelled"}
 _COMMUNICATION_CHANNELS = {"email", "sms", "voice", "portal"}
+# The workspace cohort is one bounded read; the Students view searches the
+# whole tenant through `search_students` instead of paging this copy.
+ROSTER_WORKSPACE_LIMIT = 1000
+ROSTER_SEARCH_MAX_LIMIT = 200
+ROSTER_SEARCH_MAX_LENGTH = 120
+
+
+_ATTENTION_LABELS = {
+    "overdue_requirements": "overdue enrollment requirement",
+    "blocking_requirements_open": "open blocking requirement",
+    "overdue_work": "overdue staff action",
+    "escalated_work": "escalated staff action",
+    "no_primary_adviser": "no primary adviser assigned",
+}
+
+
+def _plural(count: int, label: str) -> str:
+    return f"{count} {label}{'' if count == 1 else 's'}"
+
+
+def student_attention(
+    *,
+    overdue_requirements: int,
+    blocking_requirements_open: int,
+    overdue_work: int,
+    escalated_work: int,
+    has_primary_adviser: bool,
+    offer_accepted: bool,
+    evaluated_at: str,
+) -> dict[str, object]:
+    """Rule-based attention signals, counted from canonical rows.
+
+    There is no model behind this: each signal is a count the staff member can
+    verify on the student's record, and the level is the strongest signal
+    present. A student who has not accepted an offer is not flagged for
+    missing an adviser, because no adviser is owed yet.
+    """
+
+    signals: list[dict[str, object]] = []
+    if escalated_work > 0:
+        signals.append(
+            {
+                "code": "escalated_work",
+                "label": _plural(escalated_work, _ATTENTION_LABELS["escalated_work"]),
+                "count": escalated_work,
+            }
+        )
+    if overdue_requirements > 0:
+        signals.append(
+            {
+                "code": "overdue_requirements",
+                "label": _plural(overdue_requirements, _ATTENTION_LABELS["overdue_requirements"]),
+                "count": overdue_requirements,
+            }
+        )
+    if overdue_work > 0:
+        signals.append(
+            {
+                "code": "overdue_work",
+                "label": _plural(overdue_work, _ATTENTION_LABELS["overdue_work"]),
+                "count": overdue_work,
+            }
+        )
+    if blocking_requirements_open > 0:
+        signals.append(
+            {
+                "code": "blocking_requirements_open",
+                "label": _plural(
+                    blocking_requirements_open,
+                    _ATTENTION_LABELS["blocking_requirements_open"],
+                ),
+                "count": blocking_requirements_open,
+            }
+        )
+    if offer_accepted and not has_primary_adviser:
+        signals.append(
+            {
+                "code": "no_primary_adviser",
+                "label": _ATTENTION_LABELS["no_primary_adviser"],
+                "count": 1,
+            }
+        )
+    if escalated_work > 0 or (overdue_requirements > 0 and overdue_work > 0):
+        level = "urgent"
+    elif overdue_requirements > 0 or overdue_work > 0:
+        level = "attention"
+    elif signals:
+        level = "watch"
+    else:
+        level = "none"
+    return {"level": level, "signals": signals, "evaluatedAt": evaluated_at}
+
+
 _WORK_ITEM_PRIORITIES = {"low", "medium", "high", "urgent"}
 _WORK_ACTION_TYPES = {
     "enrollment_follow_up",
@@ -136,6 +229,8 @@ class PostgresStaffRepository:
         tenant_id = _uuid(auth.tenant_id)
         where, params = self._board_filters(auth, query, now)
         params["tenant_id"] = tenant_id
+        params["viewer_id"] = _uuid(auth.actor_id)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         async with self._engine.connect() as connection:
             member_result = await connection.execute(
                 text(self._board_staff_sql()), {"tenant_id": tenant_id, "now": now}
@@ -167,6 +262,18 @@ class PostgresStaffRepository:
                 {"tenant_id": tenant_id, "now": now, "stale_before": now - STALE_AFTER},
             )
             counts_row = dict(counts_result.mappings().one())
+            scope_result = await connection.execute(
+                text(self._board_scope_counts_sql()),
+                {
+                    "tenant_id": tenant_id,
+                    "viewer_id": params["viewer_id"],
+                    "now": now,
+                    "stale_before": now - STALE_AFTER,
+                    "day_start": day_start,
+                    "day_end": day_start + timedelta(days=1),
+                },
+            )
+            scope_row = dict(scope_result.mappings().one())
             component_result = await connection.execute(
                 text(self._board_component_facets_sql()),
                 {"tenant_id": tenant_id, "now": now, "stale_before": now - STALE_AFTER},
@@ -204,6 +311,7 @@ class PostgresStaffRepository:
                 "unassigned": int(counts_row["unassigned"]),
                 "ownerRisk": int(counts_row["owner_risk"]),
             },
+            "scopes": self._map_scope_counts(scope_row),
             "page": {
                 "limit": query.limit,
                 "offset": query.offset,
@@ -422,7 +530,12 @@ class PostgresStaffRepository:
                         limit=False,
                     )
                 ),
-                {"tenant_id": tenant_id, "work_item_id": _uuid(work_item_id), "now": now},
+                {
+                    "tenant_id": tenant_id,
+                    "work_item_id": _uuid(work_item_id),
+                    "viewer_id": _uuid(auth.actor_id),
+                    "now": now,
+                },
             )
             row = result.mappings().first()
             if row is None:
@@ -553,6 +666,14 @@ class PostgresStaffRepository:
             return f"{closed_last}, item.created_at, item.id"
         if sort == "stale":
             return f"{closed_last}, item.updated_at, item.id"
+        if sort == "attention":
+            # Escalated, then overdue, then priority, then the nearest due
+            # date: the order a person reads their own queue in.
+            overdue = "(item.due_at IS NOT NULL AND item.due_at < :now)"
+            return (
+                f"{closed_last}, item.escalated DESC, {overdue} DESC, {priority},"
+                " item.due_at NULLS LAST, item.updated_at DESC, item.id"
+            )
         return f"{closed_last}, {priority}, item.due_at NULLS LAST, item.updated_at DESC, item.id"
 
     def _board_from_sql(self) -> str:
@@ -585,8 +706,13 @@ class PostgresStaffRepository:
         """
 
     def _board_items_sql(self, *, where: str, order: str, limit: bool) -> str:
+        """The board projection. ``:viewer_id`` (the reading staff member) is a
+        required parameter: each item carries the reader's current caseload
+        roles for its student, so a card can say "your advisee"."""
+
         offer = self._table("admission_offer")
         program = self._table("program")
+        assignment = self._table("student_staff_assignment")
         page = "LIMIT :limit OFFSET :offset" if limit else ""
         return f"""
             SELECT
@@ -611,7 +737,8 @@ class PostgresStaffRepository:
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
               COALESCE(offer_program.name, 'Program not assigned') AS program_name,
-              student.class_year, item.source_type, item.source_id
+              student.class_year, item.source_type, item.source_id,
+              viewer_caseload.roles AS viewer_roles
             FROM {self._board_from_sql()}
             LEFT JOIN LATERAL (
               SELECT program.name
@@ -623,6 +750,14 @@ class PostgresStaffRepository:
               ORDER BY offer.created_at DESC
               LIMIT 1
             ) AS offer_program ON true
+            LEFT JOIN LATERAL (
+              SELECT array_agg(assignment.role ORDER BY assignment.role) AS roles
+              FROM {assignment} AS assignment
+              WHERE assignment.tenant_id = item.tenant_id
+                AND assignment.student_id = item.student_id
+                AND assignment.staff_member_id = :viewer_id
+                AND assignment.ended_at IS NULL
+            ) AS viewer_caseload ON true
             WHERE {where}
             ORDER BY {order}
             {page}
@@ -634,7 +769,7 @@ class PostgresStaffRepository:
         away_kinds = ", ".join(f"'{kind}'" for kind in AWAY_TIME_OFF_KINDS)
         return f"""
             SELECT m.id, m.display_name, m.email_normalized, m.component, m.title,
-                   m.employment_status, m.leave_until,
+                   m.employment_status, m.leave_until, m.timezone,
                    away.ends_at AS away_until, away.kind AS away_kind
             FROM {member} AS m
             LEFT JOIN LATERAL (
@@ -688,6 +823,84 @@ class PostgresStaffRepository:
             ) AS away ON item.assignee_id IS NOT NULL
             WHERE item.tenant_id = :tenant_id
         """
+
+    def _board_scope_counts_sql(self) -> str:
+        """Counts for the reader's three scopes in one pass over the tenant.
+
+        ``mine`` is work assigned to the reader; ``myComponent`` is the work of
+        the reader's component (the item's component); ``all`` is the tenant.
+        Every figure is an aggregate in SQL, never a count over a page.
+        """
+
+        open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
+        viewer_component = (
+            f"(SELECT viewer.component FROM {self._table('staff_member')} AS viewer"
+            " WHERE viewer.id = :viewer_id AND viewer.tenant_id = :tenant_id)"
+        )
+        predicates = {
+            "mine": "item.assignee_id = :viewer_id",
+            "team": f"item.component = {viewer_component}",
+            "all": "TRUE",
+        }
+        is_open = f"item.status IN ({open_statuses})"
+        measures = {
+            "todo": "item.status = 'todo'",
+            "in_progress": "item.status = 'in_progress'",
+            "follow_up_required": "item.status = 'follow_up_required'",
+            "blocked": "item.status = 'blocked'",
+            "done": "item.status = 'done'",
+            "cancelled": "item.status = 'cancelled'",
+            "open": is_open,
+            "overdue": f"{is_open} AND item.due_at IS NOT NULL AND item.due_at < :now",
+            "due_today": f"{is_open} AND item.due_at >= :day_start AND item.due_at < :day_end",
+            "urgent": f"{is_open} AND item.priority = 'urgent'",
+            "escalated": f"{is_open} AND item.escalated",
+            "stale": self._stale_sql(),
+            "unassigned": f"{is_open} AND item.assignee_id IS NULL",
+        }
+        columns = [f"{viewer_component} AS viewer_component"]
+        for scope, predicate in predicates.items():
+            for name, condition in measures.items():
+                columns.append(
+                    f"COUNT(*) FILTER (WHERE ({predicate}) AND ({condition})) AS {scope}_{name}"
+                )
+            columns.append(
+                f"COUNT(DISTINCT item.student_id) FILTER (WHERE ({predicate}) AND {is_open})"
+                f" AS {scope}_students"
+            )
+        return f"""
+            SELECT {", ".join(columns)}
+            FROM {self._table("staff_work_item")} AS item
+            WHERE item.tenant_id = :tenant_id
+        """
+
+    @staticmethod
+    def _map_scope_counts(row: Mapping[str, object]) -> dict[str, object]:
+        def scope(prefix: str) -> dict[str, int]:
+            return {
+                "todo": int(cast(int, row[f"{prefix}_todo"])),
+                "inProgress": int(cast(int, row[f"{prefix}_in_progress"])),
+                "followUpRequired": int(cast(int, row[f"{prefix}_follow_up_required"])),
+                "blocked": int(cast(int, row[f"{prefix}_blocked"])),
+                "done": int(cast(int, row[f"{prefix}_done"])),
+                "cancelled": int(cast(int, row[f"{prefix}_cancelled"])),
+                "open": int(cast(int, row[f"{prefix}_open"])),
+                "overdue": int(cast(int, row[f"{prefix}_overdue"])),
+                "dueToday": int(cast(int, row[f"{prefix}_due_today"])),
+                "urgent": int(cast(int, row[f"{prefix}_urgent"])),
+                "escalated": int(cast(int, row[f"{prefix}_escalated"])),
+                "stale": int(cast(int, row[f"{prefix}_stale"])),
+                "unassigned": int(cast(int, row[f"{prefix}_unassigned"])),
+                "students": int(cast(int, row[f"{prefix}_students"])),
+            }
+
+        component = row.get("viewer_component")
+        return {
+            "component": str(component) if component is not None else None,
+            "mine": scope("mine"),
+            "myComponent": scope("team"),
+            "all": scope("all"),
+        }
 
     def _board_open_from_sql(self) -> str:
         open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
@@ -755,6 +968,7 @@ class PostgresStaffRepository:
             "leaveUntil": (str(row["leave_until"]) if row.get("leave_until") is not None else None),
             "awayUntil": _iso_timestamp(away_until) if away_until is not None else None,
             "awayKind": str(row["away_kind"]) if row.get("away_kind") is not None else None,
+            **({"timezone": str(row["timezone"])} if row.get("timezone") else {}),
         }
 
     async def get_managed_content(self, auth: AuthContext) -> dict[str, object]:
@@ -1535,6 +1749,7 @@ class PostgresStaffRepository:
                 {
                     "tenant_id": _uuid(auth.tenant_id),
                     "work_item_id": _uuid(work_item_id),
+                    "viewer_id": _uuid(auth.actor_id),
                     "now": now,
                 },
             )
@@ -1680,16 +1895,90 @@ class PostgresStaffRepository:
         }
 
     async def get_student_roster(self, auth: AuthContext) -> list[dict[str, object]]:
-        """Return canonical students for the CRM, including accounts without risk rows."""
+        """Return canonical students for the CRM, including accounts without work rows."""
 
         self._require_staff(auth)
         async with self._engine.connect() as connection:
-            result = await connection.execute(
-                text(self._student_roster_sql()),
+            rows = await self._roster_rows(
+                connection, auth, query=None, student_id=None, limit=ROSTER_WORKSPACE_LIMIT
+            )
+        return [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
+
+    async def search_students(
+        self,
+        auth: AuthContext,
+        *,
+        query: str | None,
+        student_id: str | None,
+        limit: int,
+    ) -> dict[str, object]:
+        """One bounded page of the tenant roster, matched server-side.
+
+        The same projection the workspace cohort uses, so a search result and
+        a cohort row never disagree about a student.
+        """
+
+        self._require_staff(auth)
+        normalized_query = " ".join((query or "").split())[:ROSTER_SEARCH_MAX_LENGTH]
+        bounded_limit = max(1, min(int(limit), ROSTER_SEARCH_MAX_LIMIT))
+        async with self._engine.connect() as connection:
+            rows = await self._roster_rows(
+                connection,
+                auth,
+                query=normalized_query or None,
+                student_id=student_id,
+                limit=bounded_limit,
+            )
+            cohort_result = await connection.execute(
+                text(
+                    f"SELECT COUNT(*) AS total FROM {self._table('student')} "
+                    "WHERE tenant_id = :tenant_id"
+                ),
                 {"tenant_id": _uuid(auth.tenant_id)},
             )
-            rows = result.mappings().all()
-        return [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
+            cohort_total = int(cohort_result.mappings().one()["total"])
+        items = [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
+        total = _database_integer(rows[0]["match_count"], "student.match_count") if rows else 0
+        return {
+            "items": items,
+            "total": total,
+            "cohortTotal": cohort_total,
+            "query": normalized_query,
+            "limit": bounded_limit,
+            "generatedAt": _iso_timestamp(self._clock()),
+        }
+
+    async def _roster_rows(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        *,
+        query: str | None,
+        student_id: str | None,
+        limit: int,
+    ) -> list[Mapping[str, object]]:
+        params: dict[str, object] = {
+            "tenant_id": _uuid(auth.tenant_id),
+            "viewer_id": _uuid(auth.actor_id),
+            "now": self._clock(),
+            "limit": limit,
+        }
+        if student_id is not None:
+            try:
+                params["student_id"] = UUID(student_id)
+            except ValueError:
+                return []
+        if query is not None:
+            params["pattern"] = f"%{_escape_like(query)}%"
+        result = await connection.execute(
+            text(
+                self._student_roster_sql(
+                    by_student=student_id is not None, by_query=query is not None
+                )
+            ),
+            params,
+        )
+        return [dict(row) for row in result.mappings().all()]
 
     async def get_student_summary(
         self, auth: AuthContext, student_id: str
@@ -1904,6 +2193,7 @@ class PostgresStaffRepository:
                     "tenant_id": _uuid(auth.tenant_id),
                     "student_id": _uuid(student_id),
                     "work_item_id": _uuid(work_item_id),
+                    "viewer_id": _uuid(auth.actor_id),
                     "now": self._clock(),
                     "limit": 20,
                     "offset": 0,
@@ -5224,27 +5514,61 @@ class PostgresStaffRepository:
             WHERE student.tenant_id = :tenant_id AND student.id = :student_id
         """
 
-    def _student_roster_sql(self) -> str:
+    def _student_roster_sql(self, *, by_student: bool = False, by_query: bool = False) -> str:
         student = self._table("student")
         person = self._table("person")
         profile = self._table("student_profile")
         onboarding = self._table("student_onboarding")
         offer = self._table("admission_offer")
         program = self._table("program")
+        term = self._table("academic_term")
+        campus = self._table("campus")
         journey = self._table("enrollment_journey")
         requirement = self._table("student_requirement")
+        definition = self._table("requirement_definition_version")
         work_item = self._table("staff_work_item")
+        assignment = self._table("student_staff_assignment")
+        member = self._table("staff_member")
+        open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
+        filters = ["student.tenant_id = :tenant_id"]
+        if by_student:
+            filters.append("student.id = :student_id")
+        if by_query:
+            filters.append(
+                """(
+                  person.first_name ILIKE :pattern ESCAPE '\\'
+                  OR person.last_name ILIKE :pattern ESCAPE '\\'
+                  OR (person.first_name || ' ' || person.last_name) ILIKE :pattern ESCAPE '\\'
+                  OR COALESCE(profile.preferred_name, person.preferred_name, '')
+                    ILIKE :pattern ESCAPE '\\'
+                  OR COALESCE(student.external_ref, '') ILIKE :pattern ESCAPE '\\'
+                  OR COALESCE(offer_program.name, '') ILIKE :pattern ESCAPE '\\'
+                )"""
+            )
+        where = "\n              AND ".join(filters)
         return f"""
-            SELECT student.id, person.first_name, person.last_name,
+            SELECT student.id, student.external_ref, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
               COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              offer_program.term_name,
+              offer_program.campus_name,
               student.class_year,
               COALESCE(onboarding.status, 'not_started') AS onboarding_status,
               COALESCE(onboarding.current_step, 'offer') AS onboarding_step,
               COALESCE(cardinality(onboarding.completed_steps), 0) AS onboarding_completed,
               COALESCE(requirement_progress.completed_count, 0) AS requirement_completed,
               COALESCE(requirement_progress.total_count, 0) AS requirement_total,
+              COALESCE(requirement_progress.overdue_count, 0) AS requirement_overdue,
+              COALESCE(requirement_progress.blocking_open_count, 0)
+                AS requirement_blocking_open,
+              COALESCE(work_summary.open_count, 0) AS work_open,
+              COALESCE(work_summary.overdue_count, 0) AS work_overdue,
+              COALESCE(work_summary.escalated_count, 0) AS work_escalated,
+              COALESCE(work_summary.owners, '[]'::jsonb) AS work_owners,
+              primary_adviser.id AS primary_adviser_id,
+              primary_adviser.display_name AS primary_adviser_name,
+              viewer_caseload.roles AS viewer_roles,
               GREATEST(
                 student.updated_at,
                 COALESCE(profile.updated_at, student.updated_at),
@@ -5255,7 +5579,8 @@ class PostgresStaffRepository:
               next_work.description AS work_description,
               next_work.assignee_id,
               next_work.selected_channel,
-              next_work.priority AS work_priority
+              next_work.priority AS work_priority,
+              COUNT(*) OVER () AS match_count
             FROM {student} AS student
             JOIN {person} AS person
               ON person.id = student.person_id AND person.tenant_id = student.tenant_id
@@ -5264,10 +5589,14 @@ class PostgresStaffRepository:
             LEFT JOIN {onboarding} AS onboarding
               ON onboarding.student_id = student.id AND onboarding.tenant_id = student.tenant_id
             LEFT JOIN LATERAL (
-              SELECT program.name
+              SELECT program.name, term.name AS term_name, campus.name AS campus_name
               FROM {offer} AS offer
               JOIN {program} AS program
                 ON program.id = offer.program_id AND program.tenant_id = offer.tenant_id
+              LEFT JOIN {term} AS term
+                ON term.id = offer.academic_term_id AND term.tenant_id = offer.tenant_id
+              LEFT JOIN {campus} AS campus
+                ON campus.id = offer.campus_id AND campus.tenant_id = offer.tenant_id
               WHERE offer.tenant_id = student.tenant_id
                 AND offer.student_id = student.id
               ORDER BY offer.created_at DESC
@@ -5278,15 +5607,64 @@ class PostgresStaffRepository:
                 COUNT(requirement.id)::integer AS total_count,
                 COUNT(requirement.id) FILTER (
                   WHERE requirement.status IN ('completed', 'waived', 'not_applicable')
-                )::integer AS completed_count
+                )::integer AS completed_count,
+                COUNT(requirement.id) FILTER (
+                  WHERE requirement.status NOT IN ('completed', 'waived', 'not_applicable')
+                    AND requirement.due_at IS NOT NULL AND requirement.due_at < :now
+                )::integer AS overdue_count,
+                COUNT(requirement.id) FILTER (
+                  WHERE requirement.status NOT IN ('completed', 'waived', 'not_applicable')
+                    AND definition.blocking = 1
+                )::integer AS blocking_open_count
               FROM {journey} AS journey
               LEFT JOIN {requirement} AS requirement
                 ON requirement.tenant_id = journey.tenant_id
                AND requirement.journey_id = journey.id
                AND requirement.retired_at IS NULL
+              LEFT JOIN {definition} AS definition
+                ON definition.id = requirement.requirement_definition_version_id
+               AND definition.tenant_id = requirement.tenant_id
               WHERE journey.tenant_id = student.tenant_id
                 AND journey.student_id = student.id
             ) AS requirement_progress ON true
+            LEFT JOIN LATERAL (
+              SELECT
+                COUNT(*)::integer AS open_count,
+                COUNT(*) FILTER (
+                  WHERE item.due_at IS NOT NULL AND item.due_at < :now
+                )::integer AS overdue_count,
+                COUNT(*) FILTER (WHERE item.escalated)::integer AS escalated_count,
+                jsonb_agg(DISTINCT jsonb_build_object(
+                  'id', owner.id, 'name', owner.display_name, 'component', owner.component
+                )) FILTER (WHERE owner.id IS NOT NULL) AS owners
+              FROM {work_item} AS item
+              LEFT JOIN {member} AS owner
+                ON owner.id = item.assignee_id AND owner.tenant_id = item.tenant_id
+              WHERE item.tenant_id = student.tenant_id
+                AND item.student_id = student.id
+                AND item.status IN ({open_statuses})
+            ) AS work_summary ON true
+            LEFT JOIN LATERAL (
+              SELECT array_agg(assignment.role ORDER BY assignment.role) AS roles
+              FROM {assignment} AS assignment
+              WHERE assignment.tenant_id = student.tenant_id
+                AND assignment.student_id = student.id
+                AND assignment.staff_member_id = :viewer_id
+                AND assignment.ended_at IS NULL
+            ) AS viewer_caseload ON true
+            LEFT JOIN LATERAL (
+              SELECT member.id, member.display_name
+              FROM {assignment} AS assignment
+              JOIN {member} AS member
+                ON member.id = assignment.staff_member_id
+               AND member.tenant_id = assignment.tenant_id
+              WHERE assignment.tenant_id = student.tenant_id
+                AND assignment.student_id = student.id
+                AND assignment.role = 'primary_advisor'
+                AND assignment.ended_at IS NULL
+              ORDER BY assignment.assigned_at DESC
+              LIMIT 1
+            ) AS primary_adviser ON true
             LEFT JOIN LATERAL (
               SELECT item.id, item.title, item.description, item.assignee_id,
                      item.selected_channel, item.priority
@@ -5306,9 +5684,9 @@ class PostgresStaffRepository:
                 item.id
               LIMIT 1
             ) AS next_work ON true
-            WHERE student.tenant_id = :tenant_id
+            WHERE {where}
             ORDER BY last_activity_at DESC, student.id
-            LIMIT 1000
+            LIMIT :limit
         """
 
     def _map_student_operation(
@@ -5365,13 +5743,52 @@ class PostgresStaffRepository:
                 "recommendedToday": row.get("assignee_id") is not None,
             }
 
+        overdue_requirements = _database_integer(
+            row.get("requirement_overdue", 0), "student_requirement.overdue_count"
+        )
+        blocking_open = _database_integer(
+            row.get("requirement_blocking_open", 0), "student_requirement.blocking_open_count"
+        )
+        work_open = _database_integer(row.get("work_open", 0), "staff_work_item.open_count")
+        work_overdue = _database_integer(
+            row.get("work_overdue", 0), "staff_work_item.overdue_count"
+        )
+        work_escalated = _database_integer(
+            row.get("work_escalated", 0), "staff_work_item.escalated_count"
+        )
+        primary_adviser_id = row.get("primary_adviser_id")
+        primary_adviser = (
+            {"id": str(primary_adviser_id), "name": str(row.get("primary_adviser_name") or "")}
+            if primary_adviser_id is not None
+            else None
+        )
+        external_ref = row.get("external_ref")
+        term_name = row.get("term_name")
+        campus_name = row.get("campus_name")
+
         return {
             "id": str(row["id"]),
             "name": f"{row['first_name']} {row['last_name']}",
             "preferredName": str(row["preferred_name"]),
+            "externalRef": str(external_ref) if external_ref is not None else None,
             "programName": str(row["program_name"]),
+            "termName": str(term_name) if term_name is not None else None,
+            "campusName": str(campus_name) if campus_name is not None else None,
             "classYear": _database_integer(row["class_year"], "student.class_year"),
             "assignedStaffId": assigned_staff_id,
+            "primaryAdviser": primary_adviser,
+            # Owners of the student's open work, distinct, from the same
+            # aggregate that counts it; and the reader's own roles for them.
+            "openWorkOwners": [
+                {
+                    "id": str(owner["id"]),
+                    "name": str(owner.get("name") or ""),
+                    "component": str(owner.get("component") or ""),
+                }
+                for owner in _json_list(row.get("work_owners") or [], "student.work_owners")
+                if isinstance(owner, Mapping) and owner.get("id") is not None
+            ],
+            "viewerAssignmentRoles": _text_list(row.get("viewer_roles")),
             "syntheticSeed": False,
             "journey": {
                 "stage": stage,
@@ -5379,17 +5796,17 @@ class PostgresStaffRepository:
                 "totalTasks": total_tasks,
                 "lastActivityAt": _iso_timestamp(row["last_activity_at"]),
             },
-            "risk": {
-                "score": 0,
-                "band": "low",
-                "category": "administrative",
-                "meltLikelihoodPercent": 0,
-                "recoveryLikelihoodPercent": 0,
-                "reason": "No deterministic risk score has been generated for this student.",
-                "signals": [],
-                "modelVersion": "not-evaluated",
-                "evaluatedAt": _iso_timestamp(row["last_activity_at"]),
-            },
+            "openWorkItems": work_open,
+            "overdueWorkItems": work_overdue,
+            "attention": student_attention(
+                overdue_requirements=overdue_requirements,
+                blocking_requirements_open=blocking_open,
+                overdue_work=work_overdue,
+                escalated_work=work_escalated,
+                has_primary_adviser=primary_adviser is not None,
+                offer_accepted=onboarding_status == "completed" or requirement_total > 0,
+                evaluated_at=_iso_timestamp(self._clock()),
+            ),
             "recommendedAction": recommended_action,
             "communicationHistory": [],
         }
@@ -5527,6 +5944,9 @@ class PostgresStaffRepository:
             },
             "source": source,
             "history": history,
+            # The reader's current caseload roles for this student, e.g.
+            # ["financial_aid_counselor"]; empty when the student is not theirs.
+            "viewerAssignmentRoles": _text_list(item.get("viewer_roles")),
         }
         mapped["signals"] = derive_signals(mapped, now=moment, owner_risk=owner_risk)
         return mapped
@@ -7085,6 +7505,16 @@ def _json_object(value: object, field: str) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise RuntimeError(f"Database returned invalid JSON for {field}")
     return {str(key): item for key, item in parsed.items()}
+
+
+def _text_list(value: object) -> list[str]:
+    """A database array (or nothing) as a list of strings."""
+
+    if value is None or isinstance(value, (str, bytes)):
+        return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(entry) for entry in value if entry is not None]
 
 
 def _json_list(value: object, field: str) -> list[object]:

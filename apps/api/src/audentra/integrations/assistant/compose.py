@@ -68,6 +68,7 @@ _SOURCE_LABELS = {
     "getEnrollmentHolds": "holds and blockers",
     "getStudentDeadlines": "deadlines",
     "getStudentAppointments": "your appointments",
+    "getStudentAdvising": "your advisers",
     "getAcademicPlan": "your academic plan",
     "getCampusLife": "campus events and clubs",
     "getStudentMessages": "your messages",
@@ -151,6 +152,34 @@ def _answer_waiver_claim(
         )
 
 
+def _adviser_line(label: str, adviser: Mapping[str, Any]) -> str:
+    parts = [f"{label}: {adviser.get('name') or 'unknown'}"]
+    if adviser.get("title"):
+        parts.append(str(adviser["title"]))
+    if adviser.get("email"):
+        parts.append(f"email {adviser['email']}")
+    if adviser.get("officeLocation"):
+        parts.append(f"office {adviser['officeLocation']}")
+    status = str(adviser.get("employmentStatus") or "")
+    if status and status != "active":
+        parts.append(f"currently {status.replace('_', ' ')}")
+        if adviser.get("leaveUntil"):
+            parts.append(f"until {adviser['leaveUntil']}")
+    if adviser.get("bookable") and adviser.get("nextOpenSlotAt"):
+        parts.append(
+            f"next bookable open slot {adviser['nextOpenSlotAt']} "
+            "(a slot the student could book, not an appointment)"
+        )
+    elif adviser.get("bookable") is False:
+        reason = str(adviser.get("availabilityReason") or "no open slots").replace("_", " ")
+        parts.append(f"not bookable right now ({reason})")
+    return "; ".join(parts)
+
+
+def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
 def build_evidence_bundle(state: DerivedState) -> list[str]:
     """Every fact the composer may use, rendered once as plain text."""
 
@@ -168,8 +197,12 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
     for step in state.completed_steps:
         lines.append(f"Completed checklist step: {step.get('title')}")
     for document in state.document_states:
+        decision_note = document.get("decisionNote")
+        reason: str = f" — reviewer note: {decision_note}" if decision_note else ""
+        if document["submissionState"] == "rejected" and not decision_note:
+            reason = " — no reason is recorded on the decision"
         lines.append(
-            f"Document {document['title']}: {document['submissionState'].replace('_', ' ')}"
+            f"Document {document['title']}: {document['submissionState'].replace('_', ' ')}{reason}"
         )
     # "Due 12 June" reads as future tense whatever today is, so an answer built
     # from bare dates quietly loses the fact that a date has already passed.
@@ -469,11 +502,47 @@ def build_evidence_bundle(state: DerivedState) -> list[str]:
     if state.housing_options:
         for residence in state.housing_options.get("residences", []):
             lines.append(f"Housing option: {residence.get('name')}")
-    if state.appointments:
-        for appointment in state.appointments.get("items", []):
+    if state.advising is not None:
+        primary = state.advising.get("primaryAdviser")
+        if isinstance(primary, Mapping):
+            lines.append(_adviser_line("Primary adviser", primary))
+        else:
+            lines.append("Primary adviser: none is currently assigned")
+        for adviser in state.advising.get("advisers", []):
+            if not isinstance(adviser, Mapping):
+                continue
+            if isinstance(primary, Mapping) and adviser.get("email") == primary.get("email"):
+                continue
+            lines.append(_adviser_line(str(adviser.get("role") or "Adviser").capitalize(), adviser))
+        for gap in state.advising.get("gaps", []):
+            message = _mapping_or_empty(gap).get("message")
+            if message:
+                lines.append(f"Advising gap: {message}")
+    if state.appointments is not None:
+        appointment_items = state.appointments.get("items", [])
+        if not appointment_items:
+            lines.append("Appointments: none on record (nothing booked, nothing past)")
+        for appointment in appointment_items:
+            staff = appointment.get("with") if isinstance(appointment.get("with"), Mapping) else {}
+            who = str(staff.get("name") or "").strip()
+            role = str(staff.get("title") or staff.get("component") or "").strip()
+            with_phrase = f" with {who}" + (f" ({role})" if role else "") if who else ""
+            status = str(appointment.get("status") or "")
+            status_note = {
+                "no_show": " — the student did not attend (no-show)",
+                "cancelled": " — cancelled",
+                "completed": " — completed",
+                "scheduled": " — scheduled, still to come",
+            }.get(status, f" ({status})")
             lines.append(
-                f"Appointment: {appointment.get('type')} at {appointment.get('startsAt')} "
-                f"({appointment.get('status')})"
+                f"Appointment: {appointment.get('label') or appointment.get('type')!s}"
+                f"{with_phrase} at {appointment.get('startsAt')}{status_note}"
+            )
+        upcoming = state.appointments.get("upcoming") or []
+        if appointment_items and not upcoming:
+            lines.append(
+                "No upcoming appointment is booked; an adviser's open slot is a bookable "
+                "time, not an appointment"
             )
     if state.academics:
         if state.academics.get("selectedProgram"):

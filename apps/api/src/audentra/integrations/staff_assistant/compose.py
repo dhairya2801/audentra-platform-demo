@@ -19,7 +19,7 @@ Two staff-specific composition families live here:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -343,6 +343,17 @@ def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
         if student.get("communicationPreference"):
             lines.append(f"Communication preference: {student['communicationPreference']}")
         lines.append(f"Open staff work items: {student.get('openWorkItems')}")
+        for item in state.open_work[:8]:
+            owner = item.get("assignee")
+            owner_name = (
+                owner.get("name") if isinstance(owner, Mapping) else owner
+            ) or "unassigned"
+            lines.append(
+                f"Open work item {item.get('key')}: {item.get('title')} — "
+                f"{str(item.get('status') or '').replace('_', ' ')}, "
+                f"{item.get('priority')} priority, owner {owner_name}"
+                + (f", due {str(item.get('dueAt'))[:10]}" if item.get("dueAt") else "")
+            )
     for result in state.search_results:
         req = _m(result.get("requirements"))
         lines.append(

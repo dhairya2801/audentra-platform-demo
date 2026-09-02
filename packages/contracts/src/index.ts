@@ -1128,6 +1128,8 @@ export interface StaffMemberSummary {
   /** End of a current absence (vacation, sick, conference, leave) — null when present. */
   awayUntil?: string | null;
   awayKind?: string | null;
+  /** IANA zone the member works in; times shown to them are rendered in it. */
+  timezone?: string;
 }
 
 export type StaffEmploymentStatus = "active" | "on_leave" | "departed";
@@ -1482,6 +1484,12 @@ export interface StaffWorkItem {
   /** Populated on board pages for the items on the page and on the detail read. */
   history: StaffWorkItemLog[];
   signals: StaffWorkItemSignals;
+  /**
+   * The signed-in member's current caseload roles for this item's student
+   * (e.g. `["financial_aid_counselor"]`); empty when the student is not on
+   * their caseload. Joined server-side from `student_staff_assignment`.
+   */
+  viewerAssignmentRoles: StaffAssignmentRole[];
 }
 
 export interface StaffWorkComment {
@@ -1679,6 +1687,8 @@ export type StaffActionCenterDueWindow =
 export type StaffActionCenterSort =
   | "priority"
   | "due"
+  /** Escalated, then overdue, then priority, then nearest due: the personal queue order. */
+  | "attention"
   | "updated"
   | "created"
   | "stale";
@@ -1733,6 +1743,46 @@ export interface StaffActionCenterFacets {
 }
 
 /**
+ * Counts for one reading scope of the board. Status counts cover the whole
+ * scope; `open` onwards describe open work only. `dueToday` is the calendar
+ * day (UTC), whether or not the hour has passed. Computed in SQL, never from
+ * a page.
+ */
+export interface StaffActionCenterScopeCounts {
+  todo: number;
+  inProgress: number;
+  followUpRequired: number;
+  blocked: number;
+  done: number;
+  cancelled: number;
+  open: number;
+  overdue: number;
+  dueToday: number;
+  urgent: number;
+  escalated: number;
+  stale: number;
+  unassigned: number;
+  /** Distinct students with open work in the scope. */
+  students: number;
+}
+
+export type StaffActionCenterScope = "mine" | "myComponent" | "all";
+
+/**
+ * The three ways a member reads the shared board: their own queue
+ * (`assignee=me`), their component's work (`component=<theirs>`), and the
+ * whole institution. Served with every board page so the scope switch, the
+ * sidebar badge and the column headers never count over pages.
+ */
+export interface StaffActionCenterScopes {
+  /** The signed-in member's component; null if their staff row is missing. */
+  component: string | null;
+  mine: StaffActionCenterScopeCounts;
+  myComponent: StaffActionCenterScopeCounts;
+  all: StaffActionCenterScopeCounts;
+}
+
+/**
  * One bounded page of the board plus board-wide counts and facets. The board
  * is never returned in full: page further with `offset`, or narrow with the
  * query. `counts.todo…escalated` describe the whole board (the legacy shape);
@@ -1757,6 +1807,7 @@ export interface StaffActionCenter {
     unassigned: number;
     ownerRisk: number;
   };
+  scopes: StaffActionCenterScopes;
   page: {
     limit: number;
     offset: number;
@@ -2281,13 +2332,45 @@ export interface StaffCommunicationHistoryItem {
   occurredAt: string;
 }
 
+/**
+ * One deterministic, rule-based reason a student needs a human look. Every
+ * signal is counted from canonical rows at read time; there is no model, no
+ * score and no likelihood behind any of them.
+ */
+export interface StaffStudentAttentionSignal {
+  code:
+    | "overdue_requirements"
+    | "blocking_requirements_open"
+    | "overdue_work"
+    | "escalated_work"
+    | "no_primary_adviser";
+  label: string;
+  count: number;
+}
+
+export interface StaffStudentAttention {
+  /** `urgent` > `attention` > `watch` > `none`, derived from the signals below. */
+  level: "none" | "watch" | "attention" | "urgent";
+  signals: StaffStudentAttentionSignal[];
+  evaluatedAt: string;
+}
+
 export interface StaffStudentOperation {
   id: string;
   name: string;
   preferredName: string;
+  externalRef: string | null;
   programName: string;
+  termName: string | null;
+  campusName: string | null;
   classYear: number;
+  /** Owner of the student's next open work item; the reader when there is none. */
   assignedStaffId: string;
+  primaryAdviser: { id: string; name: string } | null;
+  /** Distinct owners of the student's open work items, from the same aggregate that counts them. */
+  openWorkOwners: { id: string; name: string; component: string }[];
+  /** The signed-in member's current caseload roles for this student; empty when not theirs. */
+  viewerAssignmentRoles: StaffAssignmentRole[];
   syntheticSeed: boolean;
   journey: {
     stage: string;
@@ -2295,26 +2378,10 @@ export interface StaffStudentOperation {
     totalTasks: number;
     lastActivityAt: string;
   };
-  risk: {
-    score: number;
-    band: "low" | "medium" | "high" | "critical";
-    category:
-      | "financial"
-      | "academic"
-      | "belonging"
-      | "administrative"
-      | "family"
-      | "engagement"
-      | "geographic"
-      | "confidence"
-      | "timing";
-    meltLikelihoodPercent: number;
-    recoveryLikelihoodPercent: number;
-    reason: string;
-    signals: string[];
-    modelVersion: string;
-    evaluatedAt: string;
-  };
+  /** Open Action Center items for this student, counted server-side. */
+  openWorkItems: number;
+  overdueWorkItems: number;
+  attention: StaffStudentAttention;
   recommendedAction: {
     title: string;
     rationale: string;
@@ -2326,17 +2393,61 @@ export interface StaffStudentOperation {
   communicationHistory: StaffCommunicationHistoryItem[];
 }
 
+/**
+ * The signed-in member's own queue: every open item assigned to them, read
+ * through the same board query the Task Board uses (`assignee=me`,
+ * `sort=attention`). `tasks` is the first page; page the rest with
+ * `GET /v1/staff/action-center?assignee=me&sort=attention&offset=`.
+ */
 export interface StaffPersonalActionCenter {
   staff: StaffMemberSummary;
+  /** Roster rows for the students in `tasks`, strongest attention first (context, not the queue). */
   students: StaffStudentOperation[];
+  /** The first page of the member's open work, attention order. */
   tasks: StaffWorkItem[];
-  counts: {
-    studentsToday: number;
-    critical: number;
-    highRisk: number;
-    inProgress: number;
-    completed: number;
+  queue: {
+    /** Open items assigned to the member across all pages. */
+    total: number;
+    limit: number;
+    hasMore: boolean;
+    sort: "attention";
   };
+  /** The member's own counts (`scopes.mine` of the board), computed in SQL. */
+  counts: {
+    open: number;
+    overdue: number;
+    dueToday: number;
+    urgent: number;
+    escalated: number;
+    todo: number;
+    inProgress: number;
+    followUpRequired: number;
+    blocked: number;
+    stale: number;
+    /** Distinct students with open work assigned to the member. */
+    students: number;
+  };
+  generatedAt: string;
+}
+
+/** GET /v1/staff/students — the tenant roster, searched server-side. */
+export interface StaffStudentSearchQuery {
+  /** Matches name, preferred name, external reference, email and program. */
+  query?: string;
+  /** Exactly one student, regardless of `query`. */
+  studentId?: string;
+  /** 1–200, default 50. */
+  limit?: number;
+}
+
+export interface StaffStudentSearch {
+  items: StaffStudentOperation[];
+  /** Students matching the query across the whole tenant. */
+  total: number;
+  /** Every student in the tenant, regardless of the query. */
+  cohortTotal: number;
+  query: string;
+  limit: number;
   generatedAt: string;
 }
 
@@ -3609,6 +3720,8 @@ export interface CreateDepositPaymentInput {
 }
 
 export interface StudentProfile {
+  /** University-facing student number (e.g. SYN-001278); absent when the SIS reference is not set. */
+  externalRef?: string;
   studentId: string;
   preferredName: string;
   firstName?: string;

@@ -55,6 +55,7 @@ from audentra.domain.edward_actions import (
     named_day,
     parse_staff_action,
     parse_student_action,
+    preference_fields_incomplete,
     question_sentences,
     recognize_with_model,
     repeats_action_for_another,
@@ -118,6 +119,9 @@ from .tenant_repository import PostgresTenantRepository
 
 JsonDict = dict[str, Any]
 LOGGER = logging.getLogger(__name__)
+# The first page of the reader's own queue shipped inside the workspace; the
+# Action Center pages the rest through GET /v1/staff/action-center?assignee=me.
+PERSONAL_QUEUE_PAGE_LIMIT = 50
 _LOCAL_FERPA_LINK_SECRET = "local-development-ferpa-delegate-link-secret-v1"  # noqa: S105
 
 SIGNED_TEMPLATES = (
@@ -1539,7 +1543,12 @@ class PostgresPlatformService:
             # personal action center does not depend on which page came back.
             action_center, personal_board = await asyncio.gather(
                 staff.get_action_center(auth, DEFAULT_QUERY),
-                staff.get_work_queue(auth, ActionCenterQuery(assignee="me", limit=200)),
+                staff.get_work_queue(
+                    auth,
+                    ActionCenterQuery(
+                        assignee="me", sort="attention", limit=PERSONAL_QUEUE_PAGE_LIMIT
+                    ),
+                ),
             )
             (
                 student,
@@ -1558,6 +1567,7 @@ class PostgresPlatformService:
                 auth,
                 action_center=action_center,
                 personal_items=cast(Sequence[Mapping[str, Any]], personal_board.get("items", [])),
+                personal_page=cast(Mapping[str, Any], personal_board.get("page", {})),
                 student=student,
                 campus_life=campus_life,
                 inquiries=cast(Sequence[Mapping[str, Any]], inquiries),
@@ -1565,6 +1575,13 @@ class PostgresPlatformService:
                 managed_content=managed_content,
                 configurations=configurations,
                 generated_at=self._timestamp(),
+            )
+        if operation == "staff.search_students":
+            return await staff.search_students(
+                auth,
+                query=call.query_params.get("query") or None,
+                student_id=call.query_params.get("studentId") or None,
+                limit=_integer(call.query_params.get("limit")) or 50,
             )
         if operation == "staff.get_me":
             return await self._advising().get_staff_me(auth)
@@ -2787,16 +2804,47 @@ class PostgresPlatformService:
         """
 
         skip = {
-            "The", "This", "That", "These", "Those", "Please", "Can", "Could", "Would",
-            "Will", "What", "When", "Where", "Which", "Who", "How", "Why", "Does", "Did",
-            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
-            "Create", "Make", "Queue", "Add", "Set", "Put", "Log", "Flag", "Chase",
-            "Edward", "Action", "Center",
+            "The",
+            "This",
+            "That",
+            "These",
+            "Those",
+            "Please",
+            "Can",
+            "Could",
+            "Would",
+            "Will",
+            "What",
+            "When",
+            "Where",
+            "Which",
+            "Who",
+            "How",
+            "Why",
+            "Does",
+            "Did",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+            "Create",
+            "Make",
+            "Queue",
+            "Add",
+            "Set",
+            "Put",
+            "Log",
+            "Flag",
+            "Chase",
+            "Edward",
+            "Action",
+            "Center",
         }
         tokens = [
-            token
-            for token in re.findall(r"\b([A-Z][a-z]{2,20})\b", message)
-            if token not in skip
+            token for token in re.findall(r"\b([A-Z][a-z]{2,20})\b", message) if token not in skip
         ][:3]
         if not tokens:
             return None
@@ -2915,6 +2963,46 @@ class PostgresPlatformService:
                     tenant_id=auth.tenant_id,
                     allows_model_calls=execution.mode.allows_model_calls,
                 )
+            elif (
+                semantic_action.action == "student.preferences.update"
+                and semantic_action.source == "pattern"
+                and semantic_action.fields
+                and preference_fields_incomplete(message, semantic_action.fields)
+            ):
+                # Tier 0 parsed part of a multi-field change; tier 1 fills the
+                # fields the patterns could not anchor ("change it to Lucy").
+                modelled, recognizer_usage = await self._recognize_with_model(
+                    message,
+                    actor="student",
+                    request_id=request_id,
+                    tenant_id=auth.tenant_id,
+                    allows_model_calls=execution.mode.allows_model_calls,
+                )
+                # Only genuine values: a model echoing the request ("my name")
+                # must not become the preview.
+                if modelled is not None and modelled.action == semantic_action.action:
+                    modelled_fields = {
+                        name: value
+                        for name, value in modelled.fields.items()
+                        if not (
+                            isinstance(value, str)
+                            and re.fullmatch(
+                                r"(?:my |the |your )?(?:name|pronouns|number)", value.strip(), re.I
+                            )
+                        )
+                    }
+                    modelled = SemanticActionRequest(
+                        modelled.action,
+                        modelled_fields,
+                        modelled.confidence,
+                        source=modelled.source,
+                    )
+                    semantic_action = SemanticActionRequest(
+                        semantic_action.action,
+                        {**modelled.fields, **semantic_action.fields},
+                        semantic_action.confidence,
+                        source="pattern+model",
+                    )
         trace_action_requested = semantic_action.action if semantic_action is not None else None
         trace_recognition_source = _recognition_source(semantic_action, recognizer_usage)
         if semantic_action is not None and conversation_id is None:
@@ -3015,7 +3103,23 @@ class PostgresPlatformService:
                 )
                 if read_question:
                     try:
-                        read_pipeline = AssistantPipeline(self._assistant_host(auth))
+                        # The read half gets the same model hooks as a plain
+                        # read turn (hybrid planning): a question the regex
+                        # classifier cannot place goes to the read loop rather
+                        # than to the broad safe fallback.
+                        read_pipeline = AssistantPipeline(
+                            self._assistant_host(auth),
+                            model_composer=model_hook(
+                                execution.mode, self._assistant_composer(auth, request_id)
+                            ),
+                            model_planner=model_hook(
+                                execution.mode, self._assistant_planner(auth, request_id)
+                            ),
+                            read_loop_step=model_hook(
+                                execution.mode, self._read_loop_step(auth, request_id, "student")
+                            ),
+                            read_planner="hybrid",
+                        )
                         read_result = await read_pipeline.execute(
                             message=read_question,
                             history=await self.repository.portal.get_recent_assistant_history(
@@ -3104,6 +3208,10 @@ class PostgresPlatformService:
                     execution.mode, self._assistant_composer(auth, request_id)
                 ),
                 model_planner=model_hook(execution.mode, self._assistant_planner(auth, request_id)),
+                read_loop_step=model_hook(
+                    execution.mode, self._read_loop_step(auth, request_id, "student")
+                ),
+                **self._read_loop_settings(execution),
             )
             result = await pipeline.execute(
                 message=message,
@@ -3307,6 +3415,40 @@ class PostgresPlatformService:
             )
 
         return plan
+
+    def _read_loop_step(self, auth: AuthContext, request_id: str, actor: str) -> Any:
+        """The model step for the read loop, bound to this turn's identity."""
+
+        step = getattr(self.ai, "run_read_loop_step", None)
+        if step is None:
+            return None
+
+        async def run(*, messages: Any, schema: Any) -> Mapping[str, Any] | None:
+            return cast(
+                Mapping[str, Any] | None,
+                await step(
+                    messages=messages,
+                    schema=schema,
+                    actor=actor,
+                    tenant_id=auth.tenant_id,
+                    subject_id=auth.student_id if actor == "student" else auth.actor_id,
+                    request_id=request_id,
+                ),
+            )
+
+        return run
+
+    def _read_loop_settings(self, execution: ResolvedAssistantExecutionMode) -> dict[str, Any]:
+        """Planner mode and round budget for one turn: the Lab header wins,
+        else the deployment default from the gateway settings."""
+
+        planner = execution.read_planner
+        default = getattr(self.ai, "default_read_planner", "deterministic")
+        rounds = getattr(self.ai, "read_loop_max_rounds", 3)
+        return {
+            "read_planner": planner.value if planner is not None else str(default),
+            "read_loop_max_rounds": int(rounds),
+        }
 
     def _assistant_composer(self, auth: AuthContext, request_id: str) -> ModelComposer | None:
         writer = getattr(self.ai, "write_grounded_answer", None)
@@ -3713,6 +3855,12 @@ class PostgresPlatformService:
                     if semantic_action is not None
                     else model_hook(execution.mode, self._staff_assistant_planner(auth, request_id))
                 ),
+                read_loop_step=(
+                    None
+                    if semantic_action is not None
+                    else model_hook(execution.mode, self._read_loop_step(auth, request_id, "staff"))
+                ),
+                **self._read_loop_settings(execution),
             )
             result = await pipeline.execute(
                 message=message,
@@ -4028,7 +4176,12 @@ class PostgresPlatformService:
         if planner is None:
             return None
 
-        async def plan(*, message: str, student_resolved: bool = False) -> Mapping[str, Any] | None:
+        async def plan(
+            *,
+            message: str,
+            student_resolved: bool = False,
+            context: Mapping[str, Any] | None = None,
+        ) -> Mapping[str, Any] | None:
             return cast(
                 Mapping[str, Any] | None,
                 await planner(
@@ -4036,6 +4189,7 @@ class PostgresPlatformService:
                     allowed_request_types=STAFF_REQUEST_TYPES,
                     available_tools=STAFF_TOOL_DESCRIPTIONS,
                     student_resolved=student_resolved,
+                    context=context,
                     tenant_id=auth.tenant_id,
                     staff_member_id=auth.actor_id,
                     request_id=request_id,

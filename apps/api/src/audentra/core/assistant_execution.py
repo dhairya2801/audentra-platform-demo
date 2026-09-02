@@ -51,6 +51,39 @@ class AssistantExecutionMode(StrEnum):
         return self is AssistantExecutionMode.DEFAULT
 
 
+class ReadPlanner(StrEnum):
+    """Who plans the reads for a question the safety gates let through.
+
+    ``deterministic`` is the regex classifier with its static tool table and
+    the model planner as the fallback; ``hybrid`` keeps the classifier for
+    confident, well-covered intents and hands everything else to the model
+    read loop; ``model`` sends every readable question through the loop. The
+    deployment default comes from ``EDWARD_READ_PLANNER``; the Lab header
+    ``x-edward-read-planner`` overrides it per request where Lab controls are
+    honoured, so one host can serve an A/B.
+    """
+
+    DETERMINISTIC = "deterministic"
+    HYBRID = "hybrid"
+    MODEL = "model"
+
+
+READ_PLANNER_HEADER = "x-edward-read-planner"
+
+
+def resolve_read_planner(raw: str | None, *, default: str | None = None) -> ReadPlanner:
+    """The read planner named by a header/env value, else the deployment default."""
+
+    for candidate in (raw, default):
+        value = (candidate or "").strip().lower()
+        if value:
+            try:
+                return ReadPlanner(value)
+            except ValueError:
+                continue
+    return ReadPlanner.DETERMINISTIC
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedAssistantExecutionMode:
     """The effective mode, plus the raw request when it was not honoured."""
@@ -59,6 +92,9 @@ class ResolvedAssistantExecutionMode:
     #: The raw header value when it asked for something this environment
     #: refused to apply; `None` whenever the effective mode is what was asked.
     ignored_request: str | None = None
+    #: The Lab's per-request read-planner choice; `None` means "the
+    #: deployment default" and is what every non-Lab request carries.
+    read_planner: ReadPlanner | None = None
 
     @property
     def allows_model_calls(self) -> bool:
@@ -73,16 +109,31 @@ def resolve_assistant_execution_mode(
     raw: str | None,
     *,
     lab_controls_enabled: bool,
+    read_planner_raw: str | None = None,
 ) -> ResolvedAssistantExecutionMode:
     """Resolve the inbound mode header into the mode this turn may use.
 
     `lab_controls_enabled` must already combine the deployment environment
-    with the trace-debug switch; see `lab_execution_controls_enabled`.
+    with the trace-debug switch; see `lab_execution_controls_enabled`. The
+    read-planner header follows the same rule: honoured only where Lab
+    controls are, ignored (never rejected) elsewhere.
     """
 
     value = (raw or "").strip().lower()
+    planner: ReadPlanner | None = None
+    planner_value = (read_planner_raw or "").strip().lower()
+    if planner_value and lab_controls_enabled:
+        try:
+            planner = ReadPlanner(planner_value)
+        except ValueError as error:
+            raise BadRequestError(
+                "INVALID_ASSISTANT_READ_PLANNER",
+                "Edward read planner must be deterministic, hybrid or model",
+            ) from error
     if not value or value == AssistantExecutionMode.DEFAULT:
-        return DEFAULT_ASSISTANT_EXECUTION
+        if planner is None:
+            return DEFAULT_ASSISTANT_EXECUTION
+        return ResolvedAssistantExecutionMode(AssistantExecutionMode.DEFAULT, read_planner=planner)
     if not lab_controls_enabled:
         # Ignored, not rejected: an unexpected header must never change how a
         # deployed turn behaves, and must never reveal that the control exists.
@@ -94,7 +145,7 @@ def resolve_assistant_execution_mode(
             "INVALID_ASSISTANT_EXECUTION_MODE",
             "Edward execution mode must be default or deterministic",
         ) from error
-    return ResolvedAssistantExecutionMode(mode)
+    return ResolvedAssistantExecutionMode(mode, read_planner=planner)
 
 
 def model_hook(mode: AssistantExecutionMode, hook: HookT) -> HookT | None:

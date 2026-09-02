@@ -213,7 +213,14 @@ export async function startEdward({ persona, faults = null, ledger }) {
         },
         // The Lab execution-mode control; absent by default, so an ordinary
         // eval turn takes exactly the path production takes.
-        executionMode ? { "x-edward-mode": executionMode } : {},
+        {
+          ...(executionMode ? { "x-edward-mode": executionMode } : {}),
+          // READ_PLANNER=deterministic|hybrid|model: the Lab read-planner
+          // control, so one host can serve an architecture A/B.
+          ...(process.env.READ_PLANNER
+            ? { "x-edward-read-planner": process.env.READ_PLANNER }
+            : {}),
+        },
       );
       const latencyMs = Math.round(performance.now() - started);
       const trace = await fetchTrace(result.payload?.requestId);

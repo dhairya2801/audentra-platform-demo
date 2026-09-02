@@ -21,6 +21,7 @@
  * metered from the per-turn trace and reported in summary.json.
  */
 
+import { foldTypography } from "../src/typography.mjs";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,8 +34,10 @@ import { HOLDOUT_CASES } from "./holdout-cases.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..", "..", "..");
 const SNAPSHOT_CACHE = join(HERE, "..", "..", "..", "artifacts", "student-v3-snapshots.json");
-const PRICE_PROMPT = 0.15e-6;
-const PRICE_COMPLETION = 0.6e-6;
+import { pricingForModel } from "../src/pricing.mjs";
+const PRICING = pricingForModel();
+const PRICE_PROMPT = PRICING.input;
+const PRICE_COMPLETION = PRICING.output;
 
 function parseArgs(argv) {
   const args = {
@@ -136,7 +139,7 @@ function resolveTemplate(pattern, facts) {
 function visibleText(turn) {
   const blocks = turn.response?.blocks ?? [];
   const extras = blocks.map((block) => block.fallbackText ?? "").filter(Boolean);
-  return [turn.answer ?? "", ...extras].join("\n");
+  return foldTypography([turn.answer ?? "", ...extras].join("\n"));
 }
 
 function executedTools(turn) {

@@ -40,6 +40,7 @@ class DerivedState:
     housing_eligibility: JsonDict | None = None
     housing_options: JsonDict | None = None
     appointments: JsonDict | None = None
+    advising: JsonDict | None = None
     academics: JsonDict | None = None
     campus_life: JsonDict | None = None
     messages: JsonDict | None = None
@@ -129,6 +130,7 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     state.appointments = (
         dict(reads["getStudentAppointments"]) if "getStudentAppointments" in reads else None
     )
+    state.advising = dict(reads["getStudentAdvising"]) if "getStudentAdvising" in reads else None
     state.academics = dict(reads["getAcademicPlan"]) if "getAcademicPlan" in reads else None
     state.campus_life = dict(reads["getCampusLife"]) if "getCampusLife" in reads else None
     state.messages = dict(reads["getStudentMessages"]) if "getStudentMessages" in reads else None
@@ -201,8 +203,13 @@ def _derive_document_states(
             if upload.get("requirementId") == item.get("id") or upload.get("category") == category
         ]
         newest = max(matching, key=lambda upload: str(upload.get("createdAt") or ""), default=None)
+        newest_status = str((newest or {}).get("status") or "")
         if requirement_status in _DONE:
             submission_state = "accepted"
+        elif newest_status == "rejected" or requirement_status == "rejected":
+            # A reviewer sent it back: neither in review nor missing, and the
+            # student must act on it. The decision note carries the reason.
+            submission_state = "rejected"
         elif newest is not None and str(newest.get("extractionStatus") or "") == "failed":
             submission_state = "needs_attention"
         elif newest is not None or requirement_status in _IN_REVIEW:
@@ -216,6 +223,7 @@ def _derive_document_states(
                 "requirementStatus": requirement_status,
                 "submissionState": submission_state,
                 "fileName": newest.get("fileName") if newest else None,
+                "decisionNote": (_mapping(newest.get("decision")).get("note") if newest else None),
                 "href": item.get("href"),
             }
         )

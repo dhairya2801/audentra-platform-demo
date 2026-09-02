@@ -93,6 +93,30 @@ _CAPABILITY_QUESTION = re.compile(
 # Social turns that carry no information need: gratitude, acknowledgement,
 # closing. Must contain no question and stay short — "thanks, but why…" is a
 # question, not an ack.
+_ADVISER_CONTACT = re.compile(
+    r"\b(?:reach|contact|call|email|e-mail|message|see|meet|book|schedule|get in with|"
+    r"get in to see|get hold of|get in touch with|talk to|speak to|who is|who's|whos|which|"
+    r"availab\w*)\b[^?]{0,24}\b(?:my )?(?:international |academic |financial[- ]aid |fa |"
+    r"admissions |housing |primary )?(?:advis(?:e|o)r|counsel(?:l)?or|coordinator)s?\b",
+    re.IGNORECASE,
+)
+# "ok whats overdue for me rn" opens like an acknowledgement and is a question.
+_ASK_MARKERS = re.compile(
+    r"\?|\b(?:what|whats|what's|which|how|when|where|who|whos|why|can|could|should|do|does|"
+    r"did|is|are|am|any|anything|my|overdue|due|status|next)\b",
+    re.IGNORECASE,
+)
+
+
+def _carries_an_ask(text: str) -> bool:
+    stripped = text.strip()
+    opener = _GRATITUDE_OR_CLOSING.match(stripped)
+    remainder = stripped[opener.end() :] if opener else stripped
+    return bool(_ASK_MARKERS.search(remainder)) or any(
+        pattern.search(stripped) for _, pattern in _DOMAIN_HINTS
+    )
+
+
 _GRATITUDE_OR_CLOSING = re.compile(
     r"^(?:thanks|thank you|thankyou|thx|ty|much appreciated|appreciate (?:it|that)"
     r"|perfect|great|awesome|amazing|cool|nice|got it|okay|ok|sounds good|will do"
@@ -190,6 +214,10 @@ _PERSONAL_INFORMATION = re.compile(
     r"|\b(?:what|which)\b[^?]{0,24}\bresidency status\b"
     r"|\bwhat did i (?:put|enter|answer|select|choose|say)\b"
     r"|\b(?:my )?pronouns\b"
+    r"|\b(?:what(?:'s| is)|which)\b[^?]{0,24}\bmy (?:preferred |first )?name\b"
+    r"|\b(?:preferred |first )?name\b[^?]{0,16}\b(?:on file|on (?:my )?record|do you have)\b"
+    r"|\b(?:what|which)\b[^?]{0,24}\b(?:number|phone|email)\b[^?]{0,24}"
+    r"\b(?:on file|do you have|on (?:my )?record)\b"
     r"|\b(?:phone number|contact (?:info|details|preference))\b[^?]{0,24}"
     r"\b(?:on file|do you have|is (?:on )?(?:my )?record)\b"
     r"|\bwho (?:can|is allowed to) (?:see|access|talk about)\b[^?]{0,24}\b(?:my )?record\b"
@@ -285,6 +313,23 @@ _DOMAIN_HINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
         "checklist",
         re.compile(r"checklist|enrollment steps|onboarding|\benrollment\b", re.IGNORECASE),
     ),
+    (
+        "advising",
+        re.compile(
+            r"\badvis(?:e|o)rs?\b|\bcounsel(?:l)?ors?\b|\bcoordinator\b|who (?:do i|should i"
+            r"|can i) "
+            r"(?:talk|speak|reach out) to",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "appointments",
+        re.compile(
+            r"\bappointments?\b|\bmeetings?\b|\bno[- ]?show|\bcalendar\b|\bslots?\b"
+            r"|\bbook(?:ed|ing)?\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 _DOMAIN_PRIMARY_TYPE: dict[str, str] = {
@@ -296,6 +341,8 @@ _DOMAIN_PRIMARY_TYPE: dict[str, str] = {
     "registration": "registration_status",
     "academics": "academic_plan",
     "campus": "campus_life",
+    "advising": "appointments",
+    "appointments": "appointments",
     "checklist": "onboarding_status",
 }
 
@@ -339,7 +386,8 @@ _NAVIGATION_TARGETS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "financials",
         re.compile(
-            r"\bfinancials?\b|\bbalance\b|\bowe\b|\bcharges?\b|\baid\b|\bfafsa\b|\bscholarship\b|\baward\b",
+            r"\bfinancials?\b|\bbalance\b|\bowe\b|\bcharges?\b|\baid\b|\bfafsa\b"
+            r"|\bscholarship\b|\baward\b",
             re.I,
         ),
     ),
@@ -354,7 +402,8 @@ _NAVIGATION_TARGETS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "help",
         re.compile(
-            r"\bhelp\b|\bsupport\b|\badvisor\b|\bcounsel\w*\b|\breal person\b|\bsomeone\b", re.I
+            r"\bhelp\b|\bsupport\b|\badvis(?:e|o)r\b|\bcounsel\w*\b|\breal person\b|\bsomeone\b",
+            re.I,
         ),
     ),
     (
@@ -406,8 +455,13 @@ def _classify(request: NormalizedRequest) -> Classification | None:
 
     if _IDENTITY_QUESTION.search(text):
         return Classification("assistant_identity", 1)
-    if _GRATITUDE_OR_CLOSING.search(text.strip()):
+    if _GRATITUDE_OR_CLOSING.search(text.strip()) and not _carries_an_ask(text):
         return Classification("conversational_ack", 1)
+    # Reaching, seeing or booking one's adviser/counsellor is an advising
+    # question wherever the verb points ("how do i reach my international
+    # adviser", "any chance i can get in with my adviser this week").
+    if _ADVISER_CONTACT.search(text) or re.search(r"\bno[- ]?show", text, re.IGNORECASE):
+        return Classification("appointments", 0.96)
 
     if not request.is_follow_up:
         if _GREETING_ONLY.search(text):
@@ -802,7 +856,10 @@ def _classify(request: NormalizedRequest) -> Classification | None:
         return Classification("student_account", 0.95)
 
     if re.search(
-        r"appointment|advisor|advising|meet with|talk to (?:someone|a person|a human)", text
+        r"appointment|advis(?:e|o)r|advising|counsel(?:l)?or|meet with|"
+        r"talk to (?:someone|a person|a human)|get in (?:with|to see)|book time|"
+        r"no[- ]?show|missed (?:a |my |an )?(?:meeting|appointment)",
+        text,
     ):
         return Classification("appointments", 0.95)
 

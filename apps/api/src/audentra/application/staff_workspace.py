@@ -50,6 +50,68 @@ _SUBMISSION_TYPES = {
 }
 
 
+_ATTENTION_ORDER = {"none": 0, "watch": 1, "attention": 2, "urgent": 3}
+
+
+def _attention_level(item: Mapping[str, Any]) -> str:
+    return str(cast(Mapping[str, Any], item.get("attention", {})).get("level", "none"))
+
+
+def _attention_rank(item: Mapping[str, Any]) -> tuple[int, int]:
+    """Strongest attention level first, then the most open work."""
+
+    return (
+        _ATTENTION_ORDER.get(_attention_level(item), 0),
+        int(item.get("openWorkItems", 0) or 0),
+    )
+
+
+_OPEN_WORK_STATUSES = {"todo", "in_progress", "follow_up_required", "blocked"}
+_PERSONAL_COUNT_KEYS = (
+    "open",
+    "overdue",
+    "dueToday",
+    "urgent",
+    "escalated",
+    "todo",
+    "inProgress",
+    "followUpRequired",
+    "blocked",
+    "stale",
+    "students",
+)
+
+
+def _personal_counts(mine: Mapping[str, Any]) -> dict[str, int]:
+    """The reader's own counts, straight from the board's SQL scope counts."""
+
+    return {key: int(mine.get(key, 0) or 0) for key in _PERSONAL_COUNT_KEYS}
+
+
+def _personal_counts_from_items(
+    tasks: Sequence[Mapping[str, Any]], student_ids: set[str]
+) -> dict[str, int]:
+    """Fallback for stores that serve no scope counts: count the page itself."""
+
+    def signal(task: Mapping[str, Any], name: str) -> bool:
+        return bool(cast(Mapping[str, Any], task.get("signals") or {}).get(name))
+
+    open_tasks = [task for task in tasks if str(task.get("status")) in _OPEN_WORK_STATUSES]
+    return {
+        "open": len(open_tasks),
+        "overdue": sum(signal(task, "overdue") for task in open_tasks),
+        "dueToday": 0,
+        "urgent": sum(task.get("priority") == "urgent" for task in open_tasks),
+        "escalated": sum(bool(task.get("escalated")) for task in open_tasks),
+        "todo": sum(task.get("status") == "todo" for task in open_tasks),
+        "inProgress": sum(task.get("status") == "in_progress" for task in open_tasks),
+        "followUpRequired": sum(task.get("status") == "follow_up_required" for task in open_tasks),
+        "blocked": sum(task.get("status") == "blocked" for task in open_tasks),
+        "stale": sum(signal(task, "stale") for task in open_tasks),
+        "students": len(student_ids),
+    }
+
+
 def compose_staff_workspace(
     auth: AuthContext,
     *,
@@ -62,8 +124,15 @@ def compose_staff_workspace(
     configurations: Mapping[str, Mapping[str, Any]],
     generated_at: str,
     personal_items: Sequence[Mapping[str, Any]] | None = None,
+    personal_page: Mapping[str, Any] | None = None,
 ) -> JsonDict:
-    """Build one response exclusively from durable reads and pure projections."""
+    """Build one response exclusively from durable reads and pure projections.
+
+    ``personal_items`` is the first page of the reader's own open work in
+    attention order and ``personal_page`` its page envelope; both come from
+    the same board read the Task Board uses (``assignee=me``), never from the
+    roster, so the personal Action Center shows every item the reader owns.
+    """
 
     _require_staff(auth)
     staff = _mapping_list(action_center.get("staff"))
@@ -79,24 +148,39 @@ def compose_staff_workspace(
 
     canonical_cohort = [copy.deepcopy(dict(item)) for item in cohort]
     items = _mapping_list(action_center.get("items"))
-    personal_students = [
-        item
-        for item in canonical_cohort
-        if str(item.get("assignedStaffId")) == auth.actor_id
-        and cast(Mapping[str, Any], item.get("recommendedAction", {})).get("recommendedToday")
-        is True
-    ]
-    personal_students.sort(
-        key=lambda item: int(cast(Mapping[str, Any], item.get("risk", {})).get("score", 0)),
-        reverse=True,
-    )
-    task_ids = {
-        str(task_id)
-        for item in personal_students
-        if (task_id := cast(Mapping[str, Any], item.get("recommendedAction", {})).get("taskId"))
+    if personal_items is not None:
+        personal_tasks = [copy.deepcopy(dict(item)) for item in personal_items]
+    else:
+        personal_tasks = [
+            item
+            for item in items
+            if str(cast(Mapping[str, Any], item.get("assignee") or {}).get("id")) == auth.actor_id
+            and str(item.get("status")) in _OPEN_WORK_STATUSES
+        ]
+    personal_student_ids = {
+        str(cast(Mapping[str, Any], task.get("student") or {}).get("id")) for task in personal_tasks
     }
-    task_pool = list(personal_items) if personal_items is not None else items
-    personal_tasks = [item for item in task_pool if str(item.get("id")) in task_ids]
+    # Roster rows for the students in the reader's queue (when the roster
+    # page carries them), strongest attention first. The queue itself is
+    # complete; this is context for it.
+    personal_students = [
+        item for item in canonical_cohort if str(item.get("id")) in personal_student_ids
+    ]
+    personal_students.sort(key=_attention_rank, reverse=True)
+    scopes = cast(Mapping[str, Any], action_center.get("scopes") or {})
+    mine_counts = cast(Mapping[str, Any], scopes.get("mine") or {})
+    personal_counts = (
+        _personal_counts(mine_counts)
+        if mine_counts
+        else _personal_counts_from_items(personal_tasks, personal_student_ids)
+    )
+    page = dict(personal_page or {})
+    personal_queue = {
+        "total": int(page.get("total", personal_counts["open"]) or 0),
+        "limit": int(page.get("limit", len(personal_tasks)) or 0),
+        "hasMore": bool(page.get("hasMore", False)),
+        "sort": "attention",
+    }
 
     journey_configuration = _configuration(configurations, "journeys")
     campus_configuration = _configuration(configurations, "campus_life")
@@ -121,19 +205,8 @@ def compose_staff_workspace(
             "staff": copy.deepcopy(current_staff),
             "students": personal_students,
             "tasks": personal_tasks,
-            "counts": {
-                "studentsToday": len(personal_students),
-                "critical": sum(
-                    cast(Mapping[str, Any], item.get("risk", {})).get("band") == "critical"
-                    for item in personal_students
-                ),
-                "highRisk": sum(
-                    cast(Mapping[str, Any], item.get("risk", {})).get("band") == "high"
-                    for item in personal_students
-                ),
-                "inProgress": sum(item.get("status") == "in_progress" for item in personal_tasks),
-                "completed": sum(item.get("status") == "done" for item in personal_tasks),
-            },
+            "queue": personal_queue,
+            "counts": personal_counts,
             "generatedAt": generated_at,
         },
         "cohort": canonical_cohort,

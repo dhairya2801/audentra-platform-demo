@@ -584,3 +584,83 @@ def test_every_action_the_catalogue_declares_has_a_capability_and_a_summary() ->
             assert spec.describe
             if spec.required:
                 assert spec.question
+
+
+def test_read_lead_in_with_task_noun_is_not_a_follow_up_request() -> None:
+    """Found by the university bank (h-008): "Count the escalated items on the
+    board." matched the create pattern on "items on" and asked which student
+    the follow-up was for. A read verb up front with no create verb is a read."""
+
+    from audentra.domain.edward_action_recognizer import parse_staff_action
+
+    assert parse_staff_action("Count the escalated items on the board.") is None
+    assert parse_staff_action("Show me the tasks on Rosa Mossbank's record") is None
+    assert parse_staff_action("List the follow-ups for Financial Aid") is None
+    # A create verb still wins even behind a read-looking opener.
+    proposal = parse_staff_action("Show me her record and add a follow-up for Rosa Mossbank")
+    assert proposal is not None and proposal.action == "operations.follow_up.create"
+    assert parse_staff_action("add a follow-up for Yusuf Everlyn").action == (
+        "operations.follow_up.create"
+    )
+
+
+def test_partial_tier0_preference_parse_is_flagged_for_tier1_completion() -> None:
+    """ "What's my preferred name right now? change it to Lucy and set my pronouns
+    to she/her" parses the pronouns but not the name ("change it" has no noun
+    to anchor on). Tier 0 must say so, so the caller can consult tier 1."""
+
+    from audentra.domain.edward_actions import parse_student_action, preference_fields_incomplete
+
+    message = "What's my preferred name right now? change it to Lucy and set my pronouns to she/her"
+    parsed = parse_student_action(message)
+    assert parsed is not None and parsed.fields == {"pronouns": "she/her"}
+    assert preference_fields_incomplete(message, parsed.fields)
+    assert not preference_fields_incomplete("set my pronouns to she/her", {"pronouns": "she/her"})
+    assert not preference_fields_incomplete(
+        "change my preferred name to Lucy", {"preferredName": "Lucy"}
+    )
+
+
+def test_recall_wording_does_not_double_the_possessive() -> None:
+    from audentra.integrations.edward_action_responses import _describe_receipt
+
+    text = _describe_receipt(
+        {
+            "action": "student.preferences.update",
+            "status": "succeeded",
+            "result": {"changes": [{"field": "pronouns", "before": None, "after": "she/her"}]},
+        }
+    )
+    assert "your your" not in text and "your pronouns to she/her" in text
+
+
+def test_recall_questions_in_casual_spelling_are_recognised() -> None:
+    """Found live: "wait did that go thru" fell into the read plane, which
+    answered "No, the change has not gone through yet" about a committed
+    change. Every casual shape of "did it happen?" is a recall question."""
+
+    from audentra.integrations.edward_action_responses import is_recall_question
+
+    for message in (
+        "wait did that go thru",
+        "did it go through?",
+        "so did that actually work",
+        "is it saved now",
+        "did the change stick",
+        "did you save that",
+    ):
+        assert is_recall_question(message), message
+    assert not is_recall_question("what do I still need to do")
+
+
+def test_bare_change_my_name_still_asks_instead_of_filling_a_value() -> None:
+    """The tier-1 completion only fills fields after tier 0 parsed at least one;
+    a bare "change my name" keeps its clarifying question."""
+
+    from audentra.domain.edward_actions import parse_student_action, preference_fields_incomplete
+
+    parsed = parse_student_action("change my name")
+    assert parsed is not None and parsed.fields == {}
+    # The service consults tier 1 only when fields is non-empty (see
+    # postgres_service); the helper itself would say the name is unparsed.
+    assert preference_fields_incomplete("change my name", parsed.fields)

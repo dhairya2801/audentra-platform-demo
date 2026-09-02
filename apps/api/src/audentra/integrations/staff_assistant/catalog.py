@@ -184,9 +184,12 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "and inquiries."
     ),
     "getStudentOwnership": (
-        "Read who currently owns one student's open cases: work-item "
-        "assignees, inquiry assignees, and the responsible offices of open "
-        "requirements. No formal advisor/caseload model exists."
+        "Read who is responsible for one student: the primary academic adviser "
+        "and every other assigned counsellor (admissions, financial aid, "
+        "international, housing) with employment status and leave dates, plus "
+        "the owner of each open Action Center item and inquiry and the offices "
+        "responsible for open requirements. Use it for 'who advises / who owns / "
+        "who is handling / is their adviser on leave' questions."
     ),
     "getStudentsNeedingAttention": (
         "Read the deterministic attention queue: students flagged by the "
@@ -231,11 +234,16 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "and overdue component items). Bound to the resolved manager or 'me'."
     ),
     "getStaffCaseload": (
-        "List the students currently assigned to one staff member (primary "
-        "advisees by default) with advising status, next appointment, open "
-        "and overdue work, deposit and offer state; optional filters for "
-        "advising status, deposit state, open or overdue work; reports the "
-        "true total behind the page."
+        "Read the students currently assigned to one staff member (handle `me` "
+        "or a resolved colleague), with each student's requirement progress, "
+        "advising status, deposit state and open/overdue work. Without `role` it "
+        "covers every assignment role the person holds (primary adviser, "
+        "admissions counselor, financial-aid counselor, international adviser, "
+        "housing coordinator); pass `role` to narrow. Filters: advisingStatus, "
+        "depositState, withOpenWork, withOverdueWork. Each student's open/overdue "
+        "work counts every open Action Center item on that student, whoever owns "
+        "it; for items assigned to this person use searchWorkQueue with "
+        "ownership=mine (or assigneeName) and combine."
     ),
     "getStaffAppointments": (
         "Read one staff member's appointments in a window (today, tomorrow, "

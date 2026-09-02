@@ -37,8 +37,10 @@ const WORKER_TOKEN =
 const RESET_SCRIPT = process.env.WRITE_EVAL_RESET ?? join(HERE, "reset-db.sh");
 
 // gpt-4o-mini pricing (USD per token), for the spend report.
-const PRICE_PROMPT = 0.15e-6;
-const PRICE_COMPLETION = 0.6e-6;
+import { pricingForModel } from "../src/pricing.mjs";
+const PRICING = pricingForModel();
+const PRICE_PROMPT = PRICING.input;
+const PRICE_COMPLETION = PRICING.output;
 
 function parseArgs(argv) {
   const args = { batch: "write-adhoc", ids: [], categories: [], verbose: false, holdout: false, reset: true };

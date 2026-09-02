@@ -63,9 +63,16 @@ _CROSS_STUDENT_ACCESS = re.compile(
 # record while narrating it as someone else's.
 _NAMED_PERSON_RECORD = re.compile(
     r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+(?:'|’)s\s+"  # noqa: RUF001
-    r"(?i:student\s*id|holds?|records?|balance|grades?|aid|transcript|documents?)"
-    r"|(?i:student\s*id|holds?|records?|balance|grades?|aid|transcripts?)\s+(?i:of|for)\s+"
+    r"(?i:student\s*id|holds?|records?|balance|grades?|aid|transcript|documents?|enrollment|"
+    r"enrolment|deposit|status|checklist|progress|appointments?|advis(?:e|o)r|counsel(?:l)?or|"
+    r"situation|deadlines?|requirements?)"
+    r"|(?i:student\s*id|holds?|records?|balance|grades?|aid|transcripts?|enrollment|deposit|"
+    r"status|checklist)\s+(?i:of|for)\s+"
     r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+"
+    # "whether Gustav Fennwick paid his deposit yet": a named person as the
+    # subject of a record verb is the same ask in a different shape.
+    r"|[A-Z][a-z]+\s+[A-Z][a-z]+\s+(?i:has|had|hasn't|hasn’t|is|was)?\s*"  # noqa: RUF001
+    r"(?i:paid|submitted|uploaded|finished|completed|enrolled|accepted|owes?|missing)\b"
 )
 _SENSITIVE_OPERATION_VERB = re.compile(
     r"\b(?:get|read|show|print|dump|steal|send|post|copy|expose|reveal|access|extract)\b",

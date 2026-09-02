@@ -744,6 +744,10 @@ class InMemoryPlatformService:
             host,
             model_composer=model_hook(execution.mode, self._assistant_composer(auth, request_id)),
             model_planner=model_hook(execution.mode, self._assistant_planner(auth, request_id)),
+            read_loop_step=model_hook(
+                execution.mode, self._read_loop_step(auth, request_id, "student")
+            ),
+            **self._read_loop_settings(execution),
         )
         result = await pipeline.execute(
             message=message,
@@ -945,6 +949,10 @@ class InMemoryPlatformService:
                 model_planner=model_hook(
                     execution.mode, self._staff_assistant_planner(auth, request_id)
                 ),
+                read_loop_step=model_hook(
+                    execution.mode, self._read_loop_step(auth, request_id, "staff")
+                ),
+                **self._read_loop_settings(execution),
             )
             result = await pipeline.execute(
                 message=message,
@@ -1080,6 +1088,37 @@ class InMemoryPlatformService:
             )
 
         return plan
+
+    def _read_loop_step(self, auth: AuthContext, request_id: str, actor: str) -> Any:
+        """The model step for the read loop, bound to this turn's identity."""
+
+        step = getattr(self.ai, "run_read_loop_step", None)
+        if step is None:
+            return None
+
+        async def run(*, messages: Any, schema: Any) -> Mapping[str, Any] | None:
+            return await step(  # type: ignore[no-any-return]
+                messages=messages,
+                schema=schema,
+                actor=actor,
+                tenant_id=auth.tenant_id,
+                subject_id=auth.student_id if actor == "student" else auth.actor_id,
+                request_id=request_id,
+            )
+
+        return run
+
+    def _read_loop_settings(self, execution: ResolvedAssistantExecutionMode) -> dict[str, Any]:
+        """Planner mode and round budget for one turn: the Lab header wins,
+        else the deployment default from the gateway settings."""
+
+        planner = execution.read_planner
+        default = getattr(self.ai, "default_read_planner", "deterministic")
+        rounds = getattr(self.ai, "read_loop_max_rounds", 3)
+        return {
+            "read_planner": planner.value if planner is not None else str(default),
+            "read_loop_max_rounds": int(rounds),
+        }
 
     def _assistant_composer(self, auth: AuthContext, request_id: str) -> Any:
         writer = getattr(self.ai, "write_grounded_answer", None)

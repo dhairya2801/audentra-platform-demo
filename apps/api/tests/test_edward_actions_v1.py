@@ -272,3 +272,55 @@ def test_provenance_can_trust_facts_but_never_instructions() -> None:
     assert untrusted["factTrusted"] is False
     assert canonical["instructionTrusted"] is False
     assert untrusted["instructionTrusted"] is False
+
+
+def test_named_follow_up_subject_matches_a_requirement_under_review() -> None:
+    """Found live (2026-09-02): "add a follow-up about her transcript" bound the
+    follow-up to "Complete financial-aid verification" because the transcript
+    requirement was under review and therefore outside the actionable set.
+    A named subject may target any still-open requirement."""
+
+    from audentra.infrastructure.postgres.edward_action_gateway import (
+        _SETTLED_REQUIREMENT_STATUSES,
+        _match_requirement,
+        _mentions,
+    )
+
+    requirements = [
+        {
+            "id": "r1",
+            "code": "official_transcript",
+            "title": "Submit your official transcript",
+            "status": "under_review",
+            "blocking": True,
+        },
+        {
+            "id": "r2",
+            "code": "financial_aid_verification",
+            "title": "Complete financial-aid verification",
+            "status": "in_progress",
+            "blocking": True,
+        },
+        {
+            "id": "r3",
+            "code": "housing_preference",
+            "title": "Select housing preference",
+            "status": "completed",
+            "blocking": False,
+        },
+    ]
+    still_open = [r for r in requirements if r["status"] not in _SETTLED_REQUIREMENT_STATUSES]
+    assert [r["id"] for r in still_open] == ["r1", "r2"]
+    open_statuses = {r["status"] for r in still_open}
+    chosen = _match_requirement(
+        "transcript", None, still_open, require_unique=False, statuses=open_statuses
+    )
+    assert chosen is not None and chosen["id"] == "r1"
+    assert _mentions("transcript", chosen)
+    # An unrelated subject matches nothing rather than the "only" open item.
+    assert (
+        _match_requirement(
+            "immunization", None, still_open, require_unique=False, statuses=open_statuses
+        )
+        is None
+    )

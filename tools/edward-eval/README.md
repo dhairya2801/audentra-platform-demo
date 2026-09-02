@@ -112,6 +112,27 @@ operation, cost per turn, and server/client latency p50/p95. Pricing lives in
 agreement). Re-run after changing the judge prompt or dimensions; keep the
 known limitations section of the baseline report honest.
 
+## Model and architecture A/B (2026-09-02)
+
+- **Model** is per host (`OPENAI_MODEL=gpt-4o-mini | gpt-5.6-luna`). A
+  gpt-5.x host also takes `EDWARD_REASONING_EFFORT=none|low|medium|high|xhigh`
+  and `EDWARD_REASONING_EFFORT_OVERRIDES="edward_action_recognizer=none,..."`.
+  Prices for both models live in `src/pricing.mjs`; every runner prices from
+  `pricingForModel()` (reads `OPENAI_MODEL`).
+- **Read planner** is per request: `READ_PLANNER=deterministic|hybrid|model`
+  makes every runner send `x-edward-read-planner`, which the platform honours
+  where Lab controls are on (`ASSISTANT_TRACE_DEBUG_ENABLED=true`, not
+  production). `hybrid` sends only the turns the regex classifier could not
+  place to the model read loop; `model` sends every readable turn.
+  `EDWARD_READ_PLANNER` sets a host's default.
+- **`read-gen/`** is the unseen READ generalization bank (128 dev / 29
+  holdout, students and staff, SQL-derived ground truth); see its README.
+- `summarize-batches.mjs 'prefix-*'` prints one comparable row per stored
+  batch (grades, hallucination/entity/tool-selection failure counts, tokens,
+  USD, latency) across every suite's summary shape; `--md` for a table.
+- Graders fold typographic punctuation (`src/typography.mjs`) before regex
+  matching so "can’t" and "can't" grade alike for every model.
+
 ## Legacy notes
 
 - The original 115 cases live unchanged in `src/cases/legacy.mjs` (ids
