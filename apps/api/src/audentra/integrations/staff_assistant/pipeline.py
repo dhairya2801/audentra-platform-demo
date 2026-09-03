@@ -56,6 +56,7 @@ from audentra.integrations.staff_assistant.entities import (
     EntityResolution,
     ResolvedEntity,
     extract_mentions,
+    has_self_reference,
     resolve_entities,
 )
 from audentra.integrations.staff_assistant.guard import guard_staff_grounded_answer
@@ -1081,6 +1082,11 @@ class StaffAssistantPipeline:
         if not request.history or has_explicit_entity(request):
             return None
         if not (request.uses_pronoun_referent or refers_back(request)):
+            return None
+        # "tasks on my board", "how many do I have" after a turn about a
+        # colleague are about the signed-in member: a self-reference never
+        # inherits the colleague.
+        if has_self_reference(request.text) and not request.uses_pronoun_referent:
             return None
         for item in reversed(request.history):
             if item["role"] != "user":

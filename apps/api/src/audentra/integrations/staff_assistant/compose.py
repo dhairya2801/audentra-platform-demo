@@ -2800,7 +2800,10 @@ def _availability_evidence(profile: dict[str, Any], availability: dict[str, Any]
     if status == "departed":
         lines.append(f"{name} cannot be booked: has left the university.")
         return lines
-    weekdays = [str(day) for day in _sequence_list(profile.get("weekdays"))]
+    weekdays = [
+        str(day.get("value") or day.get("label") or day) if isinstance(day, Mapping) else str(day)
+        for day in _sequence_list(profile.get("weekdays"))
+    ]
     if weekdays:
         lines.append(f"{name} holds appointment hours on {', '.join(weekdays)}.")
     if not availability.get("bookable"):

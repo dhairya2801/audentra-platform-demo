@@ -54,3 +54,14 @@ def test_student_side_facts_decide_a_staff_student_name_tie() -> None:
     # A weekday after the name is a staff-side noun (the possessive tie-break).
     assert "wednesday" in _STAFF_POSSESSIVE_NOUNS
     assert not _STUDENT_CONTEXT_SPECIFIC.search("how many advisees does Greta Everlyn have")
+
+
+def test_self_reference_does_not_inherit_a_colleague_referent() -> None:
+    """Found live: "tasks on my board that are in progress" asked right after
+    "what does Hana Dunmire's Wednesday look like" answered with Hana's item."""
+
+    from audentra.integrations.staff_assistant.entities import has_self_reference
+
+    assert has_self_reference("tasks on my board that are in progress")
+    assert has_self_reference("how many urgent items do I have")
+    assert not has_self_reference("and her Thursday?")
