@@ -23,6 +23,9 @@ from audentra.infrastructure.postgres.edward_feedback_repository import (
     PostgresEdwardFeedbackRepository,
 )
 from audentra.infrastructure.postgres.ferpa_repository import PostgresFerpaRepository
+from audentra.infrastructure.postgres.knowledge_repository import (
+    PostgresInstitutionKnowledgeRepository,
+)
 from audentra.infrastructure.postgres.managed_configuration_repository import (
     PostgresManagedConfigurationRepository,
 )
@@ -127,6 +130,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 edward_feedback=PostgresEdwardFeedbackRepository(engine),
                 advising=advising,
                 staff_operations=PostgresStaffOperationsRepository(engine, advising),
+                knowledge=PostgresInstitutionKnowledgeRepository(engine),
             ),
             storage,
             ai,

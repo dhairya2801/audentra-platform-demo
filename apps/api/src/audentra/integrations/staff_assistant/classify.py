@@ -114,6 +114,36 @@ STUDENT_REQUIRED_REQUEST_TYPES = frozenset(
 )
 
 
+# Language that asks about the institution's rules rather than about a
+# person's record: policies, procedures, service levels, calendar dates,
+# consequences, permissions, ownership of a step.
+_INSTITUTIONAL_QUESTION = re.compile(
+    r"\bpolic(?:y|ies)\b|\bprocedures?\b|\bhandbook\b|\bregulations?\b|\bguidelines?\b"
+    r"|\bservice levels?\b|\bsla\b|\bslas\b|\bturnaround\b|\bescalat"
+    r"|\bwhat (?:is|are) the rules?\b|\bwhat happens (?:if|when)\b"
+    r"|\bhow (?:do|should|does) (?:we|the office|the university) handle\b"
+    r"|\bis (?:it|that|this) (?:allowed|permitted)\b"
+    r"|\bcan (?:we|a student|students|an? (?:adviser|counselor|specialist))\b"
+    r"|\b(?:exemption|exemptions|waiver|waivers|extension|extensions|refund|refunds|forfeit|appeal|appeals)\b"
+    r"|\bdeadline (?:for|to)\b"
+    r"|\bwhen (?:is|are|does|do) (?:the )?(?:orientation|move[- ]?in|classes|the term"
+    r"|the semester|registration|add|drop|census|tuition|bills?|finals|break|commencement)\b"
+    r"|\bacademic calendar\b|\bwhich office\b"
+    r"|\bwho (?:handles|owns|is responsible for|decides|approves|covers|reviews)\b"
+    r"|\bhow much (?:is|are|does)\b|\btuition\b|\bcost of attendance\b"
+    r"|\bmeal plans?\b|\bresidence halls?\b"
+    r"|\bhow long (?:does|do|should|will) [a-z' -]{0,40}\btake\b"
+    r"|\bimmuni[sz]ation requirement|\bresidency requirement|\bfirst[- ]year residency\b"
+    r"|\bsatisfactory academic progress\b|\bsap\b"
+    r"|\brejection (?:reason|code)s?\b|\bhold (?:sweep|placement)\b|\bcoverage\b"
+    r"|\bholds? (?:get |are |be |is )?placed\b|\bsweep\b"
+    r"|\bwhen do (?:we|holds|health holds|sweeps)\b"
+    r"|\bwhat (?:do|should) (?:we|i) tell (?:the |a )?student\b|\bwhat (?:am i|are we) allowed\b"
+    r"|\bgrounds for\b|\bwhat do (?:they|students) (?:need|submit)\b",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class StaffClassification:
     request_type: str
@@ -960,6 +990,26 @@ def _classify_primary(
     ranking_language = bool(_RANKING_LANGUAGE.search(text))
     for reference, pattern in _UNSUPPORTED_METRICS:
         if pattern.search(text):
+            # "What is the SLA for financial aid?" / "how long does verification
+            # take?" ask what the published service level or turnaround IS —
+            # approved knowledge — not whether the office is meeting it or how
+            # long reviews are actually taking, which no metric records.
+            if (
+                reference in {"sla_compliance", "stage_duration"}
+                and re.search(
+                    r"\bwhat(?:'s| is| are) (?:the |our )?(?:sla|service[- ]levels?|turnaround)\b"
+                    r"|\b(?:sla|service[- ]level)s? for\b|\bturnaround\b"
+                    r"|\bhow long (?:does|do|should|will)\b|\bwithin how many\b"
+                    r"|\bhow many (?:business )?days\b",
+                    text,
+                )
+                and not re.search(
+                    r"\b(?:meeting|met|breach|miss(?:ed|ing)?|compliance|behind|actually|"
+                    r"currently|on average|average|typically taking|took|taken|are taking)\b",
+                    text,
+                )
+            ):
+                continue
             # "Which students are most at risk of melting?" deserves more
             # than a refusal: disclaim the missing model, then answer with
             # the deterministic attention queue. The reference carries the
@@ -967,6 +1017,22 @@ def _classify_primary(
             if ranking_language and reference in _RANKABLE_METRICS:
                 return StaffClassification("attention_ranking", 0.97, reference=reference)
             return StaffClassification("unsupported_metric", 0.97, reference=reference)
+
+    # Institutional questions with no student in them — a policy, a procedure,
+    # a service level, a calendar date, which office owns something — read the
+    # approved corpus. A turn that names a student keeps its student-scoped
+    # route and gains the corpus read through the planner's policy augment.
+    if (
+        request.candidate_student_name is None
+        and request.reference_token is None
+        and _INSTITUTIONAL_QUESTION.search(text)
+        and not re.search(
+            r"\b(?:my|our) (?:queue|team|caseload|items?|work|inbox|advisees|appointments)\b"
+            r"|\bhow many\b|\bwhich students\b|\blist\b|\bshow me\b",
+            text,
+        )
+    ):
+        return StaffClassification("playbook_lookup", 0.9, reference="institution")
 
     # Staff-aware routing: a colleague, the signed-in member, a team, a
     # department, or an aggregate over the queue/inquiries. Settled before the

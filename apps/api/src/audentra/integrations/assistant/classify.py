@@ -511,7 +511,16 @@ def _classify(request: NormalizedRequest) -> Classification | None:
     navigation = navigation_target(text) if _NAVIGATION_QUESTION.search(text) else None
     if navigation is not None:
         return Classification("portal_navigation", 0.96, requirement_reference=navigation)
-    if _COURSE_GRADE_QUESTION.search(text):
+    # "What is the minimum grade for transfer credit?" asks about a rule, not
+    # about a grade the platform does not hold; it belongs to the corpus.
+    if _COURSE_GRADE_QUESTION.search(text) and not re.search(
+        r"\bminimum grade\b|\bgrade (?:requirement|needed|required|do i need)\b"
+        r"|\bwhat grade (?:do i need|is (?:needed|required)|counts)\b"
+        r"|\btransfer(?:red)? credits?\b|\bcredits? transfer\b"
+        r"|\bpass(?:ing)?[/ ]no[- ]pass\b|\bgrading (?:scale|policy)\b"
+        r"|\bgpa (?:requirement|needed)\b",
+        text,
+    ):
         return Classification(
             "unsupported_or_out_of_scope", 1, requirement_reference="course_grades_unavailable"
         )

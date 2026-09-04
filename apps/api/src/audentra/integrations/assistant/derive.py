@@ -50,6 +50,9 @@ class DerivedState:
     enrollment: JsonDict | None = None
     onboarding_responses: JsonDict | None = None
     academic_standing: JsonDict | None = None
+    # Approved institutional knowledge retrieved for this question: documents
+    # with provenance and applicability, matching calendar entries, offices.
+    institution_knowledge: JsonDict | None = None
     priority: JsonDict | None = None
     suggested_actions: list[JsonDict] = field(default_factory=list)
     unavailable_data: list[JsonDict] = field(default_factory=list)
@@ -145,6 +148,9 @@ def derive_student_state(execution: ToolExecution) -> DerivedState:
     )
     state.academic_standing = (
         dict(reads["getAcademicStanding"]) if "getAcademicStanding" in reads else None
+    )
+    state.institution_knowledge = (
+        dict(reads["getInstitutionalPolicies"]) if "getInstitutionalPolicies" in reads else None
     )
 
     # A submitted-but-unposted deposit payment changes what the open deposit

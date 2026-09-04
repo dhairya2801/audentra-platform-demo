@@ -177,6 +177,18 @@ TOOL_DESCRIPTIONS: Mapping[str, str] = {
     ),
     "getCampusLife": "Read upcoming campus events and student clubs.",
     "getStudentMessages": "Read the unread-message count and latest message subjects.",
+    "getInstitutionalPolicies": (
+        "Search Aster's approved institutional knowledge — published policies, "
+        "procedures, handbook chapters, program guides, the academic calendar and "
+        "the office directory — for the rules relevant to the question: what a "
+        "deadline or requirement means, what happens when it is missed, "
+        "exceptions and exemptions, amounts, dates, which office owns it and how "
+        "to reach that office. Each document carries its version, effective date "
+        "and an applicability verdict computed from this student's own record "
+        "(residency, admit term, first-year or transfer, housing plan, program). "
+        "Optional argument `query`: the question in the student's words (defaults "
+        "to the message)."
+    ),
 }
 
 RECEIPT_SOURCES: Mapping[str, str] = {
@@ -204,6 +216,7 @@ RECEIPT_SOURCES: Mapping[str, str] = {
     "getAcademicPlan": "academics",
     "getCampusLife": "campus_life",
     "getStudentMessages": "messages",
+    "getInstitutionalPolicies": "institution_knowledge",
 }
 
 _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
@@ -262,7 +275,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     ),
     # Institutional policy retrieval has no reviewed source yet; the composer
     # answers honestly and routes to support instead of reading student state.
-    "policy_lookup": (),
+    # Institutional questions read the approved corpus plus enough of the
+    # student's own record to say whether a rule applies to them.
+    "policy_lookup": ("getInstitutionalPolicies", "getEnrollmentState", "getOnboardingChecklist"),
     "registration_status": (
         "getRegistrationStatus",
         "getEnrollmentHolds",

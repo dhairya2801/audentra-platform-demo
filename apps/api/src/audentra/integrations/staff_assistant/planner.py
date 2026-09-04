@@ -115,7 +115,9 @@ _SELECTION_RULES: Mapping[str, tuple[str, ...]] = {
     "daily_briefing": ("getMorningBriefing", "getStaffWorkQueue"),
     "work_item_detail": ("getWorkItemDetail",),
     "inquiries": ("getInquiries",),
-    "playbook_lookup": ("getPlaybooks",),
+    # Institutional questions read the approved corpus first; staff-authored
+    # plays ride along so a procedure and its local practice appear together.
+    "playbook_lookup": ("searchInstitutionalKnowledge", "getPlaybooks"),
     "action_rules": ("getActionRules",),
     "mailbox_read": ("getMailboxMessages",),
     # Staff-aware intents. The profile rides along with every facet so the
@@ -151,6 +153,7 @@ _FACET_EXTRA_TOOLS: Mapping[str, tuple[str, ...]] = {
 # are conspicuously absent — the pipeline binds those.
 _MODEL_SAFE_ARGUMENTS: Mapping[str, tuple[str, ...]] = {
     "searchStudents": ("query", "externalRef", "program", "limit"),
+    "searchInstitutionalKnowledge": ("query", "audience", "kind", "office", "limit"),
     # Cohort selection is not identity: the filter is validated against the
     # domain vocabulary and the tenant stays server-bound, so a model may
     # propose one.
@@ -346,6 +349,8 @@ def validate_staff_model_plan(
             allowed.update(STAFF_UNIVERSAL_CONTEXT_TOOLS)
         allowed.add("searchStudents")
         allowed.add("searchStaff")
+        # The approved corpus is safe to combine with any readable intent.
+        allowed.add("searchInstitutionalKnowledge")
         # Aggregates are safe to combine with any operational intent.
         allowed.update({"summarizeWorkQueue", "summarizeInquiries"})
 

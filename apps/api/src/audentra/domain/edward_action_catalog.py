@@ -370,7 +370,10 @@ STUDENT_BOUNDARIES: tuple[Boundary, ...] = (
         actor="student",
         pattern=re.compile(
             r"\b(?:pay|paying|settle|charge)\b.{0,40}\b(?:deposit|tuition|bill|balance|fee)\b"
-            r"|\b(?:deposit|tuition|bill|balance)\b.{0,32}\b(?:for me|on my behalf)\b",
+            # "pay the deposit for me" — a verb must precede the noun; "how
+            # much is tuition for me" is a question about an amount.
+            r"|\b(?:pay|paying|settle|cover|handle)\b.{0,24}"
+            r"\b(?:deposit|tuition|bill|balance)\b.{0,32}\b(?:for me|on my behalf)\b",
             re.I,
         ),
         boundary="I can't make a payment for you — Edward never moves money.",

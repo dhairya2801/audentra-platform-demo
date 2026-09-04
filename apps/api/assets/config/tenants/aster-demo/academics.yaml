@@ -1,83 +1,1403 @@
+# Course catalog for the Aster demo tenant. The first six courses predate the
+# synthetic-university enrichment; the rest are the catalog the program guides in
+# knowledge/documents/program-*.md reference. Instructors are fictional.
 schema_version: 1
 tenant: aster-demo
 configuration: academics
 catalog_version: 2027-2028.demo.v1
 courses:
-  - id: cs-101
-    code: CS 101
-    title: Programming Fundamentals
-    description: Problem solving, algorithms, program design, and introductory software development.
-    credits: 4
-    level: 100
-    prerequisites: []
-    instructor_names: [Dr. Maya Patel]
-    meeting_pattern: Mon/Wed 10:00 AM
-    availability_label: Fall and Spring
-    related_videos:
-      - id: mit-6-100l-introduction
-        title: Introduction to Computer Science and Programming Using Python
-        description: An open introductory programming lecture from MIT OpenCourseWare.
-        url: https://www.youtube.com/watch?v=xAcTmDO6NTI
-        source_label: MIT OpenCourseWare
-  - id: cs-201
-    code: CS 201
-    title: Data Structures
-    description: Abstract data types, algorithm analysis, trees, graphs, and hashing.
-    credits: 4
-    level: 200
-    prerequisites:
-      - course_code: CS 101
-        minimum_grade: C
-    instructor_names: [Prof. Jordan Kim]
-    meeting_pattern: Tue/Thu 1:30 PM
-    availability_label: Fall and Spring
-  - id: cs-230
-    code: CS 230
-    title: Computer Systems
-    description: Machine organization, operating systems, networks, and systems programming.
-    credits: 4
-    level: 200
-    prerequisites:
-      - course_code: CS 201
-        minimum_grade: C
-    instructor_names: [Dr. Elena Ramirez]
-    meeting_pattern: Mon/Wed 2:00 PM
-    availability_label: Fall
-  - id: math-151
-    code: MATH 151
-    title: Calculus I
-    description: Limits, derivatives, applications of differentiation, and an introduction to integration.
-    credits: 4
-    level: 100
-    prerequisites: []
-    instructor_names: [Prof. Owen Brooks]
-    meeting_pattern: Mon/Wed/Fri 9:00 AM
-    availability_label: Fall and Spring
-    related_videos:
-      - id: mit-18-01-calculus
-        title: Single Variable Calculus
-        description: An open single-variable calculus lecture from MIT OpenCourseWare.
-        url: https://www.youtube.com/watch?v=7K1sB05pE0A
-        source_label: MIT OpenCourseWare
-  - id: math-152
-    code: MATH 152
-    title: Calculus II
-    description: Integration, sequences, series, and parametric curves.
-    credits: 4
-    level: 100
-    prerequisites:
-      - course_code: MATH 151
-        minimum_grade: C
-    instructor_names: [Prof. Leila Hassan]
-    meeting_pattern: Tue/Thu 11:00 AM
-    availability_label: Fall and Spring
-  - id: writ-101
-    code: WRIT 101
-    title: Academic Writing Seminar
-    description: Evidence-based writing, revision, research literacy, and academic argument.
-    credits: 3
-    level: 100
-    prerequisites: []
-    instructor_names: [Dr. Nina Alvarez]
-    meeting_pattern: Fri 1:00 PM
-    availability_label: Fall and Spring
+- id: cs-101
+  code: CS 101
+  title: Programming Fundamentals
+  description: Problem solving, algorithms, program design, and introductory software development.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Maya Patel
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Fall and Spring
+  related_videos:
+  - id: mit-6-100l-introduction
+    title: Introduction to Computer Science and Programming Using Python
+    description: An open introductory programming lecture from MIT OpenCourseWare.
+    url: https://www.youtube.com/watch?v=xAcTmDO6NTI
+    source_label: MIT OpenCourseWare
+- id: cs-201
+  code: CS 201
+  title: Data Structures
+  description: Abstract data types, algorithm analysis, trees, graphs, and hashing.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: CS 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Jordan Kim
+  meeting_pattern: Tue/Thu 1:30 PM
+  availability_label: Fall and Spring
+- id: cs-230
+  code: CS 230
+  title: Computer Systems
+  description: Machine organization, operating systems, networks, and systems programming.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: CS 201
+    minimum_grade: C
+  instructor_names:
+  - Dr. Elena Ramirez
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall
+- id: math-151
+  code: MATH 151
+  title: Calculus I
+  description: Limits, derivatives, applications of differentiation, and an introduction to integration.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Owen Brooks
+  meeting_pattern: Mon/Wed/Fri 9:00 AM
+  availability_label: Fall and Spring
+  related_videos:
+  - id: mit-18-01-calculus
+    title: Single Variable Calculus
+    description: An open single-variable calculus lecture from MIT OpenCourseWare.
+    url: https://www.youtube.com/watch?v=7K1sB05pE0A
+    source_label: MIT OpenCourseWare
+- id: math-152
+  code: MATH 152
+  title: Calculus II
+  description: Integration, sequences, series, and parametric curves.
+  credits: 4
+  level: 100
+  prerequisites:
+  - course_code: MATH 151
+    minimum_grade: C
+  instructor_names:
+  - Prof. Leila Hassan
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Fall and Spring
+- id: writ-101
+  code: WRIT 101
+  title: Academic Writing Seminar
+  description: Evidence-based writing, revision, research literacy, and academic argument.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Nina Alvarez
+  meeting_pattern: Fri 1:00 PM
+  availability_label: Fall and Spring
+- id: ast-100
+  code: AST 100
+  title: Aster Seminar
+  description: A one-credit first-term seminar on academic expectations, campus resources, planning a
+    degree and the general education core; required of first-year students.
+  credits: 1
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Imogen Wray
+  meeting_pattern: Thu 3:00 PM
+  availability_label: Fall and Spring
+- id: writ-099
+  code: WRIT 099
+  title: Academic English
+  description: Academic English for conditionally admitted students; credits do not count towards the
+    degree.
+  credits: 3
+  level: 0
+  prerequisites: []
+  instructor_names:
+  - Ms. Ines Corvalán
+  meeting_pattern: Mon/Wed/Fri 11:00 AM
+  availability_label: Fall and Spring
+- id: math-120
+  code: MATH 120
+  title: Quantitative Reasoning
+  description: Proportional reasoning, modelling with functions, probability and data literacy for students
+    not taking calculus.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Halvard Brenner
+  meeting_pattern: Tue/Thu 9:30 AM
+  availability_label: Fall and Spring
+- id: math-220
+  code: MATH 220
+  title: Linear Algebra
+  description: Vectors, matrices, linear systems, eigenvalues and applications.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Prof. Leila Hassan
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall and Spring
+- id: math-251
+  code: MATH 251
+  title: Calculus III
+  description: 'Multivariable calculus: partial derivatives, multiple integrals, vector calculus.'
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Prof. Owen Brooks
+  meeting_pattern: Mon/Wed/Fri 10:00 AM
+  availability_label: Fall and Spring
+- id: stat-101
+  code: STAT 101
+  title: Introduction to Statistics
+  description: Descriptive statistics, probability, estimation and hypothesis testing with software.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Priya Venkataraman
+  meeting_pattern: Tue/Thu 2:00 PM
+  availability_label: Fall and Spring
+- id: stat-310
+  code: STAT 310
+  title: Statistical Inference
+  description: Likelihood, estimation, hypothesis testing and regression from a mathematical standpoint.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: STAT 101
+    minimum_grade: C
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Dr. Priya Venkataraman
+  meeting_pattern: Mon/Wed 3:00 PM
+  availability_label: Spring
+- id: cs-310
+  code: CS 310
+  title: Software Engineering
+  description: Requirements, design, testing, version control and team development of a semester-long
+    project.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: CS 201
+    minimum_grade: C
+  instructor_names:
+  - Prof. Jordan Kim
+  meeting_pattern: Tue/Thu 10:00 AM
+  availability_label: Fall
+- id: cs-320
+  code: CS 320
+  title: Algorithms
+  description: 'Algorithm design and analysis: divide and conquer, greedy, dynamic programming, graphs,
+    complexity.'
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: CS 201
+    minimum_grade: C
+  - course_code: MATH 220
+    minimum_grade: C
+  instructor_names:
+  - Dr. Maya Patel
+  meeting_pattern: Mon/Wed 11:00 AM
+  availability_label: Spring
+- id: cs-350
+  code: CS 350
+  title: Databases
+  description: Relational modelling, SQL, transactions, indexing and an introduction to distributed data.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: CS 201
+    minimum_grade: C
+  instructor_names:
+  - Dr. Elena Ramirez
+  meeting_pattern: Tue/Thu 3:30 PM
+  availability_label: Fall and Spring
+- id: cs-490
+  code: CS 490
+  title: Computing Capstone
+  description: Two-term team project with an external partner; senior standing required.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: CS 310
+    minimum_grade: C
+  instructor_names:
+  - Prof. Jordan Kim
+  meeting_pattern: Fri 10:00 AM
+  availability_label: Fall and Spring
+- id: data-110
+  code: DATA 110
+  title: Foundations of Data Science
+  description: Data wrangling, visualisation and the data-science workflow in Python.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Anouk Visser
+  meeting_pattern: Mon/Wed 9:00 AM
+  availability_label: Fall and Spring
+- id: data-220
+  code: DATA 220
+  title: Statistical Computing
+  description: Simulation, resampling, regression and reproducible analysis.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: DATA 110
+    minimum_grade: C
+  - course_code: STAT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Anouk Visser
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Fall
+- id: data-330
+  code: DATA 330
+  title: Machine Learning Practicum
+  description: Supervised and unsupervised learning applied to partner datasets, with model evaluation
+    and ethics.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: DATA 220
+    minimum_grade: C
+  - course_code: CS 201
+    minimum_grade: C
+  instructor_names:
+  - Dr. Tomasz Zielinski
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Spring
+- id: data-490
+  code: DATA 490
+  title: Data Science Practicum
+  description: Capstone practicum with a partner organisation.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: DATA 330
+    minimum_grade: C
+  instructor_names:
+  - Dr. Tomasz Zielinski
+  meeting_pattern: Fri 1:00 PM
+  availability_label: Fall and Spring
+- id: phys-151
+  code: PHYS 151
+  title: University Physics I
+  description: Mechanics, waves and thermodynamics with laboratory; MATH 151 corequisite.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Rosalind Achebe
+  meeting_pattern: Mon/Wed/Fri 8:00 AM
+  availability_label: Fall and Spring
+- id: phys-152
+  code: PHYS 152
+  title: University Physics II
+  description: Electricity, magnetism, optics and modern physics with laboratory.
+  credits: 4
+  level: 100
+  prerequisites:
+  - course_code: PHYS 151
+    minimum_grade: C
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Dr. Rosalind Achebe
+  meeting_pattern: Mon/Wed/Fri 9:00 AM
+  availability_label: Fall and Spring
+- id: phys-250
+  code: PHYS 250
+  title: Modern Physics
+  description: Relativity, quantum phenomena and atomic structure.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: PHYS 152
+    minimum_grade: C
+  instructor_names:
+  - Dr. Kenji Watanabe
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Spring
+- id: engr-101
+  code: ENGR 101
+  title: Introduction to Engineering
+  description: The engineering profession, problem solving, teamwork and a first design challenge.
+  credits: 2
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Sigrid Halvorsen
+  meeting_pattern: Tue 4:00 PM
+  availability_label: Fall
+- id: me-110
+  code: ME 110
+  title: Engineering Design
+  description: Design process, CAD, prototyping and communication.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Sigrid Halvorsen
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Fall and Spring
+- id: me-210
+  code: ME 210
+  title: Statics
+  description: Equilibrium of particles and rigid bodies, trusses, friction, centroids.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: PHYS 151
+    minimum_grade: C
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Dr. Farouk El-Sayed
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Fall and Spring
+- id: me-310
+  code: ME 310
+  title: Thermodynamics
+  description: First and second laws, properties of substances, cycles.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ME 210
+    minimum_grade: C
+  - course_code: MATH 251
+    minimum_grade: C
+  instructor_names:
+  - Dr. Farouk El-Sayed
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall
+- id: me-480
+  code: ME 480
+  title: Senior Design I
+  description: First term of the two-term senior design project.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: ME 310
+    minimum_grade: C
+  instructor_names:
+  - Prof. Sigrid Halvorsen
+  meeting_pattern: Fri 9:00 AM
+  availability_label: Fall
+- id: ee-210
+  code: EE 210
+  title: Circuit Analysis
+  description: DC and AC circuit analysis with laboratory.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: PHYS 152
+    minimum_grade: C
+  - course_code: MATH 152
+    minimum_grade: C
+  instructor_names:
+  - Dr. Beatriz Camargo
+  meeting_pattern: Mon/Wed 8:00 AM
+  availability_label: Fall and Spring
+- id: ee-220
+  code: EE 220
+  title: Digital Logic
+  description: Boolean algebra, combinational and sequential logic, hardware description.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: CS 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Beatriz Camargo
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Fall and Spring
+- id: ee-320
+  code: EE 320
+  title: Signals and Systems
+  description: Continuous and discrete signals, LTI systems, Fourier and Laplace methods.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: EE 210
+    minimum_grade: C
+  - course_code: MATH 220
+    minimum_grade: C
+  instructor_names:
+  - Dr. Nikolai Petrov
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall
+- id: ee-480
+  code: EE 480
+  title: Senior Design I
+  description: First term of the two-term senior design project.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: EE 320
+    minimum_grade: C
+  instructor_names:
+  - Dr. Nikolai Petrov
+  meeting_pattern: Fri 9:00 AM
+  availability_label: Fall
+- id: ce-210
+  code: CE 210
+  title: Surveying and Site Design
+  description: Field surveying, mapping and site layout with laboratory.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: MATH 151
+    minimum_grade: C
+  instructor_names:
+  - Prof. Amaka Obi
+  meeting_pattern: Tue/Thu 8:00 AM
+  availability_label: Spring
+- id: ce-310
+  code: CE 310
+  title: Structural Analysis
+  description: Analysis of determinate and indeterminate structures.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ME 210
+    minimum_grade: C
+  instructor_names:
+  - Prof. Amaka Obi
+  meeting_pattern: Mon/Wed 11:00 AM
+  availability_label: Fall
+- id: ce-320
+  code: CE 320
+  title: Environmental Systems
+  description: Water, air and waste systems; environmental impact.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: CHEM 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Solveig Lund
+  meeting_pattern: Tue/Thu 2:00 PM
+  availability_label: Spring
+- id: ce-480
+  code: CE 480
+  title: Senior Design I
+  description: First term of the two-term senior design project.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: CE 310
+    minimum_grade: C
+  instructor_names:
+  - Prof. Amaka Obi
+  meeting_pattern: Fri 9:00 AM
+  availability_label: Fall
+- id: bus-101
+  code: BUS 101
+  title: Foundations of Business
+  description: The functions of a business, markets, ethics and the business plan.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Desmond Achterberg
+  meeting_pattern: Mon/Wed 9:00 AM
+  availability_label: Fall and Spring
+- id: bus-210
+  code: BUS 210
+  title: Organisational Behaviour
+  description: Individuals, teams and organisations at work.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: BUS 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Yara Haddad
+  meeting_pattern: Tue/Thu 10:00 AM
+  availability_label: Fall and Spring
+- id: bus-310
+  code: BUS 310
+  title: Operations Management
+  description: Process design, capacity, quality and supply chains.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: BUS 210
+    minimum_grade: C
+  - course_code: STAT 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Desmond Achterberg
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall
+- id: bus-320
+  code: BUS 320
+  title: Business Law and Ethics
+  description: Contracts, torts, business organisations and ethical decision making; satisfies the core
+    Ethics area for business majors.
+  credits: 3
+  level: 300
+  prerequisites: []
+  instructor_names:
+  - Dr. Yara Haddad
+  meeting_pattern: Tue/Thu 3:30 PM
+  availability_label: Fall and Spring
+- id: bus-350
+  code: BUS 350
+  title: Marketing
+  description: Markets, segmentation, the marketing mix and analytics.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: BUS 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Colm Fitzgerald
+  meeting_pattern: Mon/Wed 11:00 AM
+  availability_label: Fall and Spring
+- id: bus-360
+  code: BUS 360
+  title: Corporate Finance
+  description: Time value of money, valuation, capital budgeting and risk.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ACCT 101
+    minimum_grade: C
+  - course_code: STAT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ingrid Solberg
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Fall and Spring
+- id: bus-490
+  code: BUS 490
+  title: Strategy Capstone
+  description: Integrative strategy simulation and case analysis; senior standing.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: BUS 310
+    minimum_grade: C
+  - course_code: BUS 360
+    minimum_grade: C
+  instructor_names:
+  - Prof. Desmond Achterberg
+  meeting_pattern: Fri 10:00 AM
+  availability_label: Spring
+- id: acct-101
+  code: ACCT 101
+  title: Financial Accounting
+  description: The accounting cycle, financial statements and analysis.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Ingrid Solberg
+  meeting_pattern: Mon/Wed/Fri 9:00 AM
+  availability_label: Fall and Spring
+- id: acct-201
+  code: ACCT 201
+  title: Managerial Accounting
+  description: Costing, budgeting and decision analysis.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: ACCT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ingrid Solberg
+  meeting_pattern: Mon/Wed/Fri 10:00 AM
+  availability_label: Fall and Spring
+- id: acct-210
+  code: ACCT 210
+  title: Intermediate Accounting I
+  description: Financial reporting framework, assets and revenue recognition.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: ACCT 101
+    minimum_grade: B-
+  instructor_names:
+  - Prof. Hamid Rezaei
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Fall
+- id: acct-211
+  code: ACCT 211
+  title: Intermediate Accounting II
+  description: Liabilities, equity, leases and the statement of cash flows.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: ACCT 210
+    minimum_grade: C
+  instructor_names:
+  - Prof. Hamid Rezaei
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Spring
+- id: acct-310
+  code: ACCT 310
+  title: Auditing Principles
+  description: Audit standards, evidence, risk and reporting.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ACCT 201
+    minimum_grade: C
+  instructor_names:
+  - Prof. Hamid Rezaei
+  meeting_pattern: Mon/Wed 3:00 PM
+  availability_label: Fall
+- id: acct-320
+  code: ACCT 320
+  title: Taxation
+  description: Individual and business income taxation.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ACCT 201
+    minimum_grade: C
+  instructor_names:
+  - Dr. Miriam Goldfarb
+  meeting_pattern: Tue/Thu 2:00 PM
+  availability_label: Spring
+- id: acct-330
+  code: ACCT 330
+  title: Accounting Information Systems
+  description: Transaction cycles, controls and accounting software.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ACCT 201
+    minimum_grade: C
+  instructor_names:
+  - Dr. Miriam Goldfarb
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Spring
+- id: acct-490
+  code: ACCT 490
+  title: Professional Practice Capstone
+  description: Professional practice, ethics and examination preparation.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: ACCT 310
+    minimum_grade: C
+  - course_code: ACCT 320
+    minimum_grade: C
+  instructor_names:
+  - Prof. Hamid Rezaei
+  meeting_pattern: Fri 10:00 AM
+  availability_label: Spring
+- id: econ-101
+  code: ECON 101
+  title: Microeconomics
+  description: Consumers, firms, markets and market failure.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Aurelie Fontaine
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Fall and Spring
+- id: econ-102
+  code: ECON 102
+  title: Macroeconomics
+  description: National income, money, growth and policy.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Aurelie Fontaine
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall and Spring
+- id: econ-310
+  code: ECON 310
+  title: Econometrics
+  description: Regression methods for economic data.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ECON 101
+    minimum_grade: C
+  - course_code: ECON 102
+    minimum_grade: C
+  - course_code: STAT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Samuel Osei
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Fall
+- id: econ-320
+  code: ECON 320
+  title: Intermediate Microeconomics
+  description: Consumer and producer theory, market structures, welfare.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ECON 101
+    minimum_grade: C
+  - course_code: MATH 151
+    minimum_grade: C
+  instructor_names:
+  - Dr. Aurelie Fontaine
+  meeting_pattern: Tue/Thu 9:30 AM
+  availability_label: Fall
+- id: econ-321
+  code: ECON 321
+  title: Intermediate Macroeconomics
+  description: Growth, fluctuations and stabilisation policy.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ECON 102
+    minimum_grade: C
+  - course_code: MATH 151
+    minimum_grade: C
+  instructor_names:
+  - Dr. Samuel Osei
+  meeting_pattern: Tue/Thu 9:30 AM
+  availability_label: Spring
+- id: econ-490
+  code: ECON 490
+  title: Senior Seminar in Economics
+  description: Research seminar with a thesis paper.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: ECON 310
+    minimum_grade: C
+  instructor_names:
+  - Dr. Samuel Osei
+  meeting_pattern: Fri 1:00 PM
+  availability_label: Spring
+- id: psy-101
+  code: PSY 101
+  title: Introduction to Psychology
+  description: A survey of biological, cognitive, developmental, social and clinical psychology.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Naomi Feldman
+  meeting_pattern: Mon/Wed 9:00 AM
+  availability_label: Fall and Spring
+- id: psy-210
+  code: PSY 210
+  title: Research Methods
+  description: Experimental and correlational design, measurement and ethics.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: PSY 101
+    minimum_grade: C
+  - course_code: STAT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Naomi Feldman
+  meeting_pattern: Tue/Thu 10:00 AM
+  availability_label: Fall and Spring
+- id: psy-320
+  code: PSY 320
+  title: Cognitive Psychology
+  description: Attention, memory, language and reasoning.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: PSY 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Olamide Bankole
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall
+- id: psy-330
+  code: PSY 330
+  title: Developmental Psychology
+  description: Development across the lifespan.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: PSY 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Olamide Bankole
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Fall and Spring
+- id: psy-340
+  code: PSY 340
+  title: Social Psychology
+  description: Attitudes, influence, groups and relationships.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: PSY 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Naomi Feldman
+  meeting_pattern: Mon/Wed 11:00 AM
+  availability_label: Spring
+- id: psy-350
+  code: PSY 350
+  title: Abnormal Psychology
+  description: Psychopathology, diagnosis and treatment.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: PSY 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Olamide Bankole
+  meeting_pattern: Tue/Thu 3:30 PM
+  availability_label: Spring
+- id: psy-490
+  code: PSY 490
+  title: Psychology Capstone
+  description: Laboratory research or applied placement with a written report.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: PSY 320
+    minimum_grade: C
+  instructor_names:
+  - Dr. Naomi Feldman
+  meeting_pattern: Fri 10:00 AM
+  availability_label: Fall and Spring
+- id: engl-120
+  code: ENGL 120
+  title: World Literature
+  description: Literature across cultures and periods; satisfies Humanities and Global Perspectives.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Nina Alvarez
+  meeting_pattern: Tue/Thu 9:30 AM
+  availability_label: Fall and Spring
+- id: engl-210
+  code: ENGL 210
+  title: Rhetoric and Argument
+  description: Classical and contemporary rhetoric; writing persuasive arguments.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: WRIT 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Nina Alvarez
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Fall and Spring
+- id: engl-220
+  code: ENGL 220
+  title: Introduction to Literary Study
+  description: Close reading, critical approaches and the research essay.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: WRIT 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Gareth Llewellyn
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Fall and Spring
+- id: engl-340
+  code: ENGL 340
+  title: Shakespeare
+  description: Comedies, histories and tragedies in context.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ENGL 220
+    minimum_grade: C
+  instructor_names:
+  - Prof. Gareth Llewellyn
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall
+- id: engl-350
+  code: ENGL 350
+  title: Modern Fiction
+  description: The novel from 1900 to the present.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: ENGL 220
+    minimum_grade: C
+  instructor_names:
+  - Dr. Amara Okafor
+  meeting_pattern: Tue/Thu 2:00 PM
+  availability_label: Spring
+- id: engl-490
+  code: ENGL 490
+  title: Senior Thesis
+  description: Supervised thesis in literature.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: ENGL 340
+    minimum_grade: C
+  instructor_names:
+  - Prof. Gareth Llewellyn
+  meeting_pattern: Fri 1:00 PM
+  availability_label: Fall and Spring
+- id: hist-110
+  code: HIST 110
+  title: World History
+  description: Global history from 1500; satisfies Humanities and Global Perspectives.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Amara Okafor
+  meeting_pattern: Mon/Wed/Fri 11:00 AM
+  availability_label: Fall and Spring
+- id: phil-101
+  code: PHIL 101
+  title: Introduction to Philosophy
+  description: Knowledge, mind, freedom and value.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Tobias Lindqvist
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Fall and Spring
+- id: phil-220
+  code: PHIL 220
+  title: Ethics
+  description: Moral theory and applied ethics; sections for computing, engineering and data ethics; satisfies
+    the core Ethics area.
+  credits: 3
+  level: 200
+  prerequisites: []
+  instructor_names:
+  - Dr. Tobias Lindqvist
+  meeting_pattern: Mon/Wed 3:00 PM
+  availability_label: Fall and Spring
+- id: soc-101
+  code: SOC 101
+  title: Introduction to Sociology
+  description: Society, institutions, inequality and social change.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Renata Kowalczyk
+  meeting_pattern: Tue/Thu 10:00 AM
+  availability_label: Fall and Spring
+- id: pols-101
+  code: POLS 101
+  title: American Government
+  description: Institutions, participation and policy.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Marcus Delacroix
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall and Spring
+- id: art-101
+  code: ART 101
+  title: Introduction to Visual Culture
+  description: Looking at and writing about images across media; satisfies the core Arts area.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Lucía Ferrer
+  meeting_pattern: Tue/Thu 3:30 PM
+  availability_label: Fall and Spring
+- id: envs-110
+  code: ENVS 110
+  title: Environmental Science
+  description: Earth systems, ecology and human impact, with laboratory; satisfies Laboratory Science.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Solveig Lund
+  meeting_pattern: Mon/Wed 11:00 AM
+  availability_label: Fall and Spring
+- id: bio-101
+  code: BIO 101
+  title: General Biology
+  description: Cells, genetics, evolution and ecology with laboratory.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Constance Mbeki
+  meeting_pattern: Mon/Wed/Fri 9:00 AM
+  availability_label: Fall and Spring
+- id: bio-210
+  code: BIO 210
+  title: Genetics
+  description: Transmission, molecular and population genetics with laboratory.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: BIO 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Constance Mbeki
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Fall and Spring
+- id: bio-220
+  code: BIO 220
+  title: Anatomy and Physiology I
+  description: Structure and function of the human body, part one, with laboratory.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: BIO 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Henrik Sørensen
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall and Spring
+- id: bio-221
+  code: BIO 221
+  title: Anatomy and Physiology II
+  description: Structure and function of the human body, part two, with laboratory.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: BIO 220
+    minimum_grade: C
+  instructor_names:
+  - Dr. Henrik Sørensen
+  meeting_pattern: Mon/Wed 1:00 PM
+  availability_label: Fall and Spring
+- id: bio-310
+  code: BIO 310
+  title: Microbiology
+  description: Bacteria, viruses and immunity with laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: BIO 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Constance Mbeki
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Fall and Spring
+- id: bio-320
+  code: BIO 320
+  title: Cell and Molecular Biology
+  description: Cell structure, signalling and gene expression with laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: BIO 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ravi Sundaram
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Fall
+- id: bio-330
+  code: BIO 330
+  title: Ecology
+  description: Populations, communities and ecosystems with field laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: BIO 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Solveig Lund
+  meeting_pattern: Tue/Thu 2:00 PM
+  availability_label: Spring
+- id: bio-490
+  code: BIO 490
+  title: Senior Research in Biology
+  description: Faculty-supervised research or seminar.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: BIO 310
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ravi Sundaram
+  meeting_pattern: Fri 1:00 PM
+  availability_label: Fall and Spring
+- id: chem-101
+  code: CHEM 101
+  title: General Chemistry I
+  description: Atomic structure, bonding, stoichiometry and states of matter with laboratory.
+  credits: 4
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Ewa Nowak
+  meeting_pattern: Mon/Wed/Fri 10:00 AM
+  availability_label: Fall and Spring
+- id: chem-102
+  code: CHEM 102
+  title: General Chemistry II
+  description: Kinetics, equilibrium, acids and bases, electrochemistry with laboratory.
+  credits: 4
+  level: 100
+  prerequisites:
+  - course_code: CHEM 101
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ewa Nowak
+  meeting_pattern: Mon/Wed/Fri 11:00 AM
+  availability_label: Fall and Spring
+- id: chem-210
+  code: CHEM 210
+  title: Organic Chemistry I
+  description: Structure, reactions and mechanisms of organic compounds with laboratory.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: CHEM 102
+    minimum_grade: C
+  instructor_names:
+  - Dr. Luis Ortega
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Fall
+- id: chem-211
+  code: CHEM 211
+  title: Organic Chemistry II
+  description: Continuation of organic chemistry with spectroscopy and synthesis.
+  credits: 4
+  level: 200
+  prerequisites:
+  - course_code: CHEM 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Luis Ortega
+  meeting_pattern: Tue/Thu 9:00 AM
+  availability_label: Spring
+- id: chem-310
+  code: CHEM 310
+  title: Physical Chemistry
+  description: Thermodynamics, kinetics and quantum chemistry.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: CHEM 102
+    minimum_grade: C
+  - course_code: MATH 152
+    minimum_grade: C
+  - course_code: PHYS 151
+    minimum_grade: C
+  instructor_names:
+  - Dr. Yevgenia Marchuk
+  meeting_pattern: Mon/Wed 2:00 PM
+  availability_label: Fall
+- id: chem-320
+  code: CHEM 320
+  title: Analytical Chemistry
+  description: Quantitative analysis and instrumentation with laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: CHEM 102
+    minimum_grade: C
+  instructor_names:
+  - Dr. Ewa Nowak
+  meeting_pattern: Tue/Thu 1:00 PM
+  availability_label: Spring
+- id: chem-330
+  code: CHEM 330
+  title: Inorganic Chemistry
+  description: Bonding, coordination chemistry and solid state with laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: CHEM 211
+    minimum_grade: C
+  instructor_names:
+  - Dr. Yevgenia Marchuk
+  meeting_pattern: Mon/Wed 9:00 AM
+  availability_label: Fall
+- id: chem-340
+  code: CHEM 340
+  title: Biochemistry
+  description: Proteins, enzymes, metabolism and nucleic acids with laboratory.
+  credits: 4
+  level: 300
+  prerequisites:
+  - course_code: CHEM 211
+    minimum_grade: C
+  instructor_names:
+  - Dr. Luis Ortega
+  meeting_pattern: Tue/Thu 11:00 AM
+  availability_label: Spring
+- id: chem-490
+  code: CHEM 490
+  title: Research Capstone I
+  description: First term of the two-term research capstone.
+  credits: 3
+  level: 400
+  prerequisites:
+  - course_code: CHEM 310
+    minimum_grade: C
+  instructor_names:
+  - Dr. Yevgenia Marchuk
+  meeting_pattern: Fri 9:00 AM
+  availability_label: Fall
+- id: nurs-101
+  code: NURS 101
+  title: Foundations of Nursing
+  description: The profession, ethics, communication and the nursing process.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Dr. Adaeze Okonkwo-Reyes
+  meeting_pattern: Mon/Wed 8:00 AM
+  availability_label: Fall
+- id: nurs-210
+  code: NURS 210
+  title: Health Assessment
+  description: Physical and psychosocial assessment across the lifespan with laboratory.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: NURS 101
+    minimum_grade: B-
+  - course_code: BIO 220
+    minimum_grade: B-
+  instructor_names:
+  - Dr. Adaeze Okonkwo-Reyes
+  meeting_pattern: Tue/Thu 8:00 AM
+  availability_label: Fall
+- id: nurs-310
+  code: NURS 310
+  title: Clinical Pharmacology
+  description: Drug classes, actions and safe administration.
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: NURS 210
+    minimum_grade: B-
+  - course_code: CHEM 101
+    minimum_grade: B-
+  instructor_names:
+  - Dr. Fenna de Vries
+  meeting_pattern: Mon/Wed 10:00 AM
+  availability_label: Spring
+- id: nurs-320
+  code: NURS 320
+  title: Adult Health Nursing I
+  description: Care of adults with acute and chronic conditions; clinical placement.
+  credits: 6
+  level: 300
+  prerequisites:
+  - course_code: NURS 210
+    minimum_grade: B-
+  instructor_names:
+  - Dr. Fenna de Vries
+  meeting_pattern: Tue/Thu 8:00 AM plus clinical
+  availability_label: Spring
+- id: nurs-490
+  code: NURS 490
+  title: Capstone Practicum
+  description: Precepted practicum in a partner hospital.
+  credits: 6
+  level: 400
+  prerequisites:
+  - course_code: NURS 320
+    minimum_grade: B-
+  instructor_names:
+  - Dr. Adaeze Okonkwo-Reyes
+  meeting_pattern: Clinical placement
+  availability_label: Spring
+- id: des-101
+  code: DES 101
+  title: Design Foundations
+  description: Principles of two- and three-dimensional design in the studio.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Lucía Ferrer
+  meeting_pattern: Mon/Wed 9:00 AM (studio)
+  availability_label: Fall
+- id: des-120
+  code: DES 120
+  title: Drawing
+  description: Observational and expressive drawing.
+  credits: 3
+  level: 100
+  prerequisites: []
+  instructor_names:
+  - Prof. Matthias Roth
+  meeting_pattern: Tue/Thu 9:00 AM (studio)
+  availability_label: Fall and Spring
+- id: des-130
+  code: DES 130
+  title: Colour and Composition
+  description: Colour theory and composition in practice.
+  credits: 3
+  level: 100
+  prerequisites:
+  - course_code: DES 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Lucía Ferrer
+  meeting_pattern: Mon/Wed 1:00 PM (studio)
+  availability_label: Spring
+- id: des-140
+  code: DES 140
+  title: Digital Tools
+  description: Vector, raster and layout software for designers.
+  credits: 3
+  level: 100
+  prerequisites:
+  - course_code: DES 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Matthias Roth
+  meeting_pattern: Tue/Thu 1:00 PM (studio)
+  availability_label: Spring
+- id: des-210
+  code: DES 210
+  title: Typography
+  description: Letterforms, hierarchy and typesetting.
+  credits: 3
+  level: 200
+  prerequisites:
+  - course_code: DES 101
+    minimum_grade: C
+  instructor_names:
+  - Prof. Lucía Ferrer
+  meeting_pattern: Mon/Wed 9:00 AM (studio)
+  availability_label: Fall
+- id: des-310
+  code: DES 310
+  title: Interaction Design
+  description: 'Designing interfaces: research, prototyping and evaluation.'
+  credits: 3
+  level: 300
+  prerequisites:
+  - course_code: DES 210
+    minimum_grade: C
+  instructor_names:
+  - Dr. Sunniva Berg
+  meeting_pattern: Tue/Thu 9:00 AM (studio)
+  availability_label: Spring
+- id: des-490
+  code: DES 490
+  title: Senior Thesis Exhibition
+  description: A year-long thesis project ending in the senior exhibition.
+  credits: 6
+  level: 400
+  prerequisites:
+  - course_code: DES 310
+    minimum_grade: C
+  instructor_names:
+  - Prof. Lucía Ferrer
+  meeting_pattern: Studio
+  availability_label: Spring

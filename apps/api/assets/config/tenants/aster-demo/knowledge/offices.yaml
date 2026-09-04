@@ -1,0 +1,308 @@
+schema_version: 1
+tenant: aster-demo
+configuration: offices
+# Every office a student or staff member can be routed to. `component` is the
+# staff_member.component value whose people work here (null: no staff records
+# exist in the platform for this unit — Edward must say so rather than invent
+# a person). Hours are America/New_York. Nobody has a telephone number on
+# record: contact is by portal, email or office visit.
+offices:
+  - code: EM
+    name: Office of the Vice President for Enrollment Management
+    short_name: Enrollment Management
+    component: Enrollment Leadership
+    location: Larkin Hall 400
+    hours: Mon–Fri 9:00–17:00 by appointment
+    email: vpem@synthetic.aster.example
+    head_title: Vice President for Enrollment Management
+    sla_business_days: null
+    description: >-
+      Owns the enrollment target and cross-office escalations. Students do not
+      normally contact this office directly; escalations arrive through the
+      owning office's director.
+    services: [escalations, enrollment strategy, appeals of last resort]
+    display_order: 1
+  - code: ES
+    name: Enrollment Services (one-stop)
+    short_name: Enrollment Services
+    component: Enrollment Support
+    location: Larkin Hall Lobby
+    hours: Mon–Fri 9:00–17:00, walk-in and virtual
+    email: enrollment@synthetic.aster.example
+    head_title: Director of Enrollment Services
+    sla_business_days: 1
+    description: >-
+      The front door for enrolling students: portal and checklist help,
+      profile verification, triage of any question to the owning office, and
+      the first reply to every help request submitted through the portal.
+    services: [portal help, checklist questions, profile verification, help requests, triage, veterans and military services]
+    display_order: 2
+  - code: ADM
+    name: Office of Admissions
+    short_name: Admissions
+    component: Admissions
+    location: Larkin Hall 100
+    hours: Mon–Fri 8:30–17:00; counselor appointments Mon–Fri 10:00–12:00 and 14:00–16:00
+    email: admissions@synthetic.aster.example
+    head_title: Director of Admissions
+    sla_business_days: 3
+    description: >-
+      Admission decisions, offer acceptance, enrollment-deposit follow-up and
+      refunds, deferrals, conditional admission and the final official
+      transcript requirement, English proficiency for international applicants.
+    services: [admission decisions, offer acceptance, deposit refunds, deferral requests, conditional admission, final transcript follow-up]
+    display_order: 3
+  - code: REG
+    name: Office of the Registrar
+    short_name: Registrar
+    component: Registrar
+    location: Larkin Hall 150
+    hours: Mon–Fri 8:30–16:30
+    email: registrar@synthetic.aster.example
+    head_title: University Registrar
+    sla_business_days: 5
+    description: >-
+      Academic records: registration windows and time tickets, add/drop and
+      withdrawal, grades and transcripts, transfer-credit evaluation, identity
+      documents, residency classification for tuition, FERPA, name changes,
+      enrollment verification, academic-standing holds.
+    services: [registration, add/drop, withdrawal, transcripts, transfer credit evaluation, identity documents, residency classification, FERPA, enrollment verification, name changes, academic standing]
+    display_order: 4
+  - code: FA
+    name: Office of Financial Aid
+    short_name: Financial Aid
+    component: Financial Aid
+    location: Larkin Hall 210
+    hours: Mon–Thu 9:00–12:00 and 13:00–16:00 (45-minute counselor appointments); Fri 9:00–12:00 walk-in
+    email: financialaid@synthetic.aster.example
+    head_title: Director of Financial Aid
+    sla_business_days: 5
+    description: >-
+      FAFSA processing, verification, packaging and award letters, scholarship
+      renewal, loans and work-study, disbursement, satisfactory academic
+      progress (SAP) and appeals, special-circumstance reviews.
+    services: [FAFSA, verification, award letters, scholarships, loans, work-study, disbursement, SAP appeals, special circumstances]
+    display_order: 5
+  - code: SA
+    name: Office of Student Accounts
+    short_name: Student Accounts
+    component: Student Accounts
+    location: Larkin Hall 120
+    hours: Mon–Fri 9:00–16:30
+    email: studentaccounts@synthetic.aster.example
+    head_title: Student Accounts Manager
+    sla_business_days: 3
+    description: >-
+      Billing and the student account: the enrollment deposit, tuition and fee
+      charges, payment plans, past-due balances and billing holds, refunds of
+      credit balances, third-party and 529 payments, the health-insurance
+      charge and waiver, 1098-T forms.
+    services: [enrollment deposit, bills, payment plans, billing holds, refunds, third-party payments, health insurance charge, 1098-T]
+    display_order: 6
+  - code: ADV
+    name: Academic Advising Center
+    short_name: Academic Advising
+    component: Academic Advising
+    location: Advising Centre, rooms 200–224
+    hours: Mon–Fri 8:30–16:30; adviser appointments per adviser calendar (30 minutes); first-two-weeks drop-in Mon/Wed/Fri 13:00–15:00
+    email: advising@synthetic.aster.example
+    head_title: Director of Academic Advising
+    sla_business_days: 5
+    description: >-
+      Assigns every deposited student an academic adviser, runs the
+      pre-registration advising meeting that gates registration, course
+      planning, overload petitions, change of major and change of adviser,
+      academic-standing coaching.
+    services: [adviser assignment, advising appointments, course planning, overload petitions, change of major, change of adviser, academic standing coaching]
+    display_order: 7
+  - code: HRL
+    name: Housing & Residence Life
+    short_name: Housing
+    component: Housing
+    location: Cedarcroft Commons (ground floor of Cedarcroft House)
+    hours: Mon–Fri 9:00–17:00; move-in weekend 8:00–20:00
+    email: housing@synthetic.aster.example
+    head_title: Director of Housing & Residence Life
+    sla_business_days: 5
+    description: >-
+      Housing applications, residency-requirement exemptions, hall and room
+      assignments, the waitlist, roommate matching, room changes, break
+      housing, contract cancellation, move-in and move-out, residence-life
+      conduct within the halls.
+    services: [housing application, residency exemption, room assignment, waitlist, roommate matching, room changes, break housing, contract cancellation, move-in]
+    display_order: 8
+  - code: ISS
+    name: International Student Services
+    short_name: International Student Services
+    component: International Student Services
+    location: Global Center, 2nd floor
+    hours: Mon–Fri 9:00–11:30 in person; 13:00–15:00 in person or virtual
+    email: iss@synthetic.aster.example
+    head_title: Director, International Student Services (PDSO)
+    sla_business_days: 2
+    description: >-
+      Designated School Officials for F-1 and J-1 students: Form I-20 and
+      DS-2019, SEVIS, immigration check-in, full-time enrollment and reduced
+      course loads, on-campus employment, CPT and OPT, travel signatures,
+      address and status reporting, the mandatory international health plan.
+    services: [I-20, SEVIS, immigration check-in, reduced course load, on-campus employment, CPT, OPT, travel signatures, address reporting]
+    display_order: 9
+  - code: SHS
+    name: Student Health Services
+    short_name: Student Health
+    component: Student Health
+    location: Wellness Center, 1st floor
+    hours: Mon–Fri 8:30–16:30; nurse line by portal message
+    email: studenthealth@synthetic.aster.example
+    head_title: Health Compliance Manager
+    sla_business_days: 7
+    description: >-
+      Immunization record review and health compliance, medical and religious
+      exemptions, tuberculosis screening, health holds, the student health
+      insurance plan, primary care visits and referrals.
+    services: [immunization records, health compliance, exemptions, TB screening, health holds, health insurance plan, clinic visits]
+    display_order: 10
+  - code: NSP
+    name: New Student Programs
+    short_name: New Student Programs
+    component: New Student Programs
+    location: Student Union 230
+    hours: Mon–Fri 9:00–17:00
+    email: orientation@synthetic.aster.example
+    head_title: Director of New Student Programs
+    sla_business_days: 3
+    description: >-
+      Orientation sessions and registration, the orientation fee, remote and
+      transfer sessions, no-show follow-up, Welcome Week, first-year peer
+      mentors.
+    services: [orientation registration, orientation sessions, orientation fee, Welcome Week, peer mentors]
+    display_order: 11
+  - code: SL
+    name: Office of Student Life
+    short_name: Student Life
+    component: Student Life
+    location: Student Union 300
+    hours: Mon–Fri 9:00–17:00
+    email: studentlife@synthetic.aster.example
+    head_title: Director of Student Life
+    sla_business_days: 5
+    description: >-
+      Clubs and organisations, the involvement fair, campus events, leadership
+      programs, and the liaison to Student Conduct for organisation matters.
+    services: [clubs, involvement fair, campus events, leadership programs, organisation conduct liaison]
+    display_order: 12
+  - code: ACC
+    name: Accessibility Services
+    short_name: Accessibility Services
+    component: null
+    location: Wellness Center, 1st floor (suite 110)
+    hours: Mon–Fri 9:00–16:00; intake appointments Tue/Thu
+    email: accessibility@synthetic.aster.example
+    head_title: Director of Accessibility Services
+    sla_business_days: 10
+    description: >-
+      Registers students with disabilities, reviews documentation, issues
+      accommodation letters each term, arranges testing and housing
+      accommodations, assistance animals, temporary-condition support.
+    services: [accommodation registration, accommodation letters, testing accommodations, housing accommodations, assistance animals, temporary conditions]
+    display_order: 13
+  - code: CON
+    name: Office of Student Conduct
+    short_name: Student Conduct
+    component: null
+    location: Student Union 310
+    hours: Mon–Fri 9:00–17:00
+    email: conduct@synthetic.aster.example
+    head_title: Director of Student Conduct
+    sla_business_days: 10
+    description: >-
+      Administers the Code of Student Conduct and the academic-integrity
+      process, conduct holds, hearings and appeals.
+    services: [conduct process, academic integrity cases, conduct holds, hearings, appeals]
+    display_order: 14
+  - code: CNS
+    name: Counseling Services
+    short_name: Counseling
+    component: null
+    location: Wellness Center, 2nd floor
+    hours: Mon–Fri 9:00–17:00; same-day urgent slots 13:00–15:00; after-hours line through Campus Safety
+    email: counseling@synthetic.aster.example
+    head_title: Director of Counseling Services
+    sla_business_days: 2
+    description: >-
+      Free, confidential short-term counseling, urgent same-day consultation,
+      group programs and referrals. Visits are never shared with academic or
+      enrollment offices.
+    services: [counseling, urgent consultation, groups, referrals]
+    display_order: 15
+  - code: CAR
+    name: Career Center
+    short_name: Career Center
+    component: null
+    location: Innovation Hall 120
+    hours: Mon–Fri 9:00–17:00; drop-in résumé review Wed 13:00–15:00
+    email: careers@synthetic.aster.example
+    head_title: Director of Career Development
+    sla_business_days: 5
+    description: >-
+      Career coaching, résumé and interview preparation, on-campus employment
+      postings, internships and the career fair.
+    services: [career coaching, on-campus job postings, internships, career fair, résumé review]
+    display_order: 16
+  - code: LIB
+    name: Larkin Library and Learning Commons
+    short_name: Library
+    component: null
+    location: Larkin Library (Learning Commons 2nd floor; IT Service Desk ground floor)
+    hours: Mon–Thu 7:30–24:00, Fri 7:30–20:00, Sat 10:00–20:00, Sun 10:00–24:00; 24-hour study room with ID card
+    email: library@synthetic.aster.example
+    head_title: University Librarian
+    sla_business_days: 2
+    description: >-
+      Library services, the Learning Commons (tutoring, the Writing Center,
+      supplemental instruction), and the IT Service Desk for portal and
+      account access.
+    services: [library, tutoring, writing center, supplemental instruction, IT service desk, portal access]
+    display_order: 17
+  - code: DIN
+    name: Aster Dining
+    short_name: Dining
+    component: null
+    location: Student Union (Union Dining) and Birchwood Dining Hall
+    hours: Union Dining Mon–Fri 7:00–21:00, Sat–Sun 9:00–20:00; Birchwood Dining Hall daily 7:00–22:00
+    email: dining@synthetic.aster.example
+    head_title: Director of Dining Services
+    sla_business_days: 3
+    description: >-
+      Meal plans, dining locations, dietary accommodations, meal-plan changes
+      during the first two weeks of each term.
+    services: [meal plans, dietary accommodations, meal plan changes, dining locations]
+    display_order: 18
+  - code: SAF
+    name: Campus Safety
+    short_name: Campus Safety
+    component: null
+    location: Gatehouse, University Drive
+    hours: 24 hours, every day
+    email: safety@synthetic.aster.example
+    head_title: Director of Campus Safety
+    sla_business_days: 1
+    description: >-
+      Campus safety and emergency response, the safe-walk escort, lost ID
+      cards, building access, parking permits and the shuttle.
+    services: [emergencies, safe walk, ID cards, building access, parking permits, shuttle]
+    display_order: 19
+  - code: TIX
+    name: Title IX Office
+    short_name: Title IX
+    component: null
+    location: Larkin Hall 420
+    hours: Mon–Fri 9:00–17:00
+    email: titleix@synthetic.aster.example
+    head_title: Title IX Coordinator
+    sla_business_days: 2
+    description: >-
+      Reports and supportive measures relating to sex-based discrimination,
+      harassment and sexual misconduct.
+    services: [reports, supportive measures, resolution process]
+    display_order: 20

@@ -63,7 +63,11 @@ DEFAULT_COVERAGE_GATE_MODE = "augment"
 # extends it locally (never touching production detection) where an ask has no
 # operator-era phrasing: "when are they due?" names the deadlines domain.
 _EXTRA_DOMAIN_HINTS: dict[str, re.Pattern[str]] = {
-    "deadlines": re.compile(r"\bdue\b|how long do i have", re.IGNORECASE),
+    "deadlines": re.compile(
+        r"\bdue\b|how long do i have|\bby when\b"
+        r"|\bwhen (?:do|does|is|are|will) i (?:have|need) to (?:pay|submit|send|upload|register)\b",
+        re.IGNORECASE,
+    ),
 }
 
 # A supplement can never widen a refusal or a social turn, and the broad
@@ -76,7 +80,6 @@ _GATE_EXEMPT_TYPES = frozenset(
         "conversational_ack",
         "assistant_identity",
         "unsupported_or_out_of_scope",
-        "policy_lookup",
         "general_question",
     }
 )

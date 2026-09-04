@@ -30,6 +30,7 @@ from audentra.integrations.assistant.blocks import (
     table_block,
     text_block,
 )
+from audentra.integrations.assistant.compose import institutional_evidence_lines
 from audentra.integrations.staff_assistant import links as staff_links
 from audentra.integrations.staff_assistant.classify import StaffClassification
 from audentra.integrations.staff_assistant.derive import (
@@ -248,9 +249,12 @@ def _block_identity(block: JsonDict) -> tuple[str, str]:
 
 
 def build_staff_evidence_bundle(state: StaffDerivedState) -> list[str]:
-    """Every fact the composer may use, rendered once as plain text."""
+    """Every fact the composer may use, rendered once as plain text.
+
+    Institutional facts lead (see the student bundle for why)."""
 
     lines: list[str] = []
+    lines.extend(institutional_evidence_lines(state.institution_knowledge))
     lines.extend(_staff_evidence_lines(state))
     cohort = state.cohort
     if cohort is not None:
@@ -2406,25 +2410,84 @@ def _compose_playbooks(
     _classification: StaffClassification, state: StaffDerivedState
 ) -> ComposedStaffAnswer:
     evidence = build_staff_evidence_bundle(state)
+    knowledge = state.institution_knowledge
+    documents = [_m(item) for item in _m(knowledge).get("documents", [])] if knowledge else []
     guidance = state.guidance
     plays = list(guidance.get("corePlays", [])) if guidance else []
     cards = list(guidance.get("knowledgeCards", [])) if guidance else []
-    if not plays and not cards:
+    if not documents and not plays and not cards:
         message = (
-            "No staff-authored plays or knowledge cards exist yet, and there is "
-            "no institutional playbook engine — so I have no policy to cite. I "
-            "can still recommend from a student's record, clearly labelled as "
-            "my suggestion."
+            "I found no approved policy, procedure or calendar entry for that, and no "
+            "staff-authored play or knowledge card — so I have no institutional source "
+            "to cite. I can still recommend from a student's record, clearly labelled "
+            "as my suggestion."
         )
         return ComposedStaffAnswer(
             message=message, blocks=[text_block(message)], evidence_texts=evidence
         )
-    message = (
-        f"There are {len(plays)} staff-authored core play(s) and {len(cards)} "
-        "knowledge card(s). These are prose guidance written by staff — no "
-        "engine enforces them."
-    )
-    blocks: list[JsonDict] = [text_block(message)]
+    blocks: list[JsonDict] = []
+    if documents:
+        primary = documents[0]
+        sections = [_m(item) for item in primary.get("sections", [])]
+        lead = (
+            str(sections[0].get("text") or primary.get("summary") or "")
+            if sections
+            else str(primary.get("summary") or "")
+        )
+        owner = _m(primary.get("owner"))
+        applicability = _m(primary.get("applicability"))
+        verdict = str(applicability.get("verdict") or "")
+        applies_note = {
+            "applies": " It applies to this student.",
+            "does_not_apply": " By the student's record it does not apply to them.",
+        }.get(verdict, "")
+        message = (
+            f"From {primary.get('title')} (version {primary.get('version')}, effective "
+            f"{primary.get('effectiveFrom')}, owned by "
+            f"{owner.get('name') or 'the owning office'}): "
+            f"{lead}{applies_note}"
+        )
+        blocks.append(text_block(message))
+        if len(documents) > 1:
+            blocks.append(
+                bullet_list_block(
+                    [
+                        {
+                            "text": (
+                                f"{_m(doc).get('title')} ({_m(doc).get('kind')}): "
+                                f"{_m(doc).get('summary')}"
+                            )
+                        }
+                        for doc in documents[1:4]
+                    ],
+                    title="Related documents",
+                )
+            )
+        calendar = [_m(item) for item in _m(knowledge).get("calendar", [])][:4]
+        if calendar:
+            blocks.append(
+                bullet_list_block(
+                    [
+                        {
+                            "text": f"{entry.get('label')} — {entry.get('startsOn')}"
+                            + (
+                                f" ({entry.get('relativeToToday')})"
+                                if entry.get("relativeToToday")
+                                else ""
+                            )
+                        }
+                        for entry in calendar
+                    ],
+                    title="Calendar dates",
+                )
+            )
+    else:
+        message = (
+            f"There are {len(plays)} staff-authored core play(s) and {len(cards)} "
+            "knowledge card(s). These are prose guidance written by staff — no "
+            "engine enforces them."
+        )
+        blocks.append(text_block(message))
     if plays:
         blocks.append(
             bullet_list_block(

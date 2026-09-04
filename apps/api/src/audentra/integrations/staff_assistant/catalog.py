@@ -64,6 +64,10 @@ STAFF_TOOL_NAMES = (
     "summarizeInquiries",
     "searchInquiries",
     "getComponentSummary",
+    # Approved institutional knowledge: policies, procedures, handbook,
+    # calendar, office directory. Text arguments only; `studentId` is bound
+    # server-side when the turn is about a resolved student.
+    "searchInstitutionalKnowledge",
 )
 
 # Source-of-truth classification, mirroring the student catalog's discipline.
@@ -108,6 +112,7 @@ STAFF_TOOL_INFORMATION_CLASS: Mapping[str, str] = {
     "summarizeInquiries": "operational_state",
     "searchInquiries": "operational_state",
     "getComponentSummary": "operational_state",
+    "searchInstitutionalKnowledge": "institution_knowledge",
 }
 
 STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
@@ -315,6 +320,19 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "Read staff-authored core plays and knowledge cards. Prose guidance "
         "written by staff — not system-enforced policy."
     ),
+    "searchInstitutionalKnowledge": (
+        "Search the institution's approved, versioned knowledge — published "
+        "policies, staff procedures, handbook chapters, program guides, the "
+        "academic calendar and the office directory — by a text `query`. Use "
+        "it for what a rule or deadline is, what happens when it is missed, "
+        "exceptions and extensions, amounts and dates, service levels, "
+        "escalation paths, and which office owns a step. Every hit carries "
+        "code, version, effective date and owning office; when the turn is "
+        "about a resolved student the result says whether each document "
+        "applies to that student (residency, first-year or transfer, admit "
+        "term, housing plan, program). Filters: audience (student|internal), "
+        "kind, office code, limit."
+    ),
     "getActionRules": "Read the configured staff automation rules.",
     "getMailboxMessages": (
         "Read up to 25 messages from the authenticated staff member's authorized "
@@ -361,6 +379,7 @@ STAFF_RECEIPT_SOURCES: Mapping[str, str] = {
     "summarizeInquiries": "inquiries",
     "searchInquiries": "inquiries",
     "getComponentSummary": "staff_team",
+    "searchInstitutionalKnowledge": "institution_knowledge",
 }
 
 # Tools whose primary argument is a resolved staff member. The pipeline binds
@@ -593,6 +612,26 @@ STAFF_TOOL_ARGUMENTS: Mapping[str, Mapping[str, JsonDict]] = {
         "limit": {"kind": "int", "minimum": 1, "maximum": 25, "optional": True},
     },
     "getComponentSummary": {"component": {"kind": "text", "max_length": 120}},
+    "searchInstitutionalKnowledge": {
+        "query": {"kind": "text", "max_length": 240},
+        "audience": {"kind": "enum", "values": ("student", "internal", "all"), "optional": True},
+        "kind": {
+            "kind": "enum",
+            "values": (
+                "policy",
+                "procedure",
+                "handbook",
+                "program",
+                "service",
+                "directory",
+                "internal",
+            ),
+            "optional": True,
+        },
+        "office": {"kind": "text", "max_length": 16, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 8, "optional": True},
+        "studentId": {"kind": "uuid", "optional": True},
+    },
 }
 
 

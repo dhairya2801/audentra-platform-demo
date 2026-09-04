@@ -112,10 +112,73 @@ def compose_deterministic(
                 block for block in extra_answer.blocks if block not in answer.blocks
             )
             answer.evidence_texts.extend(extra_answer.evidence_texts)
+    _append_policy_note(answer, classification, state)
     for note in _unavailable_notes(state):
         answer.message = f"{answer.message} {note}"
     answer.message = answer.message.strip()[:1_200]
     return answer
+
+
+def _append_policy_note(
+    answer: ComposedAnswer, classification: Classification, state: DerivedState
+) -> None:
+    """A record answer that also read the corpus carries the rule it found.
+
+    The prose rewrite works from this draft; a rule that only lives in the
+    evidence tail is a rule the rewrite tends to drop, so the top document's
+    best section rides in the draft itself, named and versioned.
+    """
+
+    if classification.request_type == "policy_lookup":
+        return
+    knowledge = state.institution_knowledge
+    if not knowledge:
+        return
+    documents = [_mapping_or_empty(item) for item in knowledge.get("documents", [])]
+    if not documents:
+        return
+    primary = documents[0]
+    sections = [_mapping_or_empty(item) for item in primary.get("sections", [])]
+    situation = _mapping_or_empty(primary.get("situationSection"))
+    lead = situation or (sections[0] if sections else {})
+    text = str(lead.get("highlight") or lead.get("text") or primary.get("summary") or "")
+    if not text:
+        return
+    applicability = _mapping_or_empty(primary.get("applicability"))
+    verdict = str(applicability.get("verdict") or "")
+    prefix = {
+        "applies": "This applies to you. ",
+        "does_not_apply": "By your record this does not apply to you. ",
+    }.get(verdict, "")
+    sentence = (
+        f"Policy — {primary.get('title')} (v{primary.get('version')}): {prefix}"
+        f"{_clip_text(text, 360)}"
+    )
+    if sentence not in answer.message:
+        # After the first sentence, so a long record answer (which the
+        # 1,200-character cap trims from the end) cannot push the rule out.
+        head, separator, tail = answer.message.partition(". ")
+        answer.message = (
+            f"{head}. {sentence} {tail}".strip()
+            if separator
+            else f"{answer.message} {sentence}".strip()
+        )
+    items = [
+        {"text": f"{doc.get('title')}: {_clip_text(str(doc.get('summary') or ''), 200)}"}
+        for doc in documents[:3]
+    ]
+    answer.blocks.append(bullet_list_block(items, title="From the policy"))
+
+
+def _clip_text(value: str, limit: int) -> str:
+    cleaned = " ".join(value.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[: limit - 1]
+    if "." in cut[limit // 2 :]:
+        cut = cut[: cut.rfind(".") + 1]
+        return cut
+    return cut.rstrip() + "…"
 
 
 def _answer_waiver_claim(
@@ -180,10 +243,124 @@ def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def institutional_evidence_lines(knowledge: Mapping[str, Any] | None) -> list[str]:
+    """Approved institutional knowledge as evidence, with provenance kept.
+
+    Every line names the document, its version and effective date and the
+    office that owns it, so a rewrite can cite the rule rather than assert it,
+    and the applicability verdict is stated as a fact of the student's record
+    — the composer restates it, never re-derives it.
+    """
+
+    if not knowledge:
+        return []
+    lines: list[str] = []
+    documents = [
+        _mapping_or_empty(item) for item in _mapping_or_empty(knowledge).get("documents", [])
+    ]
+    guidance = str(knowledge.get("answerGuidance") or "")
+    if documents:
+        lines.append(
+            "INSTITUTIONAL FACTS (approved, versioned documents) — when the question asks "
+            "what a rule is, what happens when something is missed, whether something is "
+            "allowed, what it costs, when a date falls, or who handles a step, answer from "
+            "these first and use the record facts to say where the student stands."
+            + (f" {guidance}" if guidance else "")
+        )
+    if not documents:
+        lines.append(
+            "Institutional knowledge search: no approved policy or calendar entry matched "
+            "this question. Do not state a rule, date or amount that is not in these facts; "
+            "say the official answer comes from enrollment support."
+        )
+    facets = _mapping_or_empty(knowledge.get("studentFacets"))
+    basis = _mapping_or_empty(facets.get("basis"))
+    if basis:
+        lines.append(
+            "Student record used to check applicability: "
+            + "; ".join(f"{key.replace('_', ' ')} — {value}" for key, value in basis.items())
+        )
+    for document in documents[:4]:
+        owner = _mapping_or_empty(document.get("owner"))
+        owner_text = str(owner.get("name") or document.get("owner") or "the owning office")
+        if owner.get("location"):
+            owner_text += f", {owner['location']}"
+        if owner.get("email"):
+            owner_text += f", {owner['email']}"
+        if owner.get("hours"):
+            owner_text += f", hours {owner['hours']}"
+        applicability = _mapping_or_empty(document.get("applicability"))
+        verdict = str(applicability.get("verdict") or "unknown")
+        verdict_text = {
+            "applies": "APPLIES to this student",
+            "does_not_apply": "DOES NOT APPLY to this student",
+        }.get(verdict, "applicability to this student could not be determined from the record")
+        if applicability.get("basis") and verdict != "applies":
+            verdict_text += f" ({applicability['basis']})"
+        lines.append(
+            f"Institutional policy '{document.get('title')}' (code {document.get('code')}, "
+            f"version {document.get('version')}, effective from {document.get('effectiveFrom')}"
+            + (f" until {document['effectiveUntil']}" if document.get("effectiveUntil") else "")
+            + f"; owned by {owner_text}); {verdict_text}. Summary: {document.get('summary')}"
+        )
+        situation = _mapping_or_empty(document.get("situationSection"))
+        if situation.get("text"):
+            lines.append(
+                f"  Policy text for THIS student ({situation.get('why')}) — "
+                f"{document.get('title')} > {situation.get('heading')}: {situation.get('text')}"
+            )
+        for section in [_mapping_or_empty(item) for item in document.get("sections", [])][:2]:
+            if section.get("highlight"):
+                lines.append(
+                    f"  Key line — {document.get('title')} > {section.get('heading')}: "
+                    f"{section.get('highlight')}"
+                )
+            lines.append(
+                f"  Policy text — {document.get('title')} > {section.get('heading')}: "
+                f"{section.get('text')}"
+            )
+    for entry in [_mapping_or_empty(item) for item in knowledge.get("calendar", [])][:6]:
+        when = str(entry.get("startsOn") or "")
+        if entry.get("endsOn"):
+            when += f" to {entry['endsOn']}"
+        if entry.get("startsAt"):
+            when += f" at {entry['startsAt']}"
+        lines.append(
+            f"Academic calendar ({entry.get('term') or 'all terms'}): "
+            f"{entry.get('label')} — {when}"
+            + (f" ({entry.get('relativeToToday')})" if entry.get("relativeToToday") else "")
+            + (f"; owner {entry.get('ownerOffice')}" if entry.get("ownerOffice") else "")
+        )
+    for office in [_mapping_or_empty(item) for item in knowledge.get("offices", [])][:3]:
+        lines.append(
+            f"Office {office.get('name')}: {office.get('location')}"
+            + (f"; email {office.get('email')}" if office.get("email") else "")
+            + (f"; hours {office.get('hours')}" if office.get("hours") else "")
+            + (
+                "; the platform holds no staff records for this office"
+                if office.get("known") and not office.get("staffRecordsInPlatform")
+                else ""
+            )
+        )
+    if documents:
+        lines.append(
+            "Institutional facts above come from approved, versioned documents; cite the "
+            "document by name when stating a rule, quote dates and amounts exactly as "
+            "written, and never extend a rule beyond what its text says."
+        )
+    return lines
+
+
 def build_evidence_bundle(state: DerivedState) -> list[str]:
-    """Every fact the composer may use, rendered once as plain text."""
+    """Every fact the composer may use, rendered once as plain text.
+
+    Institutional facts come first: the composer sees a bounded window of
+    evidence, and when a question asks what a rule is or what follows from
+    it, the rule must not be the part that falls off the end.
+    """
 
     lines: list[str] = []
+    lines.extend(institutional_evidence_lines(state.institution_knowledge))
     for step in state.remaining_steps:
         note = (
             " — a payment for this is already submitted and pending; the "
@@ -1464,30 +1641,109 @@ def _compose_aid_support(
 
 
 def _compose_policy_lookup(
-    _classification: Classification, _state: DerivedState, _name: str | None
+    _classification: Classification, state: DerivedState, _name: str | None
 ) -> ComposedAnswer:
-    # No reviewed institutional policy or calendar source is wired into Edward
-    # yet, and inventing a rule or a date is the one failure a student acts
-    # on. Say so plainly and route to the people who can answer.
+    """Institutional questions, answered from the approved knowledge corpus.
+
+    The read carries provenance (code, version, effective date, owning office)
+    and an applicability verdict computed from the student's own record. When
+    the corpus is not wired in, or nothing matched, the honest refusal stands
+    — inventing a rule or a date is the one failure a student acts on.
+    """
+
+    evidence = build_evidence_bundle(state)
+    knowledge = state.institution_knowledge
+    documents = [
+        _mapping_or_empty(item) for item in _mapping_or_empty(knowledge).get("documents", [])
+    ]
+    if not knowledge or not documents:
+        message = (
+            "I couldn't find an approved policy or calendar entry that answers that, "
+            "and I only answer institutional questions from approved sources. The "
+            "enrollment support team can give you the official answer: open the Help "
+            "page or book an appointment."
+        )
+        return ComposedAnswer(
+            message=message,
+            blocks=[
+                text_block(message),
+                next_steps_block(
+                    [
+                        {"text": "Ask enrollment support", "href": links.HELP},
+                        {"text": "Book an appointment", "href": links.APPOINTMENTS},
+                    ],
+                    title="Get the official answer",
+                ),
+            ],
+            evidence_texts=evidence,
+        )
+    primary = documents[0]
+    sections = [_mapping_or_empty(item) for item in primary.get("sections", [])]
+    lead = (
+        str(sections[0].get("text") or primary.get("summary") or "")
+        if sections
+        else str(primary.get("summary") or "")
+    )
+    applicability = _mapping_or_empty(primary.get("applicability"))
+    verdict = str(applicability.get("verdict") or "")
+    applies_note = {
+        "applies": " This applies to you.",
+        "does_not_apply": " Based on your record, this rule does not apply to you.",
+    }.get(verdict, "")
+    owner = _mapping_or_empty(primary.get("owner"))
+    owner_note = (
+        f" It is owned by {owner.get('name')}"
+        + (f" ({owner.get('location')})" if owner.get("location") else "")
+        + "."
+        if owner.get("name")
+        else ""
+    )
     message = (
-        "That's institutional information — policy or calendar dates — and I "
-        "can only answer from approved sources, which I don't have access to "
-        "yet. The enrollment support team can give you the official answer: "
-        "open the Help page or book an appointment."
+        f"From {primary.get('title')} (version {primary.get('version')}, effective "
+        f"{primary.get('effectiveFrom')}): {lead}{applies_note}{owner_note}"
     )
-    return ComposedAnswer(
-        message=message,
-        blocks=[
-            text_block(message),
-            next_steps_block(
+    blocks: list[JsonDict] = [text_block(message)]
+    if len(documents) > 1:
+        blocks.append(
+            bullet_list_block(
                 [
-                    {"text": "Ask enrollment support", "href": links.HELP},
-                    {"text": "Book an appointment", "href": links.APPOINTMENTS},
+                    {
+                        "text": (
+                            f"{_mapping_or_empty(doc).get('title')}: "
+                            f"{_mapping_or_empty(doc).get('summary')}"
+                        )
+                    }
+                    for doc in documents[1:4]
                 ],
-                title="Get the official answer",
-            ),
-        ],
-    )
+                title="Related policies",
+            )
+        )
+    calendar = [_mapping_or_empty(item) for item in knowledge.get("calendar", [])][:4]
+    if calendar:
+        blocks.append(
+            bullet_list_block(
+                [
+                    {
+                        "text": f"{entry.get('label')} — {entry.get('startsOn')}"
+                        + (
+                            f" ({entry.get('relativeToToday')})"
+                            if entry.get("relativeToToday")
+                            else ""
+                        )
+                    }
+                    for entry in calendar
+                ],
+                title="Calendar dates",
+            )
+        )
+    steps = []
+    if owner.get("email"):
+        steps.append(
+            {"text": f"Contact {owner.get('shortName') or owner.get('name')}: {owner['email']}"}
+        )
+    steps.append({"text": "Ask enrollment support", "href": links.HELP})
+    blocks.append(next_steps_block(steps, title="Who to ask"))
+    return ComposedAnswer(message=message, blocks=blocks, evidence_texts=evidence)
 
 
 def _compose_registration(

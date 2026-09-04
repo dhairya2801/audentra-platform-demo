@@ -1,0 +1,245 @@
+schema_version: 1
+tenant: aster-demo
+configuration: programs
+# Department and core requirements per program, matching the program guides in
+# documents/program-*.md and the course catalog in ../academics.yaml. The
+# importer sets program.department and upserts program_requirement rows against
+# the active catalog version; `term` is the recommended term (1–8).
+programs:
+  - code: BS-CS
+    department: Computing
+    requirements:
+      - {course: CS 101, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: CS 201, category: major_core, term: 2}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: CS 230, category: major_core, term: 3}
+      - {course: MATH 220, category: math_science, term: 3}
+      - {course: PHIL 220, category: general_education, term: 3}
+      - {course: CS 310, category: major_core, term: 4}
+      - {course: CS 320, category: major_core, term: 4}
+      - {course: CS 350, category: major_core, term: 5}
+      - {course: CS 490, category: major_core, term: 8}
+  - code: BS-DS
+    department: Computing
+    requirements:
+      - {course: DATA 110, category: major_core, term: 1}
+      - {course: CS 101, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: CS 201, category: major_core, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: DATA 220, category: major_core, term: 3}
+      - {course: MATH 220, category: math_science, term: 3}
+      - {course: STAT 310, category: major_core, term: 4}
+      - {course: CS 350, category: major_core, term: 4}
+      - {course: PHIL 220, category: general_education, term: 4}
+      - {course: DATA 330, category: major_core, term: 5}
+      - {course: DATA 490, category: major_core, term: 8}
+  - code: BS-ME
+    department: Engineering
+    requirements:
+      - {course: ENGR 101, category: major_core, term: 1}
+      - {course: ME 110, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: PHYS 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: PHYS 152, category: math_science, term: 2}
+      - {course: CHEM 101, category: math_science, term: 2}
+      - {course: MATH 251, category: math_science, term: 3}
+      - {course: ME 210, category: major_core, term: 3}
+      - {course: ME 310, category: major_core, term: 4}
+      - {course: MATH 220, category: math_science, term: 4}
+      - {course: PHIL 220, category: general_education, term: 5}
+      - {course: ME 480, category: major_core, term: 7}
+  - code: BS-EE
+    department: Engineering
+    requirements:
+      - {course: ENGR 101, category: major_core, term: 1}
+      - {course: CS 101, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: PHYS 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: EE 220, category: major_core, term: 2}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: PHYS 152, category: math_science, term: 2}
+      - {course: AST 100, category: general_education, term: 2}
+      - {course: EE 210, category: major_core, term: 3}
+      - {course: MATH 251, category: math_science, term: 3}
+      - {course: MATH 220, category: math_science, term: 3}
+      - {course: EE 320, category: major_core, term: 4}
+      - {course: PHIL 220, category: general_education, term: 5}
+      - {course: EE 480, category: major_core, term: 7}
+  - code: BS-CE
+    department: Engineering
+    requirements:
+      - {course: ENGR 101, category: major_core, term: 1}
+      - {course: ME 110, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: PHYS 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: CE 210, category: major_core, term: 2}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: PHYS 152, category: math_science, term: 2}
+      - {course: CHEM 101, category: math_science, term: 2}
+      - {course: ME 210, category: major_core, term: 3}
+      - {course: MATH 251, category: math_science, term: 3}
+      - {course: CE 310, category: major_core, term: 4}
+      - {course: CE 320, category: major_core, term: 4}
+      - {course: PHIL 220, category: general_education, term: 5}
+      - {course: CE 480, category: major_core, term: 7}
+  - code: BBA
+    department: Business
+    requirements:
+      - {course: BUS 101, category: major_core, term: 1}
+      - {course: ECON 101, category: major_core, term: 1}
+      - {course: MATH 120, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: ACCT 101, category: major_core, term: 2}
+      - {course: ECON 102, category: major_core, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: BUS 210, category: major_core, term: 3}
+      - {course: ACCT 201, category: major_core, term: 3}
+      - {course: BUS 350, category: major_core, term: 4}
+      - {course: BUS 360, category: major_core, term: 4}
+      - {course: BUS 310, category: major_core, term: 5}
+      - {course: BUS 320, category: major_core, term: 5}
+      - {course: BUS 490, category: major_core, term: 8}
+  - code: BS-ACC
+    department: Business
+    requirements:
+      - {course: BUS 101, category: major_core, term: 1}
+      - {course: ACCT 101, category: major_core, term: 1}
+      - {course: ECON 101, category: major_core, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: MATH 120, category: math_science, term: 1}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: ACCT 201, category: major_core, term: 2}
+      - {course: ECON 102, category: major_core, term: 2}
+      - {course: ACCT 210, category: major_core, term: 3}
+      - {course: ACCT 211, category: major_core, term: 4}
+      - {course: BUS 360, category: major_core, term: 4}
+      - {course: ACCT 310, category: major_core, term: 5}
+      - {course: ACCT 320, category: major_core, term: 5}
+      - {course: ACCT 330, category: major_core, term: 6}
+      - {course: BUS 320, category: major_core, term: 6}
+      - {course: ACCT 490, category: major_core, term: 8}
+  - code: BA-ECON
+    department: Social Sciences
+    requirements:
+      - {course: ECON 101, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: ECON 102, category: major_core, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: ECON 320, category: major_core, term: 3}
+      - {course: ECON 321, category: major_core, term: 4}
+      - {course: ECON 310, category: major_core, term: 4}
+      - {course: ECON 490, category: major_core, term: 8}
+  - code: BA-PSY
+    department: Social Sciences
+    requirements:
+      - {course: PSY 101, category: major_core, term: 1}
+      - {course: MATH 120, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: BIO 101, category: math_science, term: 2}
+      - {course: PSY 210, category: major_core, term: 3}
+      - {course: PSY 320, category: major_core, term: 4}
+      - {course: PSY 330, category: major_core, term: 4}
+      - {course: PSY 340, category: major_core, term: 5}
+      - {course: PSY 350, category: major_core, term: 5}
+      - {course: PSY 490, category: major_core, term: 8}
+  - code: BA-ENG
+    department: Humanities
+    requirements:
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: ENGL 120, category: major_core, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: MATH 120, category: math_science, term: 1}
+      - {course: ENGL 220, category: major_core, term: 2}
+      - {course: HIST 110, category: general_education, term: 2}
+      - {course: ENGL 210, category: major_core, term: 3}
+      - {course: ENGL 340, category: major_core, term: 5}
+      - {course: ENGL 350, category: major_core, term: 6}
+      - {course: ENGL 490, category: major_core, term: 8}
+  - code: BS-BIO
+    department: Natural Sciences
+    requirements:
+      - {course: BIO 101, category: major_core, term: 1}
+      - {course: CHEM 101, category: math_science, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: BIO 210, category: major_core, term: 2}
+      - {course: CHEM 102, category: math_science, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: BIO 220, category: major_core, term: 3}
+      - {course: CHEM 210, category: math_science, term: 3}
+      - {course: BIO 310, category: major_core, term: 4}
+      - {course: PHYS 151, category: math_science, term: 4}
+      - {course: BIO 320, category: major_core, term: 5}
+      - {course: BIO 330, category: major_core, term: 5}
+      - {course: BIO 490, category: major_core, term: 8}
+  - code: BS-CHEM
+    department: Natural Sciences
+    requirements:
+      - {course: CHEM 101, category: major_core, term: 1}
+      - {course: MATH 151, category: math_science, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: CHEM 102, category: major_core, term: 2}
+      - {course: MATH 152, category: math_science, term: 2}
+      - {course: PHYS 151, category: math_science, term: 2}
+      - {course: CHEM 210, category: major_core, term: 3}
+      - {course: PHYS 152, category: math_science, term: 3}
+      - {course: CHEM 211, category: major_core, term: 4}
+      - {course: CHEM 320, category: major_core, term: 4}
+      - {course: CHEM 310, category: major_core, term: 5}
+      - {course: CHEM 330, category: major_core, term: 5}
+      - {course: CHEM 340, category: major_core, term: 6}
+      - {course: CHEM 490, category: major_core, term: 7}
+  - code: BSN
+    department: Health Sciences
+    requirements:
+      - {course: BIO 101, category: math_science, term: 1}
+      - {course: CHEM 101, category: math_science, term: 1}
+      - {course: NURS 101, category: major_core, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: BIO 220, category: math_science, term: 2}
+      - {course: PSY 101, category: general_education, term: 2}
+      - {course: STAT 101, category: math_science, term: 2}
+      - {course: BIO 221, category: math_science, term: 3}
+      - {course: NURS 210, category: major_core, term: 3}
+      - {course: BIO 310, category: math_science, term: 3}
+      - {course: NURS 310, category: major_core, term: 4}
+      - {course: NURS 320, category: major_core, term: 4}
+      - {course: PSY 330, category: general_education, term: 5}
+      - {course: NURS 490, category: major_core, term: 8}
+  - code: BFA-DES
+    department: Arts
+    requirements:
+      - {course: DES 101, category: major_core, term: 1}
+      - {course: DES 120, category: major_core, term: 1}
+      - {course: ART 101, category: major_core, term: 1}
+      - {course: WRIT 101, category: general_education, term: 1}
+      - {course: AST 100, category: general_education, term: 1}
+      - {course: DES 130, category: major_core, term: 2}
+      - {course: DES 140, category: major_core, term: 2}
+      - {course: MATH 120, category: math_science, term: 2}
+      - {course: DES 210, category: major_core, term: 3}
+      - {course: DES 310, category: major_core, term: 5}
+      - {course: DES 490, category: major_core, term: 8}

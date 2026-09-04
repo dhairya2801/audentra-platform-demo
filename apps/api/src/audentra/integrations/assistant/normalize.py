@@ -32,7 +32,9 @@ _FOLLOW_UP_OPENER = re.compile(
 )
 
 _MUTATION_REQUEST = re.compile(
-    r"\b(?:submit|upload|pay|update|change|edit|cancel|remove|delete|register me|"
+    # "change my mind" is an idiom, not a request to change a record.
+    r"\b(?:submit|upload|pay|update|change(?! (?:my|your|his|her|their) mind)|edit|cancel|"
+    r"remove|delete|register me|"
     r"enroll me|sign me up|apply for me|book|schedule|reschedule|move|redo|"
     r"waive|approve|mark)\b"
     r"[^.?]{0,48}\b(?:for me|my|it|this|that|the)\b"
@@ -54,9 +56,12 @@ _DELEGATED_ACTION = re.compile(
 # world, not a request to perform the action. "Where do I upload it?" and
 # "Can I still pay?" must never hit the write refusal.
 _INFORMATIONAL_FRAME = re.compile(
-    r"^(?:so |and |but |ok(?:ay)? |hey |hi |please |um |well )*"
+    # A leading context clause ("my payment is still processing, do I need
+    # to pay again?") does not make the question a request.
+    r"^(?:so |and |but |ok(?:ay)? |hey |hi |please |um |well )*(?:[^,?]{0,80},\s*)?"
     r"(?:where|how|when|what|why|who|which|whether"
-    r"|can i|could i|should i|may i|do i|does|is it|are there|am i|will i|would i"
+    r"|can i|could i|should i|may i|do i|does|is (?:it|the|my|this|that|there)|are there"
+    r"|am i|will i|would i|must i|need i"
     r"|if i|if my|what if|when i|suppose|say i|assuming)\b",
     re.IGNORECASE,
 )

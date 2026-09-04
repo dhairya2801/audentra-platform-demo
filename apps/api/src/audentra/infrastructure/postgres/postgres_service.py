@@ -70,6 +70,10 @@ from audentra.infrastructure.documents.processing import (
     create_signed_onboarding_pdf,
     extract_student_document_image_region,
 )
+from audentra.infrastructure.postgres.knowledge_repository import (
+    PostgresInstitutionKnowledgeRepository,
+    SearchQuery,
+)
 from audentra.infrastructure.storage.s3 import ObjectNotFoundError, StorageError
 from audentra.integrations import edward_action_responses as action_responses
 from audentra.integrations.ai.edward_safety import (
@@ -713,6 +717,10 @@ class PostgresRepositoryBundle:
     edward_feedback: PostgresEdwardFeedbackRepository | None = None
     advising: PostgresAdvisingRepository | None = None
     staff_operations: PostgresStaffOperationsRepository | None = None
+    # The approved institutional knowledge corpus (policies, calendar,
+    # offices). Optional: a tenant without a corpus answers institutional
+    # questions with the honest refusal, exactly as before.
+    knowledge: PostgresInstitutionKnowledgeRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -2725,7 +2733,7 @@ class PostgresPlatformService:
 
         portal = self.repository.portal
         platform = self.repository.platform
-        primitives: dict[str, Callable[[], Any]] = {}
+        primitives: dict[str, Callable[..., Any]] = {}
 
         def granted(*scopes: str) -> bool:
             return not auth.is_delegate or bool(set(scopes) & auth.delegate_scopes)
@@ -2771,7 +2779,28 @@ class PostgresPlatformService:
             primitives["campus_life"] = lambda: portal.get_campus_life(auth)
         if granted("messages"):
             primitives["messages"] = lambda: portal.get_student_messages(auth)
+        knowledge = self.repository.knowledge
+        if knowledge is not None and granted("help", "enrollment"):
+            primitives["institution_knowledge"] = lambda query: self._student_knowledge_search(
+                auth, knowledge, query
+            )
         return AssistantToolHost(cast(Any, primitives))
+
+    @staticmethod
+    async def _student_knowledge_search(
+        auth: AuthContext, knowledge: PostgresInstitutionKnowledgeRepository, query: str
+    ) -> JsonDict:
+        """Approved knowledge for the signed-in student: student audience only,
+        applicability computed from that student's own record."""
+
+        facets = (
+            await knowledge.facets_for_student(auth.tenant_id, auth.student_id)
+            if auth.student_id
+            else None
+        )
+        return await knowledge.search(
+            auth.tenant_id, SearchQuery(text=query, audience="student"), facets=facets
+        )
 
     @staticmethod
     def _action_conversation_response(message: str, state: Mapping[str, Any]) -> JsonDict | None:
@@ -3618,6 +3647,7 @@ class PostgresPlatformService:
                     auth, inquiry_id
                 ),
                 "guidance": lambda: assistant.get_staff_guidance(auth),
+                **self._staff_knowledge_primitives(auth),
                 "action_rules": lambda: staff.get_action_rules(auth),
                 "mailbox_messages": (
                     lambda query="", limit=10: assistant.get_authorized_mailbox_messages(
@@ -3628,6 +3658,58 @@ class PostgresPlatformService:
             },
             staff_member_id=auth.actor_id,
         )
+
+    def _staff_knowledge_primitives(self, auth: AuthContext) -> dict[str, Any]:
+        """Approved knowledge for staff: every audience, applicability against
+        the resolved student when the turn is about one. Absent when the tenant
+        has no corpus so the tool reports honest unavailability."""
+
+        knowledge = self.repository.knowledge
+        if knowledge is None:
+            return {}
+
+        async def viewer_terms() -> tuple[str, ...]:
+            if not auth.actor_id:
+                return ()
+            try:
+                component = await knowledge.viewer_component(auth.tenant_id, str(auth.actor_id))
+            except Exception:
+                return ()
+            return (component,) if component else ()
+
+        async def read(
+            query: str,
+            student_id: str | None = None,
+            audience: str | None = None,
+            kind: str | None = None,
+            office: str | None = None,
+            limit: int | None = None,
+        ) -> JsonDict:
+            facets = (
+                await knowledge.facets_for_student(auth.tenant_id, student_id)
+                if student_id
+                else None
+            )
+            kinds: tuple[str, ...] = (kind,) if kind else ()
+            # Staff always read every audience: a student-facing rule and its
+            # internal procedure belong together, and a model narrowing the
+            # audience would hide the procedure. Fewer than three documents is
+            # too few to say "nothing else applies".
+            del audience
+            return await knowledge.search(
+                auth.tenant_id,
+                SearchQuery(
+                    text=query,
+                    audience="staff",
+                    limit=max(3, int(limit or 4)),
+                    kinds=kinds,
+                    office=office,
+                    viewer_terms=await viewer_terms(),
+                ),
+                facets=facets,
+            )
+
+        return {"institution_knowledge": read}
 
     def _staff_operations_primitives(self, auth: AuthContext) -> dict[str, Any]:
         """Bounded staff directory / inquiry / department reads.

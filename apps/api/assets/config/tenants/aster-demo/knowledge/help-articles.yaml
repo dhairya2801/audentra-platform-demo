@@ -1,0 +1,73 @@
+schema_version: 1
+tenant: aster-demo
+configuration: help_articles
+# The student Help page's short guides. Four fixed categories (the portal's
+# topic picker); each points at the fuller document in documents/.
+articles:
+  - category: getting_started
+    question: Where should I begin, and what is the enrollment checklist?
+    answer: >-
+      Start with the next action on your Dashboard. The enrollment checklist has eight requirements
+      — profile verification, identity document, official transcript, financial-aid verification
+      (if selected), immunization records, housing plans, the $500 enrollment deposit and
+      orientation registration — each with its own due date counted from the day you accepted the
+      offer and the office that owns it. Missing a date never cancels your offer by itself, but
+      each item gates something (housing, adviser assignment, registration). See The Enrollment
+      Checklist guide.
+  - category: getting_started
+    question: Who is my adviser and when do I have to meet them?
+    answer: >-
+      An academic adviser from your program's department is assigned within five business days of
+      your enrollment deposit posting; their name, email and next open slot appear on the
+      Dashboard. The first advising meeting is required before registration and is booked on the
+      Appointments page during the advising window (10–21 August 2026 for Fall admits). If your
+      adviser is on leave, the Assistant Director, First-Year Advising covers first-year students.
+  - category: documents
+    question: Which files can I upload, and why was my document rejected?
+    answer: >-
+      Upload PDF, JPEG or PNG files up to 10 MB with every edge of the page visible. The owning
+      office reviews within its service level (Registrar and Financial Aid 5 business days,
+      Student Health 7, Enrollment Services 1) and, if it cannot accept the upload, records one
+      reason — unclear image, incomplete, wrong document, expired, information mismatch, or
+      evidence that cannot be accepted. Resubmit; the original due date does not move.
+  - category: documents
+    question: Does the transcript I uploaded count as my official transcript?
+    answer: >-
+      Not on its own. An uploaded transcript lets the Registrar start transfer-credit evaluation,
+      but admission stays conditional until the issuing school sends an official copy directly to
+      registrar@synthetic.aster.example or in a sealed envelope to Larkin Hall 150. If it has not
+      arrived by the add/drop deadline (11 September 2026), an academic-records hold blocks
+      next-term registration.
+  - category: payments
+    question: When is tuition due, and what if I cannot pay in full?
+    answer: >-
+      Fall 2026 charges are due Friday 28 August 2026 and Spring 2027 charges Friday 8 January
+      2027. By the due date you can pay in full or enrol in the four-instalment payment plan ($45
+      fee, no interest) on the Financials page. A past-due balance over $250 places a billing hold
+      that blocks registration and transcripts; a $75 late fee applies at 30 days past due. Aid
+      that is accepted but held by an open condition (such as verification) is not treated as past
+      due if Student Accounts has a deferment memo — ask before the due date.
+  - category: payments
+    question: Is the enrollment deposit refundable?
+    answer: >-
+      The $500 deposit is credited to your Fall tuition. It is refunded only if a written
+      withdrawal reaches Admissions by 1 June 2026 (Fall 2026 admits) or 1 December 2026 (Spring
+      2027 admits); after that it is non-refundable. Admissions counselors can grant one extension
+      of up to 30 days on the deposit due date for hardship or a pending external decision.
+  - category: support
+    question: Which office handles my question, and how fast will someone reply?
+    answer: >-
+      Send it from this page: Enrollment Services replies within one business day and routes it to
+      the owning office — Admissions (offer, deposit refund), Registrar (transcripts, holds, FERPA),
+      Financial Aid (FAFSA, verification, awards), Student Accounts (bills), Housing & Residence
+      Life, Academic Advising, Student Health (immunizations), International Student Services
+      (visa, I-20) or New Student Programs (orientation). Offices answer within one to seven
+      business days depending on the office; reply "escalate" if a request is past that.
+  - category: support
+    question: I am an international student — what is different for me?
+    answer: >-
+      You complete immigration check-in with International Student Services (Global Center, 2nd
+      floor) during the check-in window (21–22 August 2026) before you can register, must stay
+      enrolled in at least 12 credits every Fall and Spring, cannot waive the $1,850 student health
+      plan, are not eligible for federal or state aid (Aster Merit, the Aster Global Scholarship and
+      on-campus employment are available), and must report an address change within ten days.

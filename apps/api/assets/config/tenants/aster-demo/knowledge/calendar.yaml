@@ -1,0 +1,679 @@
+schema_version: 1
+tenant: aster-demo
+configuration: academic_calendar
+# Dated entries for 2026–2027. Times are America/New_York; a missing time
+# means "the whole day" (deadlines end at 23:59). `audience` narrows who the
+# entry is for; `owner_office` is a code from offices.yaml; `document` is the
+# knowledge document that explains the entry.
+entries:
+  # ── Fall 2026 admits: before arrival ────────────────────────────────────
+  - code: fall2026-deposit-refund-deadline
+    term: Fall 2026
+    label: Last day to withdraw with a full enrollment-deposit refund (Fall 2026 admits)
+    category: admissions
+    audience: new_students
+    starts_on: 2026-06-01
+    owner_office: ADM
+    document: enrollment-deposit-policy
+    description: A written withdrawal that reaches the Office of Admissions by this date is refunded the $500 deposit in full. After it, the deposit is non-refundable.
+  - code: fall2026-housing-application-opens
+    term: Fall 2026
+    label: Housing application opens (Fall 2026 admits)
+    category: housing
+    audience: new_students
+    starts_on: 2026-07-15
+    starts_at: "09:00"
+    owner_office: HRL
+    document: housing-application-and-assignment
+    description: Opens to each student once their enrollment deposit has posted.
+  - code: fall2026-housing-accommodation-request-deadline
+    term: Fall 2026
+    label: Housing accommodation requests due to Accessibility Services
+    category: housing
+    audience: new_students
+    starts_on: 2026-07-22
+    owner_office: ACC
+    document: accessibility-services-guide
+    description: Thirty days before move-in; later requests are honoured as space allows.
+  - code: fall2026-housing-priority-deadline
+    term: Fall 2026
+    label: Housing application priority deadline
+    category: housing
+    audience: new_students
+    starts_on: 2026-08-01
+    owner_office: HRL
+    document: housing-application-and-assignment
+    description: Applications received by this date are guaranteed an assignment and receive it by 10 August.
+  - code: fall2026-residency-exemption-deadline
+    term: Fall 2026
+    label: First-year residency exemption requests due
+    category: housing
+    audience: new_students
+    starts_on: 2026-08-22
+    owner_office: HRL
+    document: housing-first-year-residency
+    description: Exemption requests filed after the housing application deadline are reviewed only for a documented change of circumstances.
+  - code: fall2026-orientation-registration-closes
+    term: Fall 2026
+    label: Orientation registration closes
+    category: orientation
+    audience: new_students
+    starts_on: 2026-08-12
+    owner_office: NSP
+    document: orientation-policy
+    description: One week before the first (remote) session. Late registration is by request to New Student Programs and is not guaranteed a seat.
+  - code: fall2026-award-acceptance-deadline
+    term: Fall 2026
+    label: Financial-aid award acceptance deadline
+    category: financial_aid
+    audience: all
+    starts_on: 2026-08-14
+    owner_office: FA
+    document: financial-aid-award-acceptance-and-disbursement
+    description: Accept, reduce or decline each award in the portal. Unaccepted loans are cancelled after this date; grants and scholarships stay offered but do not disburse until accepted.
+  - code: fall2026-advising-window
+    term: Fall 2026
+    label: New-student advising window
+    category: advising
+    audience: new_students
+    starts_on: 2026-08-10
+    ends_on: 2026-08-21
+    owner_office: ADV
+    document: academic-advising-policy
+    description: The first advising meeting must be completed before a student's registration time ticket opens.
+  - code: fall2026-registration-opens-new-students
+    term: Fall 2026
+    label: Course registration opens for new students
+    category: registration
+    audience: new_students
+    starts_on: 2026-08-17
+    starts_at: "09:00"
+    owner_office: REG
+    document: registration-policy
+    description: New students register in assigned time tickets after their advising meeting.
+  - code: fall2026-remote-orientation
+    term: Fall 2026
+    label: Remote Orientation (Session E)
+    category: orientation
+    audience: new_students
+    starts_on: 2026-08-19
+    starts_at: "11:00"
+    ends_at: "15:00"
+    owner_office: NSP
+    document: orientation-policy
+    description: Online session for students who cannot attend in person.
+  - code: fall2026-international-check-in
+    term: Fall 2026
+    label: International Check-In and Orientation
+    category: international
+    audience: international
+    starts_on: 2026-08-21
+    ends_on: 2026-08-22
+    starts_at: "09:00"
+    ends_at: "17:00"
+    owner_office: ISS
+    document: international-student-check-in
+    description: Required immigration check-in for F-1 and J-1 students, with the international orientation. SEVIS records are activated after check-in.
+  - code: fall2026-move-in
+    term: Fall 2026
+    label: Residence hall move-in (new students)
+    category: housing
+    audience: on_campus
+    starts_on: 2026-08-22
+    ends_on: 2026-08-23
+    starts_at: "10:00"
+    ends_at: "18:00"
+    owner_office: HRL
+    document: housing-move-in-and-move-out
+    description: Assigned arrival slots by hall. Students may move in before orientation.
+  - code: fall2026-housing-application-deadline
+    term: Fall 2026
+    label: Housing application final deadline
+    category: housing
+    audience: new_students
+    starts_on: 2026-08-22
+    owner_office: HRL
+    document: housing-application-and-assignment
+    description: Applications after this date go to the waitlist rather than to assignment.
+  - code: fall2026-orientation-a
+    term: Fall 2026
+    label: Orientation Session A
+    category: orientation
+    audience: new_students
+    starts_on: 2026-08-24
+    starts_at: "08:00"
+    ends_at: "17:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: fall2026-orientation-b
+    term: Fall 2026
+    label: Orientation Session B
+    category: orientation
+    audience: new_students
+    starts_on: 2026-08-25
+    starts_at: "08:00"
+    ends_at: "17:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: fall2026-orientation-c
+    term: Fall 2026
+    label: Orientation Session C
+    category: orientation
+    audience: new_students
+    starts_on: 2026-08-26
+    starts_at: "08:00"
+    ends_at: "17:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: fall2026-transfer-orientation
+    term: Fall 2026
+    label: Transfer Orientation (Session D)
+    category: orientation
+    audience: transfer
+    starts_on: 2026-08-27
+    starts_at: "09:00"
+    ends_at: "16:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: fall2026-tuition-due
+    term: Fall 2026
+    label: Fall tuition and fees due; payment-plan enrollment deadline
+    category: billing
+    audience: all
+    starts_on: 2026-08-28
+    owner_office: SA
+    document: billing-and-payment-policy
+    description: Pay in full or enrol in the four-instalment plan by 23:59. A past-due balance over $250 after this date places a billing hold.
+  - code: fall2026-welcome-week
+    term: Fall 2026
+    label: Welcome Week
+    category: campus_life
+    audience: new_students
+    starts_on: 2026-08-28
+    ends_on: 2026-09-04
+    owner_office: NSP
+    document: orientation-policy
+    description: Opens with the Welcome Week Block Party on University Green (Friday 28 August, 18:00).
+  - code: fall2026-returning-move-in
+    term: Fall 2026
+    label: Returning-student move-in
+    category: housing
+    audience: on_campus
+    starts_on: 2026-08-29
+    starts_at: "10:00"
+    ends_at: "18:00"
+    owner_office: HRL
+    document: housing-move-in-and-move-out
+  # ── Fall 2026 term ──────────────────────────────────────────────────────
+  - code: fall2026-classes-begin
+    term: Fall 2026
+    label: First day of classes
+    category: academic
+    audience: all
+    starts_on: 2026-08-31
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-aid-disbursement
+    term: Fall 2026
+    label: Fall financial aid disburses to student accounts
+    category: financial_aid
+    audience: all
+    starts_on: 2026-09-04
+    owner_office: FA
+    document: financial-aid-award-acceptance-and-disbursement
+    description: Accepted aid with no open condition credits the account; credit balances are refunded within 14 days.
+  - code: fall2026-labor-day
+    term: Fall 2026
+    label: Labor Day — no classes, offices closed
+    category: holiday
+    audience: all
+    starts_on: 2026-09-07
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-add-drop-deadline
+    term: Fall 2026
+    label: Add/drop deadline (registration closes); 100 % refund deadline; meal-plan change deadline
+    category: registration
+    audience: all
+    starts_on: 2026-09-11
+    owner_office: REG
+    document: registration-policy
+    description: Last day to add or drop a course without a transcript notation or charge. Changes after this date are withdrawals.
+  - code: fall2026-insurance-waiver-deadline
+    term: Fall 2026
+    label: Student health insurance waiver deadline
+    category: billing
+    audience: all
+    starts_on: 2026-09-11
+    owner_office: SA
+    document: student-health-insurance-policy
+    description: Submit proof of comparable coverage in the portal; the $1,850 charge is reversed on approval. F-1 and J-1 students cannot waive.
+  - code: fall2026-census
+    term: Fall 2026
+    label: Census date — enrollment freeze for aid and full-time status
+    category: financial_aid
+    audience: all
+    starts_on: 2026-09-14
+    owner_office: FA
+    document: financial-aid-award-acceptance-and-disbursement
+    description: Aid is recalculated to the credits enrolled on this date. Room-change freeze ends.
+  - code: fall2026-refund-75
+    term: Fall 2026
+    label: 75 % tuition refund deadline for withdrawal
+    category: billing
+    audience: all
+    starts_on: 2026-09-18
+    owner_office: SA
+    document: withdrawal-and-refund-policy
+  - code: fall2026-refund-50
+    term: Fall 2026
+    label: 50 % tuition refund deadline for withdrawal
+    category: billing
+    audience: all
+    starts_on: 2026-09-25
+    owner_office: SA
+    document: withdrawal-and-refund-policy
+  - code: fall2026-payment-plan-2
+    term: Fall 2026
+    label: Payment plan instalment 2 due
+    category: billing
+    audience: all
+    starts_on: 2026-09-28
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: fall2026-health-hold-date
+    term: Fall 2026
+    label: Health holds placed for outstanding immunization records
+    category: health
+    audience: all
+    starts_on: 2026-10-01
+    owner_office: SHS
+    document: immunization-requirement
+    description: Students without an accepted immunization record or approved exemption receive a health hold that blocks Spring 2027 registration.
+  - code: fall2026-refund-25
+    term: Fall 2026
+    label: 25 % tuition refund deadline for withdrawal (last refund date)
+    category: billing
+    audience: all
+    starts_on: 2026-10-02
+    owner_office: SA
+    document: withdrawal-and-refund-policy
+  - code: fall2026-advising-meeting-deadline
+    term: Fall 2026
+    label: Fall advising meeting for Spring planning due
+    category: advising
+    audience: all
+    starts_on: 2026-10-09
+    owner_office: ADV
+    document: academic-advising-policy
+    description: An advising hold is placed on continuing students who have not met their adviser by this date.
+  - code: fall2026-fall-break
+    term: Fall 2026
+    label: Fall break — no classes
+    category: holiday
+    audience: all
+    starts_on: 2026-10-12
+    ends_on: 2026-10-13
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-midterm-grades
+    term: Fall 2026
+    label: Midterm grades posted
+    category: academic
+    audience: all
+    starts_on: 2026-10-16
+    owner_office: REG
+    document: grading-policy
+  - code: fall2026-payment-plan-3
+    term: Fall 2026
+    label: Payment plan instalment 3 due
+    category: billing
+    audience: all
+    starts_on: 2026-10-28
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: spring2027-registration-opens-continuing
+    term: Spring 2027
+    label: Spring 2027 registration opens for continuing students
+    category: registration
+    audience: all
+    starts_on: 2026-11-02
+    starts_at: "09:00"
+    owner_office: REG
+    document: registration-policy
+    description: Time tickets by earned credits; every hold must be cleared first.
+  - code: fall2026-withdrawal-deadline
+    term: Fall 2026
+    label: Last day to withdraw from a course with a W; pass/no-pass election deadline
+    category: registration
+    audience: all
+    starts_on: 2026-11-06
+    owner_office: REG
+    document: withdrawal-and-refund-policy
+  - code: spring2027-housing-application-opens
+    term: Spring 2027
+    label: Housing application opens (Spring 2027 admits)
+    category: housing
+    audience: new_students
+    starts_on: 2026-11-16
+    owner_office: HRL
+    document: housing-application-and-assignment
+  - code: fall2026-thanksgiving
+    term: Fall 2026
+    label: Thanksgiving break — no classes; residence halls remain open
+    category: holiday
+    audience: all
+    starts_on: 2026-11-25
+    ends_on: 2026-11-27
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-payment-plan-4
+    term: Fall 2026
+    label: Payment plan instalment 4 due
+    category: billing
+    audience: all
+    starts_on: 2026-11-28
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: spring2027-deposit-refund-deadline
+    term: Spring 2027
+    label: Last day to withdraw with a full enrollment-deposit refund (Spring 2027 admits)
+    category: admissions
+    audience: new_students
+    starts_on: 2026-12-01
+    owner_office: ADM
+    document: enrollment-deposit-policy
+  - code: fall2026-winter-break-housing-deadline
+    term: Fall 2026
+    label: Winter break housing applications due
+    category: housing
+    audience: on_campus
+    starts_on: 2026-12-04
+    owner_office: HRL
+    document: housing-break-and-guest-policy
+  - code: spring2027-bills-issued
+    term: Spring 2027
+    label: Spring bills issued
+    category: billing
+    audience: all
+    starts_on: 2026-12-10
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: fall2026-last-day-of-classes
+    term: Fall 2026
+    label: Last day of classes
+    category: academic
+    audience: all
+    starts_on: 2026-12-11
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-reading-day
+    term: Fall 2026
+    label: Reading day
+    category: academic
+    audience: all
+    starts_on: 2026-12-14
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-final-exams
+    term: Fall 2026
+    label: Final examinations
+    category: academic
+    audience: all
+    starts_on: 2026-12-15
+    ends_on: 2026-12-18
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: fall2026-halls-close
+    term: Fall 2026
+    label: Residence halls close for winter break (12:00) except approved break residents
+    category: housing
+    audience: on_campus
+    starts_on: 2026-12-19
+    starts_at: "12:00"
+    owner_office: HRL
+    document: housing-break-and-guest-policy
+  - code: fall2026-grades-due
+    term: Fall 2026
+    label: Fall grades due from faculty (17:00); SAP evaluation runs
+    category: academic
+    audience: all
+    starts_on: 2026-12-22
+    owner_office: REG
+    document: grading-policy
+  # ── Spring 2027 ─────────────────────────────────────────────────────────
+  - code: spring2027-registration-opens-new
+    term: Spring 2027
+    label: Registration opens for Spring 2027 admits
+    category: registration
+    audience: new_students
+    starts_on: 2027-01-04
+    starts_at: "09:00"
+    owner_office: REG
+    document: registration-policy
+  - code: spring2027-orientation-registration-closes
+    term: Spring 2027
+    label: Spring orientation registration closes
+    category: orientation
+    audience: new_students
+    starts_on: 2027-01-07
+    owner_office: NSP
+    document: orientation-policy
+  - code: spring2027-housing-application-deadline
+    term: Spring 2027
+    label: Housing application deadline (Spring 2027 admits)
+    category: housing
+    audience: new_students
+    starts_on: 2027-01-08
+    owner_office: HRL
+    document: housing-application-and-assignment
+  - code: spring2027-tuition-due
+    term: Spring 2027
+    label: Spring tuition and fees due; payment-plan enrollment deadline
+    category: billing
+    audience: all
+    starts_on: 2027-01-08
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: spring2027-remote-orientation
+    term: Spring 2027
+    label: Spring Remote Orientation
+    category: orientation
+    audience: new_students
+    starts_on: 2027-01-12
+    starts_at: "11:00"
+    ends_at: "15:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: spring2027-international-check-in
+    term: Spring 2027
+    label: Spring International Check-In
+    category: international
+    audience: international
+    starts_on: 2027-01-13
+    ends_on: 2027-01-14
+    starts_at: "09:00"
+    ends_at: "17:00"
+    owner_office: ISS
+    document: international-student-check-in
+  - code: spring2027-orientation
+    term: Spring 2027
+    label: Spring Orientation (new and transfer students)
+    category: orientation
+    audience: new_students
+    starts_on: 2027-01-14
+    starts_at: "08:00"
+    ends_at: "17:00"
+    owner_office: NSP
+    document: orientation-policy
+  - code: spring2027-move-in
+    term: Spring 2027
+    label: Spring move-in (new residents)
+    category: housing
+    audience: on_campus
+    starts_on: 2027-01-16
+    ends_on: 2027-01-17
+    starts_at: "10:00"
+    ends_at: "18:00"
+    owner_office: HRL
+    document: housing-move-in-and-move-out
+  - code: spring2027-mlk-day
+    term: Spring 2027
+    label: Martin Luther King Jr. Day — offices closed
+    category: holiday
+    audience: all
+    starts_on: 2027-01-18
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: spring2027-classes-begin
+    term: Spring 2027
+    label: First day of classes
+    category: academic
+    audience: all
+    starts_on: 2027-01-19
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: spring2027-aid-disbursement
+    term: Spring 2027
+    label: Spring financial aid disburses
+    category: financial_aid
+    audience: all
+    starts_on: 2027-01-22
+    owner_office: FA
+    document: financial-aid-award-acceptance-and-disbursement
+  - code: spring2027-add-drop-deadline
+    term: Spring 2027
+    label: Add/drop deadline (registration closes); health insurance waiver deadline
+    category: registration
+    audience: all
+    starts_on: 2027-01-29
+    owner_office: REG
+    document: registration-policy
+  - code: spring2027-census
+    term: Spring 2027
+    label: Census date
+    category: financial_aid
+    audience: all
+    starts_on: 2027-02-01
+    owner_office: FA
+    document: financial-aid-award-acceptance-and-disbursement
+  - code: spring2027-payment-plan-2
+    term: Spring 2027
+    label: Payment plan instalment 2 due
+    category: billing
+    audience: all
+    starts_on: 2027-02-08
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: fafsa-priority-2027-2028
+    term: Spring 2027
+    label: FAFSA priority date for 2027–2028 aid
+    category: financial_aid
+    audience: all
+    starts_on: 2027-02-15
+    owner_office: FA
+    document: financial-aid-application-and-verification
+    description: Institutional need-based funds are packaged in FAFSA-receipt order after this date.
+  - code: spring2027-health-hold-date
+    term: Spring 2027
+    label: Health holds placed for Spring entrants with outstanding immunization records
+    category: health
+    audience: all
+    starts_on: 2027-03-01
+    owner_office: SHS
+    document: immunization-requirement
+    description: Spring 2027 entrants without an accepted immunization record or approved exemption receive a health hold that blocks Summer and Fall 2027 registration; Fall entrants had the same hold on 1 October 2026.
+  - code: spring2027-payment-plan-3
+    term: Spring 2027
+    label: Payment plan instalment 3 due
+    category: billing
+    audience: all
+    starts_on: 2027-03-08
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: spring2027-spring-break
+    term: Spring 2027
+    label: Spring break — no classes; halls remain open
+    category: holiday
+    audience: all
+    starts_on: 2027-03-15
+    ends_on: 2027-03-19
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: spring2027-withdrawal-deadline
+    term: Spring 2027
+    label: Last day to withdraw from a course with a W
+    category: registration
+    audience: all
+    starts_on: 2027-04-02
+    owner_office: REG
+    document: withdrawal-and-refund-policy
+  - code: fall2027-registration-opens
+    term: Fall 2027
+    label: Fall 2027 registration opens for continuing students
+    category: registration
+    audience: all
+    starts_on: 2027-04-05
+    starts_at: "09:00"
+    owner_office: REG
+    document: registration-policy
+  - code: spring2027-payment-plan-4
+    term: Spring 2027
+    label: Payment plan instalment 4 due
+    category: billing
+    audience: all
+    starts_on: 2027-04-08
+    owner_office: SA
+    document: billing-and-payment-policy
+  - code: spring2027-last-day-of-classes
+    term: Spring 2027
+    label: Last day of classes
+    category: academic
+    audience: all
+    starts_on: 2027-04-30
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: spring2027-final-exams
+    term: Spring 2027
+    label: Final examinations
+    category: academic
+    audience: all
+    starts_on: 2027-05-03
+    ends_on: 2027-05-07
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: spring2027-halls-close
+    term: Spring 2027
+    label: Residence halls close (12:00); graduating seniors may stay to Commencement
+    category: housing
+    audience: on_campus
+    starts_on: 2027-05-08
+    starts_at: "12:00"
+    owner_office: HRL
+    document: housing-move-in-and-move-out
+  - code: spring2027-grades-due
+    term: Spring 2027
+    label: Spring grades due; SAP and scholarship-renewal evaluation runs
+    category: academic
+    audience: all
+    starts_on: 2027-05-11
+    owner_office: REG
+    document: grading-policy
+  - code: spring2027-commencement
+    term: Spring 2027
+    label: Commencement
+    category: academic
+    audience: all
+    starts_on: 2027-05-15
+    starts_at: "10:00"
+    owner_office: REG
+    document: academic-calendar-2026-2027
+  - code: summer2027-session
+    term: Summer 2027
+    label: Summer session
+    category: academic
+    audience: all
+    starts_on: 2027-05-24
+    ends_on: 2027-07-30
+    owner_office: REG
+    document: academic-calendar-2026-2027

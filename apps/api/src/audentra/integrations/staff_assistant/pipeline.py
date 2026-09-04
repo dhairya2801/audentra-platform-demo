@@ -118,6 +118,27 @@ _LOOP_SKIP_REQUEST_TYPES = frozenset(
 )
 _LOOP_HYBRID_REQUEST_TYPES = frozenset({"general_question"})
 
+KNOWLEDGE_TOOL = "searchInstitutionalKnowledge"
+# Institutional language inside a person-scoped question (see the student
+# pipeline's _POLICY_MARKERS): consequences, permissions, exceptions, dates,
+# service levels, ownership.
+_STAFF_POLICY_MARKERS = re.compile(
+    r"\bwhat happens (?:if|when|now|after)\b|\bpolic(?:y|ies)\b|\brules?\b|\bprocedure\b"
+    r"|\bhandbook\b|\ballowed\b|\bpermitted\b|\bexempt|\bwaiv|\bpenalt|\blate fee\b"
+    r"|\brefund|\bforfeit|\bappeal|\bextension\b|\bextend\b|\bdeadline (?:for|to)\b"
+    r"|\bgrace period\b|\beligib|\bqualif|\bwhat counts as\b|\bservice levels?\b|\bsla\b"
+    r"|\bescalat|\bwho (?:handles|owns|should handle|is responsible|decides|approves|covers)\b"
+    r"|\bwhich office\b|\bhow long (?:does|do|should)\b|\bturnaround\b"
+    r"|\bappl(?:y|ies) to\b|\brequirement\b|\b(?:is|are) (?:he|she|they|the student) "
+    r"(?:required|exempt|eligible|allowed)\b|\bif (?:he|she|they) (?:don'?t|do not|miss|misses)\b"
+    r"|\bcan (?:he|she|they|the student|we)\b|\bauthori[sz]e\b|\bwhat do i need (?:before|to)\b"
+    r"|\bdrop to \d+ credits\b|\bcredits\b|\bmedical reasons?\b|\bwhat do i tell\b"
+    r"|\bstill (?:register|apply|get|live|enrol|enroll|move)\b"
+    r"|\bwhen (?:is|are|does|do) (?:the )?(?:orientation|move[- ]?in|classes|registration"
+    r"|add|drop|census|tuition|bills?|finals|break|commencement)\b",
+    re.IGNORECASE,
+)
+
 # Identity arguments the model never supplies; the executor binds them from
 # the turn's handles (see `_bind_loop_arguments`).
 _LOOP_IDENTITY_ARGUMENTS = frozenset(
@@ -504,6 +525,22 @@ class StaffAssistantPipeline:
                 PlannedToolCall(tool=tool, arguments=_cohort_arguments(tool, classification))
                 for tool in select_staff_tools(classification, student_resolved=student_resolved)
             ]
+            # Institutional language on a record question adds the approved
+            # corpus read: "what happens if Milo misses the deposit deadline"
+            # reads Milo's deadlines and the deposit policy.
+            if (
+                self._host.supports("institution_knowledge")
+                and KNOWLEDGE_TOOL not in {call.tool for call in planned_calls}
+                and classification.request_type not in _LOOP_SKIP_REQUEST_TYPES
+                and classification.request_type
+                not in {"action_request", "supported_action_request"}
+                and _STAFF_POLICY_MARKERS.search(request.text)
+            ):
+                planned_calls.append(PlannedToolCall(tool=KNOWLEDGE_TOOL, arguments={}))
+                if trace is not None:
+                    trace.add_stage(
+                        "policy_augment", 0.0, tool=KNOWLEDGE_TOOL, reason="policy_markers"
+                    )
         planned_calls = await self._bind_identity_arguments(
             planned_calls, request, resolution, execution, trace, entities, identity
         )
@@ -810,6 +847,19 @@ class StaffAssistantPipeline:
             },
             "resolvedEntities": entities.as_trace(),
             "cohortFilterVocabulary": _COHORT_FILTER_GUIDE,
+            "institutionalKnowledge": (
+                "searchInstitutionalKnowledge reads approved policies, procedures, the "
+                "calendar and the office directory by a text query; combine it with the "
+                "student's record reads for 'does this apply to them' and 'what happens if' "
+                "questions."
+                + (
+                    " This question uses institutional language: read it in the first step."
+                    if _STAFF_POLICY_MARKERS.search(request.text)
+                    else ""
+                )
+                if self._host.supports("institution_knowledge")
+                else None
+            ),
         }
         result: ReadLoopResult = await run_read_loop(
             question=request.resolved_text if request.is_follow_up else request.text,
@@ -1582,6 +1632,14 @@ class StaffAssistantPipeline:
                 if resolution.student_id is None:
                     continue
                 arguments["studentId"] = resolution.student_id
+            if call.tool == KNOWLEDGE_TOOL:
+                # The question itself is the search text; the resolved student
+                # (never a model-chosen one) scopes applicability.
+                arguments.setdefault("query", request.resolved_text or request.text)
+                if resolution.student_id is not None:
+                    arguments["studentId"] = resolution.student_id
+                else:
+                    arguments.pop("studentId", None)
             if (
                 call.tool == "searchStudents"
                 and not arguments.get("query")

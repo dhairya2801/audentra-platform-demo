@@ -1,23 +1,37 @@
 schema_version: 1
 tenant: aster-demo
 configuration: campus_life
+# Campus events for 2026–2027, matching the academic calendar and the
+# knowledge corpus (clubs-and-campus-life, orientation-policy). Times are UTC
+# in the file; the campus runs on America/New_York.
 events:
   - id: welcome-week-block-party
     title: Welcome Week Block Party
-    description: Meet classmates, student leaders, and campus support teams on University Green.
-    starts_at: 2027-08-28T18:00:00.000Z
-    ends_at: 2027-08-28T21:00:00.000Z
+    description: Meet classmates, student leaders, and campus support teams on University Green. Opens Welcome Week; food from Aster Dining, live music from student groups.
+    starts_at: 2026-08-28T22:00:00.000Z
+    ends_at: 2026-08-29T01:00:00.000Z
     location: University Green
     category: social
     featured: true
     accent: gold
     visual_theme: festival
     registration_url: null
+  - id: involvement-fair
+    title: Involvement Fair
+    description: Every registered club at a table on University Green. Join a club on the spot, meet the Office of Student Life, and sign up for the leadership program.
+    starts_at: 2026-09-02T16:00:00.000Z
+    ends_at: 2026-09-02T19:00:00.000Z
+    location: University Green
+    category: social
+    featured: true
+    accent: coral
+    visual_theme: community
+    registration_url: null
   - id: first-year-research-showcase
     title: First-Year Research Showcase
-    description: Meet faculty mentors and discover research opportunities open to first-year students.
-    starts_at: 2027-09-02T16:00:00.000Z
-    ends_at: 2027-09-02T18:00:00.000Z
+    description: Meet faculty mentors and discover research opportunities open to first-year students in every department.
+    starts_at: 2026-09-02T20:00:00.000Z
+    ends_at: 2026-09-02T22:00:00.000Z
     location: Innovation Hall
     category: academic
     featured: true
@@ -26,12 +40,111 @@ events:
     registration_url: null
   - id: internship-ready-lab
     title: Internship Ready Lab
-    description: Practice introductions, meet career coaches, and build a first-semester career plan.
-    starts_at: 2027-09-09T20:00:00.000Z
-    ends_at: 2027-09-09T22:00:00.000Z
-    location: Career Center
+    description: Practice introductions, meet career coaches, and build a first-semester career plan with the Career Center.
+    starts_at: 2026-09-09T20:00:00.000Z
+    ends_at: 2026-09-09T22:00:00.000Z
+    location: Career Center, Innovation Hall 120
     category: career
     featured: true
     accent: navy
     visual_theme: career
+    registration_url: null
+  - id: financial-aid-open-hours
+    title: Financial Aid Open Hours — before the census date
+    description: Drop in with questions about verification, award acceptance and the payment plan before the 14 September census date. No appointment needed.
+    starts_at: 2026-09-10T13:00:00.000Z
+    ends_at: 2026-09-10T16:00:00.000Z
+    location: Larkin Hall 210
+    category: academic
+    featured: false
+    accent: blue
+    visual_theme: discovery
+    registration_url: null
+  - id: family-weekend
+    title: Family Weekend
+    description: Families are welcome on campus for open classes, a residence-hall open house, the Homecoming build-up and the Saturday dinner on University Green.
+    starts_at: 2026-10-16T20:00:00.000Z
+    ends_at: 2026-10-18T20:00:00.000Z
+    location: Main Campus
+    category: social
+    featured: true
+    accent: gold
+    visual_theme: festival
+    registration_url: null
+  - id: homecoming
+    title: Homecoming
+    description: The Homecoming parade, alumni panels and the Saturday game at the Recreation Center fields.
+    starts_at: 2026-10-23T20:00:00.000Z
+    ends_at: 2026-10-25T00:00:00.000Z
+    location: Recreation Center
+    category: social
+    featured: true
+    accent: gold
+    visual_theme: festival
+    registration_url: null
+  - id: study-away-fair
+    title: Study Away Fair
+    description: "Exchange and study-away programs for 2027–2028, with the Study Away office and returning students. International students: bring immigration questions to the ISS table."
+    starts_at: 2026-11-04T17:00:00.000Z
+    ends_at: 2026-11-04T20:00:00.000Z
+    location: Global Center, 1st floor
+    category: academic
+    featured: false
+    accent: blue
+    visual_theme: discovery
+    registration_url: null
+  - id: spring-registration-clinic
+    title: Spring Registration Clinic
+    description: Advisers and the Registrar answer time-ticket, hold and waitlist questions the week Spring 2027 registration opens for continuing students.
+    starts_at: 2026-11-03T18:00:00.000Z
+    ends_at: 2026-11-03T21:00:00.000Z
+    location: Advising Centre
+    category: academic
+    featured: false
+    accent: blue
+    visual_theme: discovery
+    registration_url: null
+  - id: winter-concert
+    title: Winter Concert
+    description: The Aster Chamber Singers and the Jazz Collective close the Fall term.
+    starts_at: 2026-12-11T00:00:00.000Z
+    ends_at: 2026-12-11T02:00:00.000Z
+    location: Student Union
+    category: social
+    featured: false
+    accent: navy
+    visual_theme: community
+    registration_url: null
+  - id: career-fair-2027
+    title: Career Fair
+    description: Employers recruiting for internships and graduate roles; résumé reviews all morning at the Career Center.
+    starts_at: 2027-02-24T15:00:00.000Z
+    ends_at: 2027-02-24T20:00:00.000Z
+    location: Student Union
+    category: career
+    featured: true
+    accent: navy
+    visual_theme: career
+    registration_url: null
+  - id: spring-festival-2027
+    title: Spring Festival
+    description: Club performances, food and the Involvement Fair's spring edition on University Green.
+    starts_at: 2027-04-16T20:00:00.000Z
+    ends_at: 2027-04-17T00:00:00.000Z
+    location: University Green
+    category: social
+    featured: true
+    accent: coral
+    visual_theme: festival
+    registration_url: null
+  - id: senior-week-2027
+    title: Senior Week
+    description: Programming for graduating seniors in the week before Commencement on 15 May 2027.
+    starts_at: 2027-05-10T16:00:00.000Z
+    ends_at: 2027-05-14T22:00:00.000Z
+    location: Main Campus
+    category: social
+    featured: false
+    accent: gold
+    visual_theme: festival
     registration_url: null

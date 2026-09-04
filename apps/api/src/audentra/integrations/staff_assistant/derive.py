@@ -53,6 +53,8 @@ class StaffDerivedState:
     oldest_awaiting_reply: JsonDict | None = None
     inquiry_thread: JsonDict | None = None
     guidance: JsonDict | None = None
+    # Approved institutional knowledge retrieved for this turn.
+    institution_knowledge: JsonDict | None = None
     action_rules: list[JsonDict] = field(default_factory=list)
     mailbox_messages: list[JsonDict] = field(default_factory=list)
     mailbox_ranking_method: str | None = None
@@ -223,6 +225,10 @@ def derive_staff_state(execution: StaffToolExecution) -> StaffDerivedState:
     guidance = reads.get("getPlaybooks")
     if guidance:
         state.guidance = dict(guidance)
+
+    knowledge = reads.get("searchInstitutionalKnowledge")
+    if knowledge:
+        state.institution_knowledge = dict(knowledge)
 
     rules = reads.get("getActionRules")
     if rules:

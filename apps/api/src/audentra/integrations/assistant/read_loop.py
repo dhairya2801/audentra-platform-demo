@@ -168,6 +168,16 @@ READ_LOOP_SYSTEM_PROMPT = "\n".join(
         "name, email, phone number, status, or reason that a result does not contain. If "
         "a result is unavailable or a read failed, say plainly which part you could not "
         "verify. If the records simply do not hold what was asked, say that.",
+        "- Institutional knowledge results (policies, procedures, calendar entries, "
+        "offices) are approved documents: answer from their text as written, naming the "
+        "document. A rule that permits something under conditions is a 'yes, if …' with "
+        "the conditions, never a 'no'; a rule that forbids something is a 'no' with the "
+        "exceptions the text lists. Each document says whether it applies to the student "
+        "(applicability.verdict); repeat that verdict, do not re-derive it. A result's "
+        "`answerGuidance` and `studentFacets` state who this student is (international, "
+        "transfer, admit term) — treat them as facts, never as possibilities. If no "
+        "document covers the question, say the official answer comes from the office "
+        "named, rather than stating a rule from memory.",
         "- Never claim to have changed, sent, scheduled, assigned or submitted anything; "
         "this reply only reads. If the person asked for a change, say what the record "
         "currently shows and that a change would be a separate confirmed step — never "
@@ -480,13 +490,20 @@ def _parse_arguments(raw: Any) -> JsonDict | None:
     except json.JSONDecodeError:
         parsed = _parse_loose_object(text)
         if parsed is None:
-            return None
+            # "query: can I work on campus?" — one bare `name: value` pair,
+            # the shape smaller models fall into when a tool has a single
+            # text argument. Accept it as that one argument.
+            bare = _BARE_PAIR.match(text)
+            if bare is None:
+                return None
+            parsed = {bare.group(1): bare.group(2).strip().strip("\"'")}
     if parsed is None:
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else None
 
 
 _BARE_KEY = re.compile(r"(?<=[{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:")
+_BARE_PAIR = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.+?)\s*$", re.DOTALL)
 
 
 def _parse_loose_object(text: str) -> JsonDict | None:

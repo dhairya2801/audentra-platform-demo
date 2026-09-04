@@ -45,6 +45,18 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 2.5
 # image is megabytes of pixels, and no answer needs it in evidence.
 _ONBOARDING_EXCLUDED_FIELDS = frozenset({"signatureImageData"})
 
+# The one student tool that accepts an optional argument from a model read
+# loop: a narrower search phrase than the whole message. Identity is still
+# never an argument — the host binds the student.
+STUDENT_TOOL_ARGUMENTS: Mapping[str, Mapping[str, str]] = {
+    "getInstitutionalPolicies": {
+        "query": (
+            "text — the institutional question in a few words, passed as the JSON "
+            'object string {"query": "..."} (optional; defaults to the message)'
+        )
+    },
+}
+
 
 @dataclass
 class ToolExecution:
@@ -65,14 +77,21 @@ class AssistantToolHost:
     def __init__(self, primitives: Mapping[str, PrimitiveRead]) -> None:
         self._primitives = dict(primitives)
         self._cache: dict[str, Mapping[str, Any]] = {}
+        # The question being answered this turn. The pipeline sets it before
+        # any tool runs; the institutional-knowledge tool searches by it.
+        # A model read loop may narrow it per call through `tool_arguments`.
+        self.question: str | None = None
+        self.tool_arguments: dict[str, Mapping[str, Any]] = {}
 
     def supports(self, primitive: str) -> bool:
         return primitive in self._primitives
 
-    async def read(self, primitive: str) -> Mapping[str, Any]:
-        if primitive not in self._cache:
-            self._cache[primitive] = await self._primitives[primitive]()
-        return self._cache[primitive]
+    async def read(self, primitive: str, **arguments: Any) -> Mapping[str, Any]:
+        key = primitive if not arguments else primitive + "|" + repr(sorted(arguments.items()))
+        if key not in self._cache:
+            reader = self._primitives[primitive]
+            self._cache[key] = await (reader(**arguments) if arguments else reader())
+        return self._cache[key]
 
 
 async def execute_tool_reads(
@@ -836,6 +855,44 @@ async def _tool_academic_standing(host: AssistantToolHost, _now: datetime) -> Js
 
 
 # --------------------------------------------------------------------------
+# Institutional knowledge
+# --------------------------------------------------------------------------
+
+
+async def _tool_institutional_policies(host: AssistantToolHost, _now: datetime) -> JsonDict:
+    """Approved institutional knowledge relevant to this question.
+
+    The search runs server-side against the tenant's published corpus and is
+    scoped to the signed-in student: the host's `question` (or a narrower
+    `query` a model loop supplied) is the search text, and the repository
+    computes each document's applicability from the student's own record. The
+    tool never takes a student identifier — identity is bound by the host.
+    """
+
+    if not host.supports("institution_knowledge"):
+        raise _UnsupportedRead("institution_knowledge")
+    arguments = _mapping(host.tool_arguments.get("getInstitutionalPolicies"))
+    query = str(arguments.get("query") or host.question or "").strip()
+    if not query:
+        raise _UnsupportedRead("institution_knowledge")
+    result = await host.read("institution_knowledge", query=query)
+    documents = [dict(_mapping(item)) for item in _sequence(result.get("documents"))]
+    return {
+        "query": result.get("query", query),
+        "documents": documents,
+        "total": len(documents),
+        "totalMatches": result.get("totalMatches", len(documents)),
+        "calendar": [dict(_mapping(item)) for item in _sequence(result.get("calendar"))],
+        "offices": [dict(_mapping(item)) for item in _sequence(result.get("offices"))],
+        "studentFacets": dict(_mapping(result.get("studentFacets"))) or None,
+        "answerGuidance": result.get("answerGuidance"),
+        "today": result.get("today"),
+        "retrievalPolicy": result.get("retrievalPolicy"),
+        "href": "/help",
+    }
+
+
+# --------------------------------------------------------------------------
 # Housing
 # --------------------------------------------------------------------------
 
@@ -1249,6 +1306,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "getAcademicPlan": _tool_academics,
     "getCampusLife": _tool_campus_life,
     "getStudentMessages": _tool_messages,
+    "getInstitutionalPolicies": _tool_institutional_policies,
 }
 
 

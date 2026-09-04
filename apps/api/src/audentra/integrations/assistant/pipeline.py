@@ -11,9 +11,10 @@ deterministic rules before a student sees them.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,6 +52,7 @@ from audentra.integrations.assistant.read_loop import (
 )
 from audentra.integrations.assistant.tools import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
+    STUDENT_TOOL_ARGUMENTS,
     AssistantToolHost,
     ToolExecution,
     execute_tool_reads,
@@ -78,6 +80,56 @@ _LOOP_SKIP_REQUEST_TYPES = frozenset(
 # In hybrid mode the classifier keeps every confident, well-covered intent;
 # the loop takes the turns that used to land on the broad safe fallback.
 _LOOP_HYBRID_REQUEST_TYPES = frozenset({"general_question", "general_help"})
+
+KNOWLEDGE_TOOL = "getInstitutionalPolicies"
+# Language that asks about the institution's rules rather than (only) the
+# student's own record: consequences, permissions, exceptions, amounts,
+# calendar dates, who owns a step. A domain intent that carries it keeps its
+# record reads and adds the approved-knowledge read, so "what happens if I
+# miss the deposit deadline" answers from both the deposit's state and the
+# deposit policy. Deliberately conservative: a bare status question never
+# triggers it.
+_POLICY_MARKERS = re.compile(
+    r"\bwhat happens (?:if|when|now|after)\b|\bwhat (?:if|are the consequences)\b"
+    r"|\bif i (?:don'?t|do not|can'?t|cannot|miss|forget|never|skip|fail)\b"
+    r"|\bwill i (?:lose|still|get|have|be able|need)\b|\bappl(?:y|ies) to me\b"
+    r"|\bwho do i (?:meet|see|book|go to)\b|\bwho covers\b|\bcovers? for\b"
+    r"|\bdo i (?:still |even )?(?:have|need) to\b|\bhow long (?:does|do|will|should)\b"
+    r"|\bfile (?:types?|formats?)\b|\bwhat does (?:that|this|it|my [a-z ]{0,20}status) mean\b"
+    r"|\bprobation\b|\bsap\b|\bpay ?out\b|\bdisburs|\btransfer\b.{0,24}\bcredits?\b"
+    r"|\bcredits?\b.{0,24}\btransfer\b|\bminimum grade\b|\bwhat happens to me\b"
+    r"|\bleft the university\b|\bon leave\b|\bdeparted\b|\bferpa\b"
+    r"|\b(?:mom|dad|mother|father|parents?|guardian|family)\b.{0,40}"
+    r"\b(?:access|see|view)\b"
+    r"|\b(?:access|see|view)\b.{0,40}"
+    r"\b(?:mom|dad|mother|father|parents?|guardian)\b"
+    r"|\bwhen (?:does|do|will|is|are)\b.{0,30}"
+    r"\b(?:pay|disburs|due|open|close|start|begin|end|placed)\b"
+    r"|\bstill have to\b|\bhave to live\b|\blast day to\b|\bfirst day of\b"
+    r"|\boffer (?:gone|cancel|rescind|withdrawn|revoked|still (?:valid|good|stand))"
+    r"|\bstill have a (?:place|spot|seat)\b|\bis my offer\b"
+    r"|\bwho (?:fixes|deals with|takes care of)\b"
+    r"|\b(?:adviser|advisor|counselor) (?:is|'s) (?:away|out|gone|on leave)\b|\bwho decides\b"
+    r"|\bwhen did i need to\b|\bmedical reasons?\b|\bsingle room\b"
+    r"|\bcredits?\b.{0,20}\b(?:drop|below|minimum|full[- ]time)\b"
+    r"|\bpolic(?:y|ies)\b|\brules?\b|\bregulation|\bhandbook\b|\bprocedure\b"
+    r"|\ballowed\b|\bpermitted\b|\bexempt|\bwaiv|\bpenalt|\blate fee\b|\bfine\b"
+    r"|\brefund|\bforfeit|\bnon-?refundable\b|\bappeal|\bextension\b|\bextend\b"
+    r"|\b(?:is|was) there a deadline\b|\bdeadline (?:for|to)\b|\bhow long do i have\b"
+    r"|\bgrace period\b|\b(?:am i|are we|do i have to|must i|required to|do i need to)\b"
+    r"|\beligib|\bqualif|\bwhat counts as\b|\bminimum\b|\bmaximum\b|\bhow many credits\b"
+    r"|\bcan i (?:still|get|live|work|drop|defer|withdraw|appeal|change|switch|take|use|keep)\b"
+    r"|\bcan (?:freshmen|freshman|first[- ]years?|transfers?|international students)\b"
+    r"|\bhow much (?:is|does|do|are)\b|\bcost of\b|\btuition\b|\bfees?\b"
+    r"|\bwhen (?:is|are|does|do|will) (?:the )?(?:orientation|move[- ]?in|classes|the term|"
+    r"the semester|registration|add|drop|finals|break|commencement|tuition|bills?)\b"
+    r"|\bwho (?:handles|owns|do i (?:contact|talk to|ask|email)"
+    r"|should i (?:contact|talk to|ask|email)|"
+    r"is responsible|decides|approves)\b|\bwhich office\b|\bwhere (?:is|do i go)\b"
+    r"|\boffice hours\b|\bhours\b|\bcalendar\b|\bsyllabus\b|\bprerequisite|\bcurriculum\b"
+    r"|\bmajor requirements?\b|\bdegree requirements?\b|\bgeneral education\b|\bgen ed\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -143,6 +195,9 @@ class AssistantPipeline:
         request = normalize_request(
             message, history=history, page_path=page_path, page_label=page_label
         )
+        # The institutional-knowledge read searches by the question itself.
+        self._host.question = request.resolved_text
+        self._host.tool_arguments = {}
         if trace is not None:
             trace.user_message = request.text
             trace.page_path = request.page_path
@@ -253,7 +308,19 @@ class AssistantPipeline:
                     )
 
         selected = planned_tools if planned_tools is not None else select_tool_reads(classification)
+        knowledge_augmented = False
+        if (
+            KNOWLEDGE_TOOL not in selected
+            and self._host.supports("institution_knowledge")
+            and classification.request_type not in _LOOP_SKIP_REQUEST_TYPES
+            and not request.is_mutation_request
+            and _POLICY_MARKERS.search(request.resolved_text)
+        ):
+            selected = [*selected, KNOWLEDGE_TOOL]
+            knowledge_augmented = True
         if trace is not None:
+            if knowledge_augmented:
+                trace.add_stage("policy_augment", 0.0, tool=KNOWLEDGE_TOOL, reason="policy_markers")
             trace.classification = {
                 "requestType": classification.request_type,
                 "confidence": classification.confidence,
@@ -427,6 +494,14 @@ class AssistantPipeline:
         moment = self._now()
 
         async def executor(calls: Sequence[LoopCall]) -> None:
+            for call in calls:
+                if call.status == "planned" and call.tool in STUDENT_TOOL_ARGUMENTS:
+                    allowed = STUDENT_TOOL_ARGUMENTS[call.tool]
+                    host.tool_arguments[call.tool] = {
+                        str(name): value
+                        for name, value in dict(call.arguments or {}).items()
+                        if name in allowed and value is not None
+                    }
             fresh = [
                 call.tool
                 for call in calls
@@ -457,15 +532,38 @@ class AssistantPipeline:
                 call.duration_ms = read.get("durationMs")
 
         tools = [
-            LoopTool(name=name, description=description)
+            LoopTool(
+                name=name,
+                description=description,
+                arguments=(
+                    "; ".join(
+                        f"{arg}: {text}" for arg, text in STUDENT_TOOL_ARGUMENTS[name].items()
+                    )
+                    if name in STUDENT_TOOL_ARGUMENTS
+                    else "none"
+                ),
+            )
             for name, description in TOOL_DESCRIPTIONS.items()
+            if name != KNOWLEDGE_TOOL or host.supports("institution_knowledge")
         ]
         context = {
             "actor": "student",
             "today": moment.date().isoformat(),
             "page": {"path": request.page_path, "label": request.page_label},
+            "institutionalHint": (
+                "This question uses institutional language (a rule, a consequence, an "
+                "amount, a date, an office). Read getInstitutionalPolicies in the first "
+                "step, alongside the student's own record, and answer from both."
+                if host.supports("institution_knowledge")
+                and _POLICY_MARKERS.search(request.resolved_text)
+                else None
+            ),
             "identity": (
-                "Every tool reads the signed-in student's own record; no tool takes arguments."
+                "Every tool reads the signed-in student's own record; no tool takes an "
+                "identity argument. getInstitutionalPolicies accepts an optional `query` — "
+                "use it for questions about rules, deadlines, consequences, amounts, "
+                "calendar dates, exemptions or which office handles something, and read "
+                "the student's own record alongside it when the question is about them."
             ),
         }
         result: ReadLoopResult = await run_read_loop(
@@ -524,6 +622,19 @@ class AssistantPipeline:
                 deposit_payment_pending=bool((state.account or {}).get("depositPaymentPending")),
             )
         accepted = verdict is not None and verdict.accepted
+        # A bare verdict ("No, you cannot.") after reading a policy is not an
+        # answer a student can act on; the deterministic route carries the
+        # rule, so hand it the turn.
+        if (
+            accepted
+            and verdict is not None
+            and result.answer
+            and len(result.answer.strip()) < 80
+            and re.match(r"^\s*(?:yes|no)\b", result.answer, re.IGNORECASE)
+            and any(call.tool == KNOWLEDGE_TOOL for call in result.calls)
+        ):
+            accepted = False
+            verdict = replace(verdict, accepted=False, reason_code="too_terse")
         loop_trace = {
             "rounds": result.rounds,
             "outcome": result.outcome,

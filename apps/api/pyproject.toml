@@ -39,6 +39,8 @@ audentra-api = "audentra.interfaces.http.main:run"
 audentra-eval-api = "audentra.bootstrap.eval_api:main"
 audentra-migrate = "audentra.infrastructure.db.migrations:main"
 audentra-seed = "audentra.infrastructure.seeding.cli:run"
+audentra-seed-knowledge = "audentra.infrastructure.seeding.institution_knowledge:main"
+audentra-enrich-university = "audentra.infrastructure.seeding.institution_enrichment:main"
 audentra-worker = "audentra.interfaces.worker.main:run"
 
 [tool.hatch.build]

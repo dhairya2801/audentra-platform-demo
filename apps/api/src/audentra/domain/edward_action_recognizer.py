@@ -110,9 +110,13 @@ _CONTROL_OVERRIDE = re.compile(
 #: same-named local student and previewed a write against the wrong person. A
 #: qualifier Edward cannot honour must never be dropped from a write.
 _FOREIGN_INSTITUTION = re.compile(
-    r"\b(?:at|from|over at|in)\s+(?:the\s+)?"
-    r"(?:[A-Z][A-Za-z&'.-]+\s+){0,3}"
-    r"(?:Universit(?:y|é|ät)|College|Institute|Polytechnic|Academy|School)\b"
+    # A *named* or explicitly *other* institution. "withdraw from the
+    # university" is this university; "transfer from Ridgeway College" is not.
+    r"\b(?:at|from|over at|in|to)\s+"
+    r"(?:(?:another|other|a different|my (?:old|previous|former|other))\s+"
+    r"(?:universit(?:y|é|ät)|college|school|institute|polytechnic|academy)\b"
+    r"|(?-i:(?:[A-Z][A-Za-z&'.-]+\s+){1,3}"
+    r"(?:Universit(?:y|é|ät)|College|Institute|Polytechnic|Academy)\b))"
     r"|\b(?:at|from)\s+(?-i:Harvard|Yale|Stanford|MIT|Oxford|Cambridge|Princeton|Berkeley)\b",
     re.I,
 )

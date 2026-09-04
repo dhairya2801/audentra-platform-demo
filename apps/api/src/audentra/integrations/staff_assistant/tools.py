@@ -1034,6 +1034,36 @@ async def _tool_playbooks(
     return dict(await _primitive(host, "guidance"))
 
 
+async def _tool_search_knowledge(
+    host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
+) -> JsonDict:
+    """Approved institutional knowledge, scoped to the resolved student when one exists."""
+
+    result = await _primitive(
+        host,
+        "institution_knowledge",
+        query=str(arguments["query"]),
+        student_id=arguments.get("studentId"),
+        audience=arguments.get("audience"),
+        kind=arguments.get("kind"),
+        office=arguments.get("office"),
+        limit=arguments.get("limit"),
+    )
+    documents = [dict(_mapping(item)) for item in _sequence(result.get("documents"))]
+    return {
+        "query": result.get("query"),
+        "documents": documents,
+        "total": len(documents),
+        "totalMatches": result.get("totalMatches", len(documents)),
+        "calendar": [dict(_mapping(item)) for item in _sequence(result.get("calendar"))],
+        "offices": [dict(_mapping(item)) for item in _sequence(result.get("offices"))],
+        "studentFacets": dict(_mapping(result.get("studentFacets"))) or None,
+        "answerGuidance": result.get("answerGuidance"),
+        "today": result.get("today"),
+        "retrievalPolicy": result.get("retrievalPolicy"),
+    }
+
+
 async def _tool_action_rules(
     host: StaffAssistantToolHost, _arguments: JsonDict, _now: datetime
 ) -> JsonDict:
@@ -1423,6 +1453,7 @@ _TOOL_IMPLEMENTATIONS: Mapping[
     "summarizeInquiries": _tool_summarize_inquiries,
     "searchInquiries": _tool_search_inquiries,
     "getComponentSummary": _tool_component_summary,
+    "searchInstitutionalKnowledge": _tool_search_knowledge,
 }
 
 

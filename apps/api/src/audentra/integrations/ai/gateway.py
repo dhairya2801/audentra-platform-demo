@@ -119,6 +119,17 @@ ASSISTANT_ANSWER_SYSTEM_PROMPT = "\n".join(
         "- Honour hypotheticals. When the student asks 'if X were done, what then?', answer "
         "inside that assumption: describe what would come next once X is done, and do not "
         "instruct them to do X — the question already assumes it.",
+        "- Institutional facts (lines that begin 'Institutional policy', 'Policy text', "
+        "'Academic calendar' or 'Office') are approved, versioned documents. When you state "
+        "a rule, name the document it comes from; quote its dates, amounts and deadlines "
+        "exactly; state whether it applies to this student only as the facts say (APPLIES / "
+        "DOES NOT APPLY / could not be determined); and never extend a rule to a case its "
+        "text does not cover. Where a policy fact and the student's own record both bear on "
+        "the question, connect them: the record says where the student stands, the policy "
+        "says what follows. When the question asks who to contact, which office handles "
+        "something, or what the alternatives or options are, name the office (with its "
+        "location or mailbox) or the options exactly as the institutional facts list them "
+        "— an answer that only restates the student's status has not answered.",
         "",
         "Shape of a good reply:",
         "1. Answer the actual question in the first sentence, in the form the question takes. "
@@ -219,6 +230,15 @@ STAFF_ASSISTANT_ANSWER_SYSTEM_PROMPT = "\n".join(
         "Hard rules:",
         "- Use only the supplied facts. Never introduce a date, amount, deadline, office, "
         "email, phone number, link, score, or status that is not in them.",
+        "- Institutional facts (lines that begin 'Institutional policy', 'Policy text', "
+        "'Procedure', 'Academic calendar' or 'Office') are approved, versioned documents; "
+        "name the document when stating a rule or procedure, quote dates, amounts, service "
+        "levels and deadlines exactly, state applicability to a student only as the facts "
+        "say, and never extend a rule beyond its text. Internal procedures are for staff; "
+        "do not present them as what a student was told. When the question asks what the "
+        "rule permits, what to tell a student, what to offer instead, or who covers, answer "
+        "that from the document's text (the permitted options, the conditions, the office "
+        "or role named) rather than from the student's status alone.",
         "- This reply only reads. Never say or imply that you sent, assigned, escalated, "
         "created, scheduled, updated, approved, or changed anything. Do not describe "
         "yourself as read-only or unable to make changes either: changes go through a "
