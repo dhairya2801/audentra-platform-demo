@@ -263,6 +263,7 @@ class StaffAssistantPipeline:
         if trace is not None:
             trace.user_message = request.text
             trace.history_messages = len(request.history)
+            trace.set_history_preview(request.history)
             trace.add_stage(
                 "normalize",
                 (time.perf_counter() - stage_started) * 1_000,
@@ -860,7 +861,8 @@ class StaffAssistantPipeline:
                 "rounds": result.rounds,
                 "outcome": result.outcome,
                 "reads": [call.tool for call in result.calls],
-                "reasoning": result.reasoning[-3:],
+                "reasoning": list(result.reasoning),
+                "steps": list(result.steps),
                 "guard": guard_label,
                 **(
                     {

@@ -117,6 +117,10 @@ class AssistantTurnTrace:
     # "server" = durable conversation store; "client_fallback" = request body
     # (first conversation-less turn only); "none" = no prior context.
     history_source: str = "none"
+    # The prior turns the pipeline actually handed the model, bounded and
+    # sanitized: role plus the opening of each message. A follow-up answered
+    # from history alone has no other input worth inspecting.
+    history_preview: list[JsonDict] = field(default_factory=list)
     # "pipeline" is the normal path; "pre_pipeline_safety_gate" is a guarded
     # refusal before the pipeline ran; "idempotent_replay" returned a stored
     # exchange without executing anything.
@@ -187,6 +191,38 @@ class AssistantTurnTrace:
     )
     duration_ms: int | None = None
     _started_clock: float = field(default_factory=time.perf_counter, repr=False)
+
+    def started_from(self, clock: float) -> None:
+        """Re-anchor the turn clock to work that ran before this trace existed.
+
+        The hosting service recognizes actions and consults the model tier
+        before it knows whether a turn needs a conversation, so the trace is
+        created after that work. Without this the gated paths report 0 ms.
+        """
+
+        elapsed = max(0.0, time.perf_counter() - clock)
+        self._started_clock = clock
+        self.started_at = datetime.fromtimestamp(
+            datetime.now(UTC).timestamp() - elapsed, UTC
+        ).isoformat(timespec="milliseconds")
+
+    def set_history_preview(
+        self, history: Sequence[Mapping[str, Any]], *, limit: int = 8, characters: int = 280
+    ) -> None:
+        """Keep the tail of the history the model saw, bounded for the trace."""
+
+        tail = list(history)[-limit:]
+        self.history_preview = [
+            {
+                "role": str(entry.get("role") or ""),
+                "content": (
+                    str(entry.get("content") or "")[:characters]
+                    + ("…" if len(str(entry.get("content") or "")) > characters else "")
+                ),
+            }
+            for entry in tail
+            if isinstance(entry, Mapping)
+        ]
 
     def add_stage(self, name: str, duration_ms: float, **details: Any) -> None:
         self.stages.append(
@@ -278,6 +314,7 @@ class AssistantTurnTrace:
             "pageLabel": self.page_label,
             "historyMessages": self.history_messages,
             "historySource": self.history_source,
+            "historyPreview": [sanitize_trace_value(entry) for entry in self.history_preview],
             "classification": self.classification,
             "toolSelectionSource": self.tool_selection_source,
             "selectedTools": list(self.selected_tools),
@@ -390,6 +427,7 @@ class AssistantTraceRecorder:
                 "userMessage": str(payload.get("userMessage") or "")[:96],
                 "requestType": (payload.get("classification") or {}).get("requestType"),
                 "toolSelectionSource": payload.get("toolSelectionSource"),
+                "readPlanner": payload.get("readPlanner"),
                 "executedTools": [call.get("tool") for call in payload.get("toolCalls", [])],
                 "modelIterations": payload.get("modelIterations"),
                 "responseSource": payload.get("responseSource"),

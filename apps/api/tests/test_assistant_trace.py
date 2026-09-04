@@ -295,3 +295,53 @@ async def test_dev_persona_endpoints_require_worker_token_and_debug_flag(
             headers={"X-VV-Worker-Token": WORKER_TOKEN},
         )
     assert hidden.status_code == 404
+
+
+def test_trace_clock_can_be_anchored_to_earlier_work() -> None:
+    import time
+
+    turn_started = time.perf_counter() - 0.25
+    trace = AssistantTurnTrace(trace_id="req-anchored")
+    trace.started_from(turn_started)
+    trace.finalize()
+    # Work that ran before the trace existed (recognition, prefilters) counts.
+    assert trace.duration_ms is not None and trace.duration_ms >= 240
+
+
+def test_trace_history_preview_is_bounded_and_serialized() -> None:
+    trace = AssistantTurnTrace(trace_id="req-history")
+    trace.set_history_preview(
+        [{"role": "user", "content": "x" * 1_000}, {"role": "assistant", "content": "short"}],
+        characters=40,
+    )
+    payload = trace.to_dict()
+    assert payload["historyPreview"][0]["role"] == "user"
+    assert payload["historyPreview"][0]["content"].endswith("…")
+    assert len(payload["historyPreview"][0]["content"]) == 41
+    assert payload["historyPreview"][1]["content"] == "short"
+
+
+def test_recorder_list_carries_the_read_planner() -> None:
+    recorder = AssistantTraceRecorder(buffer_size=4)
+    trace = AssistantTurnTrace(trace_id="req-planner")
+    trace.read_planner = "hybrid"
+    recorder.record(trace)
+    assert recorder.list()[0]["readPlanner"] == "hybrid"
+
+
+@pytest.mark.anyio
+async def test_dev_tools_endpoint_serves_both_catalogues(debug_client: AsyncClient) -> None:
+    headers = {"X-VV-Worker-Token": WORKER_TOKEN}
+    response = await debug_client.get("/internal/assistant/dev/tools", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    student = {tool["name"]: tool for tool in body["student"]}
+    staff = {tool["name"]: tool for tool in body["staff"]}
+    assert "getOnboardingChecklist" in student
+    assert student["getOnboardingChecklist"]["arguments"] is None
+    assert staff["getStaffWorkQueue"]["informationClass"] == "operational_state"
+    assert "status" in staff["getStaffWorkQueue"]["arguments"]
+    assert staff["searchStudents"]["description"]
+
+    forbidden = await debug_client.get("/internal/assistant/dev/tools")
+    assert forbidden.status_code == 403

@@ -9,6 +9,7 @@ import hmac
 import logging
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -449,7 +450,7 @@ def _record_recognizer_call(
     trace.add_model_call(
         operation="action_recognizer",
         attempt=1,
-        duration_ms=0.0,
+        duration_ms=float(usage.get("durationMs") or 0.0),
         outcome="recognized" if request is not None else "no_action",
         provider=usage.get("provider"),
         model=usage.get("model"),
@@ -2914,6 +2915,7 @@ class PostgresPlatformService:
                 }
             return parsed
 
+        started = time.perf_counter()
         recognized = await recognize_with_model(
             message,
             actor=cast(Any, actor),
@@ -2922,6 +2924,8 @@ class PostgresPlatformService:
             tenant_id=tenant_id,
             request_id=request_id,
         )
+        if usage is not None:
+            usage["durationMs"] = round((time.perf_counter() - started) * 1_000)
         return recognized, usage
 
     async def _ask_edward(
@@ -2932,6 +2936,7 @@ class PostgresPlatformService:
         *,
         execution: ResolvedAssistantExecutionMode = DEFAULT_ASSISTANT_EXECUTION,
     ) -> JsonDict:
+        turn_started = time.perf_counter()
         message = str(payload.get("message", ""))
         page_path, page_label = _assistant_page_context(payload.get("pageContext"))
         conversation_id = payload.get("conversationId")
@@ -3025,6 +3030,7 @@ class PostgresPlatformService:
             action_requested=trace_action_requested,
             action_recognition_source=trace_recognition_source,
         )
+        trace.started_from(turn_started)
         _record_recognizer_call(trace, recognizer_usage, semantic_action)
 
         if not auth.is_delegate and isinstance(client_message_id, str) and client_message_id:
@@ -3702,6 +3708,7 @@ class PostgresPlatformService:
     ) -> JsonDict:
         if auth.actor_type != "staff":
             raise UnauthorizedError("Staff authentication is required")
+        turn_started = time.perf_counter()
         repo = self._staff_assistant_repo()
         message = str(payload.get("message", ""))
         conversation_id = payload.get("conversationId")
@@ -3766,6 +3773,7 @@ class PostgresPlatformService:
             action_requested=semantic_action.action if semantic_action else None,
             action_recognition_source=_recognition_source(semantic_action, recognizer_usage),
         )
+        trace.started_from(turn_started)
         _record_recognizer_call(trace, recognizer_usage, semantic_action)
 
         if isinstance(client_message_id, str) and client_message_id:

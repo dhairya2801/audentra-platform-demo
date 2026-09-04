@@ -75,6 +75,9 @@ def test_loop_reads_then_answers_and_flattens_evidence() -> None:
     assert [call.tool for call in result.calls] == ["getA"]
     assert "getA.count: 3" in result.evidence_texts
     assert result.rounds == 2 and result.outcome == "answered"
+    # The trace-facing step log mirrors the rounds as they ran.
+    assert [step["outcome"] for step in result.steps] == ["reads", "answered"]
+    assert result.steps[0]["reads"][0]["tool"] == "getA"
     # The second step saw the first step's result in its transcript.
     second_message = json.loads(
         seen[1]["messages"][1]["content"].split(">", 1)[1].rsplit("<", 1)[0]

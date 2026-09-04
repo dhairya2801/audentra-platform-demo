@@ -148,6 +148,7 @@ class AssistantPipeline:
             trace.page_path = request.page_path
             trace.page_label = request.page_label
             trace.history_messages = len(request.history)
+            trace.set_history_preview(request.history)
             trace.add_stage(
                 "normalize",
                 (time.perf_counter() - stage_started) * 1_000,
@@ -527,7 +528,8 @@ class AssistantPipeline:
             "rounds": result.rounds,
             "outcome": result.outcome,
             "reads": [call.tool for call in result.calls],
-            "reasoning": result.reasoning[-3:],
+            "reasoning": list(result.reasoning),
+            "steps": list(result.steps),
             "guard": (
                 "accepted"
                 if accepted

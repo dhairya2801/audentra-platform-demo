@@ -1538,6 +1538,54 @@ async def list_assistant_dev_personas(
     }
 
 
+@router.get(
+    "/internal/assistant/dev/tools",
+    status_code=200,
+    response_model=None,
+    include_in_schema=False,
+)
+async def list_assistant_dev_tools(
+    request: Request,
+    _worker_token: WorkerTokenDependency,
+) -> object:
+    """The tool catalogues exactly as the planners see them, for the Lab.
+
+    Descriptions come from the same tables the model planner and read loop
+    are prompted with, so what the Lab explains about a tool is what Edward
+    was told about it. Staff tools add their information class and validated
+    argument schema; student tools take no arguments (identity is bound
+    server-side).
+    """
+
+    _require_assistant_trace_debug(request)
+    from audentra.integrations.assistant.planner import TOOL_DESCRIPTIONS
+    from audentra.integrations.staff_assistant.catalog import (
+        STAFF_TOOL_ARGUMENTS,
+        STAFF_TOOL_DESCRIPTIONS,
+        STAFF_TOOL_INFORMATION_CLASS,
+        STAFF_TOOL_NAMES,
+    )
+
+    return {
+        "student": [
+            {"name": name, "description": description, "arguments": None}
+            for name, description in TOOL_DESCRIPTIONS.items()
+        ],
+        "staff": [
+            {
+                "name": name,
+                "description": STAFF_TOOL_DESCRIPTIONS.get(name, ""),
+                "informationClass": STAFF_TOOL_INFORMATION_CLASS.get(name),
+                "arguments": {
+                    argument: dict(spec)
+                    for argument, spec in STAFF_TOOL_ARGUMENTS.get(name, {}).items()
+                },
+            }
+            for name in STAFF_TOOL_NAMES
+        ],
+    }
+
+
 @router.post(
     "/internal/assistant/dev/personas/{name}",
     status_code=200,

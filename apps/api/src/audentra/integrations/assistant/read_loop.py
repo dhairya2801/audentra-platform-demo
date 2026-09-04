@@ -91,6 +91,11 @@ class ReadLoopResult:
     outcome: str = "answered"
     #: The model's own short rationale per round, for the trace.
     reasoning: list[str] = field(default_factory=list)
+    #: One entry per model round, in order: what the model said, which reads
+    #: it planned (with their outcome) and whether it answered. This is the
+    #: loop as it actually unfolded, so a trace can show round 2 retrying the
+    #: read round 1 got wrong instead of a flat list of tool names.
+    steps: list[JsonDict] = field(default_factory=list)
     #: A read the caller may wish to reflect as the conversation's next
     #: referent — the student the model resolved by searching. Only handles
     #: the executor produced are ever reported.
@@ -257,6 +262,7 @@ async def run_read_loop(
     transcript: list[JsonDict] = []
     model_calls: list[JsonDict] = []
     reasoning: list[str] = []
+    steps: list[JsonDict] = []
     tool_names = [tool.name for tool in tools]
     by_name = {tool.name: tool for tool in tools}
     rounds = 0
@@ -297,6 +303,7 @@ async def run_read_loop(
                 }
             )
             outcome = "model_error"
+            steps.append({"round": round_index + 1, "outcome": "model_error", "reads": []})
             break
         duration = round((time.perf_counter() - started) * 1_000)
         if not isinstance(step, Mapping):
@@ -309,6 +316,7 @@ async def run_read_loop(
                 }
             )
             outcome = "no_provider" if step is None else "invalid_step"
+            steps.append({"round": round_index + 1, "outcome": outcome, "reads": []})
             break
         model_calls.append(
             {
@@ -330,6 +338,24 @@ async def run_read_loop(
         if planned and not force_answer:
             await executor(planned)
             calls.extend(planned)
+            steps.append(
+                {
+                    "round": round_index + 1,
+                    "outcome": "reads",
+                    "reasoning": note,
+                    "reads": [
+                        {
+                            "tool": call.tool,
+                            "status": call.status,
+                            **({"reason": call.reason} if call.reason else {}),
+                        }
+                        for call in planned
+                    ],
+                    # The model wrote an answer in the same step as its reads;
+                    # it is discarded because it predates the results.
+                    "discardedAnswer": bool(isinstance(raw_answer, str) and raw_answer.strip()),
+                }
+            )
             transcript.append(
                 {
                     "round": round_index + 1,
@@ -353,12 +379,25 @@ async def run_read_loop(
             continue
         if isinstance(raw_answer, str) and raw_answer.strip():
             answer = raw_answer.strip()
+            steps.append(
+                {
+                    "round": round_index + 1,
+                    "outcome": "answered",
+                    "reasoning": note,
+                    "reads": [],
+                    "forced": force_answer,
+                }
+            )
             break
         if force_answer:
             outcome = "no_answer"
+            steps.append(
+                {"round": round_index + 1, "outcome": "no_answer", "reasoning": note, "reads": []}
+            )
             break
         # Neither reads nor an answer: the next round (eventually the forced
         # one) asks again with the same transcript.
+        steps.append({"round": round_index + 1, "outcome": "empty", "reasoning": note, "reads": []})
         continue
 
     if answer is None and outcome == "answered":
@@ -372,6 +411,7 @@ async def run_read_loop(
         model_calls=model_calls,
         outcome=outcome,
         reasoning=reasoning,
+        steps=steps,
     )
 
 
