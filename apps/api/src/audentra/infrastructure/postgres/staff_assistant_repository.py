@@ -133,7 +133,10 @@ class PostgresStaffAssistantRepository:
             )
         if program:
             params["program"] = f"%{_escape_like(program.strip())}%"
-            clauses.append("COALESCE(offer_program.name, '') ILIKE :program ESCAPE '\\'")
+            clauses.append(
+                "COALESCE(onboarding.payload->>'universityProgramName', offer_program.name, '') "
+                "ILIKE :program ESCAPE '\\'"
+            )
         where = f"WHERE student.tenant_id = :tenant_id{''.join(f' AND {c}' for c in clauses)}"
         async with self._engine.connect() as connection:
             rows = (
@@ -160,7 +163,8 @@ class PostgresStaffAssistantRepository:
                   AND viewer_assignment.ended_at IS NULL
               ) AS on_caseload,
               student.class_year,
-              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              COALESCE(onboarding.payload->>'universityProgramName',
+                offer_program.name, 'Program not assigned') AS program_name,
               offer_program.status AS offer_status,
               COALESCE(requirement_progress.total_count, 0) AS requirement_total,
               COALESCE(requirement_progress.completed_count, 0) AS requirement_completed,
@@ -171,6 +175,8 @@ class PostgresStaffAssistantRepository:
               ON person.id = student.person_id AND person.tenant_id = student.tenant_id
             LEFT JOIN {self._table("student_profile")} AS profile
               ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+            LEFT JOIN {self._table("student_onboarding")} AS onboarding
+              ON onboarding.student_id = student.id AND onboarding.tenant_id = student.tenant_id
             LEFT JOIN LATERAL (
               SELECT program.name, offer.status
               FROM {self._table("admission_offer")} AS offer
@@ -322,7 +328,8 @@ class PostgresStaffAssistantRepository:
               profile.communication_preference,
               student.class_year,
               COALESCE(onboarding.status, 'not_started') AS onboarding_status,
-              COALESCE(offer_detail.program_name, 'Program not assigned') AS program_name,
+              COALESCE(onboarding.payload->>'universityProgramName',
+                offer_detail.program_name, 'Program not assigned') AS program_name,
               offer_detail.status AS offer_status,
               offer_detail.response_deadline,
               offer_detail.deposit_amount_cents,

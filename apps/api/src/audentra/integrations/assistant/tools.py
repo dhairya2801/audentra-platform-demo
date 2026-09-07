@@ -35,6 +35,7 @@ from audentra.domain.student_state import (
     requirement_href,
 )
 from audentra.integrations.assistant.planner import RECEIPT_SOURCES
+from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
 
 JsonDict = dict[str, Any]
 PrimitiveRead = Callable[[], Awaitable[Mapping[str, Any]]]
@@ -876,6 +877,8 @@ async def _tool_institutional_policies(host: AssistantToolHost, _now: datetime) 
     if not query:
         raise _UnsupportedRead("institution_knowledge")
     result = await host.read("institution_knowledge", query=query)
+    if "sources" in result:
+        return dict(result)
     documents = [dict(_mapping(item)) for item in _sequence(result.get("documents"))]
     return {
         "query": result.get("query", query),
@@ -1399,3 +1402,43 @@ def _record_count(data: Any) -> int:
                 return len(data[key])
         return 1
     return 0
+
+
+def _university_tool(
+    domain: str, name: str
+) -> Callable[[AssistantToolHost, datetime], Awaitable[JsonDict]]:
+    async def read(host: AssistantToolHost, now: datetime) -> JsonDict:
+        if not host.supports("university_record"):
+            raise _UnsupportedRead("university_record")
+        args = host.tool_arguments.get(name, {})
+        return dict(
+            await host.read(
+                "university_record",
+                domain=domain,
+                known_at=args.get("knownAt"),
+                effective_at=args.get("effectiveAt"),
+                entity_type=args.get("entityType"),
+                entity_id=args.get("entityId"),
+            )
+        )
+
+    return read
+
+
+_TOOL_IMPLEMENTATIONS = {
+    **_TOOL_IMPLEMENTATIONS,
+    **{name: _university_tool(domain, name) for name, (domain, _) in UNIVERSITY_TOOLS.items()},
+}
+STUDENT_TOOL_ARGUMENTS = {
+    **STUDENT_TOOL_ARGUMENTS,
+    "getUniversityHistory": {
+        "entityType": "Optional exact event type: application, appointment, disbursement, "
+        "document, enrollment, "
+        "hold, housing, ledger, payment, sap_evaluation, transfer_credit, waitlist, workflow. "
+        "External grade corrections use transfer_credit; institutional grades use enrollment. "
+        "Omit the filter if uncertain; grade is not a valid type.",
+        "entityId": "Optional exact entity id from a prior record",
+        "knownAt": "ISO timestamp with timezone: latest recording time to include",
+        "effectiveAt": "ISO timestamp with timezone: latest fact effectivity to include",
+    },
+}

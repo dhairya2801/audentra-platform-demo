@@ -28,6 +28,7 @@ from audentra.domain.student_cohort import (
     build_cohort_filter,
 )
 from audentra.domain.student_state import AID_DOCUMENT_SATISFIED_STATUSES
+from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
 from audentra.integrations.staff_assistant.catalog import (
     STAFF_RECEIPT_SOURCES,
     ToolArgumentError,
@@ -1489,3 +1490,82 @@ def _record_count(data: Any) -> int:
                 return len(data[key])
         return 1
     return 0
+
+
+def _university_tool(
+    domain: str,
+) -> Callable[[StaffAssistantToolHost, Mapping[str, Any], datetime], Awaitable[JsonDict]]:
+    async def read(
+        host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+    ) -> JsonDict:
+        return dict(
+            await _primitive(
+                host,
+                "university_record",
+                student_id=args["studentId"],
+                domain=domain,
+                known_at=args.get("knownAt"),
+                effective_at=args.get("effectiveAt"),
+                entity_type=args.get("entityType"),
+                entity_id=args.get("entityId"),
+            )
+        )
+
+    return read
+
+
+async def _university_operations(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    return dict(await _primitive(host, "university_operations"))
+
+
+async def _university_cohort(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    return dict(await _primitive(host, "university_cohort"))
+
+
+async def _university_policies(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    return dict(
+        await _primitive(
+            host,
+            "university_policies",
+            query=args["query"],
+            student_id=args.get("studentId"),
+            at=args.get("at"),
+            known_at=args.get("knownAt"),
+        )
+    )
+
+
+_TOOL_IMPLEMENTATIONS = {
+    **_TOOL_IMPLEMENTATIONS,
+    **{name: _university_tool(domain) for name, (domain, _) in UNIVERSITY_TOOLS.items()},
+    "getUniversityOperations": _university_operations,
+    "getUniversityCohort": _university_cohort,
+    "searchUniversityPolicies": _university_policies,
+}
+
+
+async def _university_casework(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    record = await _university_tool("relationships")(host, args, now)
+    return {
+        key: record[key]
+        for key in (
+            "student",
+            "snapshotAt",
+            "workflows",
+            "steps",
+            "dependencies",
+            "communications",
+            "portalMessages",
+        )
+    }
+
+
+_TOOL_IMPLEMENTATIONS = {**_TOOL_IMPLEMENTATIONS, "getUniversityCasework": _university_casework}

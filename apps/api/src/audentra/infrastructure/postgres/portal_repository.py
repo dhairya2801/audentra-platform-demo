@@ -36,6 +36,7 @@ from audentra.infrastructure.messaging.outbox import OutboxRepository, OutboxRep
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
+from audentra.infrastructure.postgres.university_repository import PostgresUniversityRepository
 
 JsonDict = dict[str, Any]
 IdempotentHandler = Callable[[AsyncConnection], Awaitable[JsonDict]]
@@ -894,8 +895,15 @@ def _map_program(row: Mapping[str, Any]) -> JsonDict:
 class PostgresPortalRepository:
     """Tenant-scoped SQLAlchemy Core repository for every portal store method."""
 
-    def __init__(self, engine: AsyncEngine, outbox: OutboxRepository | None = None) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        outbox: OutboxRepository | None = None,
+        *,
+        university: PostgresUniversityRepository | None = None,
+    ) -> None:
         self.engine = engine
+        self.university = university
         self.outbox = outbox or OutboxRepository(
             engine, OutboxRepositoryConfig(worker_id="audentra-api")
         )
@@ -3663,7 +3671,11 @@ class PostgresPortalRepository:
         )
         if row is None:
             raise NotFoundError("STUDENT_PROFILE_NOT_FOUND", "The student profile was not found")
-        return _map_profile(row)
+        result = _map_profile(row)
+        if self.university is not None and self.university.is_enabled(auth):
+            world = await self.university.record(auth)
+            result["email"] = world["student"]["email"]
+        return result
 
     async def update_student_profile(
         self, auth: AuthContext, update: Mapping[str, Any], request_id: str
@@ -3761,6 +3773,11 @@ class PostgresPortalRepository:
             return _map_profile(updated)
 
     async def get_student_academics(self, auth: AuthContext) -> JsonDict:
+        from audentra.domain.university_projection import academics
+
+        university = self.university
+        if university is not None and university.is_enabled(auth):
+            return academics(await university.record(auth, "academics"))
         selected = await self._one(
             """
             SELECT p.id, p.code, p.name, p.degree, p.total_credits, p.description,
@@ -3978,6 +3995,13 @@ class PostgresPortalRepository:
         }
 
     async def get_student_financials(self, auth: AuthContext) -> JsonDict:
+        from audentra.domain.university_projection import financials
+
+        university = self.university
+        if university is not None and university.is_enabled(auth):
+            return financials(
+                await university.record(auth, "account"), await university.record(auth, "documents")
+            )
         summary = await self._one(
             """
             SELECT sfs.academic_year, sfs.cost_of_attendance_cents,

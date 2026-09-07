@@ -245,6 +245,7 @@ class AssistantTurnTrace:
         round_name: str = "initial",
         arguments: Any = None,
         validation: str | None = None,
+        model_result: Any = None,
     ) -> None:
         entry: JsonDict = {"tool": tool, "status": status, "round": round_name}
         if duration_ms is not None:
@@ -255,6 +256,8 @@ class AssistantTurnTrace:
             entry["reason"] = reason
         if result is not None:
             entry["result"] = sanitize_trace_value(result)
+        if model_result is not None:
+            entry["modelResult"] = sanitize_trace_value(model_result)
         # Staff tools take validated arguments; recording them (sanitized)
         # plus the validation outcome makes every read auditable.
         if arguments is not None:

@@ -322,6 +322,7 @@ def test_requests_awaiting_reply_route_to_inquiry_aggregates_not_the_roster() ->
         )
         assert classification is not None, question
         assert classification.request_type == "inquiry_aggregate", question
+        assert classification.cohort_filter is not None
         assert classification.cohort_filter.get("status") == "awaiting_first_reply", question
     roster = classify_staff_request(normalize_staff_request("How big is the roster?"))
     assert roster is not None and roster.request_type == "cohort_aggregate"
@@ -355,7 +356,8 @@ def test_staff_questions_route_to_staff_intents_never_the_roster() -> None:
         ),
         _entities("Which of Vera Jessamy's work items have been in progress?", ("Vera Jessamy",)),
     )
-    assert stale is not None and stale.cohort_filter.get("inProgressOverDays") == 7
+    assert stale is not None and stale.cohort_filter is not None
+    assert stale.cohort_filter.get("inProgressOverDays") == 7
     # Student questions that merely mention advisers stay student/cohort scoped.
     for question, expected in {
         "Which students are most at risk?": "attention_ranking",

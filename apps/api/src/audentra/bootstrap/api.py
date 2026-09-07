@@ -49,6 +49,7 @@ from audentra.infrastructure.postgres.staff_operations_repository import (
 )
 from audentra.infrastructure.postgres.staff_repository import PostgresStaffRepository
 from audentra.infrastructure.postgres.tenant_repository import PostgresTenantRepository
+from audentra.infrastructure.postgres.university_repository import PostgresUniversityRepository
 from audentra.infrastructure.postgres.voice_repository import PostgresVoiceSessionRepository
 from audentra.infrastructure.storage import ObjectStorage, create_object_storage
 from audentra.infrastructure.voice import (
@@ -104,9 +105,11 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
     storage: ObjectStorage | None = None
     try:
         storage = create_object_storage(settings.object_storage)
+        university = PostgresUniversityRepository(engine)
+        await university.load_tenants()
         platform = PostgresPlatformRepository(engine)
-        portal = PostgresPortalRepository(engine)
-        staff = PostgresStaffRepository(engine, portal)
+        portal = PostgresPortalRepository(engine, university=university)
+        staff = PostgresStaffRepository(engine, portal, university=university)
         advising = PostgresAdvisingRepository(engine, portal)
         managed = PostgresManagedConfigurationRepository(engine)
         tenant = PostgresTenantRepository(engine)
@@ -131,6 +134,7 @@ async def build_api_runtime(settings: RuntimeSettings) -> ApiRuntimeResources:
                 advising=advising,
                 staff_operations=PostgresStaffOperationsRepository(engine, advising),
                 knowledge=PostgresInstitutionKnowledgeRepository(engine),
+                university=university,
             ),
             storage,
             ai,

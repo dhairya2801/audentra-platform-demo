@@ -16,6 +16,7 @@ from audentra.integrations.assistant.pipeline import AssistantPipeline
 from audentra.integrations.assistant.read_loop import (
     LoopCall,
     LoopTool,
+    ModelStep,
     bound_result,
     evidence_from_calls,
     loop_step_schema,
@@ -32,7 +33,7 @@ def _tools() -> list[LoopTool]:
     ]
 
 
-def _scripted(steps: Sequence[Mapping[str, Any]]):
+def _scripted(steps: Sequence[Mapping[str, Any]]) -> tuple[ModelStep, list[dict[str, Any]]]:
     calls: list[dict[str, Any]] = []
     queue = list(steps)
 
@@ -274,7 +275,7 @@ def _student_host() -> AssistantToolHost:
 
 def _loop_pipeline(
     steps: Sequence[Mapping[str, Any]], planner: str
-) -> tuple[AssistantPipeline, list]:
+) -> tuple[AssistantPipeline, list[dict[str, Any]]]:
     step, seen = _scripted(steps)
     return (
         AssistantPipeline(_student_host(), read_loop_step=step, read_planner=planner),

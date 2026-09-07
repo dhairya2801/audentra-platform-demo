@@ -113,9 +113,9 @@ export interface StudentDashboard {
     id: string;
     preferredName: string;
     fullName: string;
-    classYear: number;
+    classYear: number | null;
   };
-  offer: AdmissionOfferSummary;
+  offer: AdmissionOfferSummary | null;
   journey: {
     id: string | null;
     status:
@@ -1050,7 +1050,8 @@ export interface StudentDocument {
     | "accepted"
     | "rejected"
     | "needs_resubmission"
-    | "waived";
+    | "waived"
+    | "expired";
   /** Present once a reviewer has ruled on the document. */
   review?: {
     decision:
@@ -2990,6 +2991,8 @@ export interface AskEdwardInput {
  */
 export interface EdwardContextReceipt {
   source:
+    | "university"
+    | "institution_knowledge"
     | "dashboard"
     | "profile"
     | "documents"
@@ -3099,6 +3102,110 @@ export type AssistantResponseBlock =
       items: AssistantBlockNextStep[];
     };
 
+export interface EdwardActionProvenance {
+  kind:
+    | "canonical_database"
+    | "institution_authored"
+    | "user_authored"
+    | "uploaded_document"
+    | "inbound_communication"
+    | "model_derived";
+  source: string;
+  /** Canonical sources establish facts; derived/user content does not. */
+  factTrusted: boolean;
+  /** No evidence source is ever an instruction or authorization signal. */
+  instructionTrusted: boolean;
+}
+
+export interface EdwardActionPreview {
+  title: string;
+  summary: string;
+  changes?: { field: string; before: unknown; after: unknown }[];
+  student?: { id: string; name: string };
+  recipient?: { id: string; name: string; address?: string };
+  requirement?: {
+    id?: string;
+    title?: string;
+    status?: string;
+    dueAt?: string | null;
+    blocking?: boolean;
+  } | null;
+  topic?: string;
+  message?: string;
+  /** Who an internal request reaches: the responsible office, the adviser, or both. */
+  routesTo?: {
+    office?: string | null;
+    adviser?: { name: string; title?: string | null; component?: string | null } | null;
+  } | null;
+  sender?: string;
+  subject?: string;
+  body?: string;
+  response?: Record<string, unknown>;
+  workItem?: Record<string, unknown>;
+  cohort?: {
+    filter: Record<string, unknown>;
+    description: string[];
+    count: number;
+    sample: { id: string; name: string; program?: string }[];
+  };
+  warnings?: string[];
+}
+
+export interface EdwardActionIntent {
+  id: string;
+  action:
+    | "student.requirement.submit_response"
+    | "student.preferences.update"
+    | "student.support.contact"
+    | "operations.follow_up.create"
+    | "operations.work_item.update"
+    | "operations.cohort.create_follow_ups"
+    | "communications.email.prepare";
+  status:
+    | "pending_confirmation"
+    | "executing"
+    | "succeeded"
+    | "partial"
+    | "failed"
+    | "cancelled"
+    | "expired";
+  version: number;
+  riskClass: 1 | 2 | 3 | 4;
+  confirmationMode: "immediate" | "confirm" | "strong_confirm" | "external_confirm";
+  contentSha256: string;
+  expiresAt: string;
+  preview: EdwardActionPreview;
+  provenance: EdwardActionProvenance[];
+  authorizationCapability?: string | null;
+  receipt?: EdwardActionReceipt;
+}
+
+export interface EdwardActionReceipt {
+  id: string;
+  intentId: string;
+  action: EdwardActionIntent["action"];
+  status: "succeeded" | "partial" | "failed";
+  target: {
+    studentId?: string | null;
+    resourceType?: string | null;
+    resourceId?: string | null;
+  };
+  result: Record<string, unknown>;
+  affectedCount: number;
+  auditEventIds: string[];
+  receiptSha256: string;
+  committedAt: string;
+}
+
+export interface ConfirmEdwardActionInput {
+  expectedVersion: number;
+  contentSha256: string;
+}
+
+export interface CancelEdwardActionInput {
+  expectedVersion: number;
+}
+
 export interface AskEdwardResponse {
   message: string;
   /** Structured rendering of `message`. Absent on legacy gateway replies. */
@@ -3116,6 +3223,9 @@ export interface AskEdwardResponse {
   }[];
   contextReceipts: EdwardContextReceipt[];
   widgets: EdwardActionWidget[];
+  actionIntents?: EdwardActionIntent[];
+  actionReceipts?: EdwardActionReceipt[];
+  actionError?: { code: string; message: string };
   /** Present when the platform persisted this exchange to a conversation. */
   conversationId?: string;
   userMessageId?: string;
@@ -3138,6 +3248,8 @@ export interface AssistantConversationMessage {
   contextReceipts: EdwardContextReceipt[];
   suggestedActions: AskEdwardResponse["suggestedActions"];
   widgets: EdwardActionWidget[];
+  actionIntents?: EdwardActionIntent[];
+  actionReceipts?: EdwardActionReceipt[];
   createdAt: string;
 }
 
@@ -3243,6 +3355,9 @@ export interface AskStaffEdwardResponse {
   conversationId?: string;
   userMessageId?: string;
   assistantMessageId?: string;
+  actionIntents?: EdwardActionIntent[];
+  actionReceipts?: EdwardActionReceipt[];
+  actionError?: { code: string; message: string };
 }
 
 export interface StaffAssistantConversationMessage {
@@ -3257,6 +3372,8 @@ export interface StaffAssistantConversationMessage {
   usage: AskEdwardResponse["usage"];
   blocks: StaffAssistantResponseBlock[] | null;
   contextReceipts: StaffAssistantContextReceipt[];
+  actionIntents?: EdwardActionIntent[];
+  actionReceipts?: EdwardActionReceipt[];
   referencedStudentId: string | null;
   createdAt: string;
 }
@@ -3271,6 +3388,7 @@ export interface StaffAssistantConversation {
 export interface StaffAssistantConversationMessagesResponse {
   conversationId: string;
   activeStudentId: string | null;
+  activeCohortFilter?: Record<string, unknown> | null;
   messages: StaffAssistantConversationMessage[];
 }
 
@@ -3403,6 +3521,10 @@ export interface CourseExemptionRecommendation {
 }
 
 export interface StudentAcademics {
+  attempts?: UniversityCourseAttempt[];
+  currentLoads?: { term_id: string; credits: number }[];
+  unresolvedRequirements?: { id: string; credits: number; description: string }[];
+  limitations?: string[];
   selectedProgram: AcademicProgram;
   availablePrograms: AcademicProgram[];
   transcriptCredits: TranscriptCredit[];
@@ -3455,6 +3577,14 @@ export interface FinancialAward {
 }
 
 export interface StudentFinancials {
+  accountBasis?: "posted_ledger";
+  termLabel?: string;
+  postedAidCents?: number;
+  postedChargesCents?: number;
+  accountAdjustmentsCents?: number;
+  ledger?: UniversityLedgerEntry[];
+  disbursements?: UniversityDisbursement[];
+  transactions?: UniversityPayment[];
   academicYear: string;
   costOfAttendanceCents: number;
   acceptedAidCents: number;
@@ -3473,10 +3603,10 @@ export interface StudentFinancials {
   }[];
   paymentSchedule?: FinancialPaymentScheduleItem[];
   sap: {
-    status: "meeting" | "warning" | "probation" | "not_meeting" | "appeal_pending";
-    cumulativeGpa: number;
+    status: "meeting" | "warning" | "probation" | "not_meeting" | "appeal_pending" | "not_evaluated";
+    cumulativeGpa: number | null;
     minimumGpa: number;
-    completionRatePercent: number;
+    completionRatePercent: number | null;
     minimumCompletionRatePercent: number;
     attemptedCredits: number;
     maximumAttemptedCredits: number;
@@ -3806,4 +3936,60 @@ export interface ApiErrorResponse {
     message: string;
     requestId: string;
   };
+}
+
+
+/** Canonical v3 evidence; all amounts are integer USD cents. */
+export type UniversityDomain = "overview" | "academics" | "account" | "relationships" | "documents" | "history";
+export interface UniversityCourseAttempt {
+  id: string; code: string; title: string; credits: number; term_id: string;
+  status: string; grade: string | null; weekday: number; start_minute: number;
+  end_minute: number; room: string; modality: string;
+}
+export interface UniversityLedgerEntry {
+  id: string; term_id: string; kind: string; amount_cents: number;
+  posted_at: string; due_at: string | null; description: string;
+}
+export interface UniversityDisbursement {
+  id: string; name: string; term_id: string; amount_cents: number;
+  status: string; scheduled_at: string; posted_at: string | null; reason: string | null;
+}
+export interface UniversityPayment {
+  id: string; term_id: string; amount_cents: number; status: string;
+  submitted_at: string; settled_at: string | null; method: string;
+}
+export interface UniversityRecord {
+  domain: UniversityDomain;
+  snapshotAt: string;
+  semantics: string;
+  student: { id: string; external_ref: string; name: string; preferred_name: string;
+    program_name: string; status: string; admit_term: string; residency: string };
+  applications?: { id: string; status: string; submitted_at: string; decided_at: string | null; respond_by: string | null }[];
+  holds?: { id: string; kind: string; office_name?: string; office_id: string; reason: string; placed_at: string; released_at: string | null }[];
+  loads?: { term_id: string; credits: number }[];
+  balances?: { term_id: string; balance_cents: number }[];
+  deadlines?: { id: string; title: string; starts_at: string; category: string }[];
+  attempts?: UniversityCourseAttempt[];
+  ledger?: UniversityLedgerEntry[];
+  payments?: { id: string; term_id: string; amount_cents: number; status: string; method: string; submitted_at: string }[];
+  disbursements?: { id: string; term_id: string; name: string; amount_cents: number; status: string; scheduled_at: string; reason: string | null }[];
+  portalAuthorizations?: { id: string; full_name: string; scopes: string[]; active: boolean; authorization_status: string }[];
+  assignments?: { id: string; name: string; role: string; email: string; office_name: string; ends_at: string | null }[];
+  coverage?: { id: string; covering_name: string; covering_email: string; starts_at: string; ends_at: string }[];
+  housing?: { id: string; status: string; residence_name: string | null; room: string | null; reason: string }[];
+  events?: { id: string; description: string; effective_at: string; recorded_at: string; to_state: string }[];
+  documents?: { id: string; category: string; status: string; office_name: string }[];
+  revisions?: { id: string; document_id: string; status: string; reason: string; recorded_at: string; effective_at: string }[];
+  workflows?: { id: string; title: string; status: string; owner_name: string; due_at: string }[];
+  steps?: { id: string; workflow_id: string; title: string; status: string; evidence: string | null }[];
+  consents?: { id: string; delegate_name: string; scope: string; expires_at: string; revoked_at: string | null }[];
+  exceptions?: { id: string; kind: string; status: string; starts_at: string; ends_at: string; reason: string }[];
+}
+export interface UniversityOperations {
+  staff: { name: string; title: string; capacity: number; office_id: string };
+  availability: { id: string; weekday: number; start_minute: number; end_minute: number; timezone: string; location: string }[];
+  calendar: { id: string; title: string; starts_at: string; ends_at: string; location: string }[];
+  absences: { id: string; starts_at: string; ends_at: string; covering_name: string; reason: string }[];
+  caseload: { role: string; count: number }[];
+  cases: { id: string; title: string; student_name: string; external_ref: string; status: string; due_at: string }[];
 }

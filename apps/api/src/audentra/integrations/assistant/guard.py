@@ -51,6 +51,12 @@ _PROSE_DATE = re.compile(
     r"(\d{1,2})(?:\s*,?\s*(\d{4}))?",
     re.IGNORECASE,
 )
+_DAY_FIRST_DATE = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+("
+    + "|".join([*_MONTHS, *(month[:3] for month in _MONTHS)])
+    + r")\.?\s*,?\s*(\d{4})?",
+    re.IGNORECASE,
+)
 _NUMBER = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]{2,}(?:\.\d+)?\b|\b\d+(?:\.\d+)?%")
 _CAUSAL_CONNECTIVE = re.compile(
     r"\b(?:because|since|due to|owing to|as a result of|caused by|is blocking|"
@@ -248,7 +254,9 @@ def guard_grounded_answer(
 
     corpus = "\n".join(evidence_texts).lower()
     allowed_dates = _collect_dates(corpus)
-    allowed_numbers = _collect_numbers(_mask_dates_and_contacts(corpus))
+    allowed_numbers = _collect_numbers(_mask_dates_and_contacts(corpus)) | set(
+        re.findall(r"\b(?:19|20)\d{2}(?=-\d{2}-\d{2})", corpus)
+    )
     allowed_contacts = _collect_contacts(corpus)
     lowered = normalized.lower()
 
@@ -305,7 +313,9 @@ def ungrounded_tokens(answer: str, evidence_texts: Sequence[str]) -> dict[str, l
     corpus = "\n".join(evidence_texts).lower()
     lowered = re.sub(r"\s+", " ", answer).strip().lower()
     allowed_dates = _collect_dates(corpus)
-    allowed_numbers = _collect_numbers(_mask_dates_and_contacts(corpus))
+    allowed_numbers = _collect_numbers(_mask_dates_and_contacts(corpus)) | set(
+        re.findall(r"\b(?:19|20)\d{2}(?=-\d{2}-\d{2})", corpus)
+    )
     allowed_contacts = _collect_contacts(corpus)
     return {
         "contacts": sorted(c for c in _collect_contacts(lowered) if c not in allowed_contacts),
@@ -335,7 +345,7 @@ def _detect_invented_hold(lowered: str) -> bool:
 def _mask_dates_and_contacts(text: str) -> str:
     text = _CONTACT.sub(" ", text)
     text = _ISO_DATE.sub(" ", text)
-    return _PROSE_DATE.sub(" ", text)
+    return _DAY_FIRST_DATE.sub(" ", _PROSE_DATE.sub(" ", text))
 
 
 def _collect_dates(text: str) -> set[str]:
@@ -355,6 +365,13 @@ def _collect_dates(text: str) -> set[str]:
         dates.add(f"{month_index + 1}-{day}")
         if match.group(3):
             dates.add(f"{month_index + 1}-{day}-{match.group(3)}")
+    for match in _DAY_FIRST_DATE.finditer(text):
+        month_index = next(
+            i for i, month in enumerate(_MONTHS) if month.startswith(match.group(2).lower())
+        )
+        dates.add(f"{month_index + 1}-{int(match.group(1))}")
+        if match.group(3):
+            dates.add(f"{month_index + 1}-{int(match.group(1))}-{match.group(3)}")
     return dates
 
 

@@ -121,6 +121,7 @@ from .staff_assistant_repository import PostgresStaffAssistantRepository
 from .staff_operations_repository import PostgresStaffOperationsRepository
 from .staff_repository import PostgresStaffRepository
 from .tenant_repository import PostgresTenantRepository
+from .university_repository import PostgresUniversityRepository
 
 JsonDict = dict[str, Any]
 LOGGER = logging.getLogger(__name__)
@@ -721,6 +722,7 @@ class PostgresRepositoryBundle:
     # offices). Optional: a tenant without a corpus answers institutional
     # questions with the honest refusal, exactly as before.
     knowledge: PostgresInstitutionKnowledgeRepository | None = None
+    university: PostgresUniversityRepository | None = None
 
 
 class SignedDocumentGenerator(Protocol):
@@ -1016,6 +1018,22 @@ class PostgresPlatformService:
             )
 
         auth = self._auth(call)
+        if operation in {"student.university", "staff.student_university", "staff.university"}:
+            university = self.repository.university
+            if university is None or not university.is_enabled(auth):
+                raise ApiError(404, "UNIVERSITY_NOT_AVAILABLE", "No university record is available")
+            if operation.startswith("staff.") and auth.actor_type != "staff":
+                raise ApiError(403, "STAFF_REQUIRED", "Staff access required")
+            if operation == "staff.university":
+                return await university.operations(auth)
+            bound = (
+                replace(auth, student_id=self._path(call, "id"))
+                if operation == "staff.student_university"
+                else auth
+            )
+            return await university.record(
+                bound, str(call.query_params.get("domain") or "overview")
+            )
         payload = dict(call.payload)
         key = call.idempotency_key
         portal = self.repository.portal
@@ -2784,6 +2802,10 @@ class PostgresPlatformService:
             primitives["institution_knowledge"] = lambda query: self._student_knowledge_search(
                 auth, knowledge, query
             )
+        university = self.repository.university
+        if university is not None and university.is_enabled(auth):
+            primitives["university_record"] = lambda **kwargs: university.record(auth, **kwargs)
+            primitives["institution_knowledge"] = lambda query: university.policies(auth, query)
         return AssistantToolHost(cast(Any, primitives))
 
     @staticmethod
@@ -3089,7 +3111,14 @@ class PostgresPlatformService:
             trace.path = "pre_pipeline_safety_gate"
             trace.response_source = "deterministic"
             trace.provider = str(response.get("provider") or "guided")
-        elif injection_reason is not None:
+        elif injection_reason is not None and not (
+            injection_reason == "quoted_content"
+            and re.search(
+                r"\b(?:is that|is this|is it) (?:reliable|true|correct|accurate)\s*\?",
+                message,
+                re.I,
+            )
+        ):
             response = action_responses.injection_refusal(injection_reason)
             trace.path = "action_untrusted_framing"
             trace.response_source = "deterministic"
@@ -3213,6 +3242,39 @@ class PostgresPlatformService:
             # the real route beats both a stock refusal and a read answer to a
             # question the student did not ask.
             response = boundary
+            university = self.repository.university
+            if (
+                university is not None
+                and university.is_enabled(auth)
+                and re.search(r"\bholds?\b", message, re.I)
+            ):
+                account = await university.record(auth, "account")
+                balance = sum(
+                    row["amount_cents"] for row in account["ledger"] if row["term_id"] == "2026FA"
+                )
+                active = [row for row in account["holds"] if not row["released_at"]]
+                pending = [row for row in account["payments"] if row["status"] == "pending"]
+                answer = (
+                    "Hold release is not an Edward action in this version. "
+                    f"Your posted Fall 2026 balance is ${balance / 100:,.2f}; "
+                    f"there are {len(active)} active holds and {len(pending)} pending payments. "
+                    "Pending payments do not reduce that posted balance. Student Accounts "
+                    "must verify settlement and record a financial hold release separately; "
+                    "other holds require their owning office. No hold was changed."
+                )
+                response = {
+                    **response,
+                    "message": answer,
+                    "blocks": [{"type": "text", "text": answer, "fallbackText": answer}],
+                    "contextReceipts": [{"source": "university"}],
+                }
+                trace.add_tool_call(
+                    tool="getUniversityAccount",
+                    status="available",
+                    duration_ms=None,
+                    result=account,
+                    round_name="action-boundary",
+                )
             trace.path = "action_boundary"
             trace.response_source = "deterministic"
         elif action_responses.is_capability_question(message):
@@ -3246,7 +3308,7 @@ class PostgresPlatformService:
                 read_loop_step=model_hook(
                     execution.mode, self._read_loop_step(auth, request_id, "student")
                 ),
-                **self._read_loop_settings(execution),
+                **self._read_loop_settings(execution, auth),
             )
             result = await pipeline.execute(
                 message=message,
@@ -3473,11 +3535,22 @@ class PostgresPlatformService:
 
         return run
 
-    def _read_loop_settings(self, execution: ResolvedAssistantExecutionMode) -> dict[str, Any]:
+    def _read_loop_settings(
+        self, execution: ResolvedAssistantExecutionMode, auth: AuthContext | None = None
+    ) -> dict[str, Any]:
         """Planner mode and round budget for one turn: the Lab header wins,
         else the deployment default from the gateway settings."""
 
         planner = execution.read_planner
+        university = self.repository.university
+        if auth is not None and university is not None and university.is_enabled(auth):
+            return {
+                "read_planner": planner.value if planner is not None else "model",
+                "read_loop_max_rounds": 4,
+                "now": lambda: datetime.fromisoformat(
+                    university.clocks[auth.tenant_id].replace("Z", "+00:00")
+                ),
+            }
         default = getattr(self.ai, "default_read_planner", "deterministic")
         rounds = getattr(self.ai, "read_loop_max_rounds", 3)
         return {
@@ -3655,6 +3728,7 @@ class PostgresPlatformService:
                     )
                 ),
                 **self._staff_operations_primitives(auth),
+                **self._university_staff_primitives(auth),
             },
             staff_member_id=auth.actor_id,
         )
@@ -3768,6 +3842,21 @@ class PostgresPlatformService:
                 }
             )
         return primitives
+
+    def _university_staff_primitives(self, auth: AuthContext) -> dict[str, Any]:
+        university = self.repository.university
+        if university is None or not university.is_enabled(auth):
+            return {}
+        return {
+            "university_record": lambda student_id, **kwargs: university.record(
+                replace(auth, student_id=student_id), **kwargs
+            ),
+            "university_operations": lambda: university.operations(auth),
+            "university_cohort": lambda: university.cohort(auth),
+            "university_policies": lambda query, student_id=None, **kwargs: university.policies(
+                replace(auth, student_id=student_id or ""), query, **kwargs
+            ),
+        }
 
     async def _morning_brew_for_assistant(self, auth: AuthContext) -> Mapping[str, Any]:
         """The canonical Morning Brew, or an honest unavailability."""
@@ -3950,7 +4039,7 @@ class PostgresPlatformService:
                     if semantic_action is not None
                     else model_hook(execution.mode, self._read_loop_step(auth, request_id, "staff"))
                 ),
-                **self._read_loop_settings(execution),
+                **self._read_loop_settings(execution, auth),
             )
             result = await pipeline.execute(
                 message=message,

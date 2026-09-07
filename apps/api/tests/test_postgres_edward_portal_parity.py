@@ -326,7 +326,7 @@ def test_messages_and_appointments_agree() -> None:
 
 
 def test_every_tool_reads_successfully_on_the_production_path() -> None:
-    """No capability may be silently unavailable against a real database."""
+    """Core reads work; optional adapters are explicitly absent in this fixture."""
 
     from audentra.integrations.assistant.tools import _TOOL_IMPLEMENTATIONS
 
@@ -340,6 +340,14 @@ def test_every_tool_reads_successfully_on_the_production_path() -> None:
             for tool, read in execution.reads.items()
             if read["status"] != "available"
         }
-        assert unavailable == {}
+        from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
+
+        # This deliberately minimal Harvard fixture installs neither advising
+        # nor the institutional corpus nor a v3 world. University runtime
+        # integration tests exercise those reads against an imported v3 tenant.
+        assert unavailable == {
+            name: "not_supported"
+            for name in ("getStudentAdvising", "getInstitutionalPolicies", *UNIVERSITY_TOOLS)
+        }
 
     _run(scenario)

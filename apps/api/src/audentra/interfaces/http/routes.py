@@ -2951,3 +2951,43 @@ async def get_staff_document_content(
         path_params={"documentId": _uuid(document_id)},
     )
     return _binary_response(result)
+
+
+@router.get("/v1/student/university", response_model=None)
+async def student_university(
+    request: Request, auth: AuthDependency, service: ServiceDependency, domain: str = "overview"
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="student.university",
+        request=request,
+        auth=auth,
+        query_params={"domain": domain},
+    )
+
+
+@router.get("/v1/staff/students/{id}/university", response_model=None)
+async def staff_student_university(
+    request: Request,
+    id: UUID,
+    auth: AuthDependency,
+    service: ServiceDependency,
+    domain: str = "overview",
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="staff.student_university",
+        request=request,
+        auth=auth,
+        path_params={"id": str(id)},
+        query_params={"domain": domain},
+    )
+
+
+@router.get("/v1/staff/university", response_model=None)
+async def staff_university(
+    request: Request, auth: AuthDependency, service: ServiceDependency
+) -> object:
+    return await _dispatch(
+        service=service, operation="staff.university", request=request, auth=auth
+    )

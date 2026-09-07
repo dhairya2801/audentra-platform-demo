@@ -537,11 +537,12 @@ def humanize_money(value: Any) -> Any:
         for key, item in value.items():
             name = str(key)
             if (
-                name.endswith("Cents")
+                (name.endswith("Cents") or name.endswith("_cents"))
                 and isinstance(item, int | float)
                 and not isinstance(item, bool)
             ):
-                out[name[: -len("Cents")] or name] = _dollars(item)
+                suffix = "_cents" if name.endswith("_cents") else "Cents"
+                out[name[: -len(suffix)] or name] = _dollars(item)
             else:
                 out[name] = humanize_money(item)
         return out
@@ -559,6 +560,13 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
     """Shrink a tool result structurally until its JSON fits the budget."""
 
     value = humanize_money(value)
+    if (
+        isinstance(value, Mapping)
+        and value.get("domain")
+        in ("overview", "academics", "account", "relationships", "documents", "history")
+        and "snapshotAt" in value
+    ):
+        value = _compact_university(value)
     trimmed = _trim_lists(value, MAX_LIST_ITEMS)
     encoded = json.dumps(trimmed, ensure_ascii=False, default=str)
     items = MAX_LIST_ITEMS
@@ -571,9 +579,42 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
     return trimmed
 
 
+def _compact_university(value: Any) -> Any:
+    """Remove repeated storage identity, retaining event/evidence identity and clocks.
+
+    Bound actor metadata is present once in the header. This leaves room for
+    useful history instead of spending the result budget on repeated UUIDs.
+    """
+    if isinstance(value, Mapping):
+        return {
+            str(key): _compact_university(item)
+            for key, item in value.items()
+            if key not in {"tenant_id", "student_id", "correlation_id"}
+        }
+    if isinstance(value, list | tuple):
+        return [_compact_university(item) for item in value]
+    if isinstance(value, str) and re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:\d{2})", value
+    ):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return (
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            .astimezone(ZoneInfo("America/New_York"))
+            .isoformat()
+        )
+    return value
+
+
 def _trim_lists(value: Any, items: int) -> Any:
     if isinstance(value, Mapping):
-        return {str(key): _trim_lists(item, items) for key, item in value.items()}
+        return {
+            str(key): (item[:2400] + "…" if len(item) > 2400 else item)
+            if key == "body" and isinstance(item, str)
+            else _trim_lists(item, items)
+            for key, item in value.items()
+        }
     if isinstance(value, list | tuple):
         head = [_trim_lists(item, items) for item in list(value)[:items]]
         if len(value) > items:

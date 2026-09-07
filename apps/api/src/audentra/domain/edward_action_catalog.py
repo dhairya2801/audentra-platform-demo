@@ -344,6 +344,13 @@ class Boundary:
 
 STUDENT_BOUNDARIES: tuple[Boundary, ...] = (
     Boundary(
+        code="hold_release",
+        actor="student",
+        pattern=re.compile(r"\b(?:remove|release|clear|lift)\b.{0,40}\bholds?\b", re.I),
+        boundary="Edward cannot release an official university hold.",
+        route="The office that owns the hold must verify eligibility and record its release.",
+    ),
+    Boundary(
         code="forge_state",
         actor="student",
         pattern=re.compile(
@@ -417,7 +424,7 @@ STUDENT_BOUNDARIES: tuple[Boundary, ...] = (
             r"|\b(?:change|swap|move|assign|put)\b.{0,32}\b(?:room|dorm|hall|housing)\b",
             re.I,
         ),
-        boundary="I can't assign or change a room — Audentra doesn't hold room allocations.",
+        boundary="I can't assign or change a room.",
         route=(
             "Housing preferences go through the Housing step; allocation is the housing office's."
         ),
@@ -743,6 +750,14 @@ def boundary_for(actor: ActorKind, message: str) -> Boundary | None:
     """The most specific boundary this message runs into, if any."""
 
     if not asks_edward_to_act(message):
+        # A request following a factual sentence is still an unsupported hold
+        # action. This only selects a refusal; it never authorizes a write.
+        if actor == "student" and re.search(
+            r"(?:^|[.!?]\s+)(?:remove|release|clear|lift)\b[^.!?]{0,40}\bholds?\b",
+            message,
+            re.I,
+        ):
+            return next(entry for entry in STUDENT_BOUNDARIES if entry.code == "hold_release")
         return None
     table = STUDENT_BOUNDARIES if actor == "student" else STAFF_BOUNDARIES
     for entry in table:

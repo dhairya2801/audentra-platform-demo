@@ -599,9 +599,8 @@ def test_read_lead_in_with_task_noun_is_not_a_follow_up_request() -> None:
     # A create verb still wins even behind a read-looking opener.
     proposal = parse_staff_action("Show me her record and add a follow-up for Rosa Mossbank")
     assert proposal is not None and proposal.action == "operations.follow_up.create"
-    assert parse_staff_action("add a follow-up for Yusuf Everlyn").action == (
-        "operations.follow_up.create"
-    )
+    follow_up = parse_staff_action("add a follow-up for Yusuf Everlyn")
+    assert follow_up is not None and follow_up.action == "operations.follow_up.create"
 
 
 def test_partial_tier0_preference_parse_is_flagged_for_tier1_completion() -> None:

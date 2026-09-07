@@ -216,6 +216,37 @@ class PostgresPlatformRepository:
             )
             base = _first_mapping(base_result)
             if base is None:
+                # Applicants without an offer still have a real student portal.
+                from .university_repository import PostgresUniversityRepository
+
+                university = PostgresUniversityRepository(self._engine)
+                if not auth.is_delegate and await university.enabled(auth):
+                    world = await university.record(auth)
+                    student = world["student"]
+                    return {
+                        "student": {
+                            "id": student["id"],
+                            "preferredName": student["preferred_name"],
+                            "fullName": student["name"],
+                            "classYear": None,
+                        },
+                        "offer": None,
+                        "journey": {
+                            "id": None,
+                            "status": "not_started",
+                            "completionPercent": 0,
+                            "nextAction": {
+                                "code": "application_status",
+                                "label": "Review application status",
+                                "href": "/dashboard",
+                            },
+                            "requirements": [],
+                        },
+                        "unreadMessageCount": 0,
+                        "projectionVersion": student["version"],
+                        "generatedAt": world["snapshotAt"],
+                        "applicationStatus": world["applications"],
+                    }
                 raise NotFoundError(
                     "STUDENT_DASHBOARD_NOT_FOUND",
                     "No dashboard is available for this student",

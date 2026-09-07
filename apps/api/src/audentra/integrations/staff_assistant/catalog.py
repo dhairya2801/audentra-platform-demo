@@ -21,10 +21,11 @@ from audentra.domain.student_cohort import (
     CohortFilterError,
     build_cohort_filter,
 )
+from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
 
 JsonDict = dict[str, Any]
 
-STAFF_TOOL_NAMES = (
+STAFF_TOOL_NAMES: tuple[str, ...] = (
     "searchStudents",
     "findStudents",
     "summarizeStudents",
@@ -738,3 +739,92 @@ def _validate_value(tool: str, name: str, value: Any, spec: Mapping[str, Any]) -
         except CohortFilterError as error:
             raise ToolArgumentError("invalid_cohort_filter", error.detail) from error
     raise ToolArgumentError("invalid_schema", f"{tool}.{name} has an unknown kind")
+
+
+STAFF_TOOL_NAMES = (
+    *STAFF_TOOL_NAMES,
+    *UNIVERSITY_TOOLS,
+    "getUniversityOperations",
+    "getUniversityCohort",
+    "searchUniversityPolicies",
+)
+STAFF_TOOL_DESCRIPTIONS = {
+    **STAFF_TOOL_DESCRIPTIONS,
+    **{name: value[1] for name, value in UNIVERSITY_TOOLS.items()},
+    "getUniversityOperations": (
+        "Read my university office, capacities, weekly availability, "
+        "meetings, leave/coverage, appointments and accountable case "
+        "workload."
+    ),
+    "getUniversityCohort": (
+        "Return the exact deduplicated cohort of enrolled Fall students "
+        "with active Fall financial holds AND pending Fall payments, plus "
+        "denominator. This is one saved cohort, not an arbitrary student "
+        "search."
+    ),
+    "searchUniversityPolicies": (
+        "Search versioned institutional policy/procedure passages by "
+        "query, optional at and knownAt ISO timestamps. Filters audience, "
+        "effectivity, publication; returns applicability, section "
+        "citations and source hashes. Read alongside getUniversity records"
+        " for individual exceptions."
+    ),
+}
+STUDENT_SCOPED_TOOLS = STUDENT_SCOPED_TOOLS | frozenset(UNIVERSITY_TOOLS)
+STAFF_TOOL_INFORMATION_CLASS = {
+    **STAFF_TOOL_INFORMATION_CLASS,
+    **{name: "student_state" for name in UNIVERSITY_TOOLS},
+    "getUniversityOperations": "operational_state",
+    "getUniversityCohort": "operational_state",
+    "searchUniversityPolicies": "institution_knowledge",
+}
+STAFF_TOOL_ARGUMENTS = {
+    **STAFF_TOOL_ARGUMENTS,
+    **{name: {"studentId": {"kind": "uuid"}} for name in UNIVERSITY_TOOLS},
+    "getUniversityOperations": {},
+    "getUniversityCohort": {},
+    "searchUniversityPolicies": {
+        "query": {"kind": "text", "max_length": 500},
+        "studentId": {"kind": "uuid", "optional": True},
+        "at": {"kind": "text", "max_length": 35, "optional": True},
+        "knownAt": {"kind": "text", "max_length": 35, "optional": True},
+    },
+}
+STAFF_TOOL_ARGUMENTS = {
+    **STAFF_TOOL_ARGUMENTS,
+    "getUniversityHistory": {
+        **STAFF_TOOL_ARGUMENTS["getUniversityHistory"],
+        "entityType": {"kind": "text", "max_length": 80, "optional": True},
+        "entityId": {"kind": "text", "max_length": 100, "optional": True},
+        "knownAt": {"kind": "text", "max_length": 35, "optional": True},
+        "effectiveAt": {"kind": "text", "max_length": 35, "optional": True},
+    },
+}
+
+STAFF_RECEIPT_SOURCES = {
+    **STAFF_RECEIPT_SOURCES,
+    **{name: "university" for name in UNIVERSITY_TOOLS},
+    "getUniversityOperations": "university",
+    "getUniversityCohort": "university",
+    "searchUniversityPolicies": "institution_knowledge",
+}
+
+STAFF_TOOL_NAMES = (*STAFF_TOOL_NAMES, "getUniversityCasework")
+STAFF_TOOL_DESCRIPTIONS = {
+    **STAFF_TOOL_DESCRIPTIONS,
+    "getUniversityCasework": (
+        "Read the student's cross-office case DAG, owner, steps, dependencies, "
+        "completion evidence and delivered/bounced communications. Use for shortest "
+        "safe resolution path, handoffs or whether a decision reached the student."
+    ),
+}
+STAFF_TOOL_ARGUMENTS = {
+    **STAFF_TOOL_ARGUMENTS,
+    "getUniversityCasework": {"studentId": {"kind": "uuid"}},
+}
+STUDENT_SCOPED_TOOLS = STUDENT_SCOPED_TOOLS | {"getUniversityCasework"}
+STAFF_TOOL_INFORMATION_CLASS = {
+    **STAFF_TOOL_INFORMATION_CLASS,
+    "getUniversityCasework": "student_state",
+}
+STAFF_RECEIPT_SOURCES = {**STAFF_RECEIPT_SOURCES, "getUniversityCasework": "university"}

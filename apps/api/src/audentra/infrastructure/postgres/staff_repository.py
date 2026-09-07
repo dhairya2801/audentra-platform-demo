@@ -43,6 +43,7 @@ from audentra.domain.documents import bounded_document_label
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
+from audentra.infrastructure.postgres.university_repository import PostgresUniversityRepository
 
 _MISSING = object()
 _NO_DEFAULT = object()
@@ -184,6 +185,7 @@ class PostgresStaffRepository:
         engine: AsyncEngine,
         student_reader: StaffStudentReader,
         *,
+        university: PostgresUniversityRepository | None = None,
         schema: str = "public",
         clock: Callable[[], datetime] | None = None,
         uuid_factory: Callable[[], UUID] = uuid4,
@@ -192,6 +194,7 @@ class PostgresStaffRepository:
             raise ValueError("schema is not a safe PostgreSQL identifier")
         self._engine = engine
         self._reader = student_reader
+        self._university = university
         self._schema = schema
         self._clock = clock or (lambda: datetime.now(UTC))
         self._uuid_factory = uuid_factory
@@ -736,10 +739,13 @@ class PostgresStaffRepository:
               person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
-              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              COALESCE(onboarding.payload->>'universityProgramName',
+                offer_program.name, 'Program not assigned') AS program_name,
               student.class_year, item.source_type, item.source_id,
               viewer_caseload.roles AS viewer_roles
             FROM {self._board_from_sql()}
+            LEFT JOIN {self._table("student_onboarding")} AS onboarding
+              ON onboarding.student_id = student.id AND onboarding.tenant_id = student.tenant_id
             LEFT JOIN LATERAL (
               SELECT program.name
               FROM {offer} AS offer
@@ -5231,7 +5237,17 @@ class PostgresStaffRepository:
             requirement_id = document["requirement_id"]
             if requirement_id is not None:
                 requirement_status = "completed" if decision == "accepted" else "rejected"
-                progress = 100 if decision == "accepted" else 60
+                if self._university is not None and self._university.is_enabled(auth):
+                    evidence_status = await connection.scalar(
+                        text("SELECT university.required_document_status(:tenant,:requirement)"),
+                        {
+                            "tenant": _uuid(auth.tenant_id),
+                            "requirement": _uuid(str(requirement_id)),
+                        },
+                    )
+                    if evidence_status is not None:
+                        requirement_status = str(evidence_status)
+                progress = 100 if requirement_status == "completed" else 60
                 await connection.execute(
                     text(
                         f"""
@@ -5250,7 +5266,7 @@ class PostgresStaffRepository:
                         "requirement_id": _uuid(str(requirement_id)),
                     },
                 )
-                if decision == "accepted":
+                if requirement_status == "completed":
                     await self._award_requirement_rewards(
                         connection,
                         auth=auth,
@@ -5494,13 +5510,16 @@ class PostgresStaffRepository:
             SELECT student.id, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
-              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              COALESCE(onboarding.payload->>'universityProgramName',
+                offer_program.name, 'Program not assigned') AS program_name,
               student.class_year
             FROM {student} AS student
             JOIN {person} AS person
               ON person.id = student.person_id AND person.tenant_id = student.tenant_id
             LEFT JOIN {profile} AS profile
               ON profile.student_id = student.id AND profile.tenant_id = student.tenant_id
+            LEFT JOIN {self._table("student_onboarding")} AS onboarding
+              ON onboarding.student_id = student.id AND onboarding.tenant_id = student.tenant_id
             LEFT JOIN LATERAL (
               SELECT program.name
               FROM {offer} AS offer
@@ -5542,7 +5561,8 @@ class PostgresStaffRepository:
                   OR COALESCE(profile.preferred_name, person.preferred_name, '')
                     ILIKE :pattern ESCAPE '\\'
                   OR COALESCE(student.external_ref, '') ILIKE :pattern ESCAPE '\\'
-                  OR COALESCE(offer_program.name, '') ILIKE :pattern ESCAPE '\\'
+                  OR COALESCE(onboarding.payload->>'universityProgramName', offer_program.name, '')
+                    ILIKE :pattern ESCAPE '\\'
                 )"""
             )
         where = "\n              AND ".join(filters)
@@ -5550,7 +5570,8 @@ class PostgresStaffRepository:
             SELECT student.id, student.external_ref, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
-              COALESCE(offer_program.name, 'Program not assigned') AS program_name,
+              COALESCE(onboarding.payload->>'universityProgramName',
+                offer_program.name, 'Program not assigned') AS program_name,
               offer_program.term_name,
               offer_program.campus_name,
               student.class_year,

@@ -29,9 +29,11 @@ from audentra.integrations.assistant.read_loop import (
     LoopCall,
     LoopTool,
     ReadLoopResult,
+    bound_result,
     run_read_loop,
 )
 from audentra.integrations.assistant.trace import AssistantTurnTrace
+from audentra.integrations.assistant.university_catalog import policy_evidence_blocks
 from audentra.integrations.staff_assistant.catalog import (
     STAFF_TOOL_ARGUMENTS,
     STAFF_TOOL_DESCRIPTIONS,
@@ -418,7 +420,13 @@ class StaffAssistantPipeline:
         if (
             self._read_loop_step is not None
             and not request.action_is_supported
-            and self._loop_applies(classification, request.text)
+            and (
+                self._loop_applies(classification, request.text)
+                or (
+                    self._host.supports("university_record")
+                    and self._read_planner is not ReadPlanner.DETERMINISTIC
+                )
+            )
         ):
             loop_response = await self._run_read_loop(
                 request,
@@ -432,6 +440,27 @@ class StaffAssistantPipeline:
             )
             if loop_response is not None:
                 return loop_response
+
+        if self._host.supports("university_record"):
+            message = (
+                "University record guidance is temporarily unavailable. "
+                "You can review the student's university record and "
+                "operational tasks in the portal."
+            )
+            if trace is not None:
+                trace.response_source = "university_planner_unavailable"
+                trace.failure_codes = ["university_planner_required"]
+                trace.final_message = message
+            return StaffAssistantPipelineResult(
+                message=message,
+                blocks=[text_block(message)],
+                provider="deterministic",
+                model=None,
+                usage=None,
+                context_receipts=[],
+                classification=classification,
+                failure_codes=["university_planner_required"],
+            )
 
         # --- Planning -------------------------------------------------------
         planned_calls: list[PlannedToolCall] | None = None
@@ -818,6 +847,29 @@ class StaffAssistantPipeline:
                             ),
                         }
 
+        from audentra.integrations.assistant.university_catalog import (
+            UNIVERSITY_CONTEXT,
+            UNIVERSITY_TOOLS,
+        )
+
+        university_only = {
+            *UNIVERSITY_TOOLS,
+            "getUniversityOperations",
+            "getUniversityCasework",
+            "getUniversityCohort",
+            "searchUniversityPolicies",
+        }
+        legacy_student_facts = {
+            "getStudentFinancialState",
+            "getStudentBlockers",
+            "getStudentHousingState",
+            "getStudentTimeline",
+            "getStudentCommunicationHistory",
+            "getStudentOwnership",
+            "searchInstitutionalKnowledge",
+            "getStudentStaffSummary",
+            "getStudentEngagementSignals",
+        }
         tools = [
             LoopTool(
                 name=name,
@@ -830,8 +882,11 @@ class StaffAssistantPipeline:
                 ),
             )
             for name in STAFF_TOOL_NAMES
+            if (self._host.supports("university_record") or name not in university_only)
+            and (not self._host.supports("university_record") or name not in legacy_student_facts)
         ]
         context: JsonDict = {
+            "university": UNIVERSITY_CONTEXT if self._host.supports("university_record") else None,
             "actor": "staff",
             "today": moment.date().isoformat(),
             "signedIn": identity.describe() if identity is not None else None,
@@ -878,6 +933,7 @@ class StaffAssistantPipeline:
                     duration_ms=call.duration_ms,
                     reason=call.reason,
                     result=call.result,
+                    model_result=bound_result(call.result) if call.status == "available" else None,
                     round_name=f"loop-{call.round_index + 1}",
                     arguments=call.arguments,
                 )
@@ -931,6 +987,26 @@ class StaffAssistantPipeline:
             )
         if not accepted:
             failure_codes.append(f"read_loop_fallback:{guard_label}")
+            if host.supports("university_record"):
+                message = (
+                    "I could not verify a complete answer from the university evidence on "
+                    "this turn. Please narrow the question to a student, case, or policy."
+                )
+                if trace is not None:
+                    trace.response_source = "university_guard_fallback"
+                    trace.failure_codes = list(failure_codes)
+                    trace.final_message = message
+                return StaffAssistantPipelineResult(
+                    message=message,
+                    blocks=[text_block(message)],
+                    provider="deterministic",
+                    model=None,
+                    usage=_sum_usage(result.model_calls),
+                    context_receipts=[],
+                    classification=classification,
+                    derived=state,
+                    failure_codes=failure_codes,
+                )
             return None
         assert verdict is not None
         resolved = classification or StaffClassification(
@@ -957,7 +1033,7 @@ class StaffAssistantPipeline:
             trace.final_message = verdict.answer
         return StaffAssistantPipelineResult(
             message=verdict.answer,
-            blocks=[text_block(verdict.answer)],
+            blocks=[text_block(verdict.answer), *policy_evidence_blocks(result.calls)],
             provider=str((last_call or {}).get("provider") or "openai"),
             model=(last_call or {}).get("model"),
             usage=usage_total,

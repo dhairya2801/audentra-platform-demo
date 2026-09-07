@@ -47,7 +47,9 @@ def _payload(content: object, model: str) -> dict[str, Any]:
     }
 
 
-def _gateway(settings: GatewaySettings, content: object) -> tuple[StudentAIGateway, list[dict]]:
+def _gateway(
+    settings: GatewaySettings, content: object
+) -> tuple[StudentAIGateway, list[dict[str, Any]]]:
     bodies: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

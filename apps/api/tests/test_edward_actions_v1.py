@@ -311,7 +311,7 @@ def test_named_follow_up_subject_matches_a_requirement_under_review() -> None:
     ]
     still_open = [r for r in requirements if r["status"] not in _SETTLED_REQUIREMENT_STATUSES]
     assert [r["id"] for r in still_open] == ["r1", "r2"]
-    open_statuses = {r["status"] for r in still_open}
+    open_statuses = {str(r["status"]) for r in still_open}
     chosen = _match_requirement(
         "transcript", None, still_open, require_unique=False, statuses=open_statuses
     )

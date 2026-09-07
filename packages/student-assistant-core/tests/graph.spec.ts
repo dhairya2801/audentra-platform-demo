@@ -116,7 +116,7 @@ const checklist: StudentRequirementList = {
   total: requirements.length,
 };
 
-const dashboard: StudentDashboard = {
+const dashboard: StudentDashboard & { offer: NonNullable<StudentDashboard["offer"]> } = {
   student: {
     id: "student-authoritative",
     preferredName: "Casey",
@@ -1891,6 +1891,7 @@ function blockerSource(
 }
 
 function deadlinesFromDashboard(value: StudentDashboard): StudentDeadlinesRead {
+  if (!value.offer) throw new Error("This fixture requires an admission offer");
   return {
     items: [
       {

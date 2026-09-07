@@ -48,6 +48,7 @@ from audentra.integrations.assistant.read_loop import (
     LoopCall,
     LoopTool,
     ReadLoopResult,
+    bound_result,
     run_read_loop,
 )
 from audentra.integrations.assistant.tools import (
@@ -58,6 +59,7 @@ from audentra.integrations.assistant.tools import (
     execute_tool_reads,
 )
 from audentra.integrations.assistant.trace import AssistantTurnTrace
+from audentra.integrations.assistant.university_catalog import policy_evidence_blocks
 
 JsonDict = dict[str, Any]
 
@@ -264,12 +266,42 @@ class AssistantPipeline:
         # deterministic route with the reason recorded.
         if (
             self._read_loop_step is not None
-            and not request.is_mutation_request
-            and self._loop_applies(classification)
+            # Action recognition/confirmation already ran in the service. A
+            # question about a past cancellation is still a safe university read.
+            and (not request.is_mutation_request or self._host.supports("university_record"))
+            and (
+                self._loop_applies(classification)
+                or (
+                    self._host.supports("university_record")
+                    and self._read_planner is not ReadPlanner.DETERMINISTIC
+                )
+            )
         ):
             loop_response = await self._run_read_loop(request, classification, failure_codes, trace)
             if loop_response is not None:
                 return loop_response
+
+        if self._host.supports("university_record"):
+            message = (
+                "University record guidance is temporarily unavailable. "
+                "You can review your current records in the portal."
+            )
+            if trace is not None:
+                trace.response_source = "university_planner_unavailable"
+                trace.failure_codes = ["university_planner_required"]
+                trace.final_message = message
+            return AssistantPipelineResult(
+                message=message,
+                blocks=[{"type": "text", "text": message, "fallbackText": message}],
+                provider="deterministic",
+                model=None,
+                usage=None,
+                suggested_actions=[],
+                context_receipts=[],
+                classification=classification or Classification("unknown", 0.5),
+                derived=derive_student_state(ToolExecution()),
+                failure_codes=["university_planner_required"],
+            )
         if (
             classification is None
             and self._model_planner is not None
@@ -494,34 +526,31 @@ class AssistantPipeline:
         moment = self._now()
 
         async def executor(calls: Sequence[LoopCall]) -> None:
+            # Sequential execution preserves each call's argument/evidence pairing,
+            # including two refinements of the same policy search in one round.
             for call in calls:
-                if call.status == "planned" and call.tool in STUDENT_TOOL_ARGUMENTS:
+                if call.status != "planned":
+                    continue
+                if call.tool in STUDENT_TOOL_ARGUMENTS:
                     allowed = STUDENT_TOOL_ARGUMENTS[call.tool]
                     host.tool_arguments[call.tool] = {
                         str(name): value
                         for name, value in dict(call.arguments or {}).items()
                         if name in allowed and value is not None
                     }
-            fresh = [
-                call.tool
-                for call in calls
-                if call.status == "planned" and call.tool not in execution.reads
-            ]
-            if fresh:
-                round_result = await execute_tool_reads(
-                    list(dict.fromkeys(fresh)),
-                    host,
-                    timeout_seconds=timeout,
-                    now=moment,
-                    receipt_offset=len(execution.receipts),
-                )
-                execution.reads.update(round_result.reads)
-                execution.receipts.extend(round_result.receipts)
-                execution.executed_tools.extend(round_result.executed_tools)
-                execution.unavailable_data.extend(round_result.unavailable_data)
-            for call in calls:
-                if call.status != "planned":
-                    continue
+                    execution.reads.pop(call.tool, None)
+                if call.tool not in execution.reads:
+                    fresh = await execute_tool_reads(
+                        [call.tool],
+                        host,
+                        timeout_seconds=timeout,
+                        now=moment,
+                        receipt_offset=len(execution.receipts),
+                    )
+                    execution.reads.update(fresh.reads)
+                    execution.receipts.extend(fresh.receipts)
+                    execution.executed_tools.extend(fresh.executed_tools)
+                    execution.unavailable_data.extend(fresh.unavailable_data)
                 read = execution.reads.get(call.tool)
                 if read is None:
                     call.status, call.reason = "unavailable", "not_supported"
@@ -530,6 +559,11 @@ class AssistantPipeline:
                 call.reason = read.get("reason")
                 call.result = read.get("data")
                 call.duration_ms = read.get("durationMs")
+
+        from audentra.integrations.assistant.university_catalog import (
+            UNIVERSITY_CONTEXT,
+            UNIVERSITY_TOOLS,
+        )
 
         tools = [
             LoopTool(
@@ -544,9 +578,26 @@ class AssistantPipeline:
                 ),
             )
             for name, description in TOOL_DESCRIPTIONS.items()
-            if name != KNOWLEDGE_TOOL or host.supports("institution_knowledge")
+            if (name != KNOWLEDGE_TOOL or host.supports("institution_knowledge"))
+            and (name not in UNIVERSITY_TOOLS or host.supports("university_record"))
+            and (
+                not host.supports("university_record")
+                or name in UNIVERSITY_TOOLS
+                or name
+                in {
+                    KNOWLEDGE_TOOL,
+                    "getStudentProfile",
+                    "getOnboardingChecklist",
+                    "getStudentAdvising",
+                    "getStudentMessages",
+                    "getStudentSupportRequests",
+                    "getCampusLife",
+                    "getSupportOptions",
+                }
+            )
         ]
         context = {
+            "university": UNIVERSITY_CONTEXT if host.supports("university_record") else None,
             "actor": "student",
             "today": moment.date().isoformat(),
             "page": {"path": request.page_path, "label": request.page_label},
@@ -583,7 +634,9 @@ class AssistantPipeline:
                     duration_ms=call.duration_ms,
                     reason=call.reason,
                     result=call.result,
+                    model_result=bound_result(call.result) if call.status == "available" else None,
                     round_name=f"loop-{call.round_index + 1}",
+                    arguments=dict(call.arguments or {}),
                 )
             for entry in result.model_calls:
                 trace.add_model_call(
@@ -660,6 +713,27 @@ class AssistantPipeline:
             )
         if not accepted:
             failure_codes.append(f"read_loop_fallback:{loop_trace['guard']}")
+            if host.supports("university_record"):
+                message = (
+                    "I could not verify a complete answer from the university evidence on this "
+                    "turn. Please narrow the question to the record or policy you want checked."
+                )
+                if trace is not None:
+                    trace.response_source = "university_guard_fallback"
+                    trace.failure_codes = list(failure_codes)
+                    trace.final_message = message
+                return AssistantPipelineResult(
+                    message=message,
+                    blocks=[{"type": "text", "text": message, "fallbackText": message}],
+                    provider="deterministic",
+                    model=None,
+                    usage=_sum_usage(result.model_calls),
+                    suggested_actions=[],
+                    context_receipts=[],
+                    classification=classification or Classification("unknown", 0.5),
+                    derived=state,
+                    failure_codes=failure_codes,
+                )
             return None
         assert verdict is not None
         last_call = next(
@@ -688,7 +762,10 @@ class AssistantPipeline:
             trace.final_message = verdict.answer
         return AssistantPipelineResult(
             message=verdict.answer,
-            blocks=[{"type": "text", "fallbackText": verdict.answer, "text": verdict.answer}],
+            blocks=[
+                {"type": "text", "fallbackText": verdict.answer, "text": verdict.answer},
+                *policy_evidence_blocks(result.calls),
+            ],
             provider=str((last_call or {}).get("provider") or "openai"),
             model=(last_call or {}).get("model"),
             usage=usage_total,

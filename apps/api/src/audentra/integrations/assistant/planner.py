@@ -16,8 +16,9 @@ from audentra.domain.student_state import (
     REQUIREMENT_GATE_CODES as DOMAIN_REQUIREMENT_GATE_CODES,
 )
 from audentra.integrations.assistant.classify import REQUEST_TYPES, Classification
+from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
 
-TOOL_NAMES = (
+TOOL_NAMES: tuple[str, ...] = (
     "getStudentProfile",
     "getEnrollmentState",
     "getOnboardingResponses",
@@ -465,3 +466,17 @@ def validate_model_tool_plan(value: Any) -> tuple[Classification, list[str]] | N
         additional_request_types=tuple(additional),
     )
     return classification, filtered
+
+
+# Shared v3 read tools; only exposed when the host has the canonical adapter.
+
+TOOL_NAMES = (*TOOL_NAMES, *UNIVERSITY_TOOLS)
+TOOL_DESCRIPTIONS = {
+    **TOOL_DESCRIPTIONS,
+    **{name: value[1] for name, value in UNIVERSITY_TOOLS.items()},
+}
+TOOL_INFORMATION_CLASS = {
+    **TOOL_INFORMATION_CLASS,
+    **{name: "student_state" for name in UNIVERSITY_TOOLS},
+}
+RECEIPT_SOURCES = {**RECEIPT_SOURCES, **{name: "university" for name in UNIVERSITY_TOOLS}}
