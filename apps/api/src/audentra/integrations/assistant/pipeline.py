@@ -714,12 +714,13 @@ class AssistantPipeline:
         if not accepted:
             failure_codes.append(f"read_loop_fallback:{loop_trace['guard']}")
             if host.supports("university_record"):
-                message = (
-                    "I could not verify a complete answer from the university evidence on this "
-                    "turn. Please narrow the question to the record or policy you want checked."
+                from audentra.integrations.assistant.university_catalog import (
+                    university_read_failure,
                 )
+
+                message, response_source = university_read_failure(str(loop_trace["guard"]))
                 if trace is not None:
-                    trace.response_source = "university_guard_fallback"
+                    trace.response_source = response_source
                     trace.failure_codes = list(failure_codes)
                     trace.final_message = message
                 return AssistantPipelineResult(

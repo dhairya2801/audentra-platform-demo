@@ -118,3 +118,29 @@ def policy_evidence_blocks(calls: object) -> list[dict[str, object]]:
     values = list(citations)[:5]
     content = "Policy passages retrieved:\n" + "\n".join(values)
     return [{"type": "text", "text": content, "fallbackText": content}]
+
+
+def university_read_failure(reason: str) -> tuple[str, str]:
+    """Keep provider availability distinct from an actual evidence rejection."""
+    if reason == "no_provider":
+        return (
+            "Edward is unavailable because its AI service is not configured or is disabled. "
+            "Your university records are still available in the portal.",
+            "university_provider_unavailable",
+        )
+    if reason == "model_error":
+        return (
+            "Edward could not reach its AI service to complete this request. Please try again. "
+            "Your university records are still available in the portal.",
+            "university_provider_error",
+        )
+    if reason in {"invalid_step", "no_answer"}:
+        return (
+            "Edward could not complete an answer on this turn. Please try again.",
+            "university_planner_failed",
+        )
+    return (
+        "I could not verify a complete answer from the university evidence on this turn. "
+        "Please narrow the question to the record or policy you want checked.",
+        "university_guard_fallback",
+    )

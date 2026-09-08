@@ -31,10 +31,11 @@ PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_runtime.p
 
 The helper serves the local demo API on `127.0.0.1:45609`, selects the v3
 student/staff personas, enables local Lab traces, and starts no worker. OpenAI
-is disabled by default: portal reads and existing deterministic write handling
-work; v3 model guidance reports unavailable. Add `--enable-openai` with an
-`OPENAI_API_KEY` in the environment to use the Luna model planner. Interactive
-usage after enabling the API is separate from the evaluation runner's budget.
+is enabled by default using the Luna model planner. Set `OPENAI_API_KEY` in the
+environment before starting; a missing key stops startup with an actionable error.
+Use `--disable-openai` only for intentional offline portal checks; Edward then
+reports that its AI service is unavailable. Interactive usage is separate from
+the evaluation runner's budget.
 
 From `synthetic-university/portals`, install dependencies with `npm ci`.
 Set these values in the ignored `apps/web/.env.local`, preserving other local

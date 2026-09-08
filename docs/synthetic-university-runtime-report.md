@@ -250,7 +250,7 @@ Full API/Node and portal gates, v3 transactional tests, deterministic world test
 
 The final local runtime database is `audentra_university_v3` on `127.0.0.1:55487`, local role `dhairya2801`. PostgreSQL 17.6 was compiled and initialized entirely under ignored `platform/artifacts/university-runtime/` because the installed PostgreSQL 14 could not run an inherited migration requiring PostgreSQL 15+. The tarball checksum was verified. The local API is on port 45609; the portal dev server is on port 3000. This worktree's ignored portal `.env.local` now points its public API and internal Lab proxy to port 45609. The Cloudflare worker needs those file-based settings; shell overrides alone did not configure its internal proxy. All are local processes, not deployment artifacts.
 
-Portable installation, migration, import, API and portal commands are in [tools/university/README.md](../tools/university/README.md). For this already prepared workspace, run the API helper with the local URL above; add `--enable-openai` only when you want interactive paid guidance. Existing OpenAI credentials are read from the environment and were never committed. The local helper does not start a worker or S3. If the local cluster is stopped:
+Portable installation, migration, import, API and portal commands are in [tools/university/README.md](../tools/university/README.md). For this already prepared workspace, run the API helper with the local URL above and `OPENAI_API_KEY` set in the environment. Interactive Edward is now enabled by default; `--disable-openai` is an explicit offline-only option. Existing OpenAI credentials are read from the environment and were never committed. The local helper does not start a worker or S3. If the local cluster is stopped:
 
 ```bash
 # From platform; these are ignored local artifacts, not required on another machine.
@@ -298,3 +298,86 @@ Portal gates are `npm run lint`, `npm run typecheck`, and `NEXT_PUBLIC_EDWARD_DE
 The 23 full-run skips are external mock-university, production/S3 and seed-media cases whose services were not configured. They are not counted as passes. Earlier incomplete runs exposed coverage without DB services, optional-tool fixture assumptions, seed reconciliation performance, document revision sequencing and evidence/claim weaknesses; those findings and their fixes were retained in the local logs.
 
 The portal commit is `5e17c121d1dcada4bab8b89aa623bb9004c21e89` (`Connect portals and Edward Lab to the canonical university runtime`). The platform implementation and this report are committed separately on the same existing branch name because the workspace contains two Git repositories. Neither commit was pushed or deployed.
+
+
+### Local Edward availability fix (September 7, 2026)
+
+The follow-up started at platform commit `d6b033d8248640fd7ff217e45820925fc6808ce2`
+and portal commit `5e17c121d1dcada4bab8b89aa623bb9004c21e89`, both on
+`feat/synthetic-university-v1`. The user reported that every question at
+`localhost:3000` received the same university-evidence fallback.
+
+The actual Lab traces showed `read_loop_fallback:no_provider`, zero executed
+tools, and `responseSource=university_guard_fallback`. The prior browser checks
+had intentionally run offline, and the API had been left in that state. The
+local launcher also silently discarded the available OpenAI key unless passed
+`--enable-openai`. The answer guard was therefore reporting a provider
+configuration failure as though a retrieved answer had failed verification.
+
+The local API was restarted with OpenAI enabled. The launcher now enables the
+configured GPT-5.6 Luna provider by default and stops startup with an actionable
+error if its key is missing. `--disable-openai` explicitly requests offline
+portal checks; the previous `--enable-openai` flag remains compatible. Startup
+prints which mode is active, without printing credentials.
+
+Both student and staff university pipelines now distinguish these failures in
+the displayed message and the existing Lab `responseSource` field:
+
+| Condition | Trace response source | User-facing behavior |
+| --- | --- | --- |
+| Missing or disabled provider | `university_provider_unavailable` | Explains that the AI service is not configured or is disabled |
+| Model-call exception | `university_provider_error` | Reports an AI-service failure and suggests retrying |
+| Invalid planner output or no final answer | `university_planner_failed` | Reports that the turn did not complete |
+| Actual evidence rejection | `university_guard_fallback` | Retains the existing evidence-verification fallback |
+
+No evidence validation, actor binding, tenant isolation, or write confirmation
+was relaxed. The Lab already displays the backend trace fields, so this fix
+requires no portal source changes and preserves the v3 architecture diagram.
+
+Six paid end-to-end turns passed after the restart: four through the real HTTP
+routes and two by filling and submitting the actual portal chat controls in
+Playwright. All six returned `provider=openai`, `responseSource=model_loop`,
+executed available university tools, and had no failure codes. Both browser
+runs rendered their answers without page errors.
+
+| Check | Observed answer / evidence |
+| --- | --- |
+| Student: “what docs do i still need to submit” | Identified the unsubmitted aid worksheet and distinguished the transcript under review, accepted documents, and waived affidavit |
+| Staff: “what is the name of this uni” | Returned the institution name from university operations |
+| Staff: “what should i do today” | Used the actual Morning Briefing for overdue requirements, leave coverage and urgent work |
+| Student: posted balance and pending payments | Read the canonical account and distinguished absent/pending/posted entries |
+| Student portal: account balance plus hold-release policy | Combined `getUniversityAccount` with cited institutional policy passages; correctly separated posted money from the separate hold-release action |
+| Staff portal: SYN-000015 Calculus grade known on September 1 | Resolved the student, read bounded history and academics, and distinguished the original F recorded August 20 from the B correction received September 4 |
+
+These six turns used 13 model calls, 68,752 input tokens and 1,083 output tokens.
+At the conservative rates used above, additional spend was approximately
+**$0.01505**; combined task evaluation spend is approximately **$0.1938548**.
+This includes the measured calls made for this fix, not the user's independent
+interactive usage. Observed end-to-end API durations were 2.4–6.0 seconds.
+Raw responses, screenshots, traces and a metered summary remain in ignored
+`artifacts/university-runtime/provider-fix/` and
+`portals/artifacts/university-explorer/provider-fix/` directories.
+
+Seven new regression cases verify default provider enablement, fail-fast
+missing-key behavior, explicit offline opt-out, and the student/staff failure
+messages and trace sources for missing providers and transport exceptions.
+Focused read-loop/launcher validation passed **23 tests**. Platform lint and
+full type checking passed. The full `npm test` gate passed with **1,513 API
+tests passed and 23 skipped**, **73.22% coverage**, plus all Node workspace suites. The existing
+external-service skips remain unchanged; tests used the isolated integration
+and university-test databases, with provider keys disabled.
+
+The API remains connected to `audentra_university_v3` with OpenAI enabled for
+`localhost:3000`. Refresh the portal and send a new message; earlier stored
+fallback responses remain conversation history. No seed or migration is needed
+for this fix. No sibling worktree was modified, and nothing was pushed or deployed.
+
+Try these questions in the appropriate portal (student answers depend on the
+currently selected student):
+
+- Student: “Which documents do I still need to submit, and which are already under review?”
+- Student: “What is my posted balance, and do pending payments mean my financial hold is released? Cite the relevant policy.”
+- Student: “Who are my advisers across offices, and who covers them when they are away?”
+- Staff: “What should I prioritize today, including overdue work and staff leave coverage?”
+- Staff: “For student SYN-000005, what happens if they drop CS 101 with their approved reduced-load exception? Check the individual exception and the relevant policy.”
+- Staff: “For student SYN-000015, was the corrected Calculus grade known on September 1, 2026? Compare what was known then with the current record.”

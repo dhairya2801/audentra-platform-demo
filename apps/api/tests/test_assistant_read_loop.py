@@ -7,6 +7,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import pytest
+
 from audentra.core.assistant_execution import (
     ReadPlanner,
     resolve_assistant_execution_mode,
@@ -497,3 +499,52 @@ def test_staff_loop_refuses_unbound_student_handle() -> None:
     assert rejected and rejected[0]["status"] == "rejected"
     assert "unbound handle" in str(rejected[0]["reason"])
     assert not any(name == "student_blockers" for name, _ in seen)
+
+
+@pytest.mark.parametrize("role", ["student", "staff"])
+@pytest.mark.parametrize(
+    ("failure", "source", "message_part"),
+    [
+        ("no_provider", "university_provider_unavailable", "not configured or is disabled"),
+        ("model_error", "university_provider_error", "could not reach its AI service"),
+    ],
+)
+def test_university_provider_failure_is_not_reported_as_missing_evidence(
+    role: str, failure: str, source: str, message_part: str
+) -> None:
+    async def unavailable(**kwargs: Any) -> Mapping[str, Any] | None:
+        if failure == "model_error":
+            raise RuntimeError("Provider transport failed")
+        return None
+
+    async def university_record(**kwargs: Any) -> Mapping[str, Any]:
+        pytest.fail("An unavailable planner should not execute reads")
+
+    trace = AssistantTurnTrace(trace_id="provider-failure", assistant_kind=role)
+    if role == "student":
+        student_pipeline = AssistantPipeline(
+            AssistantToolHost({"university_record": university_record}),
+            read_loop_step=unavailable,
+            read_planner="model",
+        )
+        result = asyncio.run(
+            student_pipeline.execute(message="What documents do I still need?", trace=trace)
+        )
+    else:
+        staff_pipeline = StaffAssistantPipeline(
+            StaffAssistantToolHost({"university_record": university_record}, staff_member_id=_ME),
+            read_loop_step=unavailable,
+            read_planner="model",
+        )
+        staff_result = asyncio.run(
+            staff_pipeline.execute(message="What should I do today?", trace=trace)
+        )
+        assert message_part in staff_result.message
+        assert staff_result.failure_codes == [f"read_loop_fallback:{failure}"]
+    if role == "student":
+        assert message_part in result.message
+        assert result.failure_codes == [f"read_loop_fallback:{failure}"]
+    assert trace.response_source == source
+    assert "narrow the question" not in trace.final_message
+    assert trace.read_loop is not None
+    assert trace.read_loop["outcome"] == failure
