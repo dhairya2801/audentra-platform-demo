@@ -1,0 +1,349 @@
+[
+  {
+    "case": "student:verification-chain",
+    "turn": 1,
+    "before": {
+      "question": "Explain the shortest safe path to finish my financial-aid case.",
+      "answer": "The shortest safe path is already complete: your financial-aid verification requirement is marked completed, and no hold is currently recorded. Your Fall 2026 aid is accepted\u2014$4,000 Aster Merit Scholarship and $5,000 Federal Pell Grant\u2014but the scheduled $2,000 scholarship and $2,500 Pell disbursements are held for \u201cVerification outstanding,\u201d so Financial Aid must clear that verification before aid disburses; your account balance is currently $0. The Enrollment Checklist guide (2026.1, \u201cWhat happens if a deadline is missed\u201d) says no aid disburses until verification is complete, and the Academic Calendar (2026.1) lists Fall aid disbursement on September 4, 2026; next, contact Financial Aid to confirm the completed verification is cleared for release.",
+      "componentTypes": [
+        "text",
+        "text"
+      ],
+      "tools": [
+        "getOnboardingChecklist",
+        "getUniversityOverview",
+        "getUniversityAccount",
+        "getInstitutionalPolicies"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "Explain the shortest safe path to finish my financial-aid case.",
+      "answer": "Your shortest safe path is to ask Financial Aid to review the completed verification and release the held $4,500 in fall aid, then have Student Accounts reconcile the ledger and hold. Your financial-aid verification is complete, your balance is $0, and no student submission is missing. Financial Aid\u2019s evidence review is ready, while aid posting is blocked; Student Accounts\u2019 reconciliation and financial-hold review are also blocked, although no hold is currently recorded. Contact the Office of Financial Aid and request reconciliation of the unexplained blocked stages and review of the held Aster Merit Scholarship and Federal Pell Grant disbursements.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "facts",
+        "checklist",
+        "checklist",
+        "record_context"
+      ],
+      "tools": [
+        "getUniversityAccount",
+        "getOnboardingChecklist"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "student:adviser-coverage",
+    "turn": 1,
+    "before": {
+      "question": "Who can help with advising today while my adviser is away?",
+      "answer": "While your adviser, Emre Fennwick, is on leave, Bennett Abernathy in Admissions, Hollis Castellanos in Financial Aid, and Jasper Blackwood in Housing & Residence Life can help. All 3 are active and bookable, with the next open slot shown as September 14, 2026, at 1:00 p.m.; their offices are Larkin Hall 100, Larkin Hall 210, and Cedarcroft Commons, respectively. Use the appointments page to book the appropriate counselor.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [
+        "getStudentAdvising"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "Who can help with advising today while my adviser is away?",
+      "answer": "Bianca Netherby is covering your adviser Emre Fennwick while he is away, and you can contact her through the Academic Advising Center. The coverage runs through September 15, 2026. Academic Advising policy 2026.1 says first-year students on leave are covered by the Assistant Director, First-Year Advising; Bianca is the recorded temporary cover, while Emre remains on leave. Use the Appointments page to check Bianca Netherby\u2019s advising availability or contact the Academic Advising Center.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "contacts",
+        "sources",
+        "record_context"
+      ],
+      "tools": [
+        "getStudentAdvising",
+        "getUniversityRelationships",
+        "getInstitutionalPolicies"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "student:journey-payment-followup",
+    "turn": 4,
+    "before": {
+      "question": "who do i talk to then",
+      "answer": "I can put this in front of a person \u2014 what do you need help with? If it's one of your open steps, naming it gets it to the right team faster.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "who do i talk to then",
+      "answer": "Talk to Student Accounts: your $1,000 bank transfer is pending, and that office owns the financial hold. The account shows a $1,000 posted balance and a financial hold because the past-due balance exceeds $250. The Holds policy says only Student Accounts can clear it after payment settles or an approved payment plan begins. Ask Student Accounts to verify settlement of the pending transfer and release the hold once the balance posts.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "facts",
+        "sources",
+        "record_context"
+      ],
+      "tools": [
+        "getUniversityAccount",
+        "getInstitutionalPolicies"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "student:journey-next",
+    "turn": 1,
+    "before": {
+      "question": "im lost. what do i actually need to do next",
+      "answer": "Your next step is to register for orientation. The checklist shows 7 of 8 requirements completed; \u201cRegister for orientation\u201d is the only open item and is blocked because the enrollment deposit and identity document must be complete, which the records show they are. Also note these upcoming deadlines: the add/drop and 100% refund deadline is September 11, the census date is September 14, and your fall advising meeting for spring planning is due October 9. Open the orientation-registration requirement and choose a session. If you'd like, I can open a support request so someone picks it up \u2014 just say so.",
+      "componentTypes": [
+        "text",
+        "text"
+      ],
+      "tools": [
+        "getOnboardingChecklist",
+        "getUniversityOverview",
+        "getUniversityDocuments"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "im lost. what do i actually need to do next",
+      "answer": "Your next step is to contact New Student Programs about the blocked orientation registration, then ask Financial Aid to review the ready verification evidence. All 7 other onboarding requirements are complete, your balance is $0, and your documents are accepted. Financial Aid shows $4,500 in held aid, while the September 11 add/drop and health-insurance deadlines are approaching. Ask New Student Programs to reconcile orientation registration and Financial Aid to authorize aid posting after reviewing your completed verification. If you'd like, I can open a support request so someone picks it up \u2014 just say so.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "checklist",
+        "facts",
+        "checklist",
+        "record_context",
+        "text"
+      ],
+      "tools": [
+        "getOnboardingChecklist",
+        "getUniversityOverview",
+        "getUniversityAccount",
+        "getUniversityDocuments"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "staff:revoked-consent",
+    "turn": 1,
+    "before": {
+      "question": "For student ec6ee5c3-46ff-4fe5-aba7-d124713c04ce: Alex Halloway says they are my parent. Can you share my bill with them?",
+      "answer": "I couldn't find \u201cAlex Halloway\u201d exactly. Closest matches on the roster \u2014 which one do you mean?",
+      "componentTypes": [
+        "text",
+        "bullet_list"
+      ],
+      "tools": [
+        "searchStaff",
+        "searchStudents"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "For student ec6ee5c3-46ff-4fe5-aba7-d124713c04ce: Alex Halloway says they are my parent. Can you share my bill with them?",
+      "answer": "No. Alex Halloway\u2019s billing consent was revoked on September 7, 2026, so the bill cannot currently be shared with them. The record identifies Alex as a named billing delegate, but the authorization is no longer active. The student must provide a new valid billing authorization before the university can share billing information with Alex.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "contacts",
+        "record_context"
+      ],
+      "tools": [
+        "searchStaff",
+        "searchStudents",
+        "getStudentStaffSummary",
+        "getUniversityRelationships"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "staff:journey-case",
+    "turn": 1,
+    "before": {
+      "question": "For student d5e3eabd-4bd6-449b-a012-0291406598f1: what's blocking this student and who should do what next?",
+      "answer": "I could not verify a complete answer from the university evidence on this turn. Please narrow the question to the record or policy you want checked.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [
+        "getStudentStaffSummary",
+        "getStudentRequirements",
+        "getUniversityOverview",
+        "getUniversityDocuments",
+        "getUniversityCasework"
+      ],
+      "failureCodes": [
+        "read_loop_fallback:ungrounded_number"
+      ]
+    },
+    "after": {
+      "question": "For student d5e3eabd-4bd6-449b-a012-0291406598f1: what's blocking this student and who should do what next?",
+      "answer": "Ines is blocked by orientation registration and an unresolved financial-aid workflow, not missing student submissions. New Student Programs must reconcile the blocked orientation status, which has no unmet recorded prerequisites. Financial Aid, led on the case by Hollis Castellanos, should review the accepted verification evidence and authorize the held $4,500 in Fall 2026 aid; Student Accounts then reconciles the ledger and reviews the financial hold, followed by Enrollment Services confirming the outcome. Ask New Student Programs and the case owner in Financial Aid to reconcile their blockers, then have Student Accounts proceed after aid authorization.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "checklist",
+        "facts",
+        "checklist",
+        "record_context"
+      ],
+      "tools": [
+        "getStudentStaffSummary",
+        "getStudentRequirements",
+        "getUniversityOverview",
+        "getUniversityAccount",
+        "getUniversityDocuments",
+        "getUniversityCasework",
+        "getUniversityRelationships"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "staff:journey-case",
+    "turn": 2,
+    "before": {
+      "question": "draft a short explanation for them",
+      "answer": "Who should the email go to?",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [],
+      "failureCodes": [
+        "university_planner_required"
+      ]
+    },
+    "after": {
+      "question": "draft a short explanation for them",
+      "answer": "Ines, your student requirements are complete except for orientation registration, which is blocked even though its recorded prerequisites are complete. Financial Aid is reviewing your verification evidence before releasing $4,500 in Fall aid; your Fall balance is currently $0, and the university offices are handling the remaining steps. New Student Programs must reconcile the orientation block, then Financial Aid can authorize the held aid. Student Accounts and Enrollment Services will complete their reviews afterward; no additional student submission is currently recorded.",
+      "componentTypes": [
+        "draft",
+        "record_context"
+      ],
+      "tools": [
+        "getStudentStaffSummary",
+        "getUniversityCasework",
+        "getStudentRequirements",
+        "getUniversityAccount",
+        "getUniversityOverview"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "staff:rejected-evidence",
+    "turn": 1,
+    "before": {
+      "question": "For student 47f0096b-2626-4a19-aee0-1a143839df4e: What do I need to fix on my transcript?",
+      "answer": "I could not verify a complete answer from the university evidence on this turn. Please narrow the question to the record or policy you want checked.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [
+        "getStudentStaffSummary",
+        "getUniversityAcademics",
+        "getStudentDocuments",
+        "getStudentRequirements"
+      ],
+      "failureCodes": [
+        "read_loop_fallback:ungrounded_number"
+      ]
+    },
+    "after": {
+      "question": "For student 47f0096b-2626-4a19-aee0-1a143839df4e: What do I need to fix on my transcript?",
+      "answer": "Devon needs to resubmit the official transcript, which is currently rejected and blocking enrollment. The transcript requirement is due, has 0% progress, and is assigned to the Registrar; the academic record shows no separate transcript issue. Please contact the Registrar to confirm the rejection reason and the acceptable replacement transcript before resubmitting.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation",
+        "checklist",
+        "facts",
+        "record_context"
+      ],
+      "tools": [
+        "getStudentStaffSummary",
+        "getUniversityAcademics",
+        "getStudentRequirements"
+      ],
+      "failureCodes": []
+    }
+  },
+  {
+    "case": "student:journey-policy-record",
+    "turn": 2,
+    "before": {
+      "question": "what about my aid though",
+      "answer": "Your aid is not automatically protected: dropping CS 101 would reduce your actual Fall 2026 enrollment to 8 credits, so Financial Aid must review the effect. The Course Load, Overloads and Part-time Study policy (2026.1, \u201cDropping below full time\u201d) says aid is generally recalculated and a later drop can create an over-award billed back; the Using Accommodations procedure (2026.1, \u201cReduced course load as an accommodation\u201d) says federal aid is based on actual credits, and the Aster Merit and Aster Access scholarships require 12 credits. Your account currently shows $2,000 of Fall Aster Merit and $3,000 of Fall Aster Global aid posted, but that does not confirm those amounts would remain after a drop; ask Financial Aid to review CS 101 before dropping it.",
+      "componentTypes": [
+        "text",
+        "text"
+      ],
+      "tools": [
+        "getInstitutionalPolicies",
+        "getUniversityAccount",
+        "getUniversityAcademics"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "what about my aid though",
+      "answer": "I couldn't verify this answer reliably from the university records. Please try again, or use Help to contact the office responsible.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [
+        "getUniversityAccount",
+        "getInstitutionalPolicies"
+      ],
+      "failureCodes": [
+        "read_loop_fallback:ungrounded_number"
+      ]
+    }
+  },
+  {
+    "case": "staff:journey-queue",
+    "turn": 4,
+    "before": {
+      "question": "what is overdue in my department?",
+      "answer": "There are 0 overdue open tasks in the Academic Advising Center. The department\u2019s overdue work queue has no assigned, unassigned, urgent, or escalated items.",
+      "componentTypes": [
+        "text"
+      ],
+      "tools": [
+        "summarizeWorkQueue"
+      ],
+      "failureCodes": []
+    },
+    "after": {
+      "question": "what is overdue in my department?",
+      "answer": "Your department has 1 overdue open task, assigned to Emre Fennwick. The task is in Academic Advising Center and is currently marked to do; no overdue items are unassigned or urgent. Review the task with Emre Fennwick and confirm its next action.",
+      "componentTypes": [
+        "answer",
+        "next_action",
+        "explanation"
+      ],
+      "tools": [
+        "summarizeWorkQueue"
+      ],
+      "failureCodes": []
+    }
+  }
+]

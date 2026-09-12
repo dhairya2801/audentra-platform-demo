@@ -492,7 +492,13 @@ def test_new_submission_revises_unmet_evidence_and_review_follows_current_file()
                             JOIN requirement_definition_version d
                               ON d.tenant_id=r.tenant_id
                               AND d.id=r.requirement_definition_version_id
-                            WHERE r.tenant_id=:t AND d.code=:code AND r.retired_at IS NULL LIMIT 1
+                            WHERE r.tenant_id=:t AND d.code=:code AND r.retired_at IS NULL
+                              AND (:code <> 'financial_aid_verification' OR (
+                                SELECT count(DISTINCT category) FROM university.document
+                                WHERE tenant_id=:t AND student_id=j.student_id::text
+                                  AND category IN ('verification_worksheet','tax_return_transcript')
+                              )=2)
+                            ORDER BY r.id LIMIT 1
                         """),
                                     {"t": tenant, "code": requirement_code},
                                 )

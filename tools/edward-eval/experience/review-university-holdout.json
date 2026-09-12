@@ -1,0 +1,142 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review, not independent human study",
+  "reviews": [
+    {
+      "case": "student:threshold-over",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:minor-consent",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:expired-approval",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:credit-balance",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:independent-blocker",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:waitlist-expiry",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:refund-complete",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:historical-hold",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:threshold-over",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:minor-consent",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:expired-approval",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:credit-balance",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:identity-collision",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:staff-cohort",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "ambiguous_denominator"
+      ],
+      "note": "Correct 2 matching students, but says saved cohort contains 1773 without clearly distinguishing the larger enrolled population from the matched cohort."
+    },
+    {
+      "case": "staff:safe-release",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:independent-blocker",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [
+        "staff_voice"
+      ],
+      "note": "Correctly identifies independent health hold; uses student voice for staff."
+    },
+    {
+      "case": "staff:waitlist-expiry",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:refund-complete",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:historical-hold",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    }
+  ]
+}

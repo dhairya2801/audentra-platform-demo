@@ -1,0 +1,82 @@
+{
+  "batch": "baseline",
+  "turns": 88,
+  "httpAndProjectionChecks": {
+    "http_ok": 88,
+    "trace_present": 88,
+    "no_unconfirmed_receipt": 88
+  },
+  "responseSources": {
+    "model_loop": 68,
+    "deterministic": 17,
+    "university_guard_fallback": 3
+  },
+  "tools": {
+    "getOnboardingChecklist": 7,
+    "getUniversityOverview": 18,
+    "getUniversityDocuments": 9,
+    "getUniversityAcademics": 18,
+    "getUniversityAccount": 20,
+    "getUniversityRelationships": 8,
+    "getInstitutionalPolicies": 20,
+    "getStudentAdvising": 3,
+    "getStudentMessages": 2,
+    "getUniversityHistory": 3,
+    "getStudentStaffSummary": 17,
+    "getStudentRequirements": 3,
+    "getStudentDocuments": 1,
+    "searchUniversityPolicies": 2,
+    "searchStaff": 25,
+    "searchStudents": 29,
+    "getStudentAppointments": 2,
+    "getCampusLife": 1,
+    "getMorningBriefing": 1,
+    "searchWorkQueue": 1,
+    "summarizeWorkQueue": 1,
+    "getUniversityCasework": 2,
+    "getStaffWorkQueue": 1,
+    "getStaffProfile": 1
+  },
+  "failureCodes": {
+    "read_loop_fallback:ungrounded_number": 3,
+    "untrusted_quoted_content": 1,
+    "untrusted_control_override": 1,
+    "university_planner_required": 2
+  },
+  "blockTypes": {
+    "text": 110,
+    "bullet_list": 2
+  },
+  "medianLatencyMs": 3732.0,
+  "p90LatencyMs": 5249,
+  "meanModelCalls": 1.73,
+  "medianResponseWords": 54.5,
+  "medianPrimaryAnswerWords": 54.5,
+  "conservativeOpenAIUsd": 0.185638,
+  "qualitativeOutcomes": {
+    "success": 59,
+    "failure": 18,
+    "partial": 11
+  },
+  "qualitativeIssues": {
+    "submission_vs_review": 1,
+    "wrong_contact": 2,
+    "historical_reasoning": 2,
+    "guard_false_rejection": 2,
+    "identity": 5,
+    "quoted_fact_check": 1,
+    "missing_policy_read": 1,
+    "next_step": 3,
+    "history_grounding": 1,
+    "unsolicited_action": 2,
+    "lost_followup": 1,
+    "ambiguity": 1,
+    "missing_read": 1,
+    "availability": 1,
+    "refusal_usefulness": 1,
+    "retrieval": 1,
+    "scope_filter_error": 1,
+    "unnecessary_question": 1,
+    "negated_action": 1
+  }
+}

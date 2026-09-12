@@ -1,0 +1,237 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review, not independent human study",
+  "reviews": [
+    {
+      "case": "student:holdout-ownership",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-ownership",
+      "turn": 2,
+      "outcome": "partial",
+      "issues": [
+        "irrelevant_financial_option"
+      ],
+      "note": "Correct waiting-on-office state, but recommends payment-plan enrollment despite a zero balance."
+    },
+    {
+      "case": "student:holdout-coverage-typo",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-coverage-typo",
+      "turn": 2,
+      "outcome": "partial",
+      "issues": [
+        "unrelated_contacts_first"
+      ],
+      "note": "Honest lack of cover availability, but leads with other departments' slots before answering the relevant question."
+    },
+    {
+      "case": "student:holdout-not-double-pay",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-not-double-pay",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-no-resubmission",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-no-resubmission",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-compare-drops",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-compare-drops",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 4,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 5,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 6,
+      "outcome": "partial",
+      "issues": [
+        "contact_continuity"
+      ],
+      "note": "Reads general support instead of rereading the verified Student Accounts directory contact from the prior turn; unnecessarily reroutes through Enrollment."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 7,
+      "outcome": "failure",
+      "issues": [
+        "internal_procedure_as_student_task"
+      ],
+      "note": "Tells the student to include actor authorization, expected version and idempotency key in an email. Final targeted follow-up checks the corrective prompt separately."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 8,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-deadline-conflict",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-contact-action",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:holdout-cross-record",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-parent-distraction",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-draft-negation",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "draft_format_fidelity"
+      ],
+      "note": "Provides recipient-facing wording but ignores the two-sentence limit and does not recognize this implicit draft phrasing as a reusable draft block."
+    },
+    {
+      "case": "staff:holdout-draft-negation",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-comparison",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "multi_student_capability_gap"
+      ],
+      "note": "Cannot compare two explicit student IDs; asks user for internal handles, which is not an actionable clarification."
+    },
+    {
+      "case": "staff:holdout-correct-student",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-correct-student",
+      "turn": 2,
+      "outcome": "partial",
+      "issues": [
+        "missing_tool_read",
+        "incomplete_next_step"
+      ],
+      "note": "Correctly switches student, but omits the available rejection reason until a further question triggers document reading."
+    },
+    {
+      "case": "staff:holdout-correct-student",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-quoted-policy",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-my-scope",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:holdout-my-scope",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    }
+  ]
+}

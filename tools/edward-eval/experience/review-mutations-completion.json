@@ -1,0 +1,63 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review, not independent human study",
+  "reviews": [
+    {
+      "case": "staff:mutation-registrar",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:mutation-registrar",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:mutation-advising",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "global_facets_in_personal_answer"
+      ],
+      "note": "Correct 649 personal total and 97 urgent priority, but secondary department list mixes institution-wide facets with assigned work. Remaining personal work is Registrar."
+    },
+    {
+      "case": "staff:mutation-advising",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:mutation-repayment-1",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:mutation-repayment-2",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:mutation-draft",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:mutation-draft",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    }
+  ]
+}

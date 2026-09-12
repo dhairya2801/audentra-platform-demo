@@ -183,6 +183,7 @@ class AssistantTurnTrace:
     action_execution_result: str | None = None
     action_latency_ms: int | None = None
     final_message: str = ""
+    response_blocks: list[JsonDict] = field(default_factory=list)
     user_message_id: str | None = None
     assistant_message_id: str | None = None
     error: str | None = None
@@ -349,6 +350,7 @@ class AssistantTurnTrace:
             "actionExecutionResult": self.action_execution_result,
             "actionLatencyMs": self.action_latency_ms,
             "finalMessage": sanitize_trace_value(self.final_message),
+            "responseBlocks": sanitize_trace_value(self.response_blocks),
             "userMessageId": self.user_message_id,
             "assistantMessageId": self.assistant_message_id,
             "stages": list(self.stages),

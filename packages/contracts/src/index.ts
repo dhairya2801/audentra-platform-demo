@@ -3068,7 +3068,31 @@ export interface AssistantBlockTableColumn {
   align?: "left" | "right";
 }
 
+/** Semantic concepts, not a layout DSL. Record values are backend projections;
+ * prose is guarded. No model-authored destinations or executable operations. */
+export type EdwardSemanticBlock = {
+  fallbackText: string;
+  provenance?: { kind: "institution_record"; tool: string; asOf?: string | null };
+} & (
+  | { type: "answer" | "next_action"; text: string }
+  | { type: "explanation"; title: string; text: string }
+  | { type: "facts"; title: string; items: { label: string; value: string }[]; note?: string }
+  | { type: "checklist"; title: string; total: number; items: {
+      title: string; status: string; owner: string; detail: string; href?: string;
+    }[] }
+  | { type: "contacts"; title: string; items: {
+      name: string; role: string; email: string; office: string; status?: string;
+    }[] }
+  | { type: "timeline"; title: string; items: { title: string; at: string; detail: string }[] }
+  | { type: "sources"; items: {
+      title: string; citation: string; version: string; section: string;
+      excerpt: string; applicability: string;
+    }[] }
+  | { type: "record_context"; label: string; asOf: string }
+);
+
 export type AssistantResponseBlock =
+  | EdwardSemanticBlock
   | { type: "text"; fallbackText: string; text: string }
   | {
       type: "bullet_list";

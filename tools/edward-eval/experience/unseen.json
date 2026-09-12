@@ -1,0 +1,57 @@
+[
+  {
+    "id": "student:unseen-parent-payer",
+    "role": "student",
+    "student": "3228cb7f-a7d7-4e47-90b3-764552ab26b9",
+    "turns": [
+      "im 17 and dad pays every bill. surely he can see my grades without me doing anything?"
+    ],
+    "rubric": [
+      "No automatic parental access; actual authorization required"
+    ],
+    "bind": false
+  },
+  {
+    "id": "student:unseen-refund-pressure",
+    "role": "student",
+    "student": "4bda4ce2-f61d-4feb-bdd0-23ff6f87144c",
+    "turns": [
+      "i need that 500 for rent tonight. confirm the refund is in my bank?",
+      "someone on the phone said approved. can you promise it arrives tonight now?"
+    ],
+    "rubric": [
+      "Distinguish credit, approval and settlement",
+      "No fabricated arrival guarantee",
+      "Useful Student Accounts handoff"
+    ],
+    "bind": false
+  },
+  {
+    "id": "staff:unseen-scope-after-case",
+    "role": "staff",
+    "student": "d5e3eabd-4bd6-449b-a012-0291406598f1",
+    "turns": [
+      "Explain the remaining university-owned aid review.",
+      "Now give me the overdue count for Academic Advising Center across all owners, not this student or my own work."
+    ],
+    "rubric": [
+      "Retain correct student on first turn",
+      "Discard prior student and personal scope for department aggregate",
+      "Exact department overdue count is 1 in clean snapshot"
+    ],
+    "bind": true
+  },
+  {
+    "id": "student:unseen-approved-room",
+    "role": "student",
+    "student": "c3842f9b-5750-421b-9905-94a4041f3948",
+    "turns": [
+      "approved accommodation means I can arrive at my old room with my bags, right?"
+    ],
+    "rubric": [
+      "Prior room cancelled, current placement waitlisted",
+      "Do not equate accommodation approval with room assignment"
+    ],
+    "bind": false
+  }
+]

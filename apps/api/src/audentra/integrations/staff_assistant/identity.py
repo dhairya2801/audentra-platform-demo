@@ -62,7 +62,11 @@ class StaffIdentity:
             parts.append(f"reporting to {self.manager_name}")
         if self.direct_reports:
             parts.append(f"with {self.direct_reports} direct report(s)")
-        return " ".join(parts) + "."
+        return (
+            " ".join(parts)
+            + f". Current assigned workload: {self.open_items} open, "
+            + f"{self.overdue_items} overdue (all due dates; not just items due today)."
+        )
 
     def as_trace(self) -> JsonDict:
         return {

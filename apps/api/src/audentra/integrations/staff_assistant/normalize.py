@@ -275,7 +275,7 @@ _INTERROGATIVE_OPENER = re.compile(
 _DRAFT_REQUEST = re.compile(
     r"\b(?:draft|compose|write(?:\s+me)?(?:\s+up)?|prepare|prep|give me|put together"
     r"|make me)\b.{0,60}"
-    r"\b(?:email|e-mail|message|sms|text|reply|response|note|talking points?"
+    r"\b(?:email|e-mail|message|sms|text|reply|response|note|explanation|letter|talking points?"
     r"|call (?:script|points|notes)|outreach)\b"
     # "Email Elena about her aid verification" names a recipient and a subject
     # and no draft exists yet. Edward cannot send, so the only thing that
@@ -332,7 +332,15 @@ def normalize_staff_request(
     )
     is_draft = bool(_DRAFT_REQUEST.search(text))
     action_kind = None
-    if not is_draft and not _INTERROGATIVE_OPENER.match(text):
+    negated_action = bool(
+        re.search(
+            r"\b(?:don['\u2019]t|do not|never)\s+"
+            r"(?:send|prepare|contact|message|update|change|close|create)\b",
+            text,
+            re.I,
+        )
+    )
+    if not is_draft and not negated_action and not _INTERROGATIVE_OPENER.match(text):
         # "When did we last email Marisol?" asks about history; only an
         # imperative or a request to act is an action request.
         for kind, pattern in _ACTION_KINDS:

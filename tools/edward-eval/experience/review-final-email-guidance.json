@@ -1,0 +1,61 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review",
+  "reviews": [
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 4,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 5,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 6,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 7,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    },
+    {
+      "case": "student:holdout-long-thread",
+      "turn": 8,
+      "outcome": "success",
+      "issues": [],
+      "note": "Current payment context retained; email guidance uses student-facing facts and no transaction parameters."
+    }
+  ]
+}

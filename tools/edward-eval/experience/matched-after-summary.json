@@ -1,0 +1,88 @@
+{
+  "batch": "matched-after",
+  "turns": 88,
+  "httpAndProjectionChecks": {
+    "http_ok": 88,
+    "trace_present": 88,
+    "no_unconfirmed_receipt": 88,
+    "record_component": 81,
+    "record_component_has_provenance": 81,
+    "next_step_has_no_model_url": 58
+  },
+  "responseSources": {
+    "model_loop": 77,
+    "deterministic": 10,
+    "university_guard_fallback": 1
+  },
+  "tools": {
+    "getUniversityOverview": 15,
+    "getOnboardingChecklist": 9,
+    "getUniversityDocuments": 13,
+    "getUniversityAcademics": 17,
+    "getUniversityAccount": 33,
+    "getInstitutionalPolicies": 26,
+    "getStudentAdvising": 5,
+    "getUniversityRelationships": 11,
+    "getUniversityHistory": 2,
+    "getStudentMessages": 3,
+    "getStudentSupportRequests": 1,
+    "getStudentProfile": 1,
+    "getCampusLife": 1,
+    "getStudentStaffSummary": 25,
+    "getStudentRequirements": 7,
+    "getUniversityCasework": 7,
+    "searchUniversityPolicies": 3,
+    "searchStaff": 26,
+    "searchStudents": 27,
+    "getStudentAppointments": 2,
+    "getStaffWorkQueue": 2,
+    "summarizeWorkQueue": 2,
+    "getStaffProfile": 1
+  },
+  "failureCodes": {
+    "read_loop_fallback:ungrounded_number": 1,
+    "untrusted_control_override": 1
+  },
+  "blockTypes": {
+    "answer": 76,
+    "explanation": 69,
+    "checklist": 25,
+    "facts": 44,
+    "record_context": 58,
+    "text": 11,
+    "next_action": 58,
+    "sources": 24,
+    "contacts": 10,
+    "timeline": 2,
+    "draft": 1,
+    "bullet_list": 1
+  },
+  "medianLatencyMs": 4602.5,
+  "p90LatencyMs": 6893,
+  "meanModelCalls": 2,
+  "medianResponseWords": 58.0,
+  "medianPrimaryAnswerWords": 21.0,
+  "conservativeOpenAIUsd": 0.243882,
+  "qualitativeOutcomes": {
+    "success": 76,
+    "partial": 10,
+    "failure": 2
+  },
+  "qualitativeIssues": {
+    "missing_policy_read": 2,
+    "guard_fallback": 1,
+    "ambiguous_reference": 1,
+    "conditional_task_not_verified": 1,
+    "ambiguous_domain": 1,
+    "incomplete_record_read": 1,
+    "generic_boundary": 1,
+    "staff_voice": 4,
+    "missing_tool_read": 1,
+    "incomplete_next_step": 1,
+    "uncertain_dependency_explanation": 1,
+    "role_context_underused": 1,
+    "unavailable_owner_next_step": 1,
+    "unsupported_causal_dependency": 1,
+    "unnecessary_entity_search": 2
+  }
+}

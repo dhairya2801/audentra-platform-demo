@@ -33,6 +33,7 @@ from audentra.domain.student_state import (
     derive_enrollment_blockers,
     parse_moment,
     requirement_href,
+    requirement_readiness,
 )
 from audentra.integrations.assistant.planner import RECEIPT_SOURCES
 from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
@@ -389,6 +390,7 @@ async def _tool_checklist(host: AssistantToolHost, _now: datetime) -> JsonDict:
             "responsibleOffice": item.get("responsibleOffice"),
             "dependencyCodes": [str(code) for code in _sequence(item.get("dependencyCodes"))],
             "href": requirement_href(item),
+            **requirement_readiness(item, _items(requirements)),
         }
         reward = _mapping(item.get("reward"))
         if reward:
@@ -1267,8 +1269,20 @@ async def _tool_advising(host: AssistantToolHost, now: datetime) -> JsonDict:
         if record is not None
     ]
     primary = person(advising.get("primaryAdviser"))
+    coverage = []
+    if host.supports("university_record"):
+        relationships = await host.read("university_record", domain="relationships")
+        coverage = [
+            {
+                key: row.get(key)
+                for key in ("covering_name", "covering_email", "starts_at", "ends_at")
+            }
+            for row in _sequence(relationships.get("coverage"))
+            if isinstance(row, Mapping)
+        ]
     return {
         "primaryAdviser": primary,
+        "coverage": coverage,
         "advisers": advisers,
         "total": len(advisers),
         "gaps": [

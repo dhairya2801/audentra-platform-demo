@@ -1,0 +1,55 @@
+{
+  "batch": "university-holdout",
+  "turns": 19,
+  "httpAndProjectionChecks": {
+    "http_ok": 19,
+    "trace_present": 19,
+    "no_unconfirmed_receipt": 19,
+    "next_step_has_no_model_url": 13,
+    "record_component": 13,
+    "record_component_has_provenance": 13
+  },
+  "responseSources": {
+    "model_loop": 18,
+    "deterministic": 1
+  },
+  "tools": {
+    "getUniversityAccount": 11,
+    "getUniversityOverview": 8,
+    "getInstitutionalPolicies": 5,
+    "getUniversityRelationships": 2,
+    "getUniversityAcademics": 4,
+    "searchStaff": 15,
+    "searchStudents": 15,
+    "getStudentStaffSummary": 9,
+    "searchUniversityPolicies": 2,
+    "getUniversityCohort": 1,
+    "getStudentDeadlines": 1,
+    "getUniversityCasework": 1
+  },
+  "failureCodes": {},
+  "blockTypes": {
+    "answer": 18,
+    "next_action": 13,
+    "explanation": 18,
+    "facts": 13,
+    "record_context": 17,
+    "sources": 7,
+    "text": 1,
+    "bullet_list": 1
+  },
+  "medianLatencyMs": 4507,
+  "p90LatencyMs": 5181,
+  "meanModelCalls": 1.95,
+  "medianResponseWords": 49,
+  "medianPrimaryAnswerWords": 20,
+  "conservativeOpenAIUsd": 0.056375,
+  "qualitativeOutcomes": {
+    "success": 18,
+    "partial": 1
+  },
+  "qualitativeIssues": {
+    "ambiguous_denominator": 1,
+    "staff_voice": 1
+  }
+}

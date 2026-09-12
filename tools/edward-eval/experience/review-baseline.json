@@ -1,0 +1,679 @@
+{
+  "reviewer": "Codex GPT-6; qualitative transcript review, not independent human study",
+  "reviews": [
+    {
+      "case": "student:clear-control",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:pending-is-not-paid",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:submission-not-approval",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:rejected-evidence",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:f1-drop-risk",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:approved-rcl",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:transfer-prerequisite",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:verification-chain",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "submission_vs_review"
+      ],
+      "note": "Says safe path already complete while disbursements held"
+    },
+    {
+      "case": "student:adviser-coverage",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "wrong_contact"
+      ],
+      "note": "Routes advising to unrelated offices; UTC slot mislabeled"
+    },
+    {
+      "case": "student:stale-advice",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:failed-payment",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:threshold-at",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:revoked-consent",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:late-arriving-fact",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "historical_reasoning"
+      ],
+      "note": "Correct no but does not explain later correction"
+    },
+    {
+      "case": "student:accommodation-placement",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:waitlist-offer",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:payment-reversal",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:no-show-followup",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:clear-control",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:pending-is-not-paid",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:submission-not-approval",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:rejected-evidence",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "guard_false_rejection"
+      ],
+      "note": "Progress percentage format"
+    },
+    {
+      "case": "staff:f1-drop-risk",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:approved-rcl",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:transfer-prerequisite",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:verification-chain",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "identity"
+      ],
+      "note": "Explicit UUID not resolved"
+    },
+    {
+      "case": "staff:delivery-failure",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "identity"
+      ],
+      "note": "Explicit UUID not resolved"
+    },
+    {
+      "case": "staff:adviser-coverage",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:stale-advice",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "quoted_fact_check"
+      ],
+      "note": "Refuses fact checking"
+    },
+    {
+      "case": "staff:failed-payment",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:threshold-at",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "missing_policy_read"
+      ],
+      "note": "Correct current no-hold state, but causal threshold question lacks the applicable policy. Regraded consistently with the matched after run."
+    },
+    {
+      "case": "staff:revoked-consent",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "identity"
+      ],
+      "note": "Parent name preempts explicit student"
+    },
+    {
+      "case": "staff:late-arriving-fact",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "historical_reasoning"
+      ],
+      "note": "Correct verdict; conflates evaluation with knowledge date"
+    },
+    {
+      "case": "staff:accommodation-placement",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "identity"
+      ],
+      "note": "Explicit UUID ignored in housing scope"
+    },
+    {
+      "case": "staff:waitlist-offer",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:payment-reversal",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:no-show-followup",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-next",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "next_step"
+      ],
+      "note": "Suggests selecting session while requirement is blocked"
+    },
+    {
+      "case": "student:journey-next",
+      "turn": 2,
+      "outcome": "partial",
+      "issues": [
+        "next_step"
+      ],
+      "note": "Does not resolve why completed prerequisites still block orientation"
+    },
+    {
+      "case": "student:journey-next",
+      "turn": 3,
+      "outcome": "partial",
+      "issues": [
+        "next_step"
+      ],
+      "note": "Navigation guidance leaves contradictory blocked state"
+    },
+    {
+      "case": "student:journey-payment-followup",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-payment-followup",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-payment-followup",
+      "turn": 3,
+      "outcome": "failure",
+      "issues": [
+        "history_grounding"
+      ],
+      "note": "Fails rather than rereading current payment"
+    },
+    {
+      "case": "student:journey-payment-followup",
+      "turn": 4,
+      "outcome": "failure",
+      "issues": [
+        "unsolicited_action"
+      ],
+      "note": "Support request replaces contact question"
+    },
+    {
+      "case": "student:journey-multi-intent",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "unsolicited_action"
+      ],
+      "note": "Answers all topics but unsolicited support review causes next-turn loss"
+    },
+    {
+      "case": "student:journey-multi-intent",
+      "turn": 2,
+      "outcome": "failure",
+      "issues": [
+        "lost_followup"
+      ],
+      "note": "Cancellation consumes remaining transcript question"
+    },
+    {
+      "case": "student:journey-policy-record",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-policy-record",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-policy-record",
+      "turn": 3,
+      "outcome": "failure",
+      "issues": [
+        "ambiguity"
+      ],
+      "note": "Guesses MATH 151 from ambiguous other class"
+    },
+    {
+      "case": "student:journey-overview",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-overview",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-overview",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-overview",
+      "turn": 4,
+      "outcome": "partial",
+      "issues": [
+        "missing_read"
+      ],
+      "note": "Immunization answered; residency not read although available"
+    },
+    {
+      "case": "student:journey-advising",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "wrong_contact"
+      ],
+      "note": "Recommends absent adviser despite recorded cover"
+    },
+    {
+      "case": "student:journey-advising",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-advising",
+      "turn": 3,
+      "outcome": "partial",
+      "issues": [
+        "availability"
+      ],
+      "note": "Honest no booking; covering adviser availability absent"
+    },
+    {
+      "case": "student:journey-privacy",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-privacy",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-privacy",
+      "turn": 3,
+      "outcome": "partial",
+      "issues": [
+        "refusal_usefulness"
+      ],
+      "note": "Safe but generic confirmation refusal instead of record scope"
+    },
+    {
+      "case": "student:journey-missing",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "retrieval"
+      ],
+      "note": "Unrelated quiet-hours passage; no campus location answer"
+    },
+    {
+      "case": "student:journey-missing",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-missing",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-write",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-write",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-write",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-write",
+      "turn": 4,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-sources",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-sources",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "student:journey-sources",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-queue",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-queue",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-queue",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-queue",
+      "turn": 4,
+      "outcome": "failure",
+      "issues": [
+        "scope_filter_error"
+      ],
+      "note": "Final SQL audit found 1 overdue department item. Original baseline annotation incorrectly accepted the zero; optional staffId binding silently narrowed the query."
+    },
+    {
+      "case": "staff:journey-case",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "guard_false_rejection"
+      ],
+      "note": "Valid case explanation rejected"
+    },
+    {
+      "case": "staff:journey-case",
+      "turn": 2,
+      "outcome": "failure",
+      "issues": [
+        "unnecessary_question"
+      ],
+      "note": "Lost student/draft recipient"
+    },
+    {
+      "case": "staff:journey-case",
+      "turn": 3,
+      "outcome": "failure",
+      "issues": [
+        "negated_action"
+      ],
+      "note": "Negated send treated as preparation"
+    },
+    {
+      "case": "staff:journey-ambiguity",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-ambiguity",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-ambiguity",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-authority",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "identity"
+      ],
+      "note": "Asks for supplied student identifier"
+    },
+    {
+      "case": "staff:journey-authority",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-authority",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-correction",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-correction",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-correction",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-adversarial",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-adversarial",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    },
+    {
+      "case": "staff:journey-adversarial",
+      "turn": 3,
+      "outcome": "success",
+      "issues": [],
+      "note": "Direct answer or appropriate boundary; no material error found in this review."
+    }
+  ]
+}

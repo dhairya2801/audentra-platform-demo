@@ -3114,7 +3114,8 @@ class PostgresPlatformService:
         elif injection_reason is not None and not (
             injection_reason == "quoted_content"
             and re.search(
-                r"\b(?:is that|is this|is it) (?:reliable|true|correct|accurate)\s*\?",
+                r"\bis (?:that|this|it)(?: (?:statement|claim|advice|message|note))? "
+                r"(?:reliable|true|correct|accurate)\s*\?",
                 message,
                 re.I,
             )
@@ -3399,7 +3400,17 @@ class PostgresPlatformService:
             trace.user_message_id = str(stored.get("userMessageId") or "") or None
             trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
         response["requestId"] = request_id
-        trace.final_message = trace.final_message or str(response.get("message") or "")
+        trace.final_message = str(response.get("message") or "")
+        trace.response_blocks = list(response.get("blocks") or [])
+        trace.add_stage(
+            "presentation",
+            0,
+            blockTypes=[b.get("type") for b in trace.response_blocks],
+            source=trace.response_source,
+            construction="semantic_projection"
+            if any(b.get("type") == "answer" for b in trace.response_blocks)
+            else "existing_response_blocks",
+        )
         await self._record_assistant_trace(trace)
         return response
 
@@ -3967,7 +3978,19 @@ class PostgresPlatformService:
             )
         inherited_student_id = staff_inherited_student_id
         action_recall = self._action_conversation_response(message, conversation_state)
-        if guarded is None and injection_reason is not None:
+        if (
+            guarded is None
+            and injection_reason is not None
+            and not (
+                injection_reason == "quoted_content"
+                and re.search(
+                    r"\bis (?:that|this|it)(?: (?:statement|claim|advice|message|note))? "
+                    r"(?:reliable|true|correct|accurate)\s*\?",
+                    message,
+                    re.I,
+                )
+            )
+        ):
             guarded = action_responses.injection_refusal(injection_reason)
             trace.failure_codes.append(f"untrusted_{injection_reason}")
         elif guarded is None and action_recall is not None:
@@ -4344,7 +4367,17 @@ class PostgresPlatformService:
             trace.user_message_id = str(stored.get("userMessageId") or "") or None
             trace.assistant_message_id = str(stored.get("assistantMessageId") or "") or None
         response["requestId"] = request_id
-        trace.final_message = trace.final_message or str(response.get("message") or "")
+        trace.final_message = str(response.get("message") or "")
+        trace.response_blocks = list(response.get("blocks") or [])
+        trace.add_stage(
+            "presentation",
+            0,
+            blockTypes=[b.get("type") for b in trace.response_blocks],
+            source=trace.response_source,
+            construction="semantic_projection"
+            if any(b.get("type") == "answer" for b in trace.response_blocks)
+            else "existing_response_blocks",
+        )
         await self._record_assistant_trace(trace)
         return response
 

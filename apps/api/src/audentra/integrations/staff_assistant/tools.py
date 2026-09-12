@@ -27,7 +27,7 @@ from audentra.domain.student_cohort import (
     DEFAULT_COHORT_PAGE_SIZE,
     build_cohort_filter,
 )
-from audentra.domain.student_state import AID_DOCUMENT_SATISFIED_STATUSES
+from audentra.domain.student_state import AID_DOCUMENT_SATISFIED_STATUSES, requirement_readiness
 from audentra.integrations.assistant.university_catalog import UNIVERSITY_TOOLS
 from audentra.integrations.staff_assistant.catalog import (
     STAFF_RECEIPT_SOURCES,
@@ -368,10 +368,18 @@ async def _tool_student_requirements(
             "dueAt": item.get("dueAt"),
             "responsibleOffice": item.get("responsibleOffice"),
             "progressPercent": item.get("progressPercent"),
+            "dependencyCodes": list(item.get("dependencyCodes") or []),
+            **requirement_readiness(item, _items(requirements)),
         }
         for item in _items(requirements)
     ]
-    return {"items": items, "total": len(items)}
+    completed = sum(item.get("status") in _DONE_REQUIREMENT_STATUSES for item in items)
+    return {
+        "items": items,
+        "total": len(items),
+        "completedCount": completed,
+        "openCount": len(items) - completed,
+    }
 
 
 async def _tool_student_documents(
@@ -847,6 +855,17 @@ def _public_queue_filters(arguments: JsonDict) -> JsonDict:
     return {key: arguments.get(key) for key in keys if arguments.get(key) not in (None, "", "all")}
 
 
+def _queue_window_meaning(arguments: JsonDict) -> str:
+    if arguments.get("dueWindow") == "today":
+        return (
+            "Only items with today's due date. Earlier overdue items are EXCLUDED, including "
+            "from the overdue count. Zero here does not mean no overdue work: read all or overdue."
+        )
+    return (
+        "All counts respect the requested due window; ownership and component are separate filters."
+    )
+
+
 async def _tool_work_queue(
     host: StaffAssistantToolHost, arguments: JsonDict, _now: datetime
 ) -> JsonDict:
@@ -873,7 +892,14 @@ async def _tool_work_queue(
         # Canonical order (priority → dueAt → updated) is preserved from SQL.
         "items": [_bounded_queue_item(item) for item in items],
         "counts": dict(_mapping(queue.get("counts"))),
+        "countScopes": {
+            "counts": "Whole institution, ignoring this query's filters; never personal totals.",
+            "byComponent": "Whole institution, ignoring this query's filters.",
+            "byOwner": "Whole institution grouped by named owner, ignoring date filters.",
+            "filteredTotal": "Exact total matching ALL filters, including owner and due window.",
+        },
         "filteredTotal": total,
+        "dueWindowMeaning": _queue_window_meaning(arguments),
         "filteredOpen": filtered_open,
         "distinctOpenStudents": int(page.get("distinctStudents") or 0),
         "page": {
@@ -1354,6 +1380,7 @@ async def _tool_summarize_work_queue(
         )
     )
     summary["filters"] = _public_queue_filters(arguments)
+    summary["dueWindowMeaning"] = _queue_window_meaning(arguments)
     return summary
 
 
@@ -1374,6 +1401,7 @@ async def _tool_search_work_queue(
         "total": total,
         "returned": len(items),
         "truncated": total > len(items),
+        "dueWindowMeaning": _queue_window_meaning(arguments),
         "filters": _public_queue_filters(arguments),
         "sort": str(arguments.get("sort") or "canonical"),
         "generatedAt": queue.get("generatedAt"),

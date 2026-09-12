@@ -1,0 +1,79 @@
+{
+  "boundaries": [
+    {
+      "role": "student",
+      "check": "foreign conversation",
+      "status": 404,
+      "pass": true
+    },
+    {
+      "role": "student",
+      "check": "foreign intent",
+      "status": 404,
+      "pass": true
+    },
+    {
+      "role": "student",
+      "check": "stale version",
+      "status": 409,
+      "pass": true
+    },
+    {
+      "role": "student",
+      "check": "tampered preview",
+      "status": 409,
+      "pass": true
+    },
+    {
+      "role": "student",
+      "check": "confirmed exactly once",
+      "pass": true
+    },
+    {
+      "role": "student",
+      "check": "restore preference",
+      "pass": true
+    },
+    {
+      "role": "staff",
+      "check": "foreign conversation",
+      "status": 404,
+      "pass": true
+    },
+    {
+      "role": "staff",
+      "check": "foreign intent",
+      "status": 404,
+      "pass": true
+    },
+    {
+      "role": "staff",
+      "check": "stale version",
+      "status": 409,
+      "pass": true
+    },
+    {
+      "role": "staff",
+      "check": "tampered preview",
+      "status": 409,
+      "pass": true
+    },
+    {
+      "role": "staff",
+      "check": "confirmed exactly once",
+      "pass": true
+    }
+  ],
+  "injectedWriteFailure": {
+    "write_returns_failure": true,
+    "durable_failed_receipt": true,
+    "no_profile_change": true,
+    "retry_cannot_execute_failed_intent": true
+  },
+  "browser": {
+    "confirmedPreferenceChange": true,
+    "restoredOriginalPreference": true,
+    "semanticTraceVisible": true,
+    "mailboxUnavailableHonest": true
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review",
+  "reviews": [
+    {
+      "case": "staff:holdout-comparison",
+      "turn": 1,
+      "outcome": "failure",
+      "issues": [
+        "multi_student_capability_gap"
+      ],
+      "note": "Now explains the one-student limit without asking for internal handles or repeated IDs. The requested comparison remains unsupported; do not count the clearer refusal as task success."
+    }
+  ]
+}

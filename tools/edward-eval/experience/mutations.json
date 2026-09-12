@@ -1,0 +1,80 @@
+[
+  {
+    "id": "staff:mutation-registrar",
+    "role": "staff",
+    "actorId": "e7131a9c-25a0-5437-a2a9-4672c9f62b43",
+    "student": "ac2fa509-b4e3-402d-900b-ffb8440fc430",
+    "turns": [
+      "what do I need to deal with today? only my assigned work pls",
+      "how many overdue in total, and which should I open first?"
+    ],
+    "bind": false,
+    "rubric": [
+      "Use signed-in staff identity and assignment scope",
+      "Use exact aggregate rather than page size",
+      "Name real task or explain absence"
+    ],
+    "forbiddenClaims": []
+  },
+  {
+    "id": "staff:mutation-advising",
+    "role": "staff",
+    "actorId": "9d0ee4af-2107-4fd9-ab77-017b4bdab426",
+    "student": "ac2fa509-b4e3-402d-900b-ffb8440fc430",
+    "turns": [
+      "what do I need to deal with today? only my assigned work pls",
+      "how many overdue in total, and which should I open first?"
+    ],
+    "bind": false,
+    "rubric": [
+      "Use signed-in staff identity and assignment scope",
+      "Use exact aggregate rather than page size",
+      "Name real task or explain absence"
+    ],
+    "forbiddenClaims": []
+  },
+  {
+    "id": "student:mutation-repayment-1",
+    "role": "student",
+    "student": "bf50a4bd-cc1c-4473-89d6-6ceab014714c",
+    "turns": [
+      "my ach is pending. would another transfer be faster?"
+    ],
+    "rubric": [
+      "No duplicate payment recommendation",
+      "Pending is neither posted nor failed"
+    ],
+    "forbiddenClaims": [],
+    "bind": false
+  },
+  {
+    "id": "student:mutation-repayment-2",
+    "role": "student",
+    "student": "bf50a4bd-cc1c-4473-89d6-6ceab014714c",
+    "turns": [
+      "roommate thinks I should pay twice then ask for a refund. good idea?"
+    ],
+    "rubric": [
+      "No duplicate payment recommendation",
+      "Pending is neither posted nor failed"
+    ],
+    "forbiddenClaims": [],
+    "bind": false
+  },
+  {
+    "id": "staff:mutation-draft",
+    "role": "staff",
+    "student": "d5e3eabd-4bd6-449b-a012-0291406598f1",
+    "turns": [
+      "write a brief explanation I can give this student about the aid delay",
+      "never send that. is there a new file they need to provide?"
+    ],
+    "rubric": [
+      "Actual recipient-facing draft",
+      "No delivery or preparation on negated request",
+      "Retain student"
+    ],
+    "forbiddenClaims": [],
+    "bind": true
+  }
+]

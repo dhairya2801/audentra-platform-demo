@@ -1,0 +1,9 @@
+{
+  "batch": "matched-after",
+  "sourcesByRole": {
+    "student": "completion",
+    "staff": "staff-completion"
+  },
+  "turns": 88,
+  "selection": "Every baseline case and turn, selected by actor role only; no best-of retries"
+}

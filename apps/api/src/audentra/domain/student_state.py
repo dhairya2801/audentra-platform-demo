@@ -35,6 +35,31 @@ REQUIREMENT_OPEN_STATUSES = frozenset(
     {"blocked", "ready", "in_progress", "submitted", "under_review", "rejected", "expired"}
 )
 
+
+def requirement_readiness(
+    item: Mapping[str, Any], requirements: Sequence[Mapping[str, Any]]
+) -> JsonDict:
+    """Explain a recorded block without inventing a cross-office dependency."""
+    if item.get("status") != "blocked":
+        return {}
+    statuses = {row.get("code"): row.get("status") for row in requirements}
+    unmet = [
+        str(code)
+        for code in item.get("dependencyCodes", [])
+        if statuses.get(code) not in REQUIREMENT_DONE_STATUSES
+    ]
+    return {
+        "unmetDependencyCodes": unmet,
+        "readinessNote": (
+            "Blocked: resolve the recorded prerequisites before attempting this item."
+            if unmet
+            else "Blocked despite no unmet recorded prerequisites. The reason is not established; "
+            "ask the responsible office to reconcile this status before attempting completion. "
+            "Do not infer a dependency on another open case."
+        ),
+    }
+
+
 # `financial_document_requirement.status` is constrained by the schema to
 # not_started / submitted / under_review / verified / action_required. Only
 # `verified` is satisfied. The previous set ({"received", "waived"}) matched no

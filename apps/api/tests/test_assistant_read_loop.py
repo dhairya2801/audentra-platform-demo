@@ -548,3 +548,43 @@ def test_university_provider_failure_is_not_reported_as_missing_evidence(
     assert "narrow the question" not in trace.final_message
     assert trace.read_loop is not None
     assert trace.read_loop["outcome"] == failure
+
+
+def test_followup_policy_read_does_not_ground_a_previous_account_amount() -> None:
+    step, seen = _scripted(
+        [
+            {"calls": [{"tool": "getA", "arguments": "{}"}], "answer": None},
+            {"calls": [], "answer": "Your pending payment is $1,000."},
+            {"calls": [{"tool": "getB", "arguments": "{}"}], "answer": None},
+            {"calls": [], "answer": "Your pending payment is $1,000."},
+        ]
+    )
+
+    async def execute(calls: Sequence[LoopCall]) -> None:
+        for call in calls:
+            call.status = "available"
+            call.result = (
+                {"rule": "Pending payments do not post"}
+                if call.tool == "getA"
+                else {"amount_cents": 100000, "status": "pending"}
+            )
+
+    result = asyncio.run(
+        run_read_loop(
+            question="My friend says it clears instantly",
+            history=[{"role": "assistant", "content": "Your payment was $1,000."}],
+            context={},
+            tools=_tools(),
+            model_step=step,
+            executor=execute,
+        )
+    )
+    assert result.answer == "Your pending payment is $1,000."
+    assert len(seen) == 4  # Still within the existing three reads + final cap.
+    assert [s["outcome"] for s in result.steps] == [
+        "reads",
+        "evidence_required",
+        "reads",
+        "answered",
+    ]
+    assert "getB.amount: $1,000" in result.evidence_texts

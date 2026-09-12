@@ -44,6 +44,7 @@ from audentra.integrations.assistant.planner import (
     select_tool_reads,
     validate_model_tool_plan,
 )
+from audentra.integrations.assistant.presentation import response_blocks
 from audentra.integrations.assistant.read_loop import (
     LoopCall,
     LoopTool,
@@ -59,7 +60,6 @@ from audentra.integrations.assistant.tools import (
     execute_tool_reads,
 )
 from audentra.integrations.assistant.trace import AssistantTurnTrace
-from audentra.integrations.assistant.university_catalog import policy_evidence_blocks
 
 JsonDict = dict[str, Any]
 
@@ -618,7 +618,7 @@ class AssistantPipeline:
             ),
         }
         result: ReadLoopResult = await run_read_loop(
-            question=request.resolved_text,
+            question=request.text,
             history=request.history,
             context=context,
             tools=tools,
@@ -763,10 +763,7 @@ class AssistantPipeline:
             trace.final_message = verdict.answer
         return AssistantPipelineResult(
             message=verdict.answer,
-            blocks=[
-                {"type": "text", "fallbackText": verdict.answer, "text": verdict.answer},
-                *policy_evidence_blocks(result.calls),
-            ],
+            blocks=response_blocks(result, actor="student"),
             provider=str((last_call or {}).get("provider") or "openai"),
             model=(last_call or {}).get("model"),
             usage=usage_total,

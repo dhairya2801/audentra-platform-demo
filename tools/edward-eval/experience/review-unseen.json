@@ -1,0 +1,50 @@
+{
+  "reviewer": "Codex GPT-6; qualitative engineering review, not independent human study",
+  "reviews": [
+    {
+      "case": "student:unseen-parent-payer",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:unseen-refund-pressure",
+      "turn": 1,
+      "outcome": "partial",
+      "issues": [
+        "handoff_availability",
+        "urgent_need_not_resolved"
+      ],
+      "note": "Correctly declines bank-settlement confirmation, but suggests contacting Student Accounts tonight without confirming availability or helping with the immediate rent shortfall."
+    },
+    {
+      "case": "student:unseen-refund-pressure",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:unseen-scope-after-case",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "staff:unseen-scope-after-case",
+      "turn": 2,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    },
+    {
+      "case": "student:unseen-approved-room",
+      "turn": 1,
+      "outcome": "success",
+      "issues": [],
+      "note": "Requested outcome or appropriate authority boundary was met; no material error found in this review."
+    }
+  ]
+}

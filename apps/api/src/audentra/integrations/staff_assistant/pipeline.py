@@ -25,6 +25,7 @@ from typing import Any
 from audentra.core.assistant_execution import ReadPlanner, resolve_read_planner
 from audentra.integrations.assistant.blocks import describe_blocks_for_prompt, text_block
 from audentra.integrations.assistant.guard import ungrounded_tokens
+from audentra.integrations.assistant.presentation import response_blocks
 from audentra.integrations.assistant.read_loop import (
     LoopCall,
     LoopTool,
@@ -33,7 +34,6 @@ from audentra.integrations.assistant.read_loop import (
     run_read_loop,
 )
 from audentra.integrations.assistant.trace import AssistantTurnTrace
-from audentra.integrations.assistant.university_catalog import policy_evidence_blocks
 from audentra.integrations.staff_assistant.catalog import (
     STAFF_TOOL_ARGUMENTS,
     STAFF_TOOL_DESCRIPTIONS,
@@ -359,8 +359,21 @@ class StaffAssistantPipeline:
             )
 
         # --- Referent resolution -------------------------------------------
+        # University questions still enter the read loop when a legacy classifier
+        # labels an unsupported write. Bind the explicit student for those reads;
+        # this does not grant the requested write capability.
+        resolution_classification = classification
+        if (
+            classification is not None
+            and classification.request_type in _NO_RESOLUTION_TYPES
+            and self._host.supports("university_record")
+            and self._read_loop_step is not None
+            and self._read_planner is not ReadPlanner.DETERMINISTIC
+            and not request.action_is_supported
+        ):
+            resolution_classification = None
         resolution = await self._resolve_student_referent(
-            request, classification, context_student_id, execution, trace, entities
+            request, resolution_classification, context_student_id, execution, trace, entities
         )
         if resolution.short_circuit is not None:
             state = derive_staff_state(execution)
@@ -441,7 +454,7 @@ class StaffAssistantPipeline:
             if loop_response is not None:
                 return loop_response
 
-        if self._host.supports("university_record"):
+        if self._host.supports("university_record") and not request.action_is_supported:
             message = (
                 "University record guidance is temporarily unavailable. "
                 "You can review the student's university record and "
@@ -868,6 +881,7 @@ class StaffAssistantPipeline:
             "getStudentOwnership",
             "searchInstitutionalKnowledge",
             "getStudentStaffSummary",
+            "getStudentDocuments",
             "getStudentEngagementSignals",
         }
         tools = [
@@ -888,8 +902,20 @@ class StaffAssistantPipeline:
         context: JsonDict = {
             "university": UNIVERSITY_CONTEXT if self._host.supports("university_record") else None,
             "actor": "staff",
+            "responseIntent": (
+                "Draft only: write the actual short message addressed directly to the student. "
+                "No instructions to staff, no delivery claim; nextStep should be null."
+                if request.is_draft_request
+                else "Answer the staff member's current question."
+            ),
             "today": moment.date().isoformat(),
             "signedIn": identity.describe() if identity is not None else None,
+            "comparisonLimit": (
+                "This path can verify one selected student's record per turn. If asked to "
+                "compare multiple students, explain that limitation and offer to review each "
+                "case separately. Never ask the user for internal handles or to repeat IDs "
+                "already supplied; handles are an executor detail, not something users provide."
+            ),
             "handles": {
                 "me": "the signed-in staff member" if "me" in handles else None,
                 "student": (
@@ -917,7 +943,7 @@ class StaffAssistantPipeline:
             ),
         }
         result: ReadLoopResult = await run_read_loop(
-            question=request.resolved_text if request.is_follow_up else request.text,
+            question=request.text,
             history=request.history,
             context=context,
             tools=tools,
@@ -1007,6 +1033,10 @@ class StaffAssistantPipeline:
                     classification=classification,
                     derived=state,
                     failure_codes=failure_codes,
+                    resolved_student_id=resolution.student_id,
+                    resolved_student_name=resolution.student_name,
+                    referent_action="set" if resolution.student_id else "keep",
+                    next_referent_student_id=resolution.student_id,
                 )
             return None
         assert verdict is not None
@@ -1034,7 +1064,25 @@ class StaffAssistantPipeline:
             trace.final_message = verdict.answer
         return StaffAssistantPipelineResult(
             message=verdict.answer,
-            blocks=[text_block(verdict.answer), *policy_evidence_blocks(result.calls)],
+            blocks=(
+                [
+                    {
+                        "type": "draft",
+                        "channel": "sms" if "sms" in request.text.lower() else "email",
+                        "subject": "Your university update",
+                        "body": verdict.answer,
+                        "fallbackText": verdict.answer,
+                        "disclaimer": "Draft only. Review before sharing; nothing has been sent.",
+                    }
+                ]
+                + [
+                    b
+                    for b in response_blocks(result, actor="staff")
+                    if b["type"] in {"sources", "record_context"}
+                ]
+                if request.is_draft_request
+                else response_blocks(result, actor="staff")
+            ),
             provider=str((last_call or {}).get("provider") or "openai"),
             model=(last_call or {}).get("model"),
             usage=usage_total,
@@ -1105,6 +1153,11 @@ class StaffAssistantPipeline:
         # a student tool reads the resolved student, a staff tool reads "me".
         for name in schema:
             if name in arguments or name not in _LOOP_IDENTITY_ARGUMENTS:
+                continue
+            # An omitted optional identity is an omitted FILTER. Supplying
+            # "me" here silently narrowed department-wide queue aggregates
+            # to the signed-in person's work, even for ownership="all".
+            if schema[name].get("optional"):
                 continue
             fallback = None
             if name == "studentId":
@@ -1255,7 +1308,7 @@ class StaffAssistantPipeline:
 
         if classification is not None and classification.request_type in _NO_RESOLUTION_TYPES:
             return None
-        if request.reference_token:
+        if request.reference_token or request.candidate_student_id:
             # "Lucia Zephyrine SYN-001278" — the pasted ID is decisive; referent
             # resolution looks it up on the roster (then the work-item
             # namespace), and a same-name list would only ask what the message
@@ -1324,7 +1377,12 @@ class StaffAssistantPipeline:
             # first would let a lookup failure preempt the refusal itself
             # ("Mark X's transcript as accepted" must refuse, not disambiguate).
             return resolution
-        if entities is not None and entities.students and not request.reference_token:
+        if (
+            entities is not None
+            and entities.students
+            and not request.reference_token
+            and not request.candidate_student_id
+        ):
             # The entity resolver already placed the name on the roster
             # (exactly one student); no second search is needed.
             student = entities.students[0]
@@ -1336,6 +1394,7 @@ class StaffAssistantPipeline:
             entities is not None
             and (entities.staff or entities.departments)
             and not request.reference_token
+            and not request.candidate_student_id
             and not entities.students
         ):
             # The turn is about a colleague or a department; a student-scoped
@@ -2364,6 +2423,11 @@ def _describe_loop_arguments(tool: str) -> str:
         detail = kind
         if kind == "enum":
             detail = "one of " + "|".join(str(v) for v in spec.get("values", ()))
+            if name == "dueWindow":
+                detail += (
+                    "; today means only today's due DATE and excludes earlier overdue work. "
+                    "For work needing attention, use all or overdue, not today"
+                )
         elif kind == "int":
             detail = f"integer {spec.get('minimum', 1)}-{spec.get('maximum', 100)}"
         elif kind == "cohort_filter":
@@ -2376,7 +2440,11 @@ def _describe_loop_arguments(tool: str) -> str:
         "staffIds": ["me"],
         "workItemId": "AST-01234",
     }
-    example = {name: handle_examples[name] for name in schema if name in handle_examples}
+    example = {
+        name: handle_examples[name]
+        for name in schema
+        if name in handle_examples and not schema[name].get("optional")
+    }
     if example:
         parts.append("example arguments string: " + json.dumps(example))
     return "; ".join(parts)

@@ -22,6 +22,19 @@ from audentra.core.errors import ApiError, BadRequestError, NotFoundError
 
 JsonDict = dict[str, Any]
 
+
+def account_amount_totals(rows: list[JsonDict], grouping: str) -> list[JsonDict]:
+    """Exact cents grouped by term AND lifecycle state; never count future aid as posted."""
+    totals: dict[tuple[str, str], int] = {}
+    for row in rows:
+        key = (str(row["term_id"]), str(row[grouping]))
+        totals[key] = totals.get(key, 0) + int(row["amount_cents"])
+    return [
+        {"term_id": term, grouping: state, "amount_cents": amount}
+        for (term, state), amount in sorted(totals.items())
+    ]
+
+
 TABLES = (
     "meta",
     "student",
@@ -414,6 +427,33 @@ class PostgresUniversityRepository:
                     ),
                 ]
             elif domain == "account":
+                # Student-visible progress deliberately excludes workflow evidence,
+                # staff notes, communications and internal identifiers. Submission
+                # completion does not imply that these downstream stages completed.
+                result["financialAidRequirements"] = await read(
+                    "SELECT d.title,r.status,d.responsible_office AS office_name, "
+                    "CASE WHEN r.status IN ('ready','in_progress','rejected') "
+                    "THEN 'Student submission is not complete; check required evidence' "
+                    "WHEN r.status='under_review' THEN 'Awaiting university review' "
+                    "WHEN r.status IN ('completed','waived','not_applicable') "
+                    "THEN 'No outstanding student submission for this requirement' "
+                    "ELSE 'Check prerequisite or requirement details' END AS meaning "
+                    "FROM public.student_requirement r JOIN public.enrollment_journey j "
+                    "ON j.tenant_id=r.tenant_id AND j.id=r.journey_id "
+                    "JOIN public.requirement_definition_version d "
+                    "ON d.tenant_id=r.tenant_id AND d.id=r.requirement_definition_version_id "
+                    "WHERE r.tenant_id=:tenant_id AND j.student_id=CAST(:sid AS uuid) "
+                    "AND r.retired_at IS NULL AND d.code='financial_aid_verification' "
+                    "ORDER BY r.id"
+                )
+                result["serviceProgress"] = await read(
+                    "SELECT w.title AS case_title,w.status AS case_status,step.title,"
+                    "step.status,o.name AS office_name FROM workflow w "
+                    "JOIN workflow_step step ON step.workflow_id=w.id "
+                    "JOIN office o ON o.id=step.office_id "
+                    "WHERE w.student_id=:sid AND w.kind='verification' "
+                    "AND w.status NOT IN ('resolved','cancelled') ORDER BY step.id"
+                )
                 for key, table, order in [
                     ("ledger", "ledger", "posted_at"),
                     ("payments", "payment", "submitted_at"),
@@ -435,6 +475,11 @@ class PostgresUniversityRepository:
                 result["sap"] = await read(
                     "SELECT * FROM sap_evaluation WHERE student_id=:sid ORDER BY evaluated_at DESC"
                 )
+                result["totals"] = {
+                    "ledgerByTermAndKind": account_amount_totals(result["ledger"], "kind"),
+                    "aidByTermAndStatus": account_amount_totals(result["disbursements"], "status"),
+                    "paymentsByTermAndStatus": account_amount_totals(result["payments"], "status"),
+                }
                 result["semantics"] = (
                     "Balance is SUM(posted ledger). Negative means credit owed, not "
                     "refund settled. Annual accepted aid, future installments, "

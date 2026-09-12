@@ -332,7 +332,7 @@ _SUPPORT = re.compile(
     r"|\bplease have someone\b|\bsomeone (?:to )?(?:look|chase|check|call|contact)\b"
     r"|\bget in touch\b|\breach out to me\b|\bchase it\b|\bcan someone chase\b"
     r"|\bask (?:them|him|her|my advis\w+)\b[^.!?]{0,32}\b(?:to )?(?:call|contact|email|reach)\b"
-    r"|\bis there a human\b|\bwho do i (?:complain|talk|speak)\b|\bcan someone (?:chase|look)\b",
+    r"|\bis there a human\b|\bwho do i complain\b|\bcan someone (?:chase|look)\b",
     re.I,
 )
 _REQUIREMENT_DONE = re.compile(
@@ -502,6 +502,10 @@ def parse_student_action(text: str) -> SemanticActionRequest | None:
     """Tier 0 for a student acting on their own record."""
 
     message = text.strip()
+    if re.search(
+        r"\b(?:don['\u2019]t|do not|never)\s+(?:contact|message|ask|send)\b", message, re.I
+    ):
+        return None
     # "Who do I complain to" is question-shaped AND a request for a person —
     # the support vocabulary owns those question forms on purpose, so the
     # interrogative gate stands aside for them.
@@ -623,7 +627,11 @@ def parse_staff_action(text: str) -> SemanticActionRequest | None:
         return None
     # A mixed turn matches its patterns only against the non-question part.
     message = actionable_text(message)
-    if _PREPARE_EMAIL.search(message):
+    if _PREPARE_EMAIL.search(message) and not re.search(
+        r"\b(?:don[\u2019']t|do not|never|not to)\s+(?:send|prepare|queue|stage|ready)\b",
+        message,
+        re.I,
+    ):
         return SemanticActionRequest("communications.email.prepare", {}, 0.96)
     # A work-item key is the least ambiguous signal in the whole vocabulary,
     # and it settles create-versus-update on its own: nobody creates a
@@ -1039,6 +1047,9 @@ RECOGNIZER_SYSTEM_PROMPT = "\n".join(
         "  never an action.",
         "- Choose null if they are asking for something that is not in the list. Do not",
         "  map a request onto the nearest available action.",
+        "- Asking whether to pay, why aid is incomplete, or what to do is advice, not a",
+        "  request to contact support. Support requires an explicit request for a person",
+        "  to intervene. Negated actions (do not send/contact) must never be proposed.",
         "- Never invent a field value. If they did not say a priority, a date, a name or a",
         "  status, leave it out. A guessed value is worse than a missing one.",
         "- Never output an identifier, an email address, a URL, or any text quoted from a",
@@ -1097,6 +1108,13 @@ async def recognize_with_model(
         confidence = 0.0
     if confidence < 0.55:
         return None
+    if (
+        name == "communications.email.prepare"
+        and re.search(r"\b(?:draft|compose|write)\b", message, re.I)
+        and not _PREPARE_EXISTING.search(message)
+    ):
+        # Drafting recipient-facing text is a read, not staging a message for send.
+        return None
     fields_raw = raw.get("fields")
     fields = coerce_fields(name, fields_raw if isinstance(fields_raw, Mapping) else {})
     if "subject" in fields and _PERSON_NAME.fullmatch(str(fields["subject"]).strip()):
@@ -1105,6 +1123,19 @@ async def recognize_with_model(
         # target, and letting it through makes the requirement matcher search
         # for a requirement called "Ada Kettleby".
         fields.pop("subject")
+    if name == "student.support.contact" and not (
+        _SUPPORT.search(message)
+        or _EXPLICIT_SUPPORT.search(message)
+        or re.search(
+            r"\b(?:open|create|file|raise)\b.{0,35}\b(?:ticket|support request|case)\b"
+            r"|\b(?:connect|transfer|put) me (?:to|through|in touch)\b",
+            message,
+            re.I,
+        )
+    ):
+        # A model cannot turn general advice into unsolicited outreach. Existing
+        # explicit delegation vocabulary covers the supported support operation.
+        return None
     if name == "student.support.contact" and "message" not in fields:
         # The support request carries the student's own words, not the model's
         # paraphrase of them.

@@ -663,3 +663,24 @@ def test_bare_change_my_name_still_asks_instead_of_filling_a_value() -> None:
     # The service consults tier 1 only when fields is non-empty (see
     # postgres_service); the helper itself would say the name is unparsed.
     assert preference_fields_incomplete("change my name", parsed.fields)
+
+
+@pytest.mark.anyio
+async def test_advice_cannot_become_unsolicited_support_and_drafting_is_not_prepare() -> None:
+    request = await recognize_with_model(
+        "bank transfer still spinning. roomie says pay by card again, yes?",
+        actor="student",
+        complete=_Recognizer(
+            {"action": "student.support.contact", "confidence": 0.99, "fields": {}}
+        ),
+    )
+    assert request is None
+    request = await recognize_with_model(
+        "draft a short explanation for them",
+        actor="staff",
+        capabilities=STAFF_NARROW,
+        complete=_Recognizer(
+            {"action": "communications.email.prepare", "confidence": 0.99, "fields": {}}
+        ),
+    )
+    assert request is None

@@ -1,0 +1,65 @@
+{
+  "batch": "holdouts-completion",
+  "turns": 31,
+  "httpAndProjectionChecks": {
+    "http_ok": 31,
+    "trace_present": 31,
+    "no_unconfirmed_receipt": 31,
+    "next_step_has_no_model_url": 28,
+    "record_component": 37,
+    "record_component_has_provenance": 37
+  },
+  "responseSources": {
+    "model_loop": 31
+  },
+  "tools": {
+    "getUniversityDocuments": 6,
+    "getUniversityAccount": 15,
+    "getInstitutionalPolicies": 9,
+    "getOnboardingChecklist": 4,
+    "getStudentAdvising": 2,
+    "getUniversityRelationships": 3,
+    "getUniversityOverview": 6,
+    "getUniversityAcademics": 3,
+    "getSupportOptions": 2,
+    "searchStaff": 6,
+    "searchStudents": 6,
+    "getStudentStaffSummary": 8,
+    "searchUniversityPolicies": 1,
+    "getStudentRequirements": 4,
+    "getStaffWorkQueue": 1,
+    "summarizeWorkQueue": 1
+  },
+  "failureCodes": {},
+  "blockTypes": {
+    "answer": 31,
+    "next_action": 28,
+    "explanation": 29,
+    "checklist": 16,
+    "facts": 18,
+    "sources": 10,
+    "record_context": 23,
+    "contacts": 3
+  },
+  "medianLatencyMs": 4757,
+  "p90LatencyMs": 6353,
+  "meanModelCalls": 2.23,
+  "medianResponseWords": 64,
+  "medianPrimaryAnswerWords": 21,
+  "conservativeOpenAIUsd": 0.087754,
+  "qualitativeOutcomes": {
+    "success": 24,
+    "partial": 5,
+    "failure": 2
+  },
+  "qualitativeIssues": {
+    "irrelevant_financial_option": 1,
+    "unrelated_contacts_first": 1,
+    "contact_continuity": 1,
+    "internal_procedure_as_student_task": 1,
+    "draft_format_fidelity": 1,
+    "multi_student_capability_gap": 1,
+    "missing_tool_read": 1,
+    "incomplete_next_step": 1
+  }
+}

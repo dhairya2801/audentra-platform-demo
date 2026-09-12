@@ -1,0 +1,97 @@
+[
+  {
+    "role": "student",
+    "mobile": false,
+    "geometry": {
+      "x": 766,
+      "y": 116,
+      "w": 640,
+      "h": 860,
+      "overflow": false,
+      "answerVisible": true
+    },
+    "status": 200,
+    "blockTypes": [
+      "answer",
+      "next_action",
+      "explanation",
+      "facts",
+      "checklist",
+      "sources",
+      "record_context"
+    ],
+    "accessibilityViolations": [],
+    "errors": []
+  },
+  {
+    "role": "student",
+    "mobile": true,
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "overflow": false,
+      "answerVisible": true
+    },
+    "status": 200,
+    "blockTypes": [
+      "answer",
+      "next_action",
+      "explanation",
+      "facts",
+      "checklist",
+      "checklist",
+      "sources",
+      "record_context"
+    ],
+    "accessibilityViolations": [],
+    "errors": []
+  },
+  {
+    "role": "staff",
+    "mobile": false,
+    "geometry": {
+      "x": 766,
+      "y": 116,
+      "w": 640,
+      "h": 860,
+      "overflow": false,
+      "answerVisible": true
+    },
+    "status": 200,
+    "blockTypes": [
+      "answer",
+      "next_action",
+      "explanation",
+      "checklist",
+      "facts",
+      "checklist",
+      "record_context"
+    ],
+    "accessibilityViolations": [],
+    "errors": []
+  },
+  {
+    "role": "staff",
+    "mobile": true,
+    "geometry": {
+      "x": 0,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "overflow": false,
+      "answerVisible": true
+    },
+    "status": 200,
+    "blockTypes": [
+      "answer",
+      "next_action",
+      "explanation",
+      "checklist",
+      "record_context"
+    ],
+    "accessibilityViolations": [],
+    "errors": []
+  }
+]

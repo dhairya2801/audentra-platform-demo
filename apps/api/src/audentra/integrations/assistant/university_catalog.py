@@ -25,7 +25,8 @@ UNIVERSITY_TOOLS = {
             "Read the canonical posted ledger in integer cents, exact term "
             "balances including credit owed, pending/failed/reversed payments,"
             " annual accepted awards versus term disbursements, employment "
-            "awards, SAP and actual holds. Pending money is never posted "
+            "awards, SAP, financial-aid requirements, office review stages and actual holds. "
+            "Pending money is never posted "
             "money."
         ),
     ),
@@ -68,10 +69,13 @@ UNIVERSITY_CONTEXT = (
     "This tenant uses Synthetic University v3 in PostgreSQL. Prefer getUniversity* "
     "tools for institutional facts. The tool snapshotAt is the university's fixed "
     "clock, not wall-clock today. Retrieve policy passages for rules and combine "
-    "them with current student evidence and scoped exceptions. Cite source code, "
-    "version and section in policy answers. Never infer citizenship from domestic "
+    "them with current student evidence and scoped exceptions. Name the policy briefly; "
+    "the frontend provides its version, section and passage separately. Never infer "
+    "citizenship from domestic "
     "residence, count pending transfers or money, equate approval with downstream "
     "completion, or certify graduation from unresolved curriculum distributions. "
+    "An empty serviceProgress list does not mean financial aid is complete; inspect "
+    "financialAidRequirements and distinguish student submissions from office review. "
     "Individual exception scope comes from its own record and linked "
     "policy, never a similarly named accommodation policy. Course "
     "impacts calculate the approved floor; do not invent a different "
@@ -140,7 +144,7 @@ def university_read_failure(reason: str) -> tuple[str, str]:
             "university_planner_failed",
         )
     return (
-        "I could not verify a complete answer from the university evidence on this turn. "
-        "Please narrow the question to the record or policy you want checked.",
+        "I couldn't verify this answer reliably from the university records. "
+        "Please try again, or use Help to contact the office responsible.",
         "university_guard_fallback",
     )
