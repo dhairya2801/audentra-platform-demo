@@ -81,8 +81,26 @@ TABLES = (
     "current_load",
     "policy_section",
     "runtime_link",
+    "academic_progress",
+    "source_issue",
+    "rate_catalog",
+    "financial_plan_input",
+    "financial_scenario",
+    "meal_enrollment",
+    "insurance_coverage",
+    "payment_agreement",
+    "payment_installment",
+    "loan_terms",
 )
-DOMAINS = ("overview", "academics", "account", "relationships", "documents", "history")
+DOMAINS = (
+    "overview",
+    "academics",
+    "account",
+    "relationships",
+    "documents",
+    "history",
+    "financial_plan",
+)
 
 
 def _scope(sql: str) -> str:
@@ -234,6 +252,10 @@ class PostgresUniversityRepository:
         entity_type: str | None = None,
         entity_id: str | None = None,
     ) -> JsonDict:
+        if domain == "financial_plan":
+            from .financial_plan_repository import FinancialPlanService
+
+            return await FinancialPlanService(self).read(auth)
         if entity_type is not None and entity_type not in {
             "application",
             "appointment",
@@ -755,6 +777,16 @@ class PostgresUniversityRepository:
             words = [w for w in words if w not in stop]
             expanded = " ".join([*words, *(aliases[w] for w in words if w in aliases)])
             terms = " | ".join(re.findall(r"[a-z0-9]+", expanded)) or "university"
+            # Disambiguate a course seat offer from an admission/award offer
+            # using the tenant's actual course catalog, never a persona fixture.
+            course_offer = False
+            if {"offer", "waitlist", "seat"} & set(words):
+                courses = await _rows(c, auth, "SELECT code FROM course")
+                course_offer = any(
+                    re.search(r"\b" + re.escape(row["code"]) + r"\b", query, re.IGNORECASE)
+                    for row in courses
+                )
+            contextual_code = "registration-policy" if course_offer else ""
             found = await _rows(
                 c,
                 auth,
@@ -766,11 +798,12 @@ class PostgresUniversityRepository:
                     "p.published_at<=:known AND p.effective_from<=:at AND "
                     "(p.effective_until IS NULL OR p.effective_until>:at) AND (:staff "
                     "OR p.audience IN ('student','all')) AND (s.search @@ "
-                    "to_tsquery('english',:terms) OR p.code=:exact) ORDER BY "
-                    "(p.code=:exact) DESC,score DESC,p.id,s.ordinal LIMIT 10"
+                    "to_tsquery('english',:terms) OR p.code=:exact OR p.code=:contextual) ORDER BY "
+                    "(p.code=:exact) DESC,(p.code=:contextual) DESC,score DESC,p.id,s.ordinal LIMIT 10"
                 ),
                 terms=terms,
                 exact=query.strip(),
+                contextual=contextual_code,
                 at=at or now,
                 known=known_at or now,
                 staff=auth.actor_type == "staff",
@@ -818,6 +851,7 @@ class PostgresUniversityRepository:
                     "knownAt": known_at or now,
                     "retrieval": (
                         "PostgreSQL passage full-text + vocabulary expansion; "
+                        "canonical course-offer context boost; "
                         "audience/effectivity/publication filtered before ranking"
                     ),
                     "sources": found,

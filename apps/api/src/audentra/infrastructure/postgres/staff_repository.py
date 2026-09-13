@@ -577,6 +577,11 @@ class PostgresStaffRepository:
             "now": now,
             "stale_before": now - STALE_AFTER,
         }
+        if query.board_project:
+            from .work_board_sql import PROJECT_SQL
+
+            clauses.append(f"({PROJECT_SQL}) = :board_project")
+            params["board_project"] = query.board_project
         if query.priority:
             clauses.append("item.priority = :priority")
             params["priority"] = query.priority

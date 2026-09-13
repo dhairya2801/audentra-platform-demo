@@ -131,6 +131,7 @@ def build(output=DEFAULT_OUTPUT, seed=SEED):
         *sorted((ASSETS / "knowledge").rglob("*.yaml")),
         *sorted((ASSETS / "knowledge/documents").glob("*.md")),
         *sorted(HERE.glob("*.py")),
+        *sorted((HERE / "fixtures").glob("*.json")),
         *sorted((HERE / "policies").glob("*.md")),
         *sorted((HERE / "migrations").glob("*.sql")),
     ]
@@ -1324,6 +1325,9 @@ def build(output=DEFAULT_OUTPUT, seed=SEED):
             resolution="Retained and linked to an evaluator scenario.",
             intentional=1,
         )
+    from product_world import add_product_world
+
+    add_product_world(db, CLOCK)
     db.commit()
     from validate import validate
 
@@ -1351,6 +1355,11 @@ def build(output=DEFAULT_OUTPUT, seed=SEED):
         database_sha256=hashlib.sha256(target.read_bytes()).hexdigest(),
     )
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    from product_content import publications
+
+    (output / "campus-content.json").write_text(
+        json.dumps({"clubs": publications()}, indent=2) + "\n"
+    )
     (output / "oracle.json").write_text(json.dumps(scenarios, indent=2) + "\n")
     print(
         json.dumps(

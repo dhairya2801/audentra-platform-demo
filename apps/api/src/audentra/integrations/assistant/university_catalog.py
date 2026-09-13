@@ -1,6 +1,14 @@
 """Shared v3 evidence tools. Identity stays bound by the existing executors."""
 
 UNIVERSITY_TOOLS = {
+    "getUniversityFinancialPlan": (
+        "financial_plan",
+        "Read the shared Financial Plan: posted account facts, annual offers and accepted aid, "
+        "term disbursements, payment lifecycle, published housing and meal rates, insurance "
+        "coverage, actual installment agreements, and student-entered term budget assumptions. "
+        "Savings are estimates, hypothetical housing is not an assignment, "
+        "and credit is not a settled refund.",
+    ),
     "getUniversityOverview": (
         "overview",
         (

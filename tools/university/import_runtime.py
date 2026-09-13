@@ -15,7 +15,7 @@ from uuid import UUID, NAMESPACE_URL, uuid5
 
 from sqlalchemy import text
 
-from audentra.infrastructure.db.engine import create_database_engine
+from audentra.infrastructure.db.engine import create_database_engine, DatabaseEngineOptions
 from audentra.infrastructure.seeding.relational import seed_relational_data
 from audentra.infrastructure.seeding.synthetic_university import SYNTHETIC_TENANT_ID
 
@@ -47,7 +47,7 @@ async def run(url, source, resume_bootstrap=False):
     errors = validate(db)
     if errors:
         raise ValueError(errors)
-    engine = create_database_engine(url)
+    engine = create_database_engine(url, DatabaseEngineOptions(statement_timeout_ms=600000, application_name="audentra-university-import"))
     try:
         async with engine.connect() as c:
             existing = await c.execute(
@@ -347,6 +347,12 @@ async def run(url, source, resume_bootstrap=False):
             )
             projection = (Path(__file__).parent / "runtime_projection.sql").read_text()
             await raw.execute(projection.replace(":tenant", f"'{TENANT}'::uuid"))
+            from product_content import import_clubs
+
+            await import_clubs(raw, TENANT)
+            product_operations = Path(__file__).with_name("product_operations.sql")
+            if product_operations.exists():
+                await raw.execute(product_operations.read_text().replace(":tenant", f"'{TENANT}'::uuid"))
             # Stop development workers from spending provider credits on thousands
             # of seed-triggered enrichments. Canonical writes/reads need no LLM.
             await raw.execute(

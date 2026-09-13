@@ -1,0 +1,89 @@
+{
+  "provenance": "Synthetic architectural baseline institution_enrichment.CLUBS at 4c176ccd; published directory entries, not student memberships.",
+  "clubs": [
+    {
+      "name": "Aster Robotics",
+      "category": "academic",
+      "description": "Builds and competes with autonomous robots; open to every major.",
+      "longDescription": "Weekly build sessions in the Innovation Hall makerspace, a first-year mentoring track, and two intercollegiate competitions a year. No experience needed.",
+      "meetingSchedule": "Tue 19:00, Innovation Hall makerspace"
+    },
+    {
+      "name": "Code Collective",
+      "category": "academic",
+      "description": "Peer programming, hackathons and interview practice for Computing and Data Science students.",
+      "longDescription": "Runs the autumn hackathon with the Career Center, weekly problem-solving sessions and a beginners' track aligned with CS 101.",
+      "meetingSchedule": "Wed 18:00, Innovation Hall 210"
+    },
+    {
+      "name": "Women in Business",
+      "category": "professional",
+      "description": "Mentoring, speaker series and case competitions for students in Business and Accounting.",
+      "longDescription": "Partners with the Department of Business on the spring case competition and runs a mentoring circle with alumnae.",
+      "meetingSchedule": "Thu 17:30, Student Union 300"
+    },
+    {
+      "name": "Outdoor Aster",
+      "category": "recreation",
+      "description": "Day hikes, weekend trips and gear lending for students of every experience level.",
+      "longDescription": "Runs a beginners' hike each Saturday of September and lends tents and packs from the Recreation Center.",
+      "meetingSchedule": "Sat 09:00, Gatehouse (trips depart)"
+    },
+    {
+      "name": "International Students Association",
+      "category": "cultural",
+      "description": "Community, cultural nights and practical support for students from abroad and their friends.",
+      "longDescription": "Works with International Student Services on check-in week, hosts the Global Village dinners in Fernhollow House and a monthly cultural night.",
+      "meetingSchedule": "Fri 18:00, Global Center 1F lounge"
+    },
+    {
+      "name": "Aster Pre-Health Society",
+      "category": "academic",
+      "description": "For Nursing, Biology and Chemistry students heading to health professions.",
+      "longDescription": "Application workshops, shadowing placements arranged with the Department of Health Sciences, and the spring health-professions panel.",
+      "meetingSchedule": "Mon 18:00, Wellness Center seminar room"
+    },
+    {
+      "name": "Design Collective",
+      "category": "arts",
+      "description": "BFA Design students and anyone who makes things; runs the Fernhollow studio nights.",
+      "longDescription": "Open studio nights in Fernhollow House, the spring student exhibition and portfolio reviews for internal-transfer applicants.",
+      "meetingSchedule": "Thu 19:00, Fernhollow House studio"
+    },
+    {
+      "name": "Economics Society",
+      "category": "academic",
+      "description": "Debates, guest lectures and the annual policy competition for Social Sciences students.",
+      "longDescription": "Hosts a faculty lecture each month and fields a team for the intercollegiate policy competition in March.",
+      "meetingSchedule": "Tue 17:00, Larkin Library 2F seminar room"
+    },
+    {
+      "name": "Aster Chamber Singers",
+      "category": "arts",
+      "description": "Auditioned choir performing the Winter Concert and Commencement.",
+      "longDescription": "Rehearses twice weekly; auditions in the first two weeks of each term.",
+      "meetingSchedule": "Mon/Wed 19:30, Student Union recital room"
+    },
+    {
+      "name": "Commuter Student Network",
+      "category": "community",
+      "description": "Support and space for students living off campus or with family.",
+      "longDescription": "Commuter lounge in the Student Union, carpool matching and a voice on parking and shuttle matters through Student Life.",
+      "meetingSchedule": "Wed 12:00, Student Union commuter lounge"
+    },
+    {
+      "name": "Transfer Student Alliance",
+      "category": "community",
+      "description": "Peer support for transfer students, from credit evaluation to finding a study group.",
+      "longDescription": "Meets with the Transfer Success Advisers each term and runs the transfer mentor program launched at Transfer Orientation.",
+      "meetingSchedule": "Thu 12:30, Advising Centre lounge"
+    },
+    {
+      "name": "Aster Service Corps",
+      "category": "service",
+      "description": "Community service placements with local partners; counts towards Work-Study community service.",
+      "longDescription": "Weekly placements at partner organisations and the Spring Festival service day.",
+      "meetingSchedule": "Sat 10:00, Student Union 300"
+    }
+  ]
+}

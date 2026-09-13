@@ -2991,3 +2991,67 @@ async def staff_university(
     return await _dispatch(
         service=service, operation="staff.university", request=request, auth=auth
     )
+
+
+@router.get("/v1/student/financial-plan", response_model=None)
+async def get_financial_plan(
+    request: Request, auth: AuthDependency, service: ServiceDependency, term_id: str = "2026FA"
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="student.financial_plan",
+        request=request,
+        auth=auth,
+        query_params={"termId": term_id},
+    )
+
+
+@router.put("/v1/student/financial-plan/inputs", response_model=None)
+async def save_financial_plan_inputs(
+    request: Request,
+    auth: AuthDependency,
+    service: ServiceDependency,
+    idempotency_key: IdempotencyDependency,
+    body: dict[str, object],
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="student.save_financial_plan",
+        request=request,
+        auth=auth,
+        payload=body,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/v1/staff/work-board", response_model=None)
+async def get_work_board(
+    request: Request,
+    auth: AuthDependency,
+    service: ServiceDependency,
+    offset: int = 0,
+    project: str | None = None,
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="staff.work_board",
+        request=request,
+        auth=auth,
+        query_params={"offset": str(offset), **({"project": project} if project else {})},
+    )
+
+
+@router.post("/v1/student/financial-plan/simulate", response_model=None)
+async def simulate_financial_plan(
+    request: Request,
+    auth: AuthDependency,
+    service: ServiceDependency,
+    body: dict[str, object],
+) -> object:
+    return await _dispatch(
+        service=service,
+        operation="student.simulate_financial_plan",
+        request=request,
+        auth=auth,
+        payload=body,
+    )

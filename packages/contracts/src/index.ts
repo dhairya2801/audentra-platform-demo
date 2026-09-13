@@ -4017,3 +4017,39 @@ export interface UniversityOperations {
   caseload: { role: string; count: number }[];
   cases: { id: string; title: string; student_name: string; external_ref: string; status: string; due_at: string }[];
 }
+
+/** Shared projection; every monetary property is integer cents. Annual awards
+ * and term postings are deliberately distinct. Planning inputs are assumptions. */
+export interface FinancialPlan {
+  schemaVersion: 1;
+  domain: "financial_plan";
+  term: Record<string, unknown> | null;
+  advisers: Record<string, unknown>[];
+  snapshotAt: string;
+  student: Record<string, unknown>;
+  termId: string;
+  basis: "posted_ledger";
+  currency: "USD";
+  account: {
+    postedBalanceCents: number; postedChargesCents: number; postedAidCents: number;
+    postedPaymentCreditsCents: number; adjustmentsCents: number; creditBalanceCents: number;
+    paymentStates: Record<"pending" | "posted" | "failed" | "reversed", number>;
+    refundLedgerEntries: Record<string, unknown>[]; refundSettlementStatus: "not_recorded";
+  };
+  aid: {awards: Record<string, unknown>[]; disbursements: Record<string, unknown>[];
+    offeredAnnualCents: number; acceptedAnnualCents: number; anticipatedTermCents: number;
+    loanTerms: Record<string, unknown>[]};
+  ledger: Record<string, unknown>[]; payments: Record<string, unknown>[];
+  holds: Record<string, unknown>[]; requirements: Record<string, unknown>[];
+  serviceProgress: Record<string, unknown>[]; catalog: Record<string, unknown>[];
+  mealEnrollments: Record<string, unknown>[]; insuranceCoverage: Record<string, unknown>[];
+  paymentAgreements: Record<string, unknown>[]; installments: Record<string, unknown>[];
+  planning: {version: number; inputs: Record<string, number>; updatedAt: string | null;
+    provenance: "student_entered"; scope: "term"; living: Record<string, unknown>[];
+    income: Record<string, unknown>[]; livingTotalCents: number; incomeTotalCents: number;
+    estimatedCushionCents: number; estimatedAccountGapAfterAnticipatedAidCents: number;
+    scenarios: Record<string, unknown>[]};
+  visualization: {charges: Record<string, unknown>[]; postedSources: Record<string, unknown>[];
+    postedCoverage: Record<string, unknown>[]; postedCoverageUnavailableReason: string | null; livingCoverage: Record<string, unknown>[]};
+  boundaries: string[];
+}

@@ -828,3 +828,21 @@ STAFF_TOOL_INFORMATION_CLASS = {
     "getUniversityCasework": "student_state",
 }
 STAFF_RECEIPT_SOURCES = {**STAFF_RECEIPT_SOURCES, "getUniversityCasework": "university"}
+
+
+STAFF_TOOL_NAMES = (*STAFF_TOOL_NAMES, "getUniversityWorkBoard")
+STAFF_TOOL_DESCRIPTIONS = {
+    **STAFF_TOOL_DESCRIPTIONS,
+    "getUniversityWorkBoard": (
+        "Read the canonical Action Center projection: bounded first page of work cards, "
+        "total queue counts, owners, priorities, due dates and linked document, case and "
+        "payment evidence. Card operational status never proves settlement or verification. "
+        "Use existing work-queue search tools for specific filters or additional pages."
+    ),
+}
+STAFF_TOOL_ARGUMENTS = {**STAFF_TOOL_ARGUMENTS, "getUniversityWorkBoard": {}}
+STAFF_TOOL_INFORMATION_CLASS = {
+    **STAFF_TOOL_INFORMATION_CLASS,
+    "getUniversityWorkBoard": "operational_state",
+}
+STAFF_RECEIPT_SOURCES = {**STAFF_RECEIPT_SOURCES, "getUniversityWorkBoard": "university"}

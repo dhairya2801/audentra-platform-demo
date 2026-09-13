@@ -84,6 +84,7 @@ class ActionCenterQuery:
     sort: str = "priority"
     limit: int = DEFAULT_PAGE_LIMIT
     offset: int = 0
+    board_project: str | None = None  # Canonical product board projection only.
 
     @property
     def statuses(self) -> tuple[str, ...]:

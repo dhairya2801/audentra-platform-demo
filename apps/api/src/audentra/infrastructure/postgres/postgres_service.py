@@ -1018,6 +1018,30 @@ class PostgresPlatformService:
             )
 
         auth = self._auth(call)
+        if operation == "staff.work_board":
+            from .work_board_repository import WorkBoardProjection
+
+            return await WorkBoardProjection(self.repository.staff).read(
+                auth, int(call.query_params.get("offset") or 0), call.query_params.get("project")
+            )
+        if operation in {
+            "student.financial_plan",
+            "student.save_financial_plan",
+            "student.simulate_financial_plan",
+        }:
+            from .financial_plan_repository import FinancialPlanService
+
+            university = self.repository.university
+            if university is None or not university.is_enabled(auth):
+                raise ApiError(404, "UNIVERSITY_NOT_AVAILABLE", "No university record is available")
+            plan = FinancialPlanService(university)
+            if operation == "student.simulate_financial_plan":
+                return await plan.simulate(auth, dict(call.payload))
+            if operation == "student.save_financial_plan":
+                return await plan.save_inputs(
+                    auth, dict(call.payload), call.idempotency_key, call.request_id
+                )
+            return await plan.read(auth, str(call.query_params.get("termId") or "2026FA"))
         if operation in {"student.university", "staff.student_university", "staff.university"}:
             university = self.repository.university
             if university is None or not university.is_enabled(auth):
@@ -3863,11 +3887,17 @@ class PostgresPlatformService:
                 replace(auth, student_id=student_id), **kwargs
             ),
             "university_operations": lambda: university.operations(auth),
+            "university_work_board": lambda: self._university_work_board(auth),
             "university_cohort": lambda: university.cohort(auth),
             "university_policies": lambda query, student_id=None, **kwargs: university.policies(
                 replace(auth, student_id=student_id or ""), query, **kwargs
             ),
         }
+
+    async def _university_work_board(self, auth: AuthContext) -> JsonDict:
+        from .work_board_repository import WorkBoardProjection
+
+        return await WorkBoardProjection(self.repository.staff).read(auth)
 
     async def _morning_brew_for_assistant(self, auth: AuthContext) -> Mapping[str, Any]:
         """The canonical Morning Brew, or an honest unavailability."""
