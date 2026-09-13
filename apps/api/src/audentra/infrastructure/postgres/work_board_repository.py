@@ -11,7 +11,7 @@ from audentra.core.errors import ApiError
 from audentra.domain.action_center import ActionCenterQuery
 from audentra.domain.work_board import board_card
 
-from .work_board_sql import PROJECT_SQL, PROJECTS
+from .work_board_sql import PROJECT_LABELS, PROJECT_SQL, PROJECTS
 
 if TYPE_CHECKING:
     from .staff_repository import PostgresStaffRepository
@@ -118,6 +118,10 @@ class WorkBoardProjection:
             **envelope,
             "project": project,
             "projectCounts": project_counts,
+            "projects": [
+                {"id": key, "name": name, "count": project_counts.get(key, 0)}
+                for key, name in PROJECT_LABELS.items()
+            ],
             "paymentStateCounts": payment_states,
             "paymentCountScope": "Payment attempts linked to canonical work items",
             "actorId": auth.actor_id,

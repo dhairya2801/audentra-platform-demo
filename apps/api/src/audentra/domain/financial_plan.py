@@ -149,7 +149,7 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
             "creditBalanceCents": max(0, -balance),
             "paymentStates": payment_states,
             "refundLedgerEntries": [r for r in ledger if r["kind"] == "refund"],
-            "refundSettlementStatus": "not_recorded",
+            "refundSettlementStatus": account.get("refundSettlementStatus", "not_recorded"),
         },
         "aid": {
             "awards": awards,

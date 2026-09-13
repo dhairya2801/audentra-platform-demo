@@ -504,10 +504,12 @@ class PostgresUniversityRepository:
                 }
                 result["semantics"] = (
                     "Balance is SUM(posted ledger). Negative means credit owed, not "
-                    "refund settled. Annual accepted aid, future installments, "
+                    "refund settled. A refund ledger entry records accounting, not bank delivery; "
+                    "refund settlement is not recorded. Annual accepted aid, future installments, "
                     "pending/failed payments and employment awards do not reduce "
                     "posted balance. Term charges are not annual COA."
                 )
+                result["refundSettlementStatus"] = "not_recorded"
             elif domain == "relationships":
                 result["assignments"] = await read(
                     "SELECT a.*,s.name,s.email,s.office_id,s.status,o.name AS "
@@ -799,7 +801,8 @@ class PostgresUniversityRepository:
                     "(p.effective_until IS NULL OR p.effective_until>:at) AND (:staff "
                     "OR p.audience IN ('student','all')) AND (s.search @@ "
                     "to_tsquery('english',:terms) OR p.code=:exact OR p.code=:contextual) ORDER BY "
-                    "(p.code=:exact) DESC,(p.code=:contextual) DESC,score DESC,p.id,s.ordinal LIMIT 10"
+                    "(p.code=:exact) DESC,(p.code=:contextual) DESC,score DESC,"
+                    "p.id,s.ordinal LIMIT 10"
                 ),
                 terms=terms,
                 exact=query.strip(),

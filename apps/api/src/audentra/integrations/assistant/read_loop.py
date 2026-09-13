@@ -688,6 +688,7 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
             for key in (
                 "basis",
                 "actorId",
+                "projects",
                 "projectCounts",
                 "paymentStateCounts",
                 "paymentCountScope",

@@ -110,6 +110,9 @@ def test_finance_reality_and_planning_write_boundaries() -> None:
                         {"tenant": auth.tenant_id, "sid": str(sid)},
                     )
                 assert projection["account"]["postedBalanceCents"] == balance
+                assert (await university.record(actor, "account"))[
+                    "refundSettlementStatus"
+                ] == "not_recorded"
             # Course identifiers come from this catalog, not admissions terminology.
             course_policy = await university.policies(auth, "Can I accept my CS 201 seat offer?")
             assert course_policy["sources"][0]["code"] == "registration-policy"

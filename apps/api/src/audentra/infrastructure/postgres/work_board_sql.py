@@ -21,3 +21,13 @@ END
 PROJECTS = frozenset(
     {"fa-payments", "fa-docs", "fa-outreach", "en-docs", "en-outreach", "en-requests", "cl-housing"}
 )
+
+PROJECT_LABELS = {
+    "fa-docs": "Financial Aid / Document review",
+    "fa-outreach": "Financial Aid / Outreach",
+    "fa-payments": "Financial Aid / Payments",
+    "en-docs": "Enrollment / Document review",
+    "en-outreach": "Enrollment / Outreach",
+    "en-requests": "Enrollment / Student requests",
+    "cl-housing": "Campus Life / Housing requests",
+}
