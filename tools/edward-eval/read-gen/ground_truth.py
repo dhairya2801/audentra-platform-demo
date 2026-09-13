@@ -992,15 +992,24 @@ async def cohort_truth(conn: asyncpg.Connection, tenant: str, now: datetime) -> 
         "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='staff_member' "
         "AND column_name ILIKE '%phone%'"
     )
-    risk_rows = await conn.fetchval(
-        "SELECT COUNT(*) FROM student_risk_assessment WHERE tenant_id=$1", tenant
+    # Older synthetic worlds have no assessed-risk domain. Report the missing
+    # capability explicitly; absence of a table is not a verified zero risk count.
+    risk_available = bool(
+        await conn.fetchval("SELECT to_regclass('public.student_risk_assessment') IS NOT NULL")
+    )
+    risk_rows = (
+        await conn.fetchval(
+            "SELECT COUNT(*) FROM public.student_risk_assessment WHERE tenant_id=$1", tenant
+        )
+        if risk_available else None
     )
     return {
         **{k: int(row[k]) for k in row.keys()},
         "sameName": same,
         "absentNames": absent,
         "staffPhoneColumns": int(staff_phone_columns or 0),
-        "riskAssessmentRows": int(risk_rows or 0),
+        "riskAssessmentAvailable": risk_available,
+        "riskAssessmentRows": int(risk_rows) if risk_rows is not None else None,
     }
 
 

@@ -211,7 +211,7 @@ The original 30-case oracle was exercised as both student and staff: **60 baseli
 ### Verification limits
 
 - Twenty legacy mock-university API tests remain skipped because they require a different frozen host/database fixture; three storage/production tests require S3 configuration.
-- The old read-generalization SQL ground-truth generator now passes its document-history dependency but stops at missing `student_risk_assessment`. Its original persona/fixture assumptions also differ. The bank remains preserved and is not reported as passing; no risk evidence was fabricated to satisfy it.
+- The old read-generalization SQL ground-truth generator now succeeds. An absent `student_risk_assessment` capability is explicitly `false` with a null row count, never a fabricated zero-risk finding. The untouched matched and holdout banks then fail template preflight against their older staff/persona assumptions; see section 18. They are not reported as passing.
 - The separate legacy live write/holdout banks were not executed against their old writable snapshot. Existing durable-write, university action, mutation, authorization and idempotency tests ran in isolated test databases instead. This does not constitute every requested legacy bank passing.
 - No external SSO round trip, object-store upload/download, email delivery or money-provider settlement was certified. No deployment smoke was performed.
 - Visual checks use representative screenshots and functional browser assertions, not an exhaustive pixel-diff matrix for every viewport/state.
@@ -338,3 +338,17 @@ A live probe initially answered a transcript-correction question from academic r
 The complete platform suite precedes the small final tool-description change and academic-progress view; fresh-runtime/parity tests, browser coverage, final lint/typecheck and live probes cover those final changes. The browser uses a separately named test database and metadata fixture, not an uploaded original object. External extraction, original storage and AI auto-resolution remain unverified/unimplemented. The fixed institutional snapshot clock and operational decision wall clock remain distinct and explicitly documented.
 
 Source re-audit after document integration: all five Git states and all source product files still match; only the same two ignored trace-store files differ. See `provenance/source-verification-document-history.log` and the timestamped manifest. No additional source difference, push, deploy, or existing institutional database mutation occurred.
+
+Document integration commits (local only):
+
+- platform: `68d7de32c9537a022069610b68fac8d2f694f85e`
+- portals: `d303cc2e5203b7c8e90db024dc474853a2127836`
+
+
+## 18. Legacy evaluation preflight
+
+The legacy read-generalization truth generator now tolerates a genuinely absent assessed-risk domain by reporting capability availability and a null count. It does not add risk tables or predictions to the institutional world. This permits read-only SQL truth extraction from the fresh integration database and separates a schema capability from a cohort fact.
+
+The original case banks remain unchanged. Matched-bank preflight reports **128 cases / 145 turns / 155 template problems** against this university, chiefly missing old staff external references and associated expectations. Holdout preflight results are captured in `platform/artifacts/integration/document-history/read-gen-holdout-lint.log`. No paid run was started with unresolved templates. The copied workspace has no matching frozen database dump; preserving these banks therefore requires reconstructing their documented original fixture or producing a separately reviewed integration adaptation that retains each scenario's intent. Changing live canonical people or weakening expected facts to make a bank pass is not part of this implementation.
+
+Evidence: `read-gen-truth.json` (ignored synthetic records), `read-gen-truth.log`, `read-gen-lint.log`, `read-gen-holdout-lint.log` under the same artifact directory. This advances diagnosis and reproducibility; it does not close the remaining full acceptance-matrix requirement.
