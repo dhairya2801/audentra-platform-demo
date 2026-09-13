@@ -213,16 +213,16 @@ The original 30-case oracle was exercised as both student and staff: **60 baseli
 
 ### Verification limits
 
-- Twenty legacy mock-university API tests remain skipped because they require a different frozen host/database fixture; three storage/production tests require S3 configuration.
+- The normal full-suite command leaves twenty legacy-host tests unconfigured. In the restored isolated fixture, nineteen now pass and one old time-dependent capacity assertion fails. Three storage/production tests still require S3 configuration; see section 21.
 - The old read-generalization SQL ground-truth generator now succeeds. An absent `student_risk_assessment` capability is explicitly `false` with a null row count, never a fabricated zero-risk finding. The untouched matched and holdout banks then fail template preflight against their older staff/persona assumptions; see section 18. They are not reported as passing.
-- The separate legacy live write/holdout banks were not executed against their old writable snapshot. Existing durable-write, university action, mutation, authorization and idempotency tests ran in isolated test databases instead. This does not constitute every requested legacy bank passing.
+- The legacy write development and holdout banks now pass 118/118 and 38/38 cases in separate writable copies of the current schema. Read-bank failures and skips remain explicitly reported in section 21; every bank is not claimed green.
 - No external SSO round trip, object-store upload/download, email delivery or money-provider settlement was certified. No deployment smoke was performed.
 - Visual checks use representative screenshots and functional browser assertions, not an exhaustive pixel-diff matrix for every viewport/state.
 - Model prose can still be imprecise about staff/student pronouns or refund wording. Numeric grounding and successful tool execution alone do not prove semantic correctness.
 
 ## 13. Remaining work before main-baseline promotion
 
-1. Reconcile the legacy read/write/holdout fixture banks with the integrated schema and run the complete provider-enabled acceptance matrix. Finish semantic grading beyond structural/factual probes.
+1. Resolve the remaining read-bank semantic concerns, including legacy deposit deadline derivation and ambiguous staff/student names, and finish semantic acceptance beyond regex scores. The restored legacy write development and holdout banks now pass completely; see section 21.
 2. Configure an isolated object store and document worker; verify original upload/download, extraction provider execution and revision comparison. Canonical correction/resubmission and official history are now tested through real domain commands; the desired AI auto-resolution capability still needs a separate domain review and implementation.
 3. Complete any donor interactions still opening the older canonical workspace. Confirm the desired Student 360 visual scope. Full-queue board filtering/search and cross-page related-work navigation are now implemented.
 4. Add real provider-backed financial commands only with receipts and settlement evidence: payments/refunds, award acceptance, signed installment agreements, insurance review and saved scenario management. Existing honest empty states should remain until then.
@@ -446,3 +446,62 @@ flowchart LR
 The full platform run precedes the final board classification and importer changes; the fresh rebuild and 11 targeted database/runtime/parity tests cover those changes. The final two small frontend refinements bind a pending send to its original detail context and update the Architecture description; final build/typecheck and browser rerun cover them. The same twenty legacy frozen-host tests and three external-storage/production tests remain unexecuted. The packaged older university archive was inspected as a possible legacy reconstruction source; it contains the base population but not the frozen bank's expanded staff fixture. No old bank expectation was rewritten to manufacture a passing score. External delivery, original object storage and complete legacy semantic acceptance remain promotion gates.
 
 Source audit at **2026-09-13T06:13:05.186041+00:00** again confirms all five source Git/product states unchanged. The only byte differences remain the previously disclosed two ignored synthetic portal trace-store files. No additional source differences, pushes, deployments or existing institutional database changes occurred. Exact local commit hashes are recorded below after commit creation. This workspace remains an integration review candidate, with the promotion limits in section 13 still open.
+
+Draft integration commits (local only):
+
+- platform: `867ea1f6cb6b287cc17be09fd0290f8d56bcf065`
+- portals: `6d31120787e4179bcb1ef2e71036275638776d39`
+
+
+## 21. Continued verification: isolated legacy fixtures and final acceptance evidence
+
+A read-only inspection found the documented `vv_enrollment_staffdb_eval` snapshot on loopback PostgreSQL port 5433. It has exactly 2,577 tenant students and 88 staff, including the legacy bank's expanded staff references. A consistent, read-only `pg_dump` was captured under ignored integration artifacts and restored into this workspace's own cluster. Snapshot digest and capture metadata are preserved in `provenance/legacy-evaluation-sources.json`. Two narrow legacy Explorer oracle collections were also copied read-only from port 5439 into a separate evaluation database. Neither source database received application writes, migrations, resets or fixture changes. These legacy copies are evaluation inputs only; live Atlas and the integrated portals remain on their shared 3,000-student institution.
+
+The normal migration checker correctly rejected the snapshot's divergent `0050_edward_write_v1.sql` checksum. The checksum and source migration history were preserved. `tools/university/import_legacy_eval.py` instead copies compatible public fixture data into a newly migrated current schema. It accepts only explicit legacy test database names on this workspace's loopback cluster, refuses a populated destination, reads its source transactionally, and re-creates/validates every foreign key before committing. The import moved 232,754 rows and validated 491 foreign keys. Its report enumerates excluded tables and columns; it does not invent risk assessments, application snapshots, internal student notes, external Morning Brew context, or university-v3 metadata. No current university fact is replaced to fit old personas.
+
+The normal current API now runs the older fixture in legacy product mode with Luna and the model read planner. `run_evaluation_runtime.py` uses the existing persistent provider ceiling and a process lock, serializing model calls to keep reservations consistent. There is no worker or external email sender. Read preflight now resolves the old staff/persona references; the remaining missing values concern time-relative appointment fixtures. The initial matched run exposed an existing harness crash when the question itself contained an expired appointment template. The runner now records an explicit `SKIP` for that unavailable question without making a model request. Its regression test checks the actual spawned runner, emitted transcript and zero assistant HTTP calls. Original case banks and their expectations are unchanged.
+
+Current evidence: the independent world/isolation suite passes 19 tests; the evaluation harness passes 37; a repeat fixture import is rejected. Eighteen legacy backend regression checks pass, and the isolated oracle adds one pass and one failure. The remaining oracle failure expects old time-dependent capacity signals (for example, an over-cap adviser with no upcoming slots) that no longer match current availability. Morning Brew's newer demo UI remains untouched and excluded from canonical evidence. Four current Edward workspace/browser regressions pass after the draft integration.
+
+The first complete legacy read holdout returned 18 PASS, 1 PARTIAL, 9 FAIL and 1 SKIP across 29 cases/33 turns. These are the strict harness results, not a semantic acceptance claim. Review found both overly narrow prose/date expectations and actual behavior needing investigation: an informational question was treated as an unsupported change request, and another answer attributed the signed-in student's document facts to a different named person. Its tools remained bound to the signed-in student; no other student's record was read. Initial corrections add past-tense questions to the informational frame and explicitly prohibit that attribution in the student read context. Seventy-four routing/read-loop/history tests pass. Subsequent live validation and targeted source-baseline comparisons are recorded below.
+
+Fresh write and write-holdout databases have been prepared from the current-schema legacy fixture, with the existing eval-only mailbox/recipient fixtures. The banks' staff, student and work references resolve. Both ran with `--no-reset` and an explicit loopback `WRITE_EVAL_PSQL` command. The inherited Docker reset script was not used. Results follow.
+
+
+| Final legacy/integration verification | Result | Evidence under `platform/artifacts/integration/legacy-evaluation/` unless noted |
+|---|---|---|
+| Legacy write development | **118 pass, 0 partial, 0 fail; 148 turns** | `write.log`, `artifacts/runs/vnext-legacy-write/` |
+| Legacy write holdout | **38 pass, 0 partial, 0 fail; 47 turns** | `write-holdout.log`, `artifacts/runs/vnext-legacy-write-holdout/` |
+| Complete legacy read matched, original grading | 89 pass / 6 partial / 23 fail / 10 skip; 128 cases, 145 turns | `matched-final.log` |
+| Same matched responses, punctuation-only regrade | 92 pass / 6 partial / 20 fail / 10 skip | `vnext-legacy-read-matched-final-regrade.log` |
+| Complete legacy read holdout | 18 pass / 1 partial / 9 fail / 1 skip; 29 cases, 33 turns | `holdout.log`; same totals after punctuation normalization |
+| Source baseline replay of initial matched failures | 2 pass / 21 fail; punctuation regrade 5 pass / 18 fail | `baseline-matched-failures.log` |
+| Source baseline replay of initial holdout failures | 2 pass / 7 fail | `baseline-holdout-failures.log` |
+| Corrected historical-question behavior | Live holdout passes; 74 routing/read-loop/history tests pass | `corrected-holdout.log`, `identity-routing-tests.log` |
+| Corrected peer-record behavior | Live replies refuse peer-record and peer-caseload requests; own adviser controls pass. Narrow legacy regexes still flag some valid refusals. | `corrected-identity.log`, saved transcripts; manual analysis in the linked document below |
+| Final integrated university run | **60 responses: 57 Luna, 3 expected guided responses; no runtime errors or trace failure codes** | `university-final-student.log`, `university-final-staff.log`, `university-final-summary.json` |
+| Final full Python run | 1,550 passed, 1 obsolete unit-fixture failure, 23 configured skips; 73.77% coverage | `platform-final-tests.log` |
+| Fixture correction and rerun | 3 board projection tests pass; all 1,551 Python cases verified across full run and focused rerun | `board-fixture-rerun.log` |
+| Final Node suites | Passed, including 38 eval-harness and 56 voice tests | `node-final-tests.log` |
+| Final static gates | Platform lint/typecheck pass; portal build/typecheck and lint pass with 14 existing warnings | `lint.log`, `typecheck.log`; prior portal final artifacts |
+| Deterministic world/isolation | 19 tests pass; importing again into a populated fixture is rejected | `world-tests.log`, `reimport-refusal.log` |
+| Legacy backend regressions | 19 pass / 1 time-dependent oracle failure | `mock-regression.log`, `mock-oracle-regression.log` |
+| Edward UI and Lab | 4 browser tests pass; live Luna, trace inspector and Architecture map pass | Portal `browser-edward-drafts-final.log`, `lab-legacy-final.log` |
+
+The full Python run found one old unit fixture still using the invalid `reachout` action without a canonical work type. Production classification and database parity tests were already correct. The fixture now uses `communication_response`/`communication` or `staff_decision`/`enrollment`, and all three projection tests pass. No production change followed that full run; the entire long suite was not repeated solely for this fixture correction. Final Node suites, lint and typecheck were run separately and passed. The twenty legacy-host skips from the normal suite are supplemented by the separate 19-pass/1-fail fixture run; they are not represented as twenty additional passing tests.
+
+The two behavioral fixes are verified beyond their narrow grader result. The corrected student says it can only discuss the signed-in student's records and cannot verify Camila's form; the old regex incorrectly treats the quoted/negated question as disclosure. The corrected caseload answer explicitly refuses to name other students. The record tools remain identity-bound. Source-baseline replay reproduces most raw failures; the few different outcomes include model variability, missing full names, extra adviser-leave dates and staff/student namesake interpretation. This is not a statistical claim of zero semantic regression.
+
+The detailed [legacy evaluation analysis and runbook](legacy-evaluation.md) separates actual issues from old expectations. In particular, legacy public-mode deposit derivation can confuse an offer-response deadline with a student's deposit requirement date. This is an actual inherited limitation, not merely date formatting. The live integrated university mode excludes those legacy financial interpretations and uses the shared canonical financial projection. Other unresolved read concerns include named-person role ambiguity, appointment temporal phrasing and incomplete answers. The bank itself was preserved rather than weakened to manufacture a pass.
+
+Latest source audit: **2026-09-13T06:59:10.652918+00:00**. All source branches, HEADs, indexes, Git status/diffs, refs, worktree registrations and product files match the initial capture. Only the same two previously disclosed ignored synthetic portal trace-store files differ. The later source database inspections/captures were read-only. No push, deployment, original worktree edit or existing institutional database mutation was performed during this continuation.
+
+The workspace is ready for local integration review and continued implementation. It is **not yet recommended to replace main**: the documented semantic and provider/workflow gates remain, and absolute original byte-for-byte preservation cannot be certified because of the earlier ignored trace-file exception.
+
+
+Legacy verification and Edward correction commits (local only):
+
+- platform `a8c2b1664d0200b10489e2a92848d7cf89d91aea` — canonical board test fixtures.
+- platform `66f214a4e8ac0ddebab03f97a76eef6252bcf1d7` — isolated legacy imports, guarded evaluator, robust template reporting and punctuation normalization.
+- platform `1ad87cf91ad8d0531ea0245f0196bb38ed7b4fe3` — informational past-tense requests and student-only identity context.
+- portals remains `6d31120787e4179bcb1ef2e71036275638776d39` — canonical saved outreach UI and Atlas work inspection.
