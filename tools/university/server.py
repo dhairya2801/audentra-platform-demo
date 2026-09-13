@@ -121,6 +121,7 @@ def serve(world=DEFAULT_OUTPUT, port=4310, database_url=None):
                     )
                 if database_url and path in {
                     "/api/documents",
+                    "/api/relationships",
                     "/api/financial-plan",
                     "/api/work-board",
                     "/api/campus-life",

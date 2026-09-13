@@ -543,6 +543,23 @@ class PostgresUniversityRepository:
                     ),
                     staff=auth.actor_type == "staff",
                 )
+                inbox = await c.execute(
+                    text("""
+                    SELECT id,subject,body,sender_name,kind,href,sent_at,read_at
+                    FROM public.student_message
+                    WHERE tenant_id=CAST(:tenant AS uuid) AND student_id=CAST(:student AS uuid)
+                    ORDER BY sent_at DESC,id LIMIT 50
+                    """),
+                    {"tenant": auth.tenant_id, "student": auth.student_id},
+                )
+                result["portalInbox"] = [dict(row) for row in inbox.mappings()]
+                result["portalInboxSemantics"] = (
+                    "Latest 50 canonical portal inbox messages, using operational sent_at "
+                    "timestamps rather than the fixed institutional snapshot clock. "
+                    "A portal message is delivered to this inbox; it does not prove external "
+                    "email delivery, case completion, or satisfaction of a required step. "
+                    "Internal staff notes are excluded."
+                )
                 result["portalAuthorizations"] = [
                     dict(r)
                     for r in (

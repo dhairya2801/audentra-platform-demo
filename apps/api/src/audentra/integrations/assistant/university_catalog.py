@@ -46,7 +46,8 @@ UNIVERSITY_TOOLS = {
             "appointments/no-shows, physical housing/compatible placement, "
             "effective/revoked FERPA consent and individual exceptions. Staff "
             "additionally see case owners, handoff steps, dependencies and "
-            "delivery failures."
+            "delivery failures. Includes current portal inbox messages with their "
+            "operational timestamps; delivery does not complete a case step."
         ),
     ),
     "getUniversityDocuments": (
@@ -90,6 +91,9 @@ UNIVERSITY_CONTEXT = (
     "financialAidRequirements and distinguish student submissions from office review. "
     "A record's absence can only be established by reading its owning domain. "
     "Academic attempts do not establish the absence of a rejected document. "
+    "Do not attach unrelated requirements or aid states to a specific case without "
+    "a recorded link. If the authorized evidence omits that case's outcome or next "
+    "step, state that limitation instead of substituting another domain's blocker. "
     "Individual exception scope comes from its own record and linked "
     "policy, never a similarly named accommodation policy. Course "
     "impacts calculate the approved floor; do not invent a different "

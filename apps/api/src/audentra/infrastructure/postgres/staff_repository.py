@@ -3212,7 +3212,8 @@ class PostgresStaffRepository:
         )
         channel = str(_read(payload, "channel"))
         objective = str(_read(payload, "objective")).strip()
-        async with self._engine.begin() as connection:
+
+        async def handler(connection: AsyncConnection) -> dict[str, object]:
             existing = await connection.execute(
                 text(
                     f"""
@@ -3227,7 +3228,12 @@ class PostgresStaffRepository:
                     "request_key": idempotency_key,
                 },
             )
-            if existing.mappings().first() is None:
+            if existing.mappings().first() is not None:
+                raise ConflictError(
+                    "IDEMPOTENCY_RECEIPT_UNAVAILABLE",
+                    "This request key belongs to an older interaction without a replay receipt",
+                )
+            else:
                 current = await self._lock_work_item(connection, auth, work_item_id)
                 if (
                     _database_integer(current["version"], "staff_work_item.version")
@@ -3321,6 +3327,16 @@ class PostgresStaffRepository:
                         "channel": channel,
                     },
                 )
+            return {"workItemId": work_item_id}
+
+        await self._run_idempotent(
+            auth=auth,
+            idempotency_key=idempotency_key,
+            operation="staff.start_interaction",
+            request_payload={"workItemId": work_item_id, "payload": dict(payload)},
+            response_status=201,
+            handler=handler,
+        )
         return await self.get_work_item_detail(auth, work_item_id)
 
     async def record_interaction_communication(
@@ -3348,8 +3364,7 @@ class PostgresStaffRepository:
             or self._clock()
         )
 
-        work_item_id: str | None = None
-        async with self._engine.begin() as connection:
+        async def handler(connection: AsyncConnection) -> dict[str, object]:
             existing = await connection.execute(
                 text(
                     f"""
@@ -3366,7 +3381,10 @@ class PostgresStaffRepository:
             )
             existing_row = existing.mappings().first()
             if existing_row is not None:
-                work_item_id = str(existing_row["work_item_id"])
+                raise ConflictError(
+                    "IDEMPOTENCY_RECEIPT_UNAVAILABLE",
+                    "This request key belongs to an older communication without a replay receipt",
+                )
             else:
                 interaction = await self._lock_interaction(connection, auth, interaction_id)
                 work_item_id = str(interaction["work_item_id"])
@@ -3584,8 +3602,17 @@ class PostgresStaffRepository:
                         "workItemVersion": work_version,
                     },
                 )
-        assert work_item_id is not None
-        return await self.get_work_item_detail(auth, work_item_id)
+            return {"workItemId": work_item_id}
+
+        receipt = await self._run_idempotent(
+            auth=auth,
+            idempotency_key=idempotency_key,
+            operation="staff.record_interaction_communication",
+            request_payload={"interactionId": interaction_id, "payload": dict(payload)},
+            response_status=201,
+            handler=handler,
+        )
+        return await self.get_work_item_detail(auth, str(receipt["workItemId"]))
 
     async def complete_interaction(
         self,

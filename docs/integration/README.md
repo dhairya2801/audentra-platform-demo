@@ -46,6 +46,7 @@ Atlas without `--database-url` remains the separate SQLite evaluation/scenario t
 - Planning input edits require student self-authorization, term validation, expected version, idempotency key/payload hash, an atomic audit record and a receipt. No Edward financial write was added.
 - Board edits use the existing work/document/communication command boundaries and their authorization/version/domain guards. Original files and external delivery remain dependent on configured storage/providers.
 - Official document reviews are immutable per submission. The shared history projection excludes internal notes; replacement uploads preserve earlier decisions. Imported status snapshots identify unknown reviewers/guidance and never supersede separately recorded university revision evidence.
+- Inline Action Center outreach sends to the canonical portal inbox after explicit confirmation. Start/send commands use durable payload-bound replay receipts; external activity recording does not imply delivery. Edward's relationship evidence and Atlas include the latest 50 portal inbox records with operational timestamps.
 - Morning Brew is deliberately demo-backed and cannot enter Edward evidence. See the portal's `app/staff/morning-brew/MOCK-BOUNDARY.md`.
 
 See [the actual tool catalog](edward-tool-catalog.md). In university mode legacy financial/housing interpretations are excluded from the model's read catalog.
@@ -75,5 +76,7 @@ PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/prepare_docum
 ```
 
 Then run `node tools/university-explorer/integration-document-review.mjs` from the portal clone. The browser routes all API calls to the test runtime and records a real decision there. This checks command persistence and cross-surface history, using explicit failed-extraction metadata; it does not certify original object storage or provider extraction. `test_document_history_integration.py` additionally tests replacement acceptance, replay/conflict, authorization and stale-submission protection in a rolled-back transaction.
+
+With the same separate API/Atlas test services on 45629/4329, run `node tools/university-explorer/integration-outreach.mjs` from the portal clone. It chooses an open request in that disposable world, records one confirmed portal message, deliberately loses the successful HTTP response, and proves the retry creates no duplicate. It checks the staff conversation, student inbox and Atlas. No external email is sent. `test_outreach_integration.py` adds authorization, version/hash, receipt and recorded-versus-delivered checks in a rolled-back transaction.
 
 This branch has not been pushed or deployed. See the workspace report for readiness limits and the proposed test.audentra.ai rollout sequence.
