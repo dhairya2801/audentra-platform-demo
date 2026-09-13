@@ -868,6 +868,7 @@ class StaffAssistantPipeline:
         university_only = {
             *UNIVERSITY_TOOLS,
             "getUniversityOperations",
+            "getUniversityWorkBoard",
             "getUniversityCasework",
             "getUniversityCohort",
             "searchUniversityPolicies",
@@ -1377,6 +1378,22 @@ class StaffAssistantPipeline:
             # first would let a lookup failure preempt the refusal itself
             # ("Mark X's transcript as accepted" must refuse, not disambiguate).
             return resolution
+        # A canonical roster match for the pasted reference wins over a legacy
+        # key-shaped work-item classification. Do not bind an ambiguous name.
+        if entities is not None and request.reference_token:
+            matches = [
+                student
+                for student in entities.students
+                if student.id
+                and student.mention == request.reference_token
+                and student.match_quality == "exact"
+            ]
+            if len(matches) == 1:
+                student = matches[0]
+                resolution.student_id = student.id
+                resolution.student_name = student.name
+                resolution.search_results = [dict(student.data)] if student.data else []
+                return resolution
         if (
             entities is not None
             and entities.students

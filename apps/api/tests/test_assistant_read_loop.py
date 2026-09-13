@@ -588,3 +588,89 @@ def test_followup_policy_read_does_not_ground_a_previous_account_amount() -> Non
         "answered",
     ]
     assert "getB.amount: $1,000" in result.evidence_texts
+
+
+def test_university_initial_answer_must_read_before_claiming_a_result() -> None:
+    step, seen = _scripted(
+        [
+            {
+                "reasoning": "Need the saved cohort",
+                "calls": [],
+                "answer": "I need to read the cohort.",
+            },
+            {
+                "reasoning": "Read now",
+                "calls": [{"tool": "getA", "arguments": "{}"}],
+                "answer": None,
+            },
+            {"reasoning": "Have evidence", "calls": [], "answer": "There are 3 items."},
+        ]
+    )
+    result = asyncio.run(
+        run_read_loop(
+            question="Who is in this cohort?",
+            history=[],
+            context={"university": "Canonical records required"},
+            tools=_tools(),
+            model_step=step,
+            executor=_executor_ok,
+            max_rounds=3,
+        )
+    )
+    assert result.answer == "There are 3 items."
+    assert len(seen) == 3
+    assert result.calls[0].tool == "getA"
+
+
+def test_staff_guard_allows_only_a_year_present_in_canonical_dates() -> None:
+    from audentra.integrations.staff_assistant.guard import guard_staff_grounded_answer
+
+    evidence = ["Current term starts at 2026-08-28T04:00:00Z"]
+    assert guard_staff_grounded_answer(
+        answer="The term starts in 2026.", evidence_texts=evidence
+    ).accepted
+    assert not guard_staff_grounded_answer(
+        answer="The term starts in 2027.", evidence_texts=evidence
+    ).accepted
+
+
+def test_staff_roster_reference_binds_even_when_legacy_classifier_calls_it_a_work_key() -> None:
+    seen: list[tuple[str, dict[str, Any]]] = []
+    host = _staff_host(seen)
+
+    async def search_students(**kwargs: Any) -> Mapping[str, Any]:
+        if kwargs.get("query") == "SYN-000007":
+            return {
+                "items": [{"id": _STUDENT, "name": "Ines Calderwood", "externalRef": "SYN-000007"}],
+                "total": 1,
+                "matchQuality": "exact_external_ref",
+            }
+        return {"items": [], "total": 0}
+
+    async def university_record(**kwargs: Any) -> Mapping[str, Any]:
+        seen.append(("university_record", kwargs))
+        return {"serviceProgress": [{"title": "Review verification evidence", "status": "ready"}]}
+
+    host._primitives.update(search_students=search_students, university_record=university_record)
+    step, _ = _scripted(
+        [
+            {
+                "calls": [{"tool": "getUniversityAccount", "arguments": '{"studentId":"student"}'}],
+                "answer": None,
+            },
+            {"calls": [], "answer": "Review verification evidence is ready."},
+        ]
+    )
+    result = asyncio.run(
+        StaffAssistantPipeline(host, read_loop_step=step, read_planner="model").execute(
+            message=(
+                "For student SYN-000007: Explain the shortest safe path "
+                "to finish my financial-aid case."
+            )
+        )
+    )
+    assert result.resolved_student_id == _STUDENT
+    assert any(
+        name == "university_record" and args["student_id"] == _STUDENT for name, args in seen
+    )
+    assert "Review verification evidence" in result.message

@@ -91,7 +91,9 @@ def guard_staff_grounded_answer(
             return reject("fabricated_metric_language")
 
     allowed_dates = collect_dates(corpus)
-    allowed_numbers = collect_numbers(mask_dates_and_contacts(corpus))
+    allowed_numbers = collect_numbers(mask_dates_and_contacts(corpus)) | set(
+        re.findall(r"\b(?:19|20)\d{2}(?=-\d{2}-\d{2})", corpus)
+    )
     allowed_contacts = collect_contacts(corpus)
 
     for contact in collect_contacts(lowered):

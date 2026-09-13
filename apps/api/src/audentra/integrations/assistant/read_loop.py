@@ -221,7 +221,10 @@ READ_LOOP_SYSTEM_PROMPT = "\n".join(
         "`answerGuidance` and `studentFacets` state who this student is (international, "
         "transfer, admit term) — treat them as facts, never as possibilities. If no "
         "document covers the question, say the official answer comes from the office "
-        "named, rather than stating a rule from memory.",
+        "named, rather than stating a rule from memory. Match the policy's subject to "
+        "the actual workflow: a course waitlist is not an admission offer. When a record "
+        "provides policyReferences, retrieve the relevant exact policy code before "
+        "recommending a deadline, reinstatement or exception from that policy.",
         "- Never claim to have changed, sent, scheduled, assigned or submitted anything; "
         "this reply only reads. If the person asked for a change, say what the record "
         "currently shows and that a change would be a separate confirmed step — never "
@@ -477,16 +480,18 @@ async def run_read_loop(
             )
             # A fact-bearing follow-up without reads is neither fresh nor guardable.
             # Use a remaining existing round to request evidence, never widen the cap.
-            if history and not force_answer:
+            if (history or context.get("university")) and not force_answer:
                 from audentra.integrations.assistant.guard import ungrounded_tokens
 
                 missing = ungrounded_tokens(answer, evidence_from_calls(calls))
-                if any(missing.values()):
+                if any(missing.values()) or (context.get("university") and not calls):
                     transcript.append(
                         {
                             "outcome": "evidence_required",
                             "instruction": (
-                                "Some factual tokens are absent from this turn's evidence. "
+                                "Read canonical evidence before answering "
+                                "this university question. "
+                                "Some factual tokens may be absent from this turn's evidence. "
                                 "Read their current record or policy, or omit unsupported claims. "
                                 + json.dumps(missing)
                             ),
@@ -675,11 +680,60 @@ def _dollars(cents: int | float) -> str:
 def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
     """Shrink a tool result structurally until its JSON fits the budget."""
 
+    # Keep shared projection totals before bounded record detail; duplicate
+    # portal envelopes must not push institutional counts out of model context.
+    if isinstance(value, Mapping) and value.get("basis") == "canonical_work_and_domain_evidence":
+        value = {
+            key: value[key]
+            for key in (
+                "basis",
+                "actorId",
+                "projectCounts",
+                "paymentStateCounts",
+                "paymentCountScope",
+                "counts",
+                "page",
+                "cards",
+            )
+            if key in value
+        }
+    if isinstance(value, Mapping) and value.get("domain") == "financial_plan":
+        value = {
+            key: value[key]
+            for key in (
+                "domain",
+                "student",
+                "snapshotAt",
+                "termId",
+                "term",
+                "currency",
+                "account",
+                "aid",
+                "planning",
+                "catalog",
+                "mealEnrollments",
+                "insuranceCoverage",
+                "paymentAgreements",
+                "installments",
+                "requirements",
+                "serviceProgress",
+                "boundaries",
+            )
+            if key in value
+        }
     value = humanize_money(value)
     if (
         isinstance(value, Mapping)
         and value.get("domain")
-        in ("overview", "academics", "account", "relationships", "documents", "history")
+        in (
+            "overview",
+            "academics",
+            "account",
+            "relationships",
+            "documents",
+            "history",
+            "financial_plan",
+        )
         and "snapshotAt" in value
     ):
         value = _compact_university(value)
