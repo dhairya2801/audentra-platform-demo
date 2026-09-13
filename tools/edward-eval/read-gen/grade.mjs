@@ -165,7 +165,10 @@ export function answerCorpus(payload) {
 }
 
 export function matchFact(fact, corpus, truth) {
-  return new RegExp(resolveTemplate(fact.pattern, truth), "i").test(corpus);
+  // Typography does not change a claim. Normalize both sides so apostrophes in
+  // canonical names and explicit denials obey the same existing expectations.
+  const punctuation = (value) => value.replace(/[\u2018\u2019]/g, "'");
+  return new RegExp(punctuation(resolveTemplate(fact.pattern, truth)), "i").test(punctuation(corpus));
 }
 
 export function toolCalls(trace) {

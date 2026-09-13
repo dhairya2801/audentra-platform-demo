@@ -336,7 +336,9 @@ for (const testCase of cases) {
   let turnIndex = 0;
   for (const turn of testCase.turns) {
     let observed;
+    let resolvedQuestion;
     try {
+      resolvedQuestion = resolveQuestion(turn.question, truth);
       observed = await observeTurn(testCase, turn, turnIndex, actor, conversationId);
     } catch (error) {
       observed = {
@@ -345,6 +347,7 @@ for (const testCase of cases) {
         payload: { message: "" },
         trace: null,
         transportError: String(error?.message ?? error),
+        groundTruthUnavailable: /Ground truth missing/.test(String(error?.message ?? error)),
       };
     }
     const { status, payload, latencyMs, trace } = observed;
@@ -365,7 +368,11 @@ for (const testCase of cases) {
     let graded;
     try {
       graded =
-        status === 200
+        observed.groundTruthUnavailable ? {
+          grade: "SKIP",
+          failures: [{kind: "ground_truth_unavailable", detail: observed.transportError}],
+          softMisses: [],
+        } : status === 200
           ? gradeTurn(turn, payload, trace, truth, testCase.actorKind)
           : {
               grade: "FAIL",
@@ -387,7 +394,7 @@ for (const testCase of cases) {
     else if (graded.grade === "SKIP" && caseGrade === "PASS") caseGrade = "SKIP";
     const calls = toolCalls(trace);
     turnRecords.push({
-      question: resolveQuestion(turn.question, truth),
+      question: resolvedQuestion ?? turn.question,
       expected: turn.expect ?? {},
       httpStatus: status,
       message: payload.message ?? "",

@@ -80,4 +80,6 @@ Then run `node tools/university-explorer/integration-document-review.mjs` from t
 
 With the same separate API/Atlas test services on 45629/4329, run `node tools/university-explorer/integration-outreach.mjs` from the portal clone. It chooses an open request in that disposable world, verifies draft persistence across reload and conflicting edits, records one confirmed portal message, deliberately loses the successful HTTP response, and proves the retry creates no duplicate. It checks the staff conversation, student inbox and Atlas. No external email is sent. `test_outreach_integration.py` adds authorization, version/hash, receipt and recorded-versus-delivered checks in a rolled-back transaction.
 
+The restored legacy banks run in separate current-schema test databases. See [legacy evaluation results and commands](legacy-evaluation.md) for the read-only source captures, strict fixture import, passing write banks and remaining read limitations. No source database is used by an evaluation API.
+
 This branch has not been pushed or deployed. See the workspace report for readiness limits and the proposed test.audentra.ai rollout sequence.

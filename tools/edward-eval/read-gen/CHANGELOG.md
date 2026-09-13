@@ -4,6 +4,20 @@ Every change to a case after the bank was written goes here, with the reason.
 Cases are never edited to make a run pass; only a demonstrably wrong *data*
 expectation (one that contradicts ground-truth.json) may be corrected.
 
+## 2026-09-13 restored legacy evaluation
+
+- The original frozen staff/persona snapshot was copied read-only into a separate
+  evaluation database, then compatible data was imported into an empty current
+  schema with all foreign keys validated. No migration checksum was changed.
+- Missing time-relative values in question templates now produce an explicit
+  skipped turn, without calling Edward or crashing transcript serialization.
+- Required and forbidden claim matching normalizes typographic apostrophes on
+  both the pattern and answer. This does not change which claims are required
+  or forbidden. Existing runs were regraded separately; raw results remain.
+- No case, expected fact, persona, date, permission or canonical student record
+  was changed to improve a score. Other prose/negation/date limitations remain
+  explicit in the integration report.
+
 ## 2026-09-13 integration preflight
 
 - Truth extraction now distinguishes an unavailable assessed-risk schema from
