@@ -4375,6 +4375,16 @@ class PostgresStaffRepository:
 
             status_value = _read(update, "status", default=None)
             next_status = str(status_value) if status_value is not None else str(current["status"])
+            priority_value = _read(update, "priority", default=current["priority"])
+            next_priority = str(priority_value)
+            if next_priority not in {"low", "medium", "high", "urgent"}:
+                raise BadRequestError("INVALID_PRIORITY", "Choose low, medium, high or urgent")
+            due_value = _read(update, "dueAt", "due_at", default=_MISSING)
+            next_due = (
+                current.get("due_at")
+                if due_value is _MISSING
+                else _optional_datetime(due_value, "dueAt")
+            )
             if next_status not in _WORK_ITEM_STATUSES:
                 raise BadRequestError("INVALID_WORK_ITEM_STATUS", "Choose a supported work status")
             if str(current["status"]) in _TERMINAL_WORK_ITEM_STATUSES and next_status != str(
@@ -4510,6 +4520,20 @@ class PostgresStaffRepository:
                     )
 
             changes: list[tuple[str, str]] = []
+            if next_priority != current["priority"]:
+                changes.append(
+                    (
+                        "priority_changed",
+                        f"Priority changed from {current['priority']} to {next_priority}.",
+                    )
+                )
+            if next_due != current.get("due_at"):
+                changes.append(
+                    (
+                        "due_date_changed",
+                        f"Due date changed to {_iso_timestamp(next_due) if next_due else 'none'}.",
+                    )
+                )
             if next_status != current["status"]:
                 changes.append(
                     (
@@ -4604,6 +4628,8 @@ class PostgresStaffRepository:
                     f"""
                     UPDATE {self._table("staff_work_item")}
                     SET status = CAST(:status AS varchar),
+                        priority = :priority,
+                        due_at = :due_at,
                         assignee_id = :assignee_id,
                         escalated = :escalated,
                         selected_channel = :selected_channel,
@@ -4640,6 +4666,8 @@ class PostgresStaffRepository:
                 ),
                 {
                     "status": next_status,
+                    "priority": next_priority,
+                    "due_at": next_due,
                     "assignee_id": (
                         _uuid(str(next_assignee)) if next_assignee is not None else None
                     ),
@@ -4803,6 +4831,8 @@ class PostgresStaffRepository:
                     "studentId": str(current["student_id"]),
                     "status": next_status,
                     "assigneeId": _optional_uuid_string(next_assignee),
+                    "priority": next_priority,
+                    "dueAt": _iso_timestamp(next_due) if next_due is not None else None,
                     "escalated": next_escalated,
                     "selectedChannel": next_channel,
                     "followUpAt": (
@@ -6462,7 +6492,8 @@ class PostgresStaffRepository:
         result = await connection.execute(
             text(
                 f"""
-                SELECT id, key, title, student_id, status, assignee_id, escalated, version,
+                SELECT id, key, title, student_id, status, priority, due_at,
+                       assignee_id, escalated, version,
                        source_type, source_id, work_type, selected_channel,
                        follow_up_at, blocker_code, blocker_detail, blocker_review_at,
                        outcome_code, resolution_code, next_step, terminal_reason,

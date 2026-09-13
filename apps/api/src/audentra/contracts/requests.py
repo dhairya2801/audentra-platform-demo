@@ -882,6 +882,8 @@ class UpdateStudentProfileRequest(StrictRequest):
 
 class UpdateStaffWorkItemRequest(StrictRequest):
     expected_version: StrictInt = Field(ge=1)
+    priority: Literal["low", "medium", "high", "urgent"] | None = None
+    due_at: datetime | None = None
     status: (
         Literal[
             "todo",

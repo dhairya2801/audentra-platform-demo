@@ -1166,6 +1166,8 @@ def test_work_item_update_locks_versions_and_writes_log_audit_and_outbox_atomica
                         "id": UUID(WORK_ITEM_ID),
                         "student_id": UUID(STUDENT_ID),
                         "status": "todo",
+                        "priority": "medium",
+                        "due_at": None,
                         "assignee_id": UUID(STAFF_ID),
                         "escalated": False,
                         "version": 1,
@@ -1757,6 +1759,7 @@ def _integration_schema_statements(schema: str) -> tuple[str, ...]:
         f"""CREATE TABLE {schema}.staff_work_item (
       id uuid PRIMARY KEY, tenant_id uuid NOT NULL, student_id uuid NOT NULL,
       key text NOT NULL DEFAULT 'ENR-TEST', title text NOT NULL DEFAULT 'Test work',
+      priority text NOT NULL DEFAULT 'medium', due_at timestamptz,
       status text NOT NULL, assignee_id uuid, escalated boolean NOT NULL,
       version integer NOT NULL, source_type text, source_id uuid,
       work_type text NOT NULL DEFAULT 'enrollment', selected_channel text,

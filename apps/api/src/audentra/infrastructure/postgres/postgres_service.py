@@ -311,7 +311,7 @@ _CLARIFY_STUDENT_SENTINELS = (
     "which one do you mean",
 )
 
-_ANY_WORK_ITEM_KEY = re.compile(r"\b([A-Za-z]{2,6}-\d{2,6})\b")
+_ANY_WORK_ITEM_KEY = re.compile(r"\b([A-Za-z]{2,6}-\d{1,18})\b")
 
 
 def _last_key_anywhere(history: Sequence[Mapping[str, Any]]) -> str | None:
@@ -3903,17 +3903,22 @@ class PostgresPlatformService:
                 replace(auth, student_id=student_id), **kwargs
             ),
             "university_operations": lambda: university.operations(auth),
-            "university_work_board": lambda: self._university_work_board(auth),
+            "university_work_board": lambda **kwargs: self._university_work_board(auth, **kwargs),
             "university_cohort": lambda: university.cohort(auth),
             "university_policies": lambda query, student_id=None, **kwargs: university.policies(
                 replace(auth, student_id=student_id or ""), query, **kwargs
             ),
         }
 
-    async def _university_work_board(self, auth: AuthContext) -> JsonDict:
+    async def _university_work_board(self, auth: AuthContext, **kwargs: Any) -> JsonDict:
         from .work_board_repository import WorkBoardProjection
 
-        return await WorkBoardProjection(self.repository.staff).read(auth)
+        return await WorkBoardProjection(self.repository.staff).read(
+            auth,
+            offset=kwargs.pop("offset", 0),
+            project=kwargs.pop("project", None),
+            filters=kwargs,
+        )
 
     async def _morning_brew_for_assistant(self, auth: AuthContext) -> Mapping[str, Any]:
         """The canonical Morning Brew, or an honest unavailability."""

@@ -382,8 +382,8 @@ _COHORT_REFERENCE = re.compile(
 _UPDATE_WORK = re.compile(
     r"\b(?:move|update|change|mark|set|assign|close|shut|reopen|bump|escalate"
     r"|pick(?:ing)? up|take)\b"
-    r"[^.!?]{0,40}?\b(?:AST-\d+|MAN-[0-9A-F]+)\b"
-    r"|\b(?:AST-\d+|MAN-[0-9A-F]+)\b[^.!?]{0,60}?"
+    r"[^.!?]{0,40}?\b(?:(?:AST|DEMO|TASK|PAY|FIN|ENR|HOU)-\d+|MAN-[0-9A-F]+)\b"
+    r"|\b(?:(?:AST|DEMO|TASK|PAY|FIN|ENR|HOU)-\d+|MAN-[0-9A-F]+)\b[^.!?]{0,60}?"
     r"\b(?:is|to|as|can be|should be|—|-)\b[^.!?]{0,40}?"
     r"\b(?:done|complete|completed|closed|shut|blocked|in progress|todo|to do|follow[- ]?up"
     r"|urgent|high|medium|low|chase|mine)\b"
@@ -707,7 +707,7 @@ def _named_priority(text: str) -> str | None:
     return None
 
 
-_WORK_ITEM_KEY = re.compile(r"\b(?:AST-\d+|MAN-[0-9A-F]{4,})\b", re.I)
+_WORK_ITEM_KEY = re.compile(r"\b(?:(?:AST|DEMO|TASK|PAY|FIN|ENR|HOU)-\d+|MAN-[0-9A-F]{4,})\b", re.I)
 
 _ASSIGN_TO_ME = re.compile(
     r"\bassign\b[^.!?]{0,32}\bto me\b"
@@ -763,6 +763,13 @@ _STATUS_PHRASES: tuple[tuple[str, str], ...] = (
 
 def _work_update_fields(text: str) -> JsonDict:
     fields: JsonDict = {}
+    priority = re.search(
+        r"\b(?:to|as|make\s+it|set\s+it|priority(?:\s+to)?)\s+(urgent|high|medium|low)\b",
+        text,
+        re.I,
+    )
+    if priority and re.search(r"\b(?:change|set|make|raise|lower|update|mark|bump)\b", text, re.I):
+        fields["priority"] = priority.group(1).lower()
     if _ASSIGN_TO_ME.search(text):
         fields["assignToMe"] = True
     for phrase, status in _STATUS_PHRASES:
@@ -771,7 +778,7 @@ def _work_update_fields(text: str) -> JsonDict:
             break
     due = _named_day(text)
     if due:
-        fields["followUp"] = due
+        fields["dueOn" if re.search(r"\b(?:due|deadline)\b", text, re.I) else "followUp"] = due
     reason = _next_step_phrase(text)
     if reason:
         fields["nextStep"] = reason

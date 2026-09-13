@@ -223,11 +223,19 @@ ACTIONS: tuple[ActionDefinition, ...] = (
         risk_class=3,
         confirmation_mode="strong_confirm",
         summary=(
-            "change the status, owner, follow-up date or next step of an existing tracked "
+            "change the priority, status, owner, due date, follow-up date or next step "
+            "of an existing tracked "
             "work item — the ones with keys like AST-01234"
         ),
         fields=(
             ActionField("status", "enum", "the status it should move to", values=_WORK_STATUSES),
+            ActionField("priority", "enum", "the new operational priority", values=_PRIORITIES),
+            ActionField(
+                "dueOn",
+                "day",
+                "the new due day, only when a deadline change is requested",
+                values=_DAYS,
+            ),
             ActionField(
                 "followUp", "day", "the day to come back to it, if one was named", values=_DAYS
             ),

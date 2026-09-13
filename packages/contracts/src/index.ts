@@ -1413,6 +1413,8 @@ export interface StaffWorkItemLog {
   action:
     | "created"
     | "status_changed"
+    | "priority_changed"
+    | "due_date_changed"
     | "assigned"
     | "escalated"
     | "commented"
@@ -1988,6 +1990,8 @@ export interface StaffSignUpInput extends StaffSignInInput {
 
 export interface UpdateStaffWorkItemInput {
   expectedVersion: number;
+  priority?: StaffWorkItemPriority;
+  dueAt?: string | null;
   status?: StaffWorkItemStatus;
   assigneeId?: string | null;
   escalated?: boolean;
@@ -4066,6 +4070,7 @@ export interface UniversityRecord {
   disbursements?: { id: string; term_id: string; name: string; amount_cents: number; status: string; scheduled_at: string; reason: string | null }[];
   portalAuthorizations?: { id: string; full_name: string; scopes: string[]; active: boolean; authorization_status: string }[];
   assignments?: { id: string; name: string; role: string; email: string; office_name: string; ends_at: string | null }[];
+  appointments?: { id: string; starts_at: string; ends_at: string; status: string; purpose: string; staff_name?: string }[];
   coverage?: { id: string; covering_name: string; covering_email: string; starts_at: string; ends_at: string }[];
   housing?: { id: string; status: string; residence_name: string | null; room: string | null; reason: string }[];
   events?: { id: string; description: string; effective_at: string; recorded_at: string; to_state: string }[];
@@ -4103,7 +4108,7 @@ export interface FinancialPlan {
     paymentStates: Record<"pending" | "posted" | "failed" | "reversed", number>;
     refundLedgerEntries: Record<string, unknown>[]; refundSettlementStatus: "not_recorded";
   };
-  aid: {awards: Record<string, unknown>[]; disbursements: Record<string, unknown>[];
+  aid: {totalsScope: string; awards: Record<string, unknown>[]; disbursements: Record<string, unknown>[];
     offeredAnnualCents: number; acceptedAnnualCents: number; anticipatedTermCents: number;
     loanTerms: Record<string, unknown>[]};
   ledger: Record<string, unknown>[]; payments: Record<string, unknown>[];
@@ -4116,7 +4121,7 @@ export interface FinancialPlan {
     income: Record<string, unknown>[]; livingTotalCents: number; incomeTotalCents: number;
     estimatedCushionCents: number; estimatedAccountGapAfterAnticipatedAidCents: number;
     scenarios: Record<string, unknown>[]};
-  visualization: {charges: Record<string, unknown>[]; postedSources: Record<string, unknown>[];
+  visualization: {charges: Record<string, unknown>[]; postedSources: Record<string, unknown>[]; netPostedSources: Record<string, unknown>[];
     postedCoverage: Record<string, unknown>[]; postedCoverageUnavailableReason: string | null; livingCoverage: Record<string, unknown>[]};
   boundaries: string[];
 }

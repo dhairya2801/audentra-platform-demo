@@ -729,6 +729,17 @@ class EdwardActionGateway:
         await self._require_work_item_scope(auth, item)
         resolved: JsonDict = {"expectedVersion": item["version"]}
         changes: list[JsonDict] = []
+        if request.fields.get("priority") and request.fields["priority"] != item.get("priority"):
+            resolved["priority"] = request.fields["priority"]
+            changes.append(
+                {"field": "priority", "before": item.get("priority"), "after": resolved["priority"]}
+            )
+        due_on = _due_at(request.fields.get("dueOn"), self._clock())
+        if due_on:
+            resolved["dueAt"] = due_on.isoformat()
+            changes.append(
+                {"field": "dueAt", "before": item.get("dueAt"), "after": resolved["dueAt"]}
+            )
         if request.fields.get("assignToMe"):
             resolved["assigneeId"] = auth.actor_id
             before = cast(Mapping[str, Any] | None, item.get("assignee"))
@@ -775,6 +786,18 @@ class EdwardActionGateway:
         # student with no address. A proposal has to satisfy what execution
         # requires, or ask for the piece it is missing.
         next_status = resolved.get("status")
+        if next_status in {"done", "cancelled"}:
+            from .work_board_repository import WorkBoardProjection
+
+            board = await WorkBoardProjection(self._staff).read(auth, filters={"search": key})
+            card = next((card for card in board["cards"] if card["id"] == item["id"]), None)
+            if card and (card.get("document") or card.get("payment") or card.get("case")):
+                raise ConflictError(
+                    "EDWARD_DOMAIN_DECISION_REQUIRED",
+                    "This work is linked to a document, payment or formal case. "
+                    "Use its review workflow for a decision; Edward can change its "
+                    "priority, owner, due date or active operational status.",
+                )
         if next_status == "done":
             resolved["outcomeCode"] = "staff_confirmed_complete"
             resolved["resolutionCode"] = "resolved_by_staff"
@@ -853,14 +876,14 @@ class EdwardActionGateway:
                     "title": item["title"],
                     "component": item.get("component"),
                     "status": resolved.get("status", item.get("status")),
-                    "priority": item.get("priority"),
+                    "priority": resolved.get("priority", item.get("priority")),
                     "assigneeId": resolved.get(
                         "assigneeId",
                         (cast(Mapping[str, Any], item["assignee"]) or {}).get("id")
                         if item.get("assignee")
                         else None,
                     ),
-                    "dueAt": item.get("dueAt"),
+                    "dueAt": resolved.get("dueAt", item.get("dueAt")),
                     "followUpAt": resolved.get("followUpAt", item.get("followUpAt")),
                     "nextStep": resolved.get("nextStep", item.get("nextStep")),
                 },
@@ -1095,6 +1118,19 @@ class EdwardActionGateway:
                 matches = matches and _same_instant(
                     current.get("followUpAt"), payload["followUpAt"]
                 )
+            if "dueAt" in payload:
+                matches = matches and _same_instant(current.get("dueAt"), payload["dueAt"])
+            for field in (
+                "priority",
+                "nextStep",
+                "blockerCode",
+                "blockerDetail",
+                "terminalReason",
+                "outcomeCode",
+                "resolutionCode",
+            ):
+                if field in payload:
+                    matches = matches and current.get(field) == payload[field]
             if matches:
                 return current, 1
         return None

@@ -89,6 +89,17 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
         for r in ledger
         if r["kind"] in ("aid", "payment", "credit_adjustment")
     ]
+    # A returned credit remains in ledger history but must not inflate a funding
+    # chart. Net only explicit reversal links; unallocated refunds stay separate.
+    reversed_cents: dict[str, int] = {}
+    for entry in ledger:
+        if entry["kind"] == "reversal" and entry.get("reverses_id"):
+            target = str(entry["reverses_id"])
+            reversed_cents[target] = reversed_cents.get(target, 0) + entry["amount_cents"]
+    net_sources = [
+        {**source, "amountCents": source["amountCents"] - reversed_cents.get(source["id"], 0)}
+        for source in sources
+    ]
     living: list[JsonDict] = [
         {
             "id": key,
@@ -152,6 +163,9 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
             "refundSettlementStatus": account.get("refundSettlementStatus", "not_recorded"),
         },
         "aid": {
+            "totalsScope": "Annual offered and accepted totals include only awards that post "
+            "to the student account. Employment authorization is excluded; "
+            "it is not disbursed aid.",
             "awards": awards,
             "disbursements": disbursements,
             "offeredAnnualCents": sum(r["offered_cents"] for r in awards if r["posts_to_account"]),
@@ -188,6 +202,7 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
         "visualization": {
             "charges": costs,
             "postedSources": sources,
+            "netPostedSources": net_sources,
             # Refunds/reversals cannot be allocated back to specific charges
             # without an allocation domain. Keep the exact ledger visible.
             "postedCoverage": []

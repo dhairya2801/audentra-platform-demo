@@ -683,6 +683,7 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
     # Keep shared projection totals before bounded record detail; duplicate
     # portal envelopes must not push institutional counts out of model context.
     if isinstance(value, Mapping) and value.get("basis") == "canonical_work_and_domain_evidence":
+        owners = {row["id"]: row["name"] for row in value.get("staff", [])}
         value = {
             key: value[key]
             for key in (
@@ -690,6 +691,7 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
                 "actorId",
                 "projects",
                 "projectCounts",
+                "projectSummaries",
                 "paymentStateCounts",
                 "paymentCountScope",
                 "counts",
@@ -698,6 +700,43 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
             )
             if key in value
         }
+        value["projectSummaries"] = {
+            project: {
+                key: row[key] for key in ("total", "open", "attention", "overdue") if key in row
+            }
+            for project, row in value.get("projectSummaries", {}).items()
+        }
+        value["cards"] = [
+            {
+                "ownerName": owners.get(
+                    card.get("owner"), "Unassigned" if card.get("owner") == "TEAM" else None
+                ),
+                **{
+                    key: card[key]
+                    for key in (
+                        "id",
+                        "key",
+                        "title",
+                        "description",
+                        "studentId",
+                        "student",
+                        "board",
+                        "type",
+                        "operationalStatus",
+                        "status",
+                        "priority",
+                        "owner",
+                        "due",
+                        "version",
+                        "document",
+                        "payment",
+                        "case",
+                    )
+                    if key in card
+                },
+            }
+            for card in value.get("cards", [])
+        ]
     if isinstance(value, Mapping) and value.get("domain") == "financial_plan":
         value = {
             key: value[key]
@@ -738,12 +777,26 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
         and "snapshotAt" in value
     ):
         value = _compact_university(value)
-    trimmed = _trim_lists(value, MAX_LIST_ITEMS)
+
+    def trim(items: int) -> Any:
+        result = _trim_lists(value, items)
+        # Keep a small payment-attempt history intact while shrinking longer
+        # ledger lists. Pending, failed and reversed attempts are distinct facts.
+        if (
+            isinstance(value, Mapping)
+            and value.get("domain") == "account"
+            and isinstance(value.get("payments"), list)
+            and isinstance(result, dict)
+        ):
+            result["payments"] = _trim_lists(value["payments"], 10)
+        return result
+
+    trimmed = trim(MAX_LIST_ITEMS)
     encoded = json.dumps(trimmed, ensure_ascii=False, default=str)
     items = MAX_LIST_ITEMS
     while len(encoded) > limit and items > 3:
         items = max(3, items // 2)
-        trimmed = _trim_lists(value, items)
+        trimmed = trim(items)
         encoded = json.dumps(trimmed, ensure_ascii=False, default=str)
     if len(encoded) > limit:
         return {"truncated": True, "preview": encoded[:limit]}
@@ -760,7 +813,7 @@ def _compact_university(value: Any) -> Any:
         return {
             str(key): _compact_university(item)
             for key, item in value.items()
-            if key not in {"tenant_id", "student_id", "correlation_id"}
+            if key not in {"tenant_id", "student_id", "correlation_id", "idempotency_key"}
         }
     if isinstance(value, list | tuple):
         return [_compact_university(item) for item in value]

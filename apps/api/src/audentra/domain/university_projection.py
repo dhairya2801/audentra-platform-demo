@@ -12,6 +12,12 @@ def financials(account: JsonDict, documents: JsonDict) -> JsonDict:
     charges = sum(r["amount_cents"] for r in ledger if r["kind"] == "charge")
     aid = -sum(r["amount_cents"] for r in ledger if r["kind"] == "aid")
     paid = -sum(r["amount_cents"] for r in ledger if r["kind"] == "payment")
+    payment_ids = {r["id"] for r in ledger if r["kind"] == "payment"}
+    paid -= sum(
+        r["amount_cents"]
+        for r in ledger
+        if r["kind"] == "reversal" and r.get("reverses_id") in payment_ids
+    )
     balance = sum(r["amount_cents"] for r in ledger)
     awards = [
         {

@@ -31,7 +31,7 @@ _REFERENCE_TOKEN = re.compile(r"\b([A-Z]{2,6}-[A-Z0-9][A-Z0-9._-]{0,12})\b")
 #: People type "ast-00507" from a phone as readily as the uppercase key; the
 #: canonical form is restored on extraction. Mixed case ("Top-10") stays out —
 #: that is prose, not a key.
-_WORK_ITEM_KEY = re.compile(r"\b([A-Z]{2,6}-\d{1,6}|[a-z]{2,6}-\d{1,6})\b")
+_WORK_ITEM_KEY = re.compile(r"\b([A-Z]{2,6}-\d{1,18}|[a-z]{2,6}-\d{1,18})\b")
 
 # Words that start sentences or commands and must never be read as a name.
 _NAME_STOPWORDS = frozenset(
@@ -54,6 +54,10 @@ _NAME_STOPWORDS = frozenset(
         "aster",
         "before",
         "blocked",
+        "board",
+        "task",
+        "tasks",
+        "center",
         "call",
         "can",
         "check",

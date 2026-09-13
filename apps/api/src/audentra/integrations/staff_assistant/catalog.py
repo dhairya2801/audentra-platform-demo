@@ -836,13 +836,55 @@ STAFF_TOOL_NAMES = (*STAFF_TOOL_NAMES, "getUniversityWorkBoard")
 STAFF_TOOL_DESCRIPTIONS = {
     **STAFF_TOOL_DESCRIPTIONS,
     "getUniversityWorkBoard": (
-        "Read the canonical Action Center projection: bounded first page of work cards, "
+        "Read the canonical Task Board projection: a bounded page of work cards, "
         "total queue counts, owners, priorities, due dates and linked document, case and "
         "payment evidence. Card operational status never proves settlement or verification. "
-        "Use existing work-queue search tools for specific filters or additional pages."
+        "Filter by project, status, priority, owner, due date or task key. Project summaries "
+        "always count the full institutional queue; page.total counts all filter matches. "
+        "Advance offset to read additional pages; never claim the first page is exhaustive."
     ),
 }
-STAFF_TOOL_ARGUMENTS = {**STAFF_TOOL_ARGUMENTS, "getUniversityWorkBoard": {}}
+STAFF_TOOL_ARGUMENTS = {
+    **STAFF_TOOL_ARGUMENTS,
+    "getUniversityWorkBoard": {
+        "project": {
+            "kind": "enum",
+            "values": (
+                "fa-docs",
+                "fa-outreach",
+                "fa-payments",
+                "en-docs",
+                "en-outreach",
+                "en-requests",
+                "cl-housing",
+            ),
+            "optional": True,
+        },
+        "search": {"kind": "text", "max_length": 120, "optional": True},
+        "priority": {"kind": "enum", "values": _PRIORITIES, "optional": True},
+        "status": {
+            "kind": "enum",
+            "values": (
+                "all",
+                "open",
+                "todo",
+                "in_progress",
+                "blocked",
+                "follow_up_required",
+                "done",
+                "cancelled",
+            ),
+            "optional": True,
+        },
+        "assignee": {"kind": "enum", "values": ("me", "unassigned"), "optional": True},
+        "due": {
+            "kind": "enum",
+            "values": ("overdue", "today", "seven_days", "all"),
+            "optional": True,
+        },
+        "offset": {"kind": "int", "minimum": 0, "maximum": 100000, "optional": True},
+    },
+}
 STAFF_TOOL_INFORMATION_CLASS = {
     **STAFF_TOOL_INFORMATION_CLASS,
     "getUniversityWorkBoard": "operational_state",

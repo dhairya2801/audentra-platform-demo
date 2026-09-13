@@ -902,6 +902,28 @@ class StaffAssistantPipeline:
         ]
         context: JsonDict = {
             "university": UNIVERSITY_CONTEXT if self._host.supports("university_record") else None,
+            "workBoard": (
+                "For task/card/project questions prefer getUniversityWorkBoard. "
+                "Use assignee=me only when the user asks about their own work. "
+                "Financial Aid projects are fa-docs, fa-outreach and fa-payments; "
+                "document review spans fa-docs and en-docs, not a component named "
+                "document-review. Payments is fa-payments. Project summaries describe "
+                "the whole institution, while page.total describes the requested filter. "
+                "Do not substitute global overdue counts for filtered counts. "
+                "Refer to the operational surface as Task Board."
+                if self._host.supports("university_record")
+                else None
+            ),
+            "resolvedWorkItem": (
+                {
+                    "key": request.reference_token,
+                    "meaning": "This token resolved to canonical staff work, not a student ID. "
+                    "Read getUniversityWorkBoard with search equal to this key for its "
+                    "priority, operational status, student, owner and due date.",
+                }
+                if resolution.treat_as_work_item
+                else None
+            ),
             "actor": "staff",
             "responseIntent": (
                 "Draft only: write the actual short message addressed directly to the student. "

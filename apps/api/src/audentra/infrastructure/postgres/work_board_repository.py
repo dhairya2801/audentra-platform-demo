@@ -59,7 +59,8 @@ class WorkBoardProjection:
                     f"SELECT {PROJECT_SQL} AS project, count(*) AS total, "  # noqa: S608 — code-owned SQL
                     "count(*) FILTER (WHERE item.status NOT IN ('done','cancelled')) AS open, "
                     f"count(*) FILTER (WHERE {ATTENTION_SQL}) AS attention, "
-                    "count(*) FILTER (WHERE item.due_at < CURRENT_TIMESTAMP) AS overdue, "
+                    "count(*) FILTER (WHERE item.due_at < CURRENT_TIMESTAMP "
+                    "AND item.status NOT IN ('done','cancelled')) AS overdue, "
                     "array_agg(DISTINCT item.component ORDER BY item.component) AS components "
                     "FROM public.staff_work_item item WHERE item.tenant_id=CAST(:tenant AS uuid) "
                     "GROUP BY 1"

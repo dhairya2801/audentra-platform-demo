@@ -1602,7 +1602,7 @@ _TOOL_IMPLEMENTATIONS = {**_TOOL_IMPLEMENTATIONS, "getUniversityCasework": _univ
 async def _university_work_board(
     host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
 ) -> JsonDict:
-    return dict(await _primitive(host, "university_work_board"))
+    return dict(await _primitive(host, "university_work_board", **dict(args)))
 
 
 _TOOL_IMPLEMENTATIONS = {**_TOOL_IMPLEMENTATIONS, "getUniversityWorkBoard": _university_work_board}
