@@ -395,6 +395,21 @@ def test_mutation_requests_are_refused_without_model_calls() -> None:
     assert host.read_primitives == []
 
 
+def test_questions_about_past_changes_do_not_become_write_requests() -> None:
+    from audentra.integrations.assistant.normalize import normalize_request
+
+    for question in (
+        "Did anything change on my checklist recently?",
+        "Did the office update my requirement?",
+        "Was I supposed to upload my transcript?",
+    ):
+        assert not normalize_request(question).is_mutation_request
+    # A later explicit instruction still reaches the action boundary.
+    assert normalize_request(
+        "Did anything change? Please upload my transcript for me."
+    ).is_mutation_request
+
+
 def test_unavailable_course_grade_does_not_become_generic_enrollment_advice() -> None:
     host = RecordingHost(_full_primitives())
     result = _run(AssistantPipeline(host), "What grade did I get in my first class?")

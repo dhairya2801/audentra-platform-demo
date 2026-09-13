@@ -610,8 +610,17 @@ class AssistantPipeline:
                 else None
             ),
             "identity": (
-                "Every tool reads the signed-in student's own record; no tool takes an "
-                "identity argument. getInstitutionalPolicies accepts an optional `query` — "
+                "Every personal tool reads only the signed-in student's own record; no tool "
+                "can read another student. Never attribute these results to a different "
+                "person named in the question. If asked about another person's private "
+                "student records, explain that you can only discuss the signed-in "
+                "student's own records; do not answer the other person's status using "
+                "the signed-in student's facts. If a named person may be the requester, "
+                "read getStudentProfile to establish that before answering. Other students "
+                "on an adviser's caseload are private too; the requester's own adviser "
+                "list cannot answer who else that adviser advises. Published "
+                "staff professional contacts and university policies remain readable. "
+                "getInstitutionalPolicies accepts an optional `query` — "
                 "use it for questions about rules, deadlines, consequences, amounts, "
                 "calendar dates, exemptions or which office handles something, and read "
                 "the student's own record alongside it when the question is about them."

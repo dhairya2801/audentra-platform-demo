@@ -61,7 +61,7 @@ _INFORMATIONAL_FRAME = re.compile(
     r"^(?:so |and |but |ok(?:ay)? |hey |hi |please |um |well )*(?:[^,?]{0,80},\s*)?"
     r"(?:where|how|when|what|why|who|which|whether"
     r"|can i|could i|should i|may i|do i|does|is (?:it|the|my|this|that|there)|are there"
-    r"|am i|will i|would i|must i|need i"
+    r"|am i|will i|would i|must i|need i|did|was|were"
     r"|if i|if my|what if|when i|suppose|say i|assuming)\b",
     re.IGNORECASE,
 )
