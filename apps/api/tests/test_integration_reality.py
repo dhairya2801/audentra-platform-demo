@@ -263,9 +263,7 @@ def test_board_filters_search_full_queue_before_pagination() -> None:
             assert filtered["page"]["total"] == len(expected)
             assert {card["id"] for card in filtered["cards"]} <= {card["id"] for card in expected}
             attention = await board.read(auth, filters={"quick": "exceptions"})
-            expected_attention = [
-                card for card in cards if card["status"] in {"exceptions", "exception", "escalated"}
-            ]
+            expected_attention = [card for card in cards if card["attention"]]
             assert attention["page"]["total"] == len(expected_attention)
             assert sum(row["attention"] for row in first["projectSummaries"].values()) == len(
                 expected_attention

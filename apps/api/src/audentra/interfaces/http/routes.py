@@ -50,6 +50,7 @@ from audentra.contracts.requests import (
     RescheduleStudentAppointmentRequest,
     RetryStaffCallTranscriptionRequest,
     ReviewStaffDocumentRequest,
+    SaveStaffOutreachDraftRequest,
     SelectPaymentPlanRequest,
     SimulateStaffOutreachRequest,
     StartStaffInteractionRequest,
@@ -2491,6 +2492,26 @@ async def create_work_item_comment(
         service=service,
         request=request,
         operation="staff.create_work_comment",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"workItemId": _uuid(work_item_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.put("/v1/staff/work-items/{id}/outreach-draft", status_code=200, response_model=None)
+async def save_outreach_draft(
+    work_item_id: Annotated[UUID, Path(alias="id")],
+    body: SaveStaffOutreachDraftRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.save_outreach_draft",
         auth=auth,
         payload=body.public_payload(),
         path_params={"workItemId": _uuid(work_item_id)},

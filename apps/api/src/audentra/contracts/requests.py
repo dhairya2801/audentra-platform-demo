@@ -958,6 +958,13 @@ class CreateStaffWorkCommentRequest(StrictRequest):
     mention_ids: list[UUID] = Field(default_factory=list, max_length=20)
 
 
+class SaveStaffOutreachDraftRequest(StrictRequest):
+    expected_work_item_version: StrictInt = Field(ge=1)
+    expected_draft_version: StrictInt = Field(ge=0)
+    subject: Annotated[StrictStr, StringConstraints(min_length=1, max_length=500)] | None = None
+    body: Annotated[StrictStr, StringConstraints(min_length=1, max_length=12000)]
+
+
 class StartStaffInteractionRequest(StrictRequest):
     expected_work_item_version: StrictInt = Field(ge=1)
     channel: StaffCommunicationChannel
@@ -971,6 +978,8 @@ class RecordStaffCommunicationRequest(StrictRequest):
     subject: Annotated[StrictStr, StringConstraints(min_length=1, max_length=500)] | None = None
     body: Annotated[StrictStr, StringConstraints(min_length=1, max_length=12000)]
     occurred_at: datetime | None = None
+    draft_id: UUID | None = None
+    expected_draft_version: StrictInt | None = Field(default=None, ge=1)
 
 
 class CompleteStaffInteractionRequest(StrictRequest):

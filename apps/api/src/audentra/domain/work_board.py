@@ -15,7 +15,7 @@ def board_card(item: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
         else "payment"
         if payment
         else "outreach"
-        if item["actionType"] in ("reachout", "outreach", "follow_up")
+        if item["type"] == "communication" or item["actionType"] == "communication_response"
         else "request"
     )
     office = (
@@ -58,14 +58,19 @@ def board_card(item: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
             "reversed": "exception",
         }.get(payment["status"], "requested")
     elif kind == "outreach":
-        stage = {
-            "todo": "identified",
-            "in_progress": "drafting",
-            "follow_up_required": "waiting",
-            "blocked": "approval",
-            "done": "completed",
-            "cancelled": "completed",
-        }[operational]
+        draft = links.get("outreachDraft") or {}
+        communication = links.get("communication") or {}
+        if operational in ("done", "cancelled"):
+            stage = "completed"
+        elif draft.get("status") == "draft":
+            stage = "drafting"
+        elif communication.get("direction") == "inbound":
+            stage = "responded"
+        elif communication.get("deliveryStatus") == "delivered":
+            stage = "waiting"
+        else:
+            # Operational blocking is not an approval decision or a sent message.
+            stage = "drafting" if operational == "in_progress" else "identified"
     else:
         stage = {
             "todo": "received",
@@ -88,6 +93,13 @@ def board_card(item: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
         "board": board,
         "status": stage,
         "operationalStatus": operational,
+        "attention": (
+            document["status"] in {"under_review", "needs_review"}
+            if document
+            else payment["status"] in {"failed", "reversed"}
+            if payment
+            else operational == "blocked"
+        ),
         "student": item["student"]["name"],
         "studentId": item["student"]["id"],
         "program": item["student"]["programName"],
@@ -108,6 +120,8 @@ def board_card(item: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
         "document": document,
         "payment": payment,
         "case": links.get("case"),
+        "outreachDraft": links.get("outreachDraft"),
+        "communication": links.get("communication"),
         "signals": item["signals"],
         "source": item["source"],
         "exceptions": [],

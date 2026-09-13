@@ -41,6 +41,7 @@ from audentra.domain.action_center import (
 )
 from audentra.domain.document_review import public_review_decision
 from audentra.domain.documents import bounded_document_label
+from audentra.domain.outreach_drafts import project_outreach_draft
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
@@ -2206,6 +2207,15 @@ class PostgresStaffRepository:
                 text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
                 {"tenant": auth.tenant_id},
             )
+            draft_result = await connection.execute(
+                text(
+                    "SELECT * FROM public.staff_outreach_draft "
+                    "WHERE tenant_id=:tenant AND work_item_id=:work"
+                ),
+                {"tenant": _uuid(auth.tenant_id), "work": _uuid(work_item_id)},
+            )
+            draft_row = draft_result.mappings().first()
+            outreach_draft = project_outreach_draft(dict(draft_row) if draft_row else None)
             decisions = await connection.execute(
                 text("""
                 SELECT id,document_id,decision,reason_code,reason_label,student_message,
@@ -2570,6 +2580,7 @@ class PostgresStaffRepository:
             "interactions": interactions,
             "comments": comments,
             "relatedItems": related_items,
+            "outreachDraft": outreach_draft,
             "relatedDocuments": [
                 {
                     "id": str(row["id"]),
@@ -3197,6 +3208,127 @@ class PostgresStaffRepository:
                 )
         return await self.get_work_item_detail(auth, work_item_id)
 
+    async def save_outreach_draft(
+        self,
+        auth: AuthContext,
+        work_item_id: str,
+        payload: Mapping[str, object],
+        idempotency_key: str,
+        request_id: str,
+    ) -> dict[str, object]:
+        self._require_staff(auth)
+        expected_work = _integer(
+            _read(payload, "expectedWorkItemVersion"), "expectedWorkItemVersion"
+        )
+        expected_draft = _read(payload, "expectedDraftVersion")
+        if (
+            isinstance(expected_draft, bool)
+            or not isinstance(expected_draft, int)
+            or expected_draft < 0
+        ):
+            raise BadRequestError(
+                "OUTREACH_DRAFT_INVALID", "Draft version must be a nonnegative integer"
+            )
+        subject = _optional_text(_read(payload, "subject", default=None))
+        body = str(_read(payload, "body")).strip()
+        if expected_draft < 0 or not body or len(body) > 12000 or (subject and len(subject) > 500):
+            raise BadRequestError(
+                "OUTREACH_DRAFT_INVALID", "A draft needs bounded message text and a valid version"
+            )
+
+        async def handler(connection: AsyncConnection) -> dict[str, object]:
+            work = await self._lock_work_item(connection, auth, work_item_id)
+            if _database_integer(work["version"], "staff_work_item.version") != expected_work:
+                raise ConflictError(
+                    "VERSION_CONFLICT", "This work item changed; refresh before saving"
+                )
+            if str(work["status"]) in _TERMINAL_WORK_ITEM_STATUSES:
+                raise ConflictError("WORK_ITEM_TERMINAL", "Closed work cannot receive a new draft")
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id',:tenant,true)"),
+                {"tenant": auth.tenant_id},
+            )
+            current = (
+                (
+                    await connection.execute(
+                        text(
+                            "SELECT * FROM public.staff_outreach_draft "
+                            "WHERE tenant_id=:tenant AND work_item_id=:work FOR UPDATE"
+                        ),
+                        {"tenant": _uuid(auth.tenant_id), "work": _uuid(work_item_id)},
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if (int(current["version"]) if current else 0) != expected_draft:
+                raise ConflictError(
+                    "DRAFT_VERSION_CONFLICT",
+                    "Another staff member changed this draft; your unsaved text is retained",
+                )
+            result = await connection.execute(
+                text("""
+                INSERT INTO public.staff_outreach_draft
+                (id,tenant_id,work_item_id,student_id,subject,body,created_by,updated_by)
+                VALUES(:id,:tenant,:work,:student,:subject,:body,:actor,:actor)
+                ON CONFLICT(tenant_id,work_item_id) DO UPDATE SET
+                  subject=EXCLUDED.subject,body=EXCLUDED.body,status='draft',
+                  version=staff_outreach_draft.version+1,updated_by=EXCLUDED.updated_by,
+                  communication_id=NULL,updated_at=NOW()
+                RETURNING *
+            """),
+                {
+                    "id": self._uuid_factory(),
+                    "tenant": _uuid(auth.tenant_id),
+                    "work": _uuid(work_item_id),
+                    "student": work["student_id"],
+                    "subject": subject,
+                    "body": body,
+                    "actor": _uuid(auth.actor_id),
+                },
+            )
+            draft = project_outreach_draft(dict(result.mappings().one()))
+            await connection.execute(
+                text(
+                    "UPDATE staff_work_item SET version=version+1,updated_at=NOW() "
+                    "WHERE tenant_id=:tenant AND id=:work"
+                ),
+                {"tenant": _uuid(auth.tenant_id), "work": _uuid(work_item_id)},
+            )
+            actor_name = await self._staff_name(connection, auth, auth.actor_id)
+            await self._insert_work_log(
+                connection,
+                auth=auth,
+                work_item_id=work_item_id,
+                actor_name=actor_name,
+                action="outreach_draft_saved",
+                message="Saved an unsent portal outreach draft.",
+            )
+            await self._insert_outbox(
+                connection,
+                auth=auth,
+                request_id=request_id,
+                event_name="staff.work_item_updated.v1",
+                aggregate_type="staff_work_item",
+                aggregate_id=work_item_id,
+                aggregate_version=expected_work + 1,
+                data={
+                    "workItemId": work_item_id,
+                    "studentId": str(work["student_id"]),
+                    "changedFields": ["outreachDraft"],
+                },
+            )
+            return {"draft": draft, "workItemVersion": expected_work + 1}
+
+        return await self._run_idempotent(
+            auth=auth,
+            idempotency_key=idempotency_key,
+            operation="staff.save_outreach_draft",
+            request_payload={"workItemId": work_item_id, "payload": dict(payload)},
+            response_status=200,
+            handler=handler,
+        )
+
     async def start_interaction(
         self,
         auth: AuthContext,
@@ -3364,6 +3496,17 @@ class PostgresStaffRepository:
             or self._clock()
         )
 
+        draft_id = payload.get("draftId")
+        draft_version = payload.get("expectedDraftVersion")
+        if (draft_id is None) != (draft_version is None):
+            raise BadRequestError(
+                "OUTREACH_DRAFT_INVALID", "Draft ID and expected version are required together"
+            )
+        if draft_id is not None and (channel != "portal" or direction != "outbound"):
+            raise BadRequestError(
+                "OUTREACH_DRAFT_INVALID", "Saved outreach drafts send only to the portal inbox"
+            )
+
         async def handler(connection: AsyncConnection) -> dict[str, object]:
             existing = await connection.execute(
                 text(
@@ -3402,6 +3545,43 @@ class PostgresStaffRepository:
                         "WORK_ITEM_TERMINAL",
                         "Closed work cannot receive another communication",
                     )
+
+                if draft_id is not None:
+                    await connection.execute(
+                        text("SELECT set_config('audentra.tenant_id',:tenant,true)"),
+                        {"tenant": auth.tenant_id},
+                    )
+                    draft = (
+                        (
+                            await connection.execute(
+                                text(
+                                    "SELECT * FROM public.staff_outreach_draft "
+                                    "WHERE tenant_id=:tenant AND work_item_id=:work "
+                                    "AND id=:id FOR UPDATE"
+                                ),
+                                {
+                                    "tenant": _uuid(auth.tenant_id),
+                                    "work": _uuid(work_item_id),
+                                    "id": _uuid(str(draft_id)),
+                                },
+                            )
+                        )
+                        .mappings()
+                        .first()
+                    )
+                    if (
+                        draft is None
+                        or draft["status"] != "draft"
+                        or int(draft["version"]) != draft_version
+                    ):
+                        raise ConflictError(
+                            "DRAFT_VERSION_CONFLICT",
+                            "The reviewed draft changed or was already sent",
+                        )
+                    if draft["subject"] != subject or draft["body"] != body:
+                        raise ConflictError(
+                            "DRAFT_CONTENT_CHANGED", "Save this message before confirming delivery"
+                        )
 
                 sequence = (
                     _database_integer(
@@ -3507,6 +3687,21 @@ class PostgresStaffRepository:
                         "delivery_status": delivery_status,
                     },
                 )
+                if draft_id is not None:
+                    await connection.execute(
+                        text("""
+                        UPDATE public.staff_outreach_draft SET status='sent',
+                          communication_id=:communication,updated_by=:actor,
+                          version=version+1,updated_at=NOW()
+                        WHERE tenant_id=:tenant AND id=:id
+                    """),
+                        {
+                            "communication": communication_id,
+                            "actor": _uuid(auth.actor_id),
+                            "tenant": _uuid(auth.tenant_id),
+                            "id": _uuid(str(draft_id)),
+                        },
+                    )
                 quiet_until = occurred_at + timedelta(minutes=5)
                 interaction_update = await connection.execute(
                     text(

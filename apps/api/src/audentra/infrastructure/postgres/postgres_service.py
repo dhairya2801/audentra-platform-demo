@@ -1775,6 +1775,14 @@ class PostgresPlatformService:
                 self._key(call.idempotency_key),
                 call.request_id,
             )
+        if operation == "staff.save_outreach_draft":
+            return await staff.save_outreach_draft(
+                auth,
+                self._path(call, "workItemId", "id", "work_item_id"),
+                payload,
+                self._key(call.idempotency_key),
+                call.request_id,
+            )
         if operation == "staff.start_interaction":
             return await staff.start_interaction(
                 auth,

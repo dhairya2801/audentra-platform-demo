@@ -1419,6 +1419,7 @@ export interface StaffWorkItemLog {
     | "document_decided"
     | "student_preferences_updated"
     | "channel_selected"
+    | "outreach_draft_saved"
     | "interaction_started"
     | "communication_recorded"
     | "outcome_recorded"
@@ -1686,6 +1687,7 @@ export interface StaffTaskAiInsight {
 }
 
 export interface StaffWorkItemDetail {
+  outreachDraft?: StaffOutreachDraft | null;
   workItem: StaffWorkItem;
   taskInsight: StaffTaskAiInsight;
   studentSummary: StaffStudentAiSummary;
@@ -2031,6 +2033,34 @@ export interface CreateStaffWorkCommentInput {
   mentionIds?: string[];
 }
 
+export interface StaffOutreachDraft {
+  id: string;
+  workItemId: string;
+  studentId: string;
+  channel: "portal";
+  subject: string | null;
+  body: string;
+  status: "draft" | "sent";
+  version: number;
+  createdByStaffId: string;
+  updatedByStaffId: string;
+  communicationId: string | null;
+  updatedAt: string;
+  semantics: string;
+}
+
+export interface SaveStaffOutreachDraftInput {
+  expectedWorkItemVersion: number;
+  expectedDraftVersion: number;
+  subject?: string | null;
+  body: string;
+}
+
+export interface SaveStaffOutreachDraftResult {
+  draft: StaffOutreachDraft;
+  workItemVersion: number;
+}
+
 export interface StartStaffInteractionInput {
   expectedWorkItemVersion: number;
   channel: StaffCommunicationChannel;
@@ -2038,6 +2068,8 @@ export interface StartStaffInteractionInput {
 }
 
 export interface RecordStaffCommunicationInput {
+  draftId?: string;
+  expectedDraftVersion?: number;
   expectedInteractionVersion: number;
   channel: StaffCommunicationChannel;
   direction: "inbound" | "outbound";

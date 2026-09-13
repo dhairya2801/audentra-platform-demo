@@ -12,7 +12,7 @@ CASE
  WHEN item.source_type='document' OR item.action_type='document_review' THEN
   CASE WHEN lower(item.component) SIMILAR TO '%(financial|accounts|aid)%'
        THEN 'fa-docs' ELSE 'en-docs' END
- WHEN item.action_type IN ('reachout','outreach','follow_up') THEN
+ WHEN item.work_type='communication' OR item.action_type='communication_response' THEN
   CASE WHEN lower(item.component) SIMILAR TO '%(financial|accounts|aid)%'
        THEN 'fa-outreach' ELSE 'en-outreach' END
  ELSE 'en-requests'
@@ -46,7 +46,6 @@ CASE
              ON p.tenant_id=l.tenant_id AND p.id=l.world_id
              WHERE l.tenant_id=item.tenant_id AND l.runtime_id=item.id
              AND l.kind='payment_work_item' AND p.status IN ('failed','reversed'))
- ELSE item.status='blocked' AND item.action_type NOT IN
-      ('reachout','outreach','follow_up')
+ ELSE item.status='blocked'
 END
 """

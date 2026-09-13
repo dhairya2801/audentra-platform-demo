@@ -105,7 +105,7 @@ class LiveDatabase:
             self.runner.close()
 
 
-async def projection(url, kind, student_id, actor_id, offset=0):
+async def projection(url, kind, student_id, actor_id, offset=0, work_item_id=None):
     runtime = await build_api_runtime(
         RuntimeSettings.from_environment({"DATABASE_URL": url})
     )
@@ -119,6 +119,10 @@ async def projection(url, kind, student_id, actor_id, offset=0):
             return await runtime.service.repository.university.record(auth, "documents")
         if kind == "relationships":
             return await runtime.service.repository.university.record(auth, "relationships")
+        if kind == "work-item":
+            return await runtime.service.repository.staff.get_work_item_detail(
+                auth, str(UUID(str(work_item_id)))
+            )
         if kind == "student-profile":
             return await runtime.service.repository.portal.get_student_profile(
                 replace(auth, actor_type="student", actor_id=student_id)

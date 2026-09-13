@@ -122,6 +122,7 @@ def serve(world=DEFAULT_OUTPUT, port=4310, database_url=None):
                 if database_url and path in {
                     "/api/documents",
                     "/api/relationships",
+                    "/api/work-item",
                     "/api/financial-plan",
                     "/api/work-board",
                     "/api/campus-life",
@@ -142,6 +143,7 @@ def serve(world=DEFAULT_OUTPUT, port=4310, database_url=None):
                                     "actor_id", "01973261-954a-5019-8e9e-24a699abea7b"
                                 ),
                                 int(q.get("offset", "0")),
+                                q.get("work_item_id"),
                             )
                         )
                     )

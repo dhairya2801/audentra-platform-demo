@@ -94,6 +94,41 @@ class WorkBoardProjection:
                 )
                 params = {"tenant": auth.tenant_id, "ids": list(linked)}
                 result = await c.execute(
+                    text("""SELECT work_item_id,id,status,version,communication_id
+                    FROM public.staff_outreach_draft WHERE tenant_id=CAST(:tenant AS uuid)
+                    AND work_item_id=ANY(CAST(:ids AS uuid[]))"""),
+                    params,
+                )
+                for row in result.mappings():
+                    linked[str(row["work_item_id"])]["outreachDraft"] = {
+                        "id": str(row["id"]),
+                        "status": row["status"],
+                        "version": row["version"],
+                        "communicationId": str(row["communication_id"])
+                        if row["communication_id"]
+                        else None,
+                    }
+                result = await c.execute(
+                    text("""SELECT DISTINCT ON(i.work_item_id) i.work_item_id,c.id,
+                    c.channel,c.direction,c.delivery_status,c.source_type,c.occurred_at
+                    FROM public.staff_interaction i JOIN public.communication_event c
+                      ON c.tenant_id=i.tenant_id AND c.interaction_id=i.id
+                    WHERE i.tenant_id=CAST(:tenant AS uuid)
+                      AND i.work_item_id=ANY(CAST(:ids AS uuid[]))
+                      AND c.delivery_status IN ('received','delivered')
+                    ORDER BY i.work_item_id,c.occurred_at DESC,c.id DESC"""),
+                    params,
+                )
+                for row in result.mappings():
+                    linked[str(row["work_item_id"])]["communication"] = {
+                        "id": str(row["id"]),
+                        "channel": row["channel"],
+                        "direction": row["direction"],
+                        "deliveryStatus": row["delivery_status"],
+                        "source": row["source_type"],
+                        "occurredAt": row["occurred_at"].isoformat(),
+                    }
+                result = await c.execute(
                     text("""
                     SELECT wi.id AS work_id,d.id,d.status,d.file_name AS filename,wi.version
                     FROM public.staff_work_item wi JOIN public.document_record d

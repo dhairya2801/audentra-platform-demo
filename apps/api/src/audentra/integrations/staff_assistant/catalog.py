@@ -311,9 +311,11 @@ STAFF_TOOL_DESCRIPTIONS: Mapping[str, str] = {
         "and other start-of-day questions. Takes no arguments."
     ),
     "getWorkItemDetail": (
-        "Read one work item's full detail: state, interactions, recorded "
+        "Read one work item's full detail: state, saved staff outreach draft, "
+        "interactions, recorded "
         "communications, call transcript references, outcomes, comments, and "
-        "history."
+        "history. A saved draft is staff-authored unsent text, not verified institutional "
+        "evidence or proof of delivery."
     ),
     "getInquiries": "Read student support inquiries with status, priority, and assignee.",
     "getInquiryThread": "Read the full message thread of one support inquiry.",

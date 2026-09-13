@@ -161,6 +161,9 @@ The donor's official document history was selectively adapted in integration mig
 | `0070_document_review_history.sql` | Tenant reason catalog, immutable official decisions, requirement status history, identity/link validation and tenant RLS |
 | `0071_document_resubmission_sync.sql` | Follow the current submission link, preserve older decisions, and prevent an old submission from overwriting the current university document |
 | `0072_university_academic_progress.sql` | Restore the missing PostgreSQL academic-progress view used by Atlas dossiers, with tenant joins and invoker permissions |
+| `0073_staff_outreach_drafts.sql` | Staff-only versioned composition, tenant/actor/work links, and sent-to-communication integrity |
+| `0074_outreach_draft_activity.sql` | Extend the existing immutable work activity vocabulary with draft saving |
+| `0075_imported_case_work_classification.sql` | Correct only original importer defaults: formal case coordination versus notification communication work |
 | SQLite `0004_product_planning.sql` | Deterministic evaluation counterparts for the new financial seed domains |
 
 No prior synthetic migration was renumbered or overwritten. Applied integration migrations were not changed. The catalog has 12 approved policy-derived rates, and 992 active meal enrollments are grounded in existing billed meal records. Savings, agreements, insurance coverage, loan terms and saved scenarios are not fabricated to fill screens.
@@ -364,7 +367,7 @@ The approved Action Center now retains its communication workspace while support
 
 Those two existing commands now use the shared durable idempotency helper, binding actor, operation, entity, full request payload and expected version under a transaction lock. The receipt commits with delivery/history/outbox changes. Identical retries return the canonical work detail without sending again; a changed payload or version under the same key fails. Older request keys without a durable replay receipt fail explicitly rather than guessing success. The iframe retains a command's original version and key across a lost response, preserving the draft on failure. Sending cannot close the formal case, settle money or mark required institutional steps complete.
 
-Typed, unsent composition remains ephemeral text in the open board, explicitly described as lost on leaving/refreshing. It is not a browser-owned delivery record or a claimed saved institutional draft. Persisted cross-session outreach drafts and automated drafting/approval remain unfinished capabilities. No generic send tool, external provider integration or workflow engine was added.
+Typed, unsent composition remains ephemeral text in the open board, explicitly described as lost on leaving/refreshing. It is not a browser-owned delivery record or a claimed saved institutional draft. This historical limitation is superseded by section 20 for persisted cross-session drafts. Automated drafting/approval remains unfinished. No generic send tool, external provider integration or workflow engine was added.
 
 The integration also identified and repaired a read gap: newly sent public portal messages were absent from the university relationship evidence used by Edward. `getUniversityRelationships` now includes the latest 50 canonical `student_message` records, with operational timestamps and explicit delivery/case boundaries. It does not expose staff-only notes or claim an historical time-lens read. Atlas `/api/relationships` and its live Relationships tab use that same projection. Stale asynchronous document/inbox results cannot populate a different student's newly opened dossier.
 
@@ -387,3 +390,59 @@ Verification includes a real PostgreSQL transaction for authorization, start/sen
 | Targeted Luna | Staff identifies outstanding case step; corrected student response limits claims to available evidence | `platform/artifacts/integration/outreach-edward-staff-final.log`, `outreach-edward-student-corrected.log` |
 
 The complete platform suite precedes the final inbox-evidence/context refinements, which have dedicated transaction, registered-tool, browser and live-probe coverage. The supplemental PostgreSQL run closes three configuration-only skips; twenty legacy frozen-host tests and three external-storage/production tests remain unexecuted. The portal test build precedes the final checkbox alignment and screenshot-animation adjustment; the final build and browser run cover them. No schema migration was required for this continuation: canonical message, communication, interaction and idempotency tables already existed.
+
+Outreach integration commits (local only):
+
+- platform: `731bc5c3324dc1604ea7e549f8c0b0e7a9d0ae67`
+- portals: `76062d2d06c91f26ef2bd4d976138e21f477f40b`
+
+Latest source audit: **2026-09-13T05:37:04.856799+00:00**. All source Git/product-state checks remain unchanged, with only the same two ignored trace-store differences documented earlier. No push or deploy. Both integration branches are clean and have no configured remotes.
+
+
+## 20. Continued integration: durable outreach drafts and evidence-derived stages
+
+The deployed communication workspace now saves real, shared staff drafts. `public.staff_outreach_draft` owns one current composition per tenant/work item. The record contains subject/body, student/work linkage, author/updater, version and an optional sent communication link. It is product workflow state, never verified institutional fact or a delivered message merely because it exists. New synthetic worlds contain no fabricated staff drafts. Starting another composition continues the record's version; prior sent messages and their command receipts remain canonical history. Full per-keystroke draft revision history and automated drafting/approval are not implemented.
+
+`PUT /v1/staff/work-items/{id}/outreach-draft` enforces staff authorization, bounded text, tenant/work/student/actor integrity, expected work and draft versions, payload-bound idempotency, an atomic receipt, activity and the existing outbox event. Saving does not create an interaction, send a message, change account facts, or complete a formal case. The browser keeps only unsaved typing and in-flight retry keys. Saved content survives reload. A competing save rejects stale input while retaining local typing; explicit reload retrieves the current version. Sending after explicit review saves any changed composition, then binds the exact saved draft ID/version/subject/body to the existing communication command. Delivered communication, portal inbox insertion, draft `sent` state and replay receipt commit together. A changed or already-sent draft cannot be sent under a stale version. Retry retains the original command payload and creates one message.
+
+Edward's existing `getWorkItemDetail` returns the same staff-only projection; its catalog now describes the provenance boundary. No new Edward tool or write action was introduced. The Luna model read planner, action gateway, grounding and privacy guards remain in place. A live staff probe correctly identifies a newly saved draft as unsent and distinguishes it from four earlier delivered messages on the same task. Student university relationships do not contain private draft text. Atlas live adds `/api/work-item?work_item_id=<UUID>` and an inspectable work/draft panel, sharing the staff repository and retaining live mutation denial. The Architecture description includes this actual draft/delivery path.
+
+The draft stage test exposed an older integration classification error: the board used action names that canonical PostgreSQL constraints do not allow. Outreach now means canonical communication work or `communication_response`, with document/payment evidence retaining precedence. Its stage is drafting for an unsent saved draft, waiting for an actual outbound delivery, responded for a recorded inbound communication, or completed for terminal operational work. Blocked operational status is not an approval decision. Attention remains explicit for blocked work without changing its evidence-derived stage. The current importer also assigned every formal university workflow the document-review work type. Fresh imports and forward migration 0075 now classify notification cases as communication work and other formal case coordination as enrollment work with `staff_decision`; individual source-linked document review cards retain their own file workflow. Existing ownership, operational state, case dependencies and evidence remain authoritative.
+
+| Added ownership mapping | Canonical owner | Consumers |
+|---|---|---|
+| Saved outreach composition | `staff_outreach_draft` plus staff command receipts/activity | Approved board, staff work detail, Edward work-detail read, Atlas operator view |
+| Actual portal delivery | `communication_event`, `student_message`, linked sent draft | Staff conversation, student inbox, Edward relationships, Atlas relationships |
+| Outreach stage/attention | Shared Work Board projection over work, draft and communication records | Board filtering/counts/cards, Edward operations, Atlas operations |
+
+```mermaid
+flowchart LR
+  S[Staff saves composition] --> D[(PostgreSQL staff_outreach_draft)]
+  D --> W[Shared staff work detail]
+  W --> B[Action Center]
+  W --> E[Edward existing work-detail read]
+  W --> A[Atlas live work inspection]
+  B --> C[Explicit review and confirmation]
+  C --> G[Version and payload-bound communication command]
+  D --> G
+  G --> T[Atomic delivered communication / sent draft / receipt]
+  T --> I[(Canonical student_message)]
+  I --> R[Shared current inbox and relationships]
+  R --> P[Student Portal / Edward / Atlas]
+```
+
+| Draft integration verification | Result | Local evidence |
+|---|---|---|
+| Complete platform test command | 1,550 passed, 23 skipped; 73.72% coverage; Node suites passed | `platform/artifacts/integration/tests-drafts.log` |
+| Fresh imported PostgreSQL transaction/runtime/parity tests after final classifier change | 11 passed; no skipped tests | `platform/artifacts/integration/drafts-classified-fresh-tests.log` |
+| New empty database rebuild | Migrations through 0075 and deterministic import succeeded; 3,000 students, 88 staff, 383 policy passages; zero seeded drafts | `platform/artifacts/integration/drafts-classified-fresh-import.log`, `drafts-classified-mapping.log` |
+| Portal full tests | 136 passed, no failures or skips | `portals/artifacts/integration/tests-drafts-final.log` |
+| Platform/portal lint and typecheck, portal build | Passed; portal retains 14 warnings and no lint errors | Respective `artifacts/integration/*-drafts-final.log` |
+| Browser draft workflow | Save/reload, concurrent-save conflict, retained local text, explicit refresh, no pre-confirmation delivery, dropped-response retry, one message, portal/Atlas equality passed | `portals/artifacts/integration/browser-drafts-final.log` |
+| Normal canonical surfaces and full-queue board browser tests | Passed against the interactive integration runtime | `portals/artifacts/integration/parity-drafts-final.log`, `filters-drafts-final.log` |
+| Live Luna staff interpretation | Correctly distinguished an unsent version from prior deliveries | `platform/artifacts/integration/edward-draft-probe.log` |
+| Visual review | Saved draft and Atlas draft panels inspected; donor communication treatment retained | Workspace `VISUAL-REVIEW.html` |
+
+The full platform run precedes the final board classification and importer changes; the fresh rebuild and 11 targeted database/runtime/parity tests cover those changes. The final two small frontend refinements bind a pending send to its original detail context and update the Architecture description; final build/typecheck and browser rerun cover them. The same twenty legacy frozen-host tests and three external-storage/production tests remain unexecuted. The packaged older university archive was inspected as a possible legacy reconstruction source; it contains the base population but not the frozen bank's expanded staff fixture. No old bank expectation was rewritten to manufacture a passing score. External delivery, original object storage and complete legacy semantic acceptance remain promotion gates.
+
+Source audit at **2026-09-13T06:13:05.186041+00:00** again confirms all five source Git/product states unchanged. The only byte differences remain the previously disclosed two ignored synthetic portal trace-store files. No additional source differences, pushes, deployments or existing institutional database changes occurred. Exact local commit hashes are recorded below after commit creation. This workspace remains an integration review candidate, with the promotion limits in section 13 still open.

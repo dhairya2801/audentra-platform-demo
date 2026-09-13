@@ -312,8 +312,8 @@ async def run(url, source, resume_bootstrap=False):
                 rid = uid("workflow", w["id"])
                 links.append((TENANT, "workflow", w["id"], rid))
                 await raw.execute(
-                    """INSERT INTO staff_work_item(id,tenant_id,student_id,key,title,description,status,priority,work_type,component,due_at,assignee_id,version)
-                  VALUES($1,$2,$3,$4,$5,$6,$7,'medium','document_review',$8,$9::text::timestamptz,$10,$11)""",
+                    """INSERT INTO staff_work_item(id,tenant_id,student_id,key,title,description,status,priority,work_type,component,due_at,assignee_id,version,action_type)
+                  VALUES($1,$2,$3,$4,$5,$6,$7,'medium',$12,$8,$9::text::timestamptz,$10,$11,$13)""",
                     rid,
                     TENANT,
                     UUID(w["student_id"]),
@@ -330,6 +330,8 @@ async def run(url, source, resume_bootstrap=False):
                     w["due_at"],
                     uid("staff", w["owner_id"]),
                     w["version"],
+                    "communication" if w["kind"] == "notification" else "enrollment",
+                    "communication_response" if w["kind"] == "notification" else "staff_decision",
                 )
             await raw.copy_records_to_table(
                 "runtime_link",
