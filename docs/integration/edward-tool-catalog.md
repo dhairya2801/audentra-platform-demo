@@ -1,0 +1,114 @@
+# Edward tool catalog in vNext
+
+Generated from the actual registries. Runtime authorization, tenant capabilities, university mode and identity gates select a subset; this is not a grant of every capability to every actor. No generic SQL/write tool is added.
+
+## Student reads (32 registered)
+
+| Tool | Capability |
+| --- | --- |
+| `getStudentProfile` | Read the authenticated student's profile: names, pronouns, email and phone with their verification state, and communication preference. |
+| `getEnrollmentState` | Read where the student stands overall: admission decision, program, starting term, campus, class year, enrollment-deposit payment state, enrollment journey progress and next action, and onboarding position. |
+| `getOnboardingResponses` | Read what the student answered during onboarding: citizenship and residency, mailing address, emergency contacts, family permissions, insurance and accommodation interest, campus interests and goals, and the enrollment signature record. |
+| `getOnboardingChecklist` | Read enrollment and onboarding requirements with their statuses, due dates, prerequisites, responsible office, and submitted responses. |
+| `getDocumentStatuses` | Read the documents the student has actually uploaded, with review status, extraction outcome, and any staff decision. Uploads only: which documents are still required or missing comes from getOnboardingChecklist. |
+| `getEnrollmentHolds` | Read official enrollment holds and derived blockers. |
+| `getStudentDeadlines` | Read enrollment, requirement, and appointment deadlines. |
+| `getSupportOptions` | Read approved general support contacts and articles. |
+| `getStudentSupportRequests` | Read the student's own support conversations and the latest reply on each. |
+| `getFinancialAidStatus` | Read bounded financial-aid requirements, verification, and award acceptance statuses. |
+| `getFinancialAidSummary` | Read how much aid the student has: FAFSA state, whether the package is estimated or finalized, every award with its offered and accepted amount, what the aid covers against the cost of attendance, and each condition still holding the package open. |
+| `getAidDisbursements` | Read when aid money actually moves: what has paid out, what is scheduled and when, and the exhaustive list of reasons a disbursement is being held. |
+| `getFinancialAidSupportOptions` | Read approved financial-aid support routes. |
+| `getStudentHousingStatus` | Read the housing plan and housing requirement state. |
+| `getStudentHousingEligibility` | Read whether the student can act on housing right now: the housing step's own state and each open item blocking it. |
+| `getHousingOptions` | Read tenant-listed housing preference options. |
+| `getRegistrationStatus` | Read course-registration eligibility for the current term: each gate blocking registration and what clears it. |
+| `getStudentAccountSummary` | Read the student account: balance, charges, posted and pending payments, and whether the balance blocks registration. |
+| `getAcademicStanding` | Read satisfactory academic progress — cumulative GPA against the minimum, completion rate, attempted credits — and earned credits. |
+| `getStudentAppointments` | Read scheduled advising, orientation, financial-aid, and housing appointments, plus where the student can book one. |
+| `getStudentAdvising` | Read who advises the student: the primary adviser and every other assigned staff member (admissions counselor, financial-aid counselor, international adviser, housing coordinator) with their role, title, institutional email, office location and whether they can be booked right now — plus the next open slot and any advising gap (no primary adviser, adviser on leave or departed, no open slots). Use this for 'who is my adviser', 'how do I reach my counselor', and 'when could I meet them' questions. |
+| `getAcademicPlan` | Read the student's academic program and planned courses, including missing prerequisites and suggested exemptions. |
+| `getCampusLife` | Read upcoming campus events and student clubs. |
+| `getStudentMessages` | Read the unread-message count and latest message subjects. |
+| `getUniversityFinancialPlan` | Read the shared Financial Plan: posted account facts, annual offers and accepted aid, term disbursements, payment lifecycle, published housing and meal rates, insurance coverage, actual installment agreements, and student-entered term budget assumptions. Savings are estimates, hypothetical housing is not an assignment, and credit is not a settled refund. |
+| `getUniversityOverview` | Read current admission/lifecycle, actual term credit loads, posted balances, independent official holds with their owning offices, and institutional deadlines. |
+| `getUniversityAcademics` | Read actual registrations and historical course attempts/grades, accepted versus pending transfer evaluations, evidence-based SAP history, prerequisites, waitlist offers, individual exceptions and explicitly unresolved degree requirements. Use for academic progress or course-drop consequences. |
+| `getUniversityAccount` | Read the canonical posted ledger in integer cents, exact term balances including credit owed, pending/failed/reversed payments, annual accepted awards versus term disbursements, employment awards, SAP, financial-aid requirements, office review stages and actual holds. Pending money is never posted money. |
+| `getUniversityRelationships` | Read named cross-office advisers and active leave coverage, appointments/no-shows, physical housing/compatible placement, effective/revoked FERPA consent and individual exceptions. Staff additionally see case owners, handoff steps, dependencies and delivery failures. |
+| `getUniversityDocuments` | Read required documents including not submitted, current review status, rejection reasons and original revisions with effective and recorded timestamps. |
+| `getUniversityHistory` | Read historical events bounded by BOTH knownAt (recorded time) and effectiveAt. Optional entityType and entityId focus the event history; external grade corrections use entityType=transfer_credit, institutional course grades use enrollment. There is no grade entity type. Use ISO timestamps with timezone. Defaults to the fixed university clock. Current dossier fields cannot answer what the university knew before a late grade correction. |
+| `getInstitutionalPolicies` | Read audience-scoped, effective, published institutional passages with applicability, source version and provenance; uses the canonical university policy repository for this tenant. |
+
+## Staff reads (49 registered)
+
+| Tool | Capability |
+| --- | --- |
+| `searchStudents` | Search the canonical student roster by name, student ID (external reference), and/or program. Returns concise summaries with the student ID and requirement progress; when no exact name matches, close-spelling suggestions are returned marked matchQuality=fuzzy and must be confirmed, never silently chosen. |
+| `findStudents` | Find the students matching a cohort filter and report how many match in total. Filters combine conjunctively and cover admission offer status, deposit state, onboarding status, a named requirement's state, a document category's state, financial-aid document state, housing state, program, class year, residency and citizenship, assigned staff, open Action Center work, and overdue requirements. Use this for questions of the form 'which students ...'. |
+| `summarizeStudents` | Count the students matching a cohort filter, grouped by one dimension: offer status, deposit state, onboarding status, program, class year, assigned staff, housing state, or blocking requirement. Use this for 'how many ...' and 'what are the most common ...' questions instead of listing every student. |
+| `getStudentStaffSummary` | Read one student's staff-facing overview: identity, program, offer and deposit state, onboarding status, requirement counts, open blocking count, next due date, and open staff work. |
+| `getStudentRequirements` | Read one student's full enrollment checklist: every requirement with status, blocking flag, due date, and responsible office. |
+| `getStudentDocuments` | Read one student's document records (transcript, immunization/health, residency, identity, and others) with statuses including rejection. |
+| `getStudentBlockers` | Read what is blocking one student's enrollment: derived blockers from blocking requirements and unpaid deposit, each with owner and clearing action. The platform operates no registrar hold system. |
+| `getStudentDeadlines` | Read one student's authoritative deadlines: requirement due dates, the offer response deadline, and aid-document due dates, bucketed. |
+| `getStudentFinancialState` | Read one student's financial state: awards, aid document requirements, cost of attendance, payments, derived remaining balance, and deposit state. No disbursement schedule exists. |
+| `getStudentHousingState` | Read one student's housing preference and housing requirement state. No application window or room assignment is modeled. |
+| `getStudentAppointments` | Read one student's scheduled appointments. |
+| `getStudentCommunicationHistory` | Read one student's recorded communications (email, sms, voice, portal) with direction, delivery status, and resolution status, plus support inquiries. Recorded interactions only — no vendor send/receive integration or open/click tracking exists. |
+| `getStudentEngagementSignals` | Read one student's engagement snapshot: completion percentage, blocking count, days to next deadline, upload failures, help requested, open support cases, and last meaningful activity, with the snapshot's freshness timestamp. |
+| `getStudentTimeline` | Read a bounded chronological timeline for one student from work logs, documents, payments, recorded communications, appointments, and inquiries. |
+| `getStudentOwnership` | Read who is responsible for one student: the primary academic adviser and every other assigned counsellor (admissions, financial aid, international, housing) with employment status and leave dates, plus the owner of each open Action Center item and inquiry and the offices responsible for open requirements. Use it for 'who advises / who owns / who is handling / is their adviser on leave' questions. |
+| `getStudentsNeedingAttention` | Read the deterministic attention queue: students flagged by the engagement scan with priority, reason codes, and evidence. Rule-based signals, not risk scores or probabilities. |
+| `getStaffWorkQueue` | Read the staff work queue — the SAME source of truth the Staff Portal's Action Center renders — as one bounded page (25 items) in canonical order (priority, then due date), filtered server-side by ownership (mine / unassigned / all), assignee name, component, status, due window, stale (in progress and untouched for 10+ days), ownerRisk (owner departed, on leave, or away), and topic (keyword over key, title, student and owner), plus board-wide counts and per-component / per-owner rollups. Authoritative for what is in the Action Center, in which order, and who is behind. Use summarizeWorkQueue for counts and groupings, searchWorkQueue for a differently sorted page. |
+| `getMorningBriefing` | Read today's Morning Brew — the same start-of-day briefing the Staff Portal renders, built by the same canonical composer. Carries the population and cohort counts, what changed in the last 24 hours, the ranked attention themes, the work-queue summary, open student requests, and an explicit list of metrics the platform does not hold. Use for 'what's my briefing', 'what changed overnight', 'catch me up' and other start-of-day questions. Takes no arguments. |
+| `getWorkItemDetail` | Read one work item's full detail: state, interactions, recorded communications, call transcript references, outcomes, comments, and history. |
+| `getInquiries` | Read student support inquiries with status, priority, and assignee. |
+| `getInquiryThread` | Read the full message thread of one support inquiry. |
+| `getPlaybooks` | Read staff-authored core plays and knowledge cards. Prose guidance written by staff — not system-enforced policy. |
+| `getActionRules` | Read the configured staff automation rules. |
+| `getMailboxMessages` | Read up to 25 messages from the authenticated staff member's authorized seven-day mailbox cache. Every mailbox grant is rechecked. Results are ranked by explicit urgent/time-sensitive language, then matched student, then recency; this is not a predictive priority score. |
+| `getStaffProfile` | Read one staff member's profile: title, role, component, manager, direct reports, employment status (active / on leave / departed), current absence, caseload vs cap, open/overdue/stale work, appointments today and this week, open inquiries, and calendar summary (next open slot, open slots in 14 days, weekly days). Bound to the resolved staff member or the signed-in member ('me'). |
+| `searchStaff` | Search the staff directory by name, component (department) or role, or list who is away right now (absentNow: on leave, vacation, sick, conference); returns briefs with match quality (exact_name, first_name, last_name, partial), employment status, absence, advisee and open-item counts. This — not the student roster — is where a colleague's name resolves. |
+| `getStaffTeam` | Read a manager's reporting subtree with per-person flags (over_cap, on_leave_with_caseload, departed_with_caseload, no_open_slots, falling_behind, spare_capacity), caseload, backlog, availability, and the component summary (students with departed / on-leave adviser, accepted students without an adviser, unassigned and overdue component items). Bound to the resolved manager or 'me'. |
+| `getStaffCaseload` | Read the students currently assigned to one staff member (handle `me` or a resolved colleague), with each student's requirement progress, advising status, deposit state and open/overdue work. Without `role` it covers every assignment role the person holds (primary adviser, admissions counselor, financial-aid counselor, international adviser, housing coordinator); pass `role` to narrow. Filters: advisingStatus, depositState, withOpenWork, withOverdueWork. Each student's open/overdue work counts every open Action Center item on that student, whoever owns it; for items assigned to this person use searchWorkQueue with ownership=mine (or assigneeName) and combine. |
+| `getStaffAppointments` | Read one staff member's appointments in a window (today, tomorrow, this week, next two weeks, the past week, or those awaiting an outcome) with the student on each and per-status counts. |
+| `getStaffAvailability` | Read one staff member's bookability: whether students can book them now (and why not: on leave, departed, no hours), next open slot, open slots in the next 14 days, booked slots, weekly appointment days, current and upcoming absences. |
+| `compareStaff` | Read the profiles of two to four staff members side by side (caseload, backlog, appointments, availability) for a comparison question. Bound to the resolved staff members. |
+| `summarizeWorkQueue` | Count Action Center work in SQL with optional filters (ownership mine/unassigned, a specific assignee, component, status, priority, due window, topic keyword, stale in-progress, escalated, action type, work type) and an optional grouping (assignee, component, status, priority, due_window, action_type, work_type, student). Returns totals — open, unassigned, urgent, overdue, due today, due in 7 days, stale, escalated, distinct students — and the top buckets. Use this for every 'how many items…' / 'which team or person has the most…' question instead of reading the board. |
+| `searchWorkQueue` | Read a bounded page of Action Center items matching the same filters as summarizeWorkQueue, in canonical order (or by due date / oldest / stalest), with the true total behind the page. |
+| `summarizeInquiries` | Count student support inquiries in SQL: awaiting a first reply (status new), open, waiting on the student, resolved, unassigned, urgent, older than 24 hours, the oldest awaiting inquiry, and optional grouping by status, assignee, topic or priority. |
+| `searchInquiries` | Read a bounded page of support inquiries (oldest first by default) with subject, topic, priority, age, assignee and student, matching status / ownership / topic / age filters. |
+| `getComponentSummary` | Read one department's (component's) operational picture: headcount, who is on leave / departed / absent right now, each member's open, overdue and stale work, the component's open / unassigned / overdue / urgent / escalated / due-today items, document reviews, and open inquiries. |
+| `searchInstitutionalKnowledge` | Search the institution's approved, versioned knowledge — published policies, staff procedures, handbook chapters, program guides, the academic calendar and the office directory — by a text `query`. Use it for what a rule or deadline is, what happens when it is missed, exceptions and extensions, amounts and dates, service levels, escalation paths, and which office owns a step. Every hit carries code, version, effective date and owning office; when the turn is about a resolved student the result says whether each document applies to that student (residency, first-year or transfer, admit term, housing plan, program). Filters: audience (student/internal), kind, office code, limit. |
+| `getUniversityFinancialPlan` | Read the shared Financial Plan: posted account facts, annual offers and accepted aid, term disbursements, payment lifecycle, published housing and meal rates, insurance coverage, actual installment agreements, and student-entered term budget assumptions. Savings are estimates, hypothetical housing is not an assignment, and credit is not a settled refund. |
+| `getUniversityOverview` | Read current admission/lifecycle, actual term credit loads, posted balances, independent official holds with their owning offices, and institutional deadlines. |
+| `getUniversityAcademics` | Read actual registrations and historical course attempts/grades, accepted versus pending transfer evaluations, evidence-based SAP history, prerequisites, waitlist offers, individual exceptions and explicitly unresolved degree requirements. Use for academic progress or course-drop consequences. |
+| `getUniversityAccount` | Read the canonical posted ledger in integer cents, exact term balances including credit owed, pending/failed/reversed payments, annual accepted awards versus term disbursements, employment awards, SAP, financial-aid requirements, office review stages and actual holds. Pending money is never posted money. |
+| `getUniversityRelationships` | Read named cross-office advisers and active leave coverage, appointments/no-shows, physical housing/compatible placement, effective/revoked FERPA consent and individual exceptions. Staff additionally see case owners, handoff steps, dependencies and delivery failures. |
+| `getUniversityDocuments` | Read required documents including not submitted, current review status, rejection reasons and original revisions with effective and recorded timestamps. |
+| `getUniversityHistory` | Read historical events bounded by BOTH knownAt (recorded time) and effectiveAt. Optional entityType and entityId focus the event history; external grade corrections use entityType=transfer_credit, institutional course grades use enrollment. There is no grade entity type. Use ISO timestamps with timezone. Defaults to the fixed university clock. Current dossier fields cannot answer what the university knew before a late grade correction. |
+| `getUniversityOperations` | Read my university office, capacities, weekly availability, meetings, leave/coverage, appointments and accountable case workload. |
+| `getUniversityCohort` | Return the exact deduplicated cohort of enrolled Fall students with active Fall financial holds AND pending Fall payments, plus denominator. This is one saved cohort, not an arbitrary student search. |
+| `searchUniversityPolicies` | Search versioned institutional policy/procedure passages by query, optional at and knownAt ISO timestamps. Filters audience, effectivity, publication; returns applicability, section citations and source hashes. Read alongside getUniversity records for individual exceptions. |
+| `getUniversityCasework` | Read the student's cross-office case DAG, owner, steps, dependencies, completion evidence and delivered/bounced communications. Use for shortest safe resolution path, handoffs or whether a decision reached the student. |
+| `getUniversityWorkBoard` | Read the canonical Action Center projection: bounded first page of work cards, total queue counts, owners, priorities, due dates and linked document, case and payment evidence. Card operational status never proves settlement or verification. Use existing work-queue search tools for specific filters or additional pages. |
+
+## Durable action registry
+
+- `student.preferences.update`
+- `student.support.contact`
+- `student.requirement.submit_response`
+- `operations.follow_up.create`
+- `operations.work_item.update`
+- `operations.cohort.create_follow_ups`
+- `communications.email.prepare`
+
+The new reads are `getUniversityFinancialPlan` (student and authorized staff student context) and `getUniversityWorkBoard` (staff only). Existing `getUniversityOperations` retains its previous output and interpretation. Planning input edits use the dedicated authenticated portal command; Edward gains no new financial write command. Morning Brew demo data never enters these registries.
+
+## Integrated model-loop exposure
+
+The imported university student loop exposes 15 reads: the seven `getUniversity*` student reads plus `getInstitutionalPolicies`, `getStudentProfile`, `getOnboardingChecklist`, `getStudentAdvising`, `getStudentMessages`, `getStudentSupportRequests`, `getCampusLife`, and `getSupportOptions`.
+
+The university staff loop exposes 39 of the registered reads. It suppresses the legacy interpretations `getStudentFinancialState`, `getStudentBlockers`, `getStudentHousingState`, `getStudentTimeline`, `getStudentCommunicationHistory`, `getStudentOwnership`, `searchInstitutionalKnowledge`, `getStudentStaffSummary`, `getStudentDocuments`, and `getStudentEngagementSignals`. Those legacy descriptions above do not describe the richer university runtime. Identity resolution can still call the canonical roster directly. Counts are runtime catalog counts, not permissions grants.
+
+Work Board model evidence keeps all project counts and linked-payment state counts before bounded card detail. Financial Plan model evidence omits visualization data and duplicate ledger rows, preserving term, catalog period, assumptions and lifecycle distinctions; the full raw tool result remains inspectable in traces.
