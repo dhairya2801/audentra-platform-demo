@@ -12,6 +12,7 @@ def item() -> dict[str, Any]:
         "status": "done",
         "priority": "high",
         "actionType": "document_review",
+        "type": "document_review",
         "component": "Financial Aid",
         "student": {
             "id": "student",
@@ -41,7 +42,8 @@ def test_document_stage_cannot_be_completed_by_operational_status() -> None:
 
 def test_payment_card_uses_settlement_evidence_and_retains_failure() -> None:
     row = item()
-    row["actionType"] = "reachout"
+    row["actionType"] = "communication_response"
+    row["type"] = "communication"
     for state, stage in [
         ("pending", "processing"),
         ("posted", "completed"),
@@ -56,7 +58,8 @@ def test_payment_card_uses_settlement_evidence_and_retains_failure() -> None:
 
 def test_case_dependencies_are_visible_and_not_completed_by_projection() -> None:
     row = item()
-    row["actionType"] = "reachout"
+    row["actionType"] = "staff_decision"
+    row["type"] = "enrollment"
     case = {"incomplete_steps": 2, "status": "waiting"}
     card = board_card(row, {"case": case})
     assert card["case"]["incomplete_steps"] == 2
