@@ -24,7 +24,8 @@ UNIVERSITY_TOOLS = {
             "accepted versus pending transfer evaluations, evidence-based SAP "
             "history, prerequisites, waitlist offers, individual exceptions "
             "and explicitly unresolved degree requirements. Use for academic "
-            "progress or course-drop consequences."
+            "progress or course-drop consequences. Submitted transcript review and "
+            "file corrections belong to getUniversityDocuments."
         ),
     ),
     "getUniversityAccount": (
@@ -53,7 +54,10 @@ UNIVERSITY_TOOLS = {
         (
             "Read required documents including not submitted, current review "
             "status, rejection reasons and original revisions with effective "
-            "and recorded timestamps."
+            "and recorded timestamps. Includes submitted transcripts, correction/"
+            "resubmission guidance and official per-submission decision history. "
+            "Use this evidence to determine whether a submitted file needs correction "
+            "or has been accepted; course registrations cannot establish file status."
         ),
     ),
     "getUniversityHistory": (
@@ -84,6 +88,8 @@ UNIVERSITY_CONTEXT = (
     "completion, or certify graduation from unresolved curriculum distributions. "
     "An empty serviceProgress list does not mean financial aid is complete; inspect "
     "financialAidRequirements and distinguish student submissions from office review. "
+    "A record's absence can only be established by reading its owning domain. "
+    "Academic attempts do not establish the absence of a rejected document. "
     "Individual exception scope comes from its own record and linked "
     "policy, never a similarly named accommodation policy. Course "
     "impacts calculate the approved floor; do not invent a different "

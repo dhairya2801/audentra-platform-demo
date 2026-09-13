@@ -1068,6 +1068,8 @@ class ReviewStaffDocumentRequest(StrictRequest):
     decision: Literal["accepted", "rejected"]
     note: Annotated[StrictStr, StringConstraints(min_length=3, max_length=500)]
     notify_student: StrictBool
+    reason_code: Annotated[StrictStr, StringConstraints(min_length=1, max_length=80)] | None = None
+    internal_note: Annotated[StrictStr, StringConstraints(max_length=1000)] | None = None
 
 
 StaffManagedConfigurationKind = Literal["journeys", "campus_life", "academics"]

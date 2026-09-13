@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, NotFoundError
+from audentra.domain.document_review import public_review_decision
 
 JsonDict = dict[str, Any]
 
@@ -596,6 +597,27 @@ class PostgresUniversityRepository:
                     "d.id=r.document_id WHERE d.student_id=:sid ORDER BY recorded_at "
                     "DESC"
                 )
+                decisions = await c.execute(
+                    text("""
+                    SELECT id, document_id, decision, reason_code, reason_label,
+                      student_message, reviewer_display_name, source, decided_at
+                    FROM public.document_review_decision
+                    WHERE tenant_id=CAST(:tenant AS uuid) AND student_id=CAST(:student AS uuid)
+                    ORDER BY decided_at,id
+                """),
+                    {"tenant": auth.tenant_id, "student": auth.student_id},
+                )
+                result["reviewDecisionSemantics"] = (
+                    "staff_review records an official decision on one submission. "
+                    "legacy_backfill is a prior portal status snapshot without an original "
+                    "reviewer or guidance in that snapshot. Consult the university document "
+                    "revisions for any separately recorded reasons; a snapshot does not "
+                    "supersede revision evidence."
+                )
+                result["reviewDecisions"] = [
+                    {**public_review_decision(dict(row)), "documentId": str(row["document_id"])}
+                    for row in decisions.mappings()
+                ]
             elif domain == "history":
                 known_at = _cutoff(known_at)
                 effective_at = _cutoff(effective_at)

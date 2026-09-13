@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
+from audentra.domain.document_review import public_review_decision as _map_document_review
 from audentra.domain.documents import bounded_document_label
 from audentra.domain.onboarding import (
     ABOUT_YOU_REQUIRED_FIELDS,
@@ -730,7 +731,9 @@ def _map_message(row: Mapping[str, Any]) -> JsonDict:
     }
 
 
-def _map_document(row: Mapping[str, Any]) -> JsonDict:
+def _map_document(
+    row: Mapping[str, Any], review_history: Sequence[Mapping[str, Any]] = ()
+) -> JsonDict:
     item: JsonDict = {
         "id": str(row["id"]),
         "fileName": row["file_name"],
@@ -749,6 +752,10 @@ def _map_document(row: Mapping[str, Any]) -> JsonDict:
         item["sha256"] = str(row["sha256"])
     if row.get("extraction"):
         item["extraction"] = _mapping(row["extraction"])
+    reviews = [_map_document_review(review) for review in review_history]
+    if reviews:
+        item["review"] = reviews[-1]
+        item["reviewHistory"] = reviews
     return item
 
 
@@ -2951,6 +2958,24 @@ class PostgresPortalRepository:
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
+        async with self.engine.connect() as connection:
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
+                {"tenant": auth.tenant_id},
+            )
+            result = await connection.execute(
+                text("""
+                SELECT id, document_id, decision, reason_code, reason_label,
+                       student_message, reviewer_display_name, source, decided_at
+                FROM document_review_decision WHERE tenant_id=:tenant AND student_id=:student
+                ORDER BY decided_at,id
+            """),
+                {"tenant": auth.tenant_id, "student": auth.student_id},
+            )
+            decision_rows = [dict(row) for row in result.mappings()]
+        decisions_by_document: dict[str, list[Mapping[str, Any]]] = {}
+        for decision in decision_rows:
+            decisions_by_document.setdefault(str(decision["document_id"]), []).append(decision)
         signed = await self._all(
             """
             SELECT id, template_code, onboarding_version, title, file_name, mime_type,
@@ -2963,7 +2988,16 @@ class PostgresPortalRepository:
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
         )
-        items = [*map(_map_document, uploads), *map(_map_signed_document, signed)]
+        items = [
+            *(
+                _map_document(
+                    upload,
+                    decisions_by_document.get(str(upload["id"]), []),
+                )
+                for upload in uploads
+            ),
+            *map(_map_signed_document, signed),
+        ]
         items.sort(key=lambda item: (item["createdAt"], item["id"]), reverse=True)
         return {"items": items, "total": len(items)}
 

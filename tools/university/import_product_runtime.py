@@ -60,8 +60,10 @@ async def run(url, source):
                         *record,
                     )
             from product_content import import_clubs
+            from product_history import import_review_snapshots
 
             await import_clubs(raw, SYNTHETIC_TENANT_ID)
+            await import_review_snapshots(raw, SYNTHETIC_TENANT_ID)
             operations = Path(__file__).with_name("product_operations.sql").read_text()
             await raw.execute(
                 operations.replace(":tenant", f"'{SYNTHETIC_TENANT_ID}'::uuid")

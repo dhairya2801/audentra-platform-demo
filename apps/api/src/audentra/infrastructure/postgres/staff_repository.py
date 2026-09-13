@@ -15,7 +15,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -39,6 +39,7 @@ from audentra.domain.action_center import (
     derive_signals,
     owner_risk_for,
 )
+from audentra.domain.document_review import public_review_decision
 from audentra.domain.documents import bounded_document_label
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
@@ -175,6 +176,40 @@ class StaffStudentReader(Protocol):
     async def get_student_requirements(self, auth: AuthContext) -> Mapping[str, object]: ...
 
     async def get_student_documents(self, auth: AuthContext) -> Mapping[str, object]: ...
+
+
+_DEFAULT_DOCUMENT_REJECTION_REASONS: tuple[dict[str, str], ...] = (
+    {
+        "code": "illegible",
+        "label": "Image or text is unclear",
+        "description": "Upload a clear, complete scan or photo with every edge visible.",
+    },
+    {
+        "code": "incomplete",
+        "label": "Document is incomplete",
+        "description": "Upload every required page and complete all required fields or signatures.",
+    },
+    {
+        "code": "wrong_document",
+        "label": "Wrong document",
+        "description": "Upload the document requested for this enrollment task.",
+    },
+    {
+        "code": "expired",
+        "label": "Document is expired",
+        "description": "Upload a document that is currently valid.",
+    },
+    {
+        "code": "information_mismatch",
+        "label": "Information does not match",
+        "description": "Correct the conflicting information or upload a matching document.",
+    },
+    {
+        "code": "unsupported_evidence",
+        "label": "Evidence cannot be accepted",
+        "description": "Upload an official document that meets the requirement instructions.",
+    },
+)
 
 
 class PostgresStaffRepository:
@@ -2159,7 +2194,7 @@ class PostgresStaffRepository:
                 text(
                     f"""
                     SELECT id, file_name, mime_type, size_bytes, category,
-                           processing_mode, status, created_at
+                           processing_mode, status, extraction, created_at
                     FROM {self._table("document_record")}
                     WHERE tenant_id = :tenant_id AND student_id = :student_id
                     ORDER BY created_at DESC, id DESC
@@ -2167,6 +2202,24 @@ class PostgresStaffRepository:
                 ),
                 {"tenant_id": _uuid(auth.tenant_id), "student_id": _uuid(student_id)},
             )
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
+                {"tenant": auth.tenant_id},
+            )
+            decisions = await connection.execute(
+                text("""
+                SELECT id,document_id,decision,reason_code,reason_label,student_message,
+                  reviewer_display_name,source,decided_at
+                FROM public.document_review_decision WHERE tenant_id=:tenant AND student_id=:student
+                ORDER BY decided_at,id
+            """),
+                {"tenant": _uuid(auth.tenant_id), "student": _uuid(student_id)},
+            )
+            review_history: dict[str, list[dict[str, Any]]] = {}
+            for row in decisions.mappings():
+                review_history.setdefault(str(row["document_id"]), []).append(
+                    public_review_decision(dict(row))
+                )
             job_result = await connection.execute(
                 text(
                     f"""
@@ -2528,6 +2581,12 @@ class PostgresStaffRepository:
                     "status": str(row["status"]),
                     "contentUrl": f"/v1/staff/documents/{row['id']}/content",
                     "createdAt": _iso_timestamp(row["created_at"]),
+                    **(
+                        {"extraction": _json_object(row["extraction"], "document.extraction")}
+                        if row.get("extraction")
+                        else {}
+                    ),
+                    "reviewHistory": review_history.get(str(row["id"]), []),
                 }
                 for row in document_result.mappings().all()
             ],
@@ -5171,29 +5230,146 @@ class PostgresStaffRepository:
             )
         return await self.get_student_record(auth, student_id)
 
+    async def get_document_review_options(self, auth: AuthContext) -> dict[str, object]:
+        self._require_staff(auth)
+        async with self._engine.connect() as connection:
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
+                {"tenant": auth.tenant_id},
+            )
+            result = await connection.execute(
+                text(
+                    f"""
+                    SELECT code, label, description, active
+                    FROM {self._table("tenant_document_rejection_reason")}
+                    WHERE tenant_id=:tenant_id
+                    ORDER BY display_order, code
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            configured = list(result.mappings().all())
+            reasons = [
+                {
+                    "code": str(row["code"]),
+                    "label": str(row["label"]),
+                    "description": str(row["description"]),
+                }
+                for row in configured
+                if bool(row["active"])
+            ]
+        return {
+            "rejectionReasons": (
+                reasons
+                if configured
+                else [dict(reason) for reason in _DEFAULT_DOCUMENT_REJECTION_REASONS]
+            )
+        }
+
+    async def _active_document_rejection_reason(
+        self,
+        connection: AsyncConnection,
+        auth: AuthContext,
+        reason_code: str,
+    ) -> dict[str, str]:
+        result = await connection.execute(
+            text(
+                f"""
+                SELECT code, label, description, active
+                FROM {self._table("tenant_document_rejection_reason")}
+                WHERE tenant_id=:tenant_id AND code=:code
+                """
+            ),
+            {"tenant_id": _uuid(auth.tenant_id), "code": reason_code},
+        )
+        row = result.mappings().first()
+        if row is None:
+            configured_result = await connection.execute(
+                text(
+                    f"""
+                    SELECT 1
+                    FROM {self._table("tenant_document_rejection_reason")}
+                    WHERE tenant_id=:tenant_id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": _uuid(auth.tenant_id)},
+            )
+            fallback = next(
+                (
+                    reason
+                    for reason in _DEFAULT_DOCUMENT_REJECTION_REASONS
+                    if reason["code"] == reason_code
+                ),
+                None,
+            )
+            if configured_result.mappings().first() is None and fallback is not None:
+                return dict(fallback)
+        if row is None or not bool(row["active"]):
+            raise BadRequestError(
+                "DOCUMENT_REJECTION_REASON_INVALID",
+                "Choose an active rejection reason for this university",
+            )
+        return {
+            "code": str(row["code"]),
+            "label": str(row["label"]),
+            "description": str(row["description"]),
+        }
+
     async def review_document(
         self,
         auth: AuthContext,
         document_id: str,
         review: Mapping[str, object],
         request_id: str,
+        idempotency_key: str | None = None,
     ) -> dict[str, object]:
         self._require_staff(auth)
         work_item_id = str(_read(review, "workItemId", "work_item_id"))
         expected_version = _integer(
-            _read(
-                review,
-                "expectedWorkItemVersion",
-                "expected_work_item_version",
-            ),
+            _read(review, "expectedWorkItemVersion", "expected_work_item_version"),
             "expectedWorkItemVersion",
         )
         decision = str(_read(review, "decision"))
         note = str(_read(review, "note")).strip()
         notification_requested = bool(_read(review, "notifyStudent", "notify_student"))
-        notification: dict[str, object] | None = None
+        reason_value = review.get("reasonCode", review.get("reason_code"))
+        reason_code = str(reason_value) if reason_value is not None else None
+        internal_value = review.get("internalNote", review.get("internal_note"))
+        internal_note = str(internal_value).strip() if internal_value is not None else None
+        if decision == "rejected" and reason_code is None:
+            raise BadRequestError(
+                "DOCUMENT_REJECTION_REASON_REQUIRED",
+                "Choose a rejection reason when requesting changes",
+            )
+        if decision == "accepted" and reason_code is not None:
+            raise BadRequestError(
+                "DOCUMENT_REJECTION_REASON_NOT_ALLOWED",
+                "A rejection reason can be used only when changes are requested",
+            )
+        normalized_request = {
+            "documentId": document_id,
+            "workItemId": work_item_id,
+            "expectedWorkItemVersion": expected_version,
+            "decision": decision,
+            "reasonCode": reason_code,
+            "note": note,
+            "internalNote": internal_note,
+            "notifyStudent": notification_requested,
+        }
 
-        async with self._engine.begin() as connection:
+        async def handler(connection: AsyncConnection) -> dict[str, object]:
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
+                {"tenant": auth.tenant_id},
+            )
+            reason = (
+                await self._active_document_rejection_reason(
+                    connection, auth, cast(str, reason_code)
+                )
+                if decision == "rejected"
+                else None
+            )
             work_item = await self._lock_work_item(connection, auth, work_item_id)
             if work_item["source_type"] != "document" or str(work_item["source_id"]) != document_id:
                 raise NotFoundError(
@@ -5213,7 +5389,7 @@ class PostgresStaffRepository:
                     f"""
                     SELECT id, student_id, requirement_id, file_name, status
                     FROM {self._table("document_record")}
-                    WHERE tenant_id = :tenant_id AND id = :document_id
+                    WHERE tenant_id=:tenant_id AND id=:document_id
                     FOR UPDATE
                     """
                 ),
@@ -5234,8 +5410,8 @@ class PostgresStaffRepository:
                 text(
                     f"""
                     UPDATE {self._table("document_record")}
-                    SET status = :decision, updated_at = NOW()
-                    WHERE tenant_id = :tenant_id AND id = :document_id
+                    SET status=:decision, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:document_id
                     """
                 ),
                 {
@@ -5262,11 +5438,9 @@ class PostgresStaffRepository:
                     text(
                         f"""
                         UPDATE {self._table("student_requirement")}
-                        SET status = :status,
-                            progress_percent = :progress,
-                            version = version + 1,
-                            updated_at = NOW()
-                        WHERE tenant_id = :tenant_id AND id = :requirement_id
+                        SET status=:status, progress_percent=:progress,
+                            version=version+1, updated_at=NOW()
+                        WHERE tenant_id=:tenant_id AND id=:requirement_id
                         """
                     ),
                     {
@@ -5284,18 +5458,15 @@ class PostgresStaffRepository:
                         requirement_id=str(requirement_id),
                     )
                     await self._refresh_requirement_dependencies(
-                        connection,
-                        auth,
-                        str(requirement_id),
+                        connection, auth, str(requirement_id)
                     )
             item_update = await connection.execute(
                 text(
                     f"""
                     UPDATE {self._table("staff_work_item")}
-                    SET status = 'done', version = version + 1, updated_at = NOW()
-                    WHERE tenant_id = :tenant_id
-                      AND id = :work_item_id
-                      AND version = :expected_version
+                    SET status='done', version=version+1, updated_at=NOW()
+                    WHERE tenant_id=:tenant_id AND id=:work_item_id
+                      AND version=:expected_version
                     RETURNING version
                     """
                 ),
@@ -5320,7 +5491,56 @@ class PostgresStaffRepository:
                 work_item_id=work_item_id,
                 actor_name=actor_name,
                 action="document_decided",
-                message=f"{verb} {document['file_name']}: {note}",
+                message=f"{verb} {document['file_name']}: {internal_note or note}",
+            )
+            decision_id = str(self._uuid_factory())
+            decided_at = self._clock()
+            await connection.execute(
+                text(
+                    f"""
+                    INSERT INTO {self._table("document_review_decision")} (
+                      id, tenant_id, document_id, student_id, requirement_id,
+                      work_item_id, reviewer_id, reviewer_display_name, decision,
+                      reason_code, reason_label, student_message, internal_note,
+                      source, decided_at, created_at
+                    ) VALUES (
+                      :id, :tenant_id, :document_id, :student_id, :requirement_id,
+                      :work_item_id, :reviewer_id, :reviewer_name, :decision,
+                      :reason_code, :reason_label, :student_message, :internal_note,
+                      'staff_review', :decided_at, NOW()
+                    )
+                    """
+                ),
+                {
+                    "id": _uuid(decision_id),
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "document_id": _uuid(document_id),
+                    "student_id": _uuid(str(document["student_id"])),
+                    "requirement_id": (
+                        _uuid(str(requirement_id)) if requirement_id is not None else None
+                    ),
+                    "work_item_id": _uuid(work_item_id),
+                    "reviewer_id": _uuid(auth.actor_id),
+                    "reviewer_name": actor_name,
+                    "decision": decision,
+                    "reason_code": reason_code,
+                    "reason_label": reason["label"] if reason is not None else None,
+                    "student_message": note,
+                    "internal_note": internal_note,
+                    "decided_at": decided_at,
+                },
+            )
+            public_decision = public_review_decision(
+                {
+                    "id": decision_id,
+                    "decision": decision,
+                    "decided_at": decided_at,
+                    "reason_code": reason_code,
+                    "reason_label": reason["label"] if reason else None,
+                    "student_message": note,
+                    "reviewer_display_name": actor_name,
+                    "source": "staff_review",
+                }
             )
             notification = await self._insert_student_message(
                 connection,
@@ -5348,9 +5568,11 @@ class PostgresStaffRepository:
                 resource_type="document_record",
                 resource_id=document_id,
                 metadata={
+                    "decisionId": decision_id,
                     "decision": decision,
+                    "reasonCode": reason_code,
                     "workItemId": work_item_id,
-                    "notifiedStudent": True,
+                    "notifiedStudent": notification is not None,
                     "notificationRequested": notification_requested,
                 },
             )
@@ -5363,15 +5585,30 @@ class PostgresStaffRepository:
                 aggregate_id=document_id,
                 aggregate_version=item_version,
                 data={
+                    "decisionId": decision_id,
                     "documentId": document_id,
                     "studentId": str(document["student_id"]),
                     "decision": decision,
+                    "reasonCode": reason_code,
                     "workItemId": work_item_id,
-                    "notifiedStudent": True,
+                    "notifiedStudent": notification is not None,
                     "notificationRequested": notification_requested,
                 },
             )
+            return {
+                "workItemId": work_item_id,
+                "notification": notification,
+                "decision": public_decision,
+            }
 
+        receipt = await self._run_idempotent(
+            auth=auth,
+            idempotency_key=idempotency_key or request_id,
+            operation="staff.document.review",
+            request_payload=normalized_request,
+            response_status=201,
+            handler=handler,
+        )
         current_work_item = await self._require_work_item(auth, work_item_id)
         student = cast(Mapping[str, object], current_work_item["student"])
         student_auth = replace(auth, student_id=str(student["id"]))
@@ -5396,7 +5633,8 @@ class PostgresStaffRepository:
         return {
             "document": decided_document,
             "workItem": current_work_item,
-            "notification": notification,
+            "notification": receipt.get("notification"),
+            "decision": receipt.get("decision"),
         }
 
     async def _ensure_document_work_items(self, auth: AuthContext) -> None:

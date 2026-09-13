@@ -348,8 +348,10 @@ async def run(url, source, resume_bootstrap=False):
             projection = (Path(__file__).parent / "runtime_projection.sql").read_text()
             await raw.execute(projection.replace(":tenant", f"'{TENANT}'::uuid"))
             from product_content import import_clubs
+            from product_history import import_review_snapshots
 
             await import_clubs(raw, TENANT)
+            await import_review_snapshots(raw, TENANT)
             product_operations = Path(__file__).with_name("product_operations.sql")
             if product_operations.exists():
                 await raw.execute(product_operations.read_text().replace(":tenant", f"'{TENANT}'::uuid"))

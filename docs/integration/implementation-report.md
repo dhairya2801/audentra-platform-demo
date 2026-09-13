@@ -65,7 +65,7 @@ The implementation retains useful unavailable concepts rather than inventing per
 | Actual meals/insurance/payment agreements | Dedicated enrollment/coverage/agreement/installment tables | Empty when no evidence exists; preference is not agreement |
 | Operational ownership, priority, due date, comments and status | Public staff work domain | Board projection, existing full workspace, Edward, Atlas |
 | Institutional case outcome | University workflow/step/dependency/evidence records | Completion must satisfy existing case guards |
-| Document processing/review/revisions | Public document processing + linked university document/revision | Existing review commands; no browser-only acceptance |
+| Document processing/review/revisions | Public submissions, immutable `document_review_decision`, requirement status history + linked university document/revisions | One shared student-safe decision projection; internal notes remain staff-only; replacement submissions preserve old decisions |
 | Inquiry, draft, communication and delivery | Existing public inquiry/interaction/communication/message domains and university case evidence | Delivery status is evidence; task completion alone is not delivery |
 | Appointments and coverage | Canonical public scheduling and university relationship links | Profiles, portals, Edward, Atlas |
 | Events, clubs and registration | Existing published public content/event/club/registration domains | APIs and Edward use the published rows; seed files are input only |
@@ -148,7 +148,7 @@ Authentication repository, core middleware and object-storage paths were compare
 
 The newer human-facing document-review labels/projector behavior was adapted, with a clean forward migration. The donor's conflicting migration sequence was not copied. Existing upload originals, extraction retries, tenant scoping, FERPA/delegate restrictions, public inquiry/mailbox foundations and canonical staff student inspector were preserved and covered by applicable existing tests.
 
-The donor's separate `document_review_decision` history/auto-resolution extension was not imported wholesale; the integrated runtime currently uses its existing document revisions, work history and decision workflow. Its dedicated newer history surface remains a follow-up. Mainline web-search/model-default changes were not substituted for the requested Luna/university evidence architecture. External mailbox/provider configuration, SSO callback wiring and deployment origin values require an isolated deployment setup; none were pointed at deployed systems.
+The donor's official document history was selectively adapted in integration migration 0070, preserving the synthetic named-evidence requirement checks. Migration 0071 repairs replacement-submission synchronization. Action Center, student Documents, Edward and Atlas now share official decision history. AI auto-resolution remains unimported; machine extraction alone does not constitute an official review. Mainline web-search/model-default changes were not substituted for the requested Luna/university evidence architecture. External mailbox/provider configuration, SSO callback wiring and deployment origin values require an isolated deployment setup; none were pointed at deployed systems.
 
 ## 11. Schema and architecture
 
@@ -158,6 +158,9 @@ The donor's separate `document_review_decision` history/auto-resolution extensio
 | `0067_payment_work_item_boundary.sql` | Prevent completion of linked payment work without posted canonical payment evidence |
 | `0068_payment_work_tenant_guard.sql` | Scope/restore tenant context correctly inside the payment guard |
 | `0069_document_review_product_copy.sql` | Adapt current human-readable document review titles/types and version affected work |
+| `0070_document_review_history.sql` | Tenant reason catalog, immutable official decisions, requirement status history, identity/link validation and tenant RLS |
+| `0071_document_resubmission_sync.sql` | Follow the current submission link, preserve older decisions, and prevent an old submission from overwriting the current university document |
+| `0072_university_academic_progress.sql` | Restore the missing PostgreSQL academic-progress view used by Atlas dossiers, with tenant joins and invoker permissions |
 | SQLite `0004_product_planning.sql` | Deterministic evaluation counterparts for the new financial seed domains |
 
 No prior synthetic migration was renumbered or overwritten. Applied integration migrations were not changed. The catalog has 12 approved policy-derived rates, and 992 active meal enrollments are grounded in existing billed meal records. Savings, agreements, insurance coverage, loan terms and saved scenarios are not fabricated to fill screens.
@@ -170,6 +173,10 @@ flowchart TD
   PG --> P[Product repositories: work, documents, communications, profiles, content]
   U --> F[FinancialPlanService]
   P --> W[WorkBoardProjection]
+  P --> DH[Student-safe official document history]
+  DH --> SP
+  DH --> E
+  DH --> A
   U --> F
   F --> MF[Concept 4 My Financials]
   W --> AC[Action Center]
@@ -204,7 +211,7 @@ The original 30-case oracle was exercised as both student and staff: **60 baseli
 ### Verification limits
 
 - Twenty legacy mock-university API tests remain skipped because they require a different frozen host/database fixture; three storage/production tests require S3 configuration.
-- The old read-generalization SQL ground-truth generator was attempted but expects `document_review_decision`, absent from this synthetic schema. Its original persona/fixture assumptions also differ. That bank was preserved, not silently rewritten or reported as passing.
+- The old read-generalization SQL ground-truth generator now passes its document-history dependency but stops at missing `student_risk_assessment`. Its original persona/fixture assumptions also differ. The bank remains preserved and is not reported as passing; no risk evidence was fabricated to satisfy it.
 - The separate legacy live write/holdout banks were not executed against their old writable snapshot. Existing durable-write, university action, mutation, authorization and idempotency tests ran in isolated test databases instead. This does not constitute every requested legacy bank passing.
 - No external SSO round trip, object-store upload/download, email delivery or money-provider settlement was certified. No deployment smoke was performed.
 - Visual checks use representative screenshots and functional browser assertions, not an exhaustive pixel-diff matrix for every viewport/state.
@@ -213,7 +220,7 @@ The original 30-case oracle was exercised as both student and staff: **60 baseli
 ## 13. Remaining work before main-baseline promotion
 
 1. Reconcile the legacy read/write/holdout fixture banks with the integrated schema and run the complete provider-enabled acceptance matrix. Finish semantic grading beyond structural/factual probes.
-2. Configure an isolated object store and document worker; verify original uploads, extraction, revision comparison, correction/resubmission and the desired newer decision-history/auto-resolution surface end to end.
+2. Configure an isolated object store and document worker; verify original upload/download, extraction provider execution and revision comparison. Canonical correction/resubmission and official history are now tested through real domain commands; the desired AI auto-resolution capability still needs a separate domain review and implementation.
 3. Complete any donor interactions still opening the older canonical workspace. Confirm the desired Student 360 visual scope. Full-queue board filtering/search and cross-page related-work navigation are now implemented.
 4. Add real provider-backed financial commands only with receipts and settlement evidence: payments/refunds, award acceptance, signed installment agreements, insurance review and saved scenario management. Existing honest empty states should remain until then.
 5. Decide how institutional snapshot time and operational wall-clock scheduling should behave in long-running demos. The fixed university oracle clock remains September 8 while operational availability uses current time.
@@ -253,7 +260,7 @@ Final audit timestamp: **2026-09-13 03:57:57 UTC**. The audit checked 215,150 fi
 
 The complete Python test run precedes the final small refund-evidence addition; the listed 12 targeted tests, lint/typecheck and four live refund probes cover that addition. The 60-response comparison is not a complete semantic acceptance score, and the old fixture-bank limitations in section 12 remain. No omitted legacy evaluation is counted as a pass.
 
-Open `../../../VISUAL-REVIEW.html` in the integration workspace for donor and integrated screenshots, including My Financials, Action Center/detail/payments, profiles, clubs, Morning Brew, mobile finance, Atlas and Lab. Raw provider responses, runtime databases and screenshots remain ignored local artifacts. They are available for local review, not embedded as production fixtures.
+[Open the visual review gallery](VISUAL-REVIEW.html) for donor and integrated screenshots, including My Financials, Action Center/detail/payments, profiles, clubs, Morning Brew, mobile finance, Atlas and Lab. Raw provider responses, runtime databases and screenshots remain ignored local artifacts. They are available for local review, not embedded as production fixtures.
 
 ### Platform implementation commits
 
@@ -295,3 +302,39 @@ Verification artifacts for this continuation use `*-board-filters.log` in each c
 The final CSS toast-dismissal adjustment was covered by the browser regression and final production build after the complete portal test run. The full platform test run and final targeted checks cover the UUID search used by cross-page detail navigation. The latest source audit at **2026-09-13 04:22:27 UTC** again found all Git states and source product files unchanged, with only the same two ignored trace-store exceptions. No additional source differences appeared.
 
 The platform commit records the canonical query/projection work and this documentation; the portal commits separate board behavior from the production-test configuration fix. Exact hashes are recorded in the workspace-root report after commit creation. No migration or Edward planner/action change is introduced by this continuation.
+
+Continuation commits (local only):
+
+- platform: `765a14f502c48264cf49d21845e0ec395fa22261` — feat: filter canonical Action Center work before pagination
+- portals: `10af627b175dce7c9d50b0426c4555e25a901573` — feat: search full task queues and resolve related work across pages
+- portals: `2627a203768f4eb548b12aad8b971be517d104aa` — test: disable local Lab flags in production gate builds
+
+
+## 17. Continued integration: official document decisions and resubmission
+
+Mainline donor migration 0050 and its review/history UI informed fresh integration migration 0070. Each uploaded submission receives at most one immutable official decision. The command records the tenant-approved rejection reason, student guidance, staff-only note, reviewer, work item and requirement together with existing audit/notification behavior. Expected work version, authorization, idempotency and payload-hash checks remain mandatory. Replaying the same request returns the same decision receipt; changed payloads and stale work versions fail. Student requirements still use the synthetic named-document evidence rules: accepting an unrelated file cannot complete verification or disburse aid.
+
+Replacement uploads preserve prior submissions and decisions. Migration 0071 follows the current `runtime_link` when synchronizing university document status and revisions; a later update to an older submission cannot overwrite the current head. Legacy imports receive explicitly identified status snapshots, with unknown original reviewer/guidance rather than fabricated official reviews. The original university revision reasons remain independently valid evidence. The deterministic importer creates snapshots for all **8,726** terminal submissions in the rebuilt university tenant; other managed seed tenants are outside that publisher's scope.
+
+`public_review_decision` is the shared privacy boundary for student Documents, staff detail, Edward's existing `getUniversityDocuments`, and Atlas `/api/documents`. Official receipt and later history values match exactly, including UTC timestamp normalization. Internal notes are never selected into student or university read evidence. The deployed detail panel now renders actual extraction fields/confidence/warnings, reason selection, student guidance, a distinct internal-note field, explicit confirmation and official history. A correction/resubmission remains a new review cycle. No file content or extraction output is fabricated when storage/provider execution is unavailable.
+
+Atlas's live Documents tab now renders the same document projection. Browser testing exposed a pre-existing omission in the PostgreSQL port: `academic_progress` was absent, causing full student dossiers to fail even though the overview worked. Migration 0072 restores the deterministic world's attempted/earned-credit/GPA semantics with tenant-bound joins and invoker permissions. The normal parity browser harness now requests a full dossier as well as comparing document histories.
+
+A live probe initially answered a transcript-correction question from academic registrations alone. The existing document/academic tool descriptions now distinguish submitted-file review from academic attempts, and the evidence instruction requires reading an owning domain before asserting absence. The bounded Luna planner and tool inventory are unchanged. Six subsequent student/staff probes on the fresh imported database correctly identify the rejected seal, pending review, and verification-to-aid dependencies. These are targeted semantic checks, not a complete legacy-bank certification.
+
+| Document integration verification | Result | Evidence |
+|---|---|---|
+| Complete platform test command | 1,548 Python passed / 23 skipped; 73.20% coverage; all Node suites passed | `platform/artifacts/integration/tests-document-history.log` |
+| Final platform/portal lint and typecheck | Passed; portal retains 14 warnings, zero errors | Each clone's `artifacts/integration/{lint,typecheck}-document-history-final.log` |
+| Portal tests / final production build | 136 passed; final build passed | `portals/artifacts/integration/tests-document-history.log`, `build-document-history-final.log` |
+| Deterministic world | 17 tests passed; fresh build/import succeeded | `platform/artifacts/integration/document-history/world-tests.log`, `world/`, `rebuild-import.log` |
+| New empty PostgreSQL database | All migrations through 0072; 3,000 students, 88 staff, 51 university tables, 383 policy passages; migration rerun is a checksum/no-op success | `document-history/rebuild-migrations-noop.log`, `fresh-history-counts.log` |
+| Fresh runtime + cross-domain parity | 6 runtime tests and 4 document/finance/board tests passed | `document-history/fresh-runtime-tests.log`, `fresh-parity-tests.log` |
+| Real review/resubmission transaction | Reject, replay/conflict, unauthorized actor, immutable history, replacement acceptance, stale-head protection and unchanged account verified; fixtures rolled back | `apps/api/tests/test_document_history_integration.py` |
+| Full review browser | Confirmation precedes mutation; student guidance, staff history and Atlas agree; internal-note privacy verified | `portals/artifacts/integration/browser-document-review.log` |
+| Normal browser parity and board filters | Passed, now including full Atlas dossier and document projection | `portals/artifacts/integration/browser-parity-document-history-final.log`, `browser-board-filters-document-history.log` |
+| Luna document regression checks | Six grounded student/staff answers after tool-description correction | `platform/artifacts/integration/document-history/edward-{student,staff}-final.log` |
+
+The complete platform suite precedes the small final tool-description change and academic-progress view; fresh-runtime/parity tests, browser coverage, final lint/typecheck and live probes cover those final changes. The browser uses a separately named test database and metadata fixture, not an uploaded original object. External extraction, original storage and AI auto-resolution remain unverified/unimplemented. The fixed institutional snapshot clock and operational decision wall clock remain distinct and explicitly documented.
+
+Source re-audit after document integration: all five Git states and all source product files still match; only the same two ignored trace-store files differ. See `provenance/source-verification-document-history.log` and the timestamped manifest. No additional source difference, push, deploy, or existing institutional database mutation occurred.

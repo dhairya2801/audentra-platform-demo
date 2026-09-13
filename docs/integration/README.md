@@ -45,6 +45,7 @@ Atlas without `--database-url` remains the separate SQLite evaluation/scenario t
 - `WorkBoardProjection` joins canonical work items with document, case and payment evidence. Its project counts and linked-payment state counts cover the full queue; cards are paginated. Search, owner/priority/office filters, quick filters and sorting run before pagination; project attention/open/overdue totals cover the whole project. Operational status never settles money or proves verification/delivery.
 - Planning input edits require student self-authorization, term validation, expected version, idempotency key/payload hash, an atomic audit record and a receipt. No Edward financial write was added.
 - Board edits use the existing work/document/communication command boundaries and their authorization/version/domain guards. Original files and external delivery remain dependent on configured storage/providers.
+- Official document reviews are immutable per submission. The shared history projection excludes internal notes; replacement uploads preserve earlier decisions. Imported status snapshots identify unknown reviewers/guidance and never supersede separately recorded university revision evidence.
 - Morning Brew is deliberately demo-backed and cannot enter Edward evidence. See the portal's `app/staff/morning-brew/MOCK-BOUNDARY.md`.
 
 See [the actual tool catalog](edward-tool-catalog.md). In university mode legacy financial/housing interpretations are excluded from the model's read catalog.
@@ -64,5 +65,15 @@ node tools/university-explorer/integration-lab.mjs
 ```
 
 The parity harness compares HTTP APIs to Atlas and checks the imported UI. The workspace test uses the integrated demo identities and deliberately avoids the legacy browser suite's fixture-reset hooks. Raw screenshots, database files and provider traces are ignored local artifacts, not committed test fixtures.
+
+The document browser regression requires a **separate disposable imported test database**. Start `run_runtime.py --disable-openai --port 45629` and `server.py --port 4329` with that database's explicit URL. From this platform clone, create a fresh pending submission before each run:
+
+```bash
+PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/prepare_document_review_fixture.py \
+  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_test_vnext_rebuild \
+  --output ../portals/artifacts/integration/document-review-fixture.json
+```
+
+Then run `node tools/university-explorer/integration-document-review.mjs` from the portal clone. The browser routes all API calls to the test runtime and records a real decision there. This checks command persistence and cross-surface history, using explicit failed-extraction metadata; it does not certify original object storage or provider extraction. `test_document_history_integration.py` additionally tests replacement acceptance, replay/conflict, authorization and stale-submission protection in a rolled-back transaction.
 
 This branch has not been pushed or deployed. See the workspace report for readiness limits and the proposed test.audentra.ai rollout sequence.

@@ -115,6 +115,8 @@ async def projection(url, kind, student_id, actor_id, offset=0):
             return await runtime.service.repository.portal.get_campus_life(
                 replace(auth, actor_type="student", actor_id=student_id)
             )
+        if kind == "documents":
+            return await runtime.service.repository.university.record(auth, "documents")
         if kind == "student-profile":
             return await runtime.service.repository.portal.get_student_profile(
                 replace(auth, actor_type="student", actor_id=student_id)

@@ -2925,6 +2925,7 @@ async def review_document(
     request: Request,
     service: ServiceDependency,
     auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
 ) -> object:
     return await _dispatch(
         service=service,
@@ -2933,6 +2934,7 @@ async def review_document(
         auth=auth,
         payload=body.public_payload(),
         path_params={"documentId": _uuid(document_id)},
+        idempotency_key=idempotency_key,
     )
 
 
@@ -3058,4 +3060,13 @@ async def simulate_financial_plan(
         request=request,
         auth=auth,
         payload=body,
+    )
+
+
+@router.get("/v1/staff/document-review/options", response_model=None)
+async def document_review_options(
+    request: Request, auth: AuthDependency, service: ServiceDependency
+) -> object:
+    return await _dispatch(
+        service=service, operation="staff.document_review_options", request=request, auth=auth
     )

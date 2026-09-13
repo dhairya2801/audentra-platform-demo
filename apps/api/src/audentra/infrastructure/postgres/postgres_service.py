@@ -1866,12 +1866,15 @@ class PostgresPlatformService:
                 payload,
                 call.request_id,
             )
+        if operation == "staff.document_review_options":
+            return await staff.get_document_review_options(auth)
         if operation == "staff.review_document":
             return await staff.review_document(
                 auth,
                 self._path(call, "documentId", "id", "document_id"),
                 payload,
                 call.request_id,
+                call.idempotency_key,
             )
         if operation == "staff.get_document_content":
             return await self._get_staff_document_content(
