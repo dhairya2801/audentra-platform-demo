@@ -3037,7 +3037,11 @@ async def get_work_board(
         operation="staff.work_board",
         request=request,
         auth=auth,
-        query_params={"offset": str(offset), **({"project": project} if project else {})},
+        query_params={
+            **dict(request.query_params),
+            "offset": str(offset),
+            **({"project": project} if project else {}),
+        },
     )
 
 

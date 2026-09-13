@@ -31,3 +31,22 @@ PROJECT_LABELS = {
     "en-requests": "Enrollment / Student requests",
     "cl-housing": "Campus Life / Housing requests",
 }
+
+# Attention follows the same document/payment precedence as the card projection.
+# Every linked record is constrained to the work item's tenant.
+ATTENTION_SQL = """
+CASE
+ WHEN EXISTS(SELECT 1 FROM public.document_record d WHERE d.tenant_id=item.tenant_id
+             AND d.id=item.source_id AND item.source_type='document')
+ THEN EXISTS(SELECT 1 FROM public.document_record d WHERE d.tenant_id=item.tenant_id
+             AND d.id=item.source_id AND d.status IN ('under_review','needs_review'))
+ WHEN EXISTS(SELECT 1 FROM university.runtime_link l WHERE l.tenant_id=item.tenant_id
+             AND l.runtime_id=item.id AND l.kind='payment_work_item')
+ THEN EXISTS(SELECT 1 FROM university.runtime_link l JOIN university.payment p
+             ON p.tenant_id=l.tenant_id AND p.id=l.world_id
+             WHERE l.tenant_id=item.tenant_id AND l.runtime_id=item.id
+             AND l.kind='payment_work_item' AND p.status IN ('failed','reversed'))
+ ELSE item.status='blocked' AND item.action_type NOT IN
+      ('reachout','outreach','follow_up')
+END
+"""

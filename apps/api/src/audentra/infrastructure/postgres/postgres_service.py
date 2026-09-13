@@ -1022,7 +1022,12 @@ class PostgresPlatformService:
             from .work_board_repository import WorkBoardProjection
 
             return await WorkBoardProjection(self.repository.staff).read(
-                auth, int(call.query_params.get("offset") or 0), call.query_params.get("project")
+                auth,
+                int(call.query_params.get("offset") or 0),
+                call.query_params.get("project"),
+                filters={
+                    k: v for k, v in call.query_params.items() if k not in {"offset", "project"}
+                },
             )
         if operation in {
             "student.financial_plan",

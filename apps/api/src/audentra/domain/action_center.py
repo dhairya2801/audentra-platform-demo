@@ -85,6 +85,7 @@ class ActionCenterQuery:
     limit: int = DEFAULT_PAGE_LIMIT
     offset: int = 0
     board_project: str | None = None  # Canonical product board projection only.
+    board_attention: bool = False
 
     @property
     def statuses(self) -> tuple[str, ...]:

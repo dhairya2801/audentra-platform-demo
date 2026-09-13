@@ -4053,3 +4053,9 @@ export interface FinancialPlan {
     postedCoverage: Record<string, unknown>[]; postedCoverageUnavailableReason: string | null; livingCoverage: Record<string, unknown>[]};
   boundaries: string[];
 }
+
+/** Canonical Action Center filters apply before bounded card pagination. */
+export interface StaffWorkBoardQuery extends Pick<StaffActionCenterQuery,
+  "search" | "assignee" | "priority" | "component" | "sort"> {
+  quick?: "all" | "mine" | "exceptions" | "overdue";
+}

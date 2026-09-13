@@ -582,6 +582,10 @@ class PostgresStaffRepository:
 
             clauses.append(f"({PROJECT_SQL}) = :board_project")
             params["board_project"] = query.board_project
+        if query.board_attention:
+            from .work_board_sql import ATTENTION_SQL
+
+            clauses.append(f"({ATTENTION_SQL})")
         if query.priority:
             clauses.append("item.priority = :priority")
             params["priority"] = query.priority
@@ -603,7 +607,8 @@ class PostgresStaffRepository:
                 params["assignee_pattern"] = f"%{_escape_like(query.assignee)}%"
         if query.search:
             clauses.append(
-                "(item.key ILIKE :search_pattern OR item.title ILIKE :search_pattern"
+                "(item.key ILIKE :search_pattern OR item.id::text ILIKE :search_pattern"
+                " OR item.title ILIKE :search_pattern"
                 " OR item.description ILIKE :search_pattern"
                 " OR item.component ILIKE :search_pattern"
                 " OR person.first_name ILIKE :search_pattern"

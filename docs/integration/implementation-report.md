@@ -112,7 +112,7 @@ The UI has no payment-provider integration, award-acceptance command, insurance 
 
 `seedTasks`, localStorage persistence and the donor's mock workflow/document/delivery engines were removed from the active board. Static stage names/layout metadata remain presentation code. Historical stage averages and targets show unavailable values rather than fake SLAs.
 
-Remaining board limitations: search/filter/group operate on the current page; a full server search remains available in the existing canonical workspace. Some advanced creation, outreach, extraction and correction operations open that workspace rather than reproducing every donor interaction inside the new detail panel. No generic workflow engine or unrestricted drag-to-domain-transition command was added.
+Board search, owner/priority/office filters, quick attention/overdue/mine filters and sorting now run against the full canonical queue before pagination. Grouping remains a presentation of the returned page. Full-project open/attention/overdue counts and office options are server aggregates. Related work outside the current page loads its canonical card and detail; delayed searches cannot overwrite newer results, and failed loads expose an explicit retry. Remaining board limitations: Some advanced creation, outreach, extraction and correction operations open that workspace rather than reproducing every donor interaction inside the new detail panel. No generic workflow engine or unrestricted drag-to-domain-transition command was added.
 
 ## 7. Profiles and campus life
 
@@ -214,7 +214,7 @@ The original 30-case oracle was exercised as both student and staff: **60 baseli
 
 1. Reconcile the legacy read/write/holdout fixture banks with the integrated schema and run the complete provider-enabled acceptance matrix. Finish semantic grading beyond structural/factual probes.
 2. Configure an isolated object store and document worker; verify original uploads, extraction, revision comparison, correction/resubmission and the desired newer decision-history/auto-resolution surface end to end.
-3. Extend board-wide search/filtering beyond the current page and complete any donor interactions still opening the older canonical workspace. Confirm the desired Student 360 visual scope.
+3. Complete any donor interactions still opening the older canonical workspace. Confirm the desired Student 360 visual scope. Full-queue board filtering/search and cross-page related-work navigation are now implemented.
 4. Add real provider-backed financial commands only with receipts and settlement evidence: payments/refunds, award acceptance, signed installment agreements, insurance review and saved scenario management. Existing honest empty states should remain until then.
 5. Decide how institutional snapshot time and operational wall-clock scheduling should behave in long-running demos. The fixed university oracle clock remains September 8 while operational availability uses current time.
 6. Add canonical club membership/join workflows if desired; current directory publication is real, membership is not inferred. Expand transactional service bookings only when there is a real command/domain.
@@ -278,6 +278,20 @@ Branch: `integration/audentra-vnext-portals`. The first commit captures the sour
 
 ### Documentation and workspace artifacts
 
-The platform documentation commit records this report, the local runbook and the final registered/active Edward tool catalog. Its own hash is recorded in the workspace-root report after commit creation. Root provenance manifests and the visual gallery stay within this isolated workspace; the root directory itself is not a third Git repository.
+The platform documentation commit records this report, the local runbook and the final registered/active Edward tool catalog. Its exact hash is `d7ba36e910a418c9246ab244ad770a1a1e547fc4` — docs: record integration provenance, verification and deployment gates. Root provenance manifests and the visual gallery stay within this isolated workspace; the root directory itself is not a third Git repository.
 
 Both integration clones have no remotes. No source commit, index, branch, tracked file or untracked product file was changed. No push, deploy or existing institutional database mutation was performed. See the explicit ignored trace-file exception above.
+
+## 16. Continued integration: full-queue Action Center
+
+The imported board now delegates search, assignee, priority, component, quick filters and sorting to the existing tenant-scoped work repository before its bounded 100-card page. `StaffWorkBoardQuery` is synchronized between platform and portal contracts. Canonical project summaries supply full-project open, attention and overdue totals and office choices. Attention uses linked document review, failed/reversed payment and blocked request evidence. The page retains visual grouping and the deployed board/list treatment. A nonfunctional demo-only EDgent-owner filter was removed; no automated owner is fabricated.
+
+The detail panel resolves related cards outside the loaded page through the same canonical projection. Search result sequencing rejects older responses; a failed query displays a retry action instead of a permanently busy board. A meaningful browser regression finds a matching card beyond the first page, checks filters and page resets, opens related work outside the result page, deliberately delays a prior query, and exercises failed-load recovery.
+
+The portal test command now explicitly disables `NEXT_PUBLIC_EDWARD_DEBUG_ENABLED` only in its production test build/process. This prevents the intentional local Lab setting from invalidating the production-404 assertion while preserving the development Lab.
+
+Verification artifacts for this continuation use `*-board-filters.log` in each clone's ignored integration artifacts. Results: platform **1,547 passed / 23 skipped, 72.89% coverage**, all Node suites passed; platform lint/typecheck passed. Portal **136 passed / 0 failed**, typecheck/build passed, lint **0 errors / 14 warnings**. Cross-surface HTTP/browser parity and the full-queue board browser regression passed, including actual Next/Previous navigation through a filtered queue larger than 100 cards. Two direct PostgreSQL board tests also passed against the independently rebuilt integration test world.
+
+The final CSS toast-dismissal adjustment was covered by the browser regression and final production build after the complete portal test run. The full platform test run and final targeted checks cover the UUID search used by cross-page detail navigation. The latest source audit at **2026-09-13 04:22:27 UTC** again found all Git states and source product files unchanged, with only the same two ignored trace-store exceptions. No additional source differences appeared.
+
+The platform commit records the canonical query/projection work and this documentation; the portal commits separate board behavior from the production-test configuration fix. Exact hashes are recorded in the workspace-root report after commit creation. No migration or Edward planner/action change is introduced by this continuation.

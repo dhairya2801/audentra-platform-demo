@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import text
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError
-from audentra.domain.action_center import ActionCenterQuery
+from audentra.domain.action_center import parse_action_center_query
 from audentra.domain.work_board import board_card
 
-from .work_board_sql import PROJECT_LABELS, PROJECT_SQL, PROJECTS
+from .work_board_sql import ATTENTION_SQL, PROJECT_LABELS, PROJECT_SQL, PROJECTS
 
 if TYPE_CHECKING:
     from .staff_repository import PostgresStaffRepository
@@ -22,7 +24,11 @@ class WorkBoardProjection:
         self.staff = staff
 
     async def read(
-        self, auth: AuthContext, offset: int = 0, project: str | None = None
+        self,
+        auth: AuthContext,
+        offset: int = 0,
+        project: str | None = None,
+        filters: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         if auth.actor_type != "staff":
             raise ApiError(403, "STAFF_REQUIRED", "Staff access required")
@@ -30,6 +36,19 @@ class WorkBoardProjection:
             raise ApiError(400, "INVALID_OFFSET", "Invalid board page")
         if project is not None and project not in PROJECTS:
             raise ApiError(400, "INVALID_PROJECT", "Choose an institutional work board")
+        raw = dict(filters or {})
+        quick = raw.pop("quick", "all")
+        if quick not in {"all", "mine", "exceptions", "overdue"}:
+            raise ApiError(400, "INVALID_QUICK_FILTER", "Choose a supported work filter")
+        if quick == "mine":
+            raw["assignee"] = "me"
+        if quick == "overdue":
+            raw["due"] = "overdue"
+        query = replace(
+            parse_action_center_query({"status": "all", **raw, "limit": 100, "offset": offset}),
+            board_project=project,
+            board_attention=quick == "exceptions",
+        )
         async with self.staff._engine.connect() as connection:
             await connection.execute(
                 text("SELECT set_config('audentra.tenant_id',:tenant,true)"),
@@ -37,13 +56,18 @@ class WorkBoardProjection:
             )
             counts = await connection.execute(
                 text(
-                    f"SELECT {PROJECT_SQL} AS project, count(*) AS total "  # noqa: S608 — code-owned SQL
+                    f"SELECT {PROJECT_SQL} AS project, count(*) AS total, "  # noqa: S608 — code-owned SQL
+                    "count(*) FILTER (WHERE item.status NOT IN ('done','cancelled')) AS open, "
+                    f"count(*) FILTER (WHERE {ATTENTION_SQL}) AS attention, "
+                    "count(*) FILTER (WHERE item.due_at < CURRENT_TIMESTAMP) AS overdue, "
+                    "array_agg(DISTINCT item.component ORDER BY item.component) AS components "
                     "FROM public.staff_work_item item WHERE item.tenant_id=CAST(:tenant AS uuid) "
                     "GROUP BY 1"
                 ),
                 {"tenant": auth.tenant_id},
             )
-            project_counts = {row.project: row.total for row in counts}
+            summaries = {row.project: dict(row._mapping) for row in counts}
+            project_counts = {key: row["total"] for key, row in summaries.items()}
             payments = await connection.execute(
                 text("""SELECT p.status,count(*) AS total FROM university.payment p
                     WHERE p.tenant_id=CAST(:tenant AS uuid) AND EXISTS (
@@ -57,7 +81,7 @@ class WorkBoardProjection:
             dict[str, Any],
             await self.staff.get_work_queue(
                 auth,
-                ActionCenterQuery(status="all", limit=100, offset=offset, board_project=project),
+                query,
             ),
         )
         items = envelope["items"]
@@ -118,6 +142,8 @@ class WorkBoardProjection:
             **envelope,
             "project": project,
             "projectCounts": project_counts,
+            "projectSummaries": summaries,
+            "filterScope": "full_matching_queue",
             "projects": [
                 {"id": key, "name": name, "count": project_counts.get(key, 0)}
                 for key, name in PROJECT_LABELS.items()

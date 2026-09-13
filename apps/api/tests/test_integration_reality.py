@@ -220,3 +220,74 @@ def test_work_board_projects_match_evidence_and_edward() -> None:
             await runtime.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.postgres
+@pytest.mark.integration
+def test_board_filters_search_full_queue_before_pagination() -> None:
+    async def run() -> None:
+        runtime = await build_api_runtime(
+            RuntimeSettings.from_environment({"DATABASE_URL": database_url()})
+        )
+        service: Any = runtime.service
+        auth = AuthContext(SYNTHETIC_TENANT_ID, STUDENT, STAFF, "staff")
+        board = WorkBoardProjection(service.repository.staff)
+        try:
+            first = await board.read(auth)
+            cards = list(first["cards"])
+            page = first
+            while page["page"]["hasMore"]:
+                page = await board.read(auth, page["page"]["offset"] + 100)
+                cards.extend(page["cards"])
+            assert len(cards) == first["page"]["total"] > 100
+            target = cards[100]
+            assert target["id"] not in {card["id"] for card in first["cards"]}
+            found = await board.read(
+                auth, project=target["board"], filters={"search": target["key"]}
+            )
+            assert found["page"]["offset"] == 0
+            assert target["id"] in {card["id"] for card in found["cards"]}
+            assert found["projectCounts"] == first["projectCounts"]
+            assert found["filterScope"] == "full_matching_queue"
+            by_id = await board.read(auth, filters={"search": target["id"]})
+            assert [card["id"] for card in by_id["cards"]] == [target["id"]]
+            filters = {"priority": target["priority"].lower(), "assignee": target["owner"]}
+            if target["owner"] == "TEAM":
+                filters["assignee"] = "unassigned"
+            expected = [
+                card
+                for card in cards
+                if card["priority"] == target["priority"] and card["owner"] == target["owner"]
+            ]
+            filtered = await board.read(auth, filters=filters)
+            assert filtered["page"]["total"] == len(expected)
+            assert {card["id"] for card in filtered["cards"]} <= {card["id"] for card in expected}
+            attention = await board.read(auth, filters={"quick": "exceptions"})
+            expected_attention = [
+                card for card in cards if card["status"] in {"exceptions", "exception", "escalated"}
+            ]
+            assert attention["page"]["total"] == len(expected_attention)
+            assert sum(row["attention"] for row in first["projectSummaries"].values()) == len(
+                expected_attention
+            )
+            for project, summary in first["projectSummaries"].items():
+                matching = [card for card in cards if card["board"] == project]
+                assert summary["components"] == sorted({card["category"] for card in matching})
+                assert summary["open"] == sum(
+                    card["operationalStatus"] not in {"done", "cancelled"} for card in matching
+                )
+            mine = await board.read(auth, filters={"quick": "mine"})
+            assert mine["page"]["total"] == sum(card["owner"] == STAFF for card in cards)
+            empty = await board.read(auth, filters={"search": "%unlikely_literal_%"})
+            assert empty["page"]["total"] == 0
+            for invalid in [
+                {"priority": "not-a-priority"},
+                {"quick": "agent"},
+                {"search": "x" * 121},
+            ]:
+                with pytest.raises(ApiError):
+                    await board.read(auth, filters=invalid)
+        finally:
+            await runtime.close()
+
+    asyncio.run(run())

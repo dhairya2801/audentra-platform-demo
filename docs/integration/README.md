@@ -42,7 +42,7 @@ Atlas without `--database-url` remains the separate SQLite evaluation/scenario t
 ## Domain contracts
 
 - `FinancialPlanService` combines posted ledger, awards, disbursements, payment states, requirements, catalog, actual enrollments and student planning assumptions. All money remains integer cents. `simulate` is a read-only preview.
-- `WorkBoardProjection` joins canonical work items with document, case and payment evidence. Its project counts and linked-payment state counts cover the full queue; cards are paginated. Operational status never settles money or proves verification/delivery.
+- `WorkBoardProjection` joins canonical work items with document, case and payment evidence. Its project counts and linked-payment state counts cover the full queue; cards are paginated. Search, owner/priority/office filters, quick filters and sorting run before pagination; project attention/open/overdue totals cover the whole project. Operational status never settles money or proves verification/delivery.
 - Planning input edits require student self-authorization, term validation, expected version, idempotency key/payload hash, an atomic audit record and a receipt. No Edward financial write was added.
 - Board edits use the existing work/document/communication command boundaries and their authorization/version/domain guards. Original files and external delivery remain dependent on configured storage/providers.
 - Morning Brew is deliberately demo-backed and cannot enter Edward evidence. See the portal's `app/staff/morning-brew/MOCK-BOUNDARY.md`.
@@ -57,6 +57,7 @@ From the sibling portal:
 
 ```bash
 node tools/university-explorer/integration-parity.mjs
+node tools/university-explorer/integration-board-filters.mjs
 E2E_BASE_URL=http://localhost:3009 npx playwright test tools/browser-e2e/specs/integration-edward.spec.ts
 # Explicit provider-enabled Lab smoke; incurs a model call:
 node tools/university-explorer/integration-lab.mjs
