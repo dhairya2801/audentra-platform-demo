@@ -57,6 +57,61 @@ def bounded_document_label(
     return f"{prefix}{normalized_name}{suffix}"
 
 
+def document_review_task_copy(
+    student_name: object,
+    category: object,
+    *,
+    parse_failure: bool = False,
+) -> tuple[str, str]:
+    """Build clear, student-centered copy for a staff document review task."""
+
+    first_name = _document_review_first_name(student_name)
+    document_label = document_review_label(category)
+    possessive = f"{first_name}'s" if first_name else "the student's"
+    title = bounded_document_label(document_label, prefix=f"Review {possessive} ")
+    subject = first_name or "The student"
+    if parse_failure:
+        return (
+            title,
+            f"{subject}'s {document_label.lower()} is safely stored, but automatic parsing "
+            "needs a hand. Review the original or retry extraction when you're ready.",
+        )
+    return (
+        title,
+        f"{subject} is waiting for a quick review. Compare the document with the extracted "
+        "details, then approve it or ask for an update.",
+    )
+
+
+def document_review_label(category: object) -> str:
+    """Return a person-friendly document label without exposing a file name."""
+
+    normalized = str(category).strip().lower() if category is not None else ""
+    labels = {
+        "consent": "FERPA Consent Form",
+        "financial_aid": "Financial Aid Document",
+        "health": "Immunization Record",
+        "identity": "Identity Document",
+        "immunization": "Immunization Record",
+        "residency": "Residency Document",
+        "transcript": "Transcript",
+    }
+    if normalized in labels:
+        return labels[normalized]
+    if not normalized or normalized == "other":
+        return "Supporting Document"
+    humanized = normalized.replace("_", " ").title()
+    if humanized.lower().endswith(("document", "form", "letter", "record", "transcript")):
+        return humanized
+    return f"{humanized} Document"
+
+
+def _document_review_first_name(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip().split(maxsplit=1)[0] if value.strip() else ""
+
+
 def validate_document_upload(file_name: str, mime_type: str, category: str, content: bytes) -> str:
     """Validate metadata and magic bytes, returning a normalized filename."""
 

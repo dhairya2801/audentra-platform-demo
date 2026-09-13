@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from audentra.domain.documents import bounded_document_label
+from audentra.domain.documents import document_review_task_copy
 from audentra.infrastructure.messaging.envelope import DomainEventEnvelope
 
 _REVIEWABLE_STATUSES = {"needs_review", "under_review"}
@@ -60,10 +60,24 @@ class DocumentReviewProjector:
             document_result = await connection.execute(
                 text(
                     """
-                    SELECT id, tenant_id, student_id, file_name, category, status
-                    FROM public.document_record
-                    WHERE tenant_id = :tenant_id AND id = :document_id
-                    FOR SHARE
+                    SELECT document.id, document.tenant_id, document.student_id,
+                           document.file_name, document.category, document.status,
+                           COALESCE(
+                             NULLIF(BTRIM(profile.preferred_name), ''),
+                             NULLIF(BTRIM(person.first_name), '')
+                           ) AS student_name
+                    FROM public.document_record AS document
+                    JOIN public.student AS student
+                      ON student.id = document.student_id
+                     AND student.tenant_id = document.tenant_id
+                    JOIN public.person AS person
+                      ON person.id = student.person_id
+                     AND person.tenant_id = student.tenant_id
+                    LEFT JOIN public.student_profile AS profile
+                      ON profile.student_id = student.id
+                     AND profile.tenant_id = student.tenant_id
+                    WHERE document.tenant_id = :tenant_id AND document.id = :document_id
+                    FOR SHARE OF document
                     """
                 ),
                 {"tenant_id": event.tenant_id, "document_id": document_id},
@@ -75,6 +89,10 @@ class DocumentReviewProjector:
                 return
 
             component, priority = _document_route(str(document["category"]))
+            task_title, task_description = document_review_task_copy(
+                document["student_name"],
+                document["category"],
+            )
             assignee_result = await connection.execute(
                 text(
                     """
@@ -95,13 +113,11 @@ class DocumentReviewProjector:
                     """
                     INSERT INTO public.staff_work_item (
                       id, tenant_id, student_id, key, title, description,
-                      status, priority, work_type, component, due_at,
+                      status, priority, work_type, action_type, component, due_at,
                       escalated, assignee_id, source_type, source_id, version
                     ) VALUES (
-                      :id, :tenant_id, :student_id, :key, :title,
-                      'Verify the stored original, extracted evidence, and proposed '
-                      'record matches.',
-                      'todo', :priority, 'document_review', :component,
+                      :id, :tenant_id, :student_id, :key, :title, :description,
+                      'todo', :priority, 'document_review', 'document_review', :component,
                       NOW() + INTERVAL '2 days', false, :assignee_id,
                       'document', :document_id, 1
                     )
@@ -116,7 +132,8 @@ class DocumentReviewProjector:
                     "tenant_id": event.tenant_id,
                     "student_id": document["student_id"],
                     "key": f"DOC-{document_id.replace('-', '')[:8].upper()}",
-                    "title": bounded_document_label(document["file_name"], prefix="Review "),
+                    "title": task_title,
+                    "description": task_description,
                     "priority": priority,
                     "component": component,
                     "assignee_id": assignee["id"] if assignee is not None else None,
@@ -153,7 +170,7 @@ class DocumentReviewProjector:
                     ) VALUES (
                       :id, :tenant_id, :work_item_id, 'system', NULL,
                       'Audentra workflow', 'created',
-                      'Created from the durable document review event.', NOW()
+                      'A document is ready for a staff decision.', NOW()
                     )
                     """
                 ),
