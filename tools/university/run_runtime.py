@@ -22,6 +22,7 @@ def runtime_settings(
     *,
     enable_openai: bool = True,
     environ: Mapping[str, str] | None = None,
+    portal_origin: str | None = None,
 ) -> RuntimeSettings:
     values = dict(os.environ if environ is None else environ)
     key = values.get("OPENAI_API_KEY", "").strip()
@@ -35,6 +36,14 @@ def runtime_settings(
         "/audentra_university"
     ):
         raise ValueError("Use an explicit local audentra_university database")
+    if portal_origin:
+        origin = urlparse(portal_origin)
+        if (
+            origin.scheme != "http"
+            or origin.hostname not in ("localhost", "127.0.0.1")
+            or origin.path not in ("", "/")
+        ):
+            raise ValueError("Use an explicit loopback HTTP portal origin")
     values = {
         **values,
         "AUDENTRA_ENV": "development",
@@ -44,7 +53,8 @@ def runtime_settings(
         "DEMO_STUDENT_ID": "ac2fa509-b4e3-402d-900b-ffb8440fc430",
         "DEMO_ACTOR_ID": "ac2fa509-b4e3-402d-900b-ffb8440fc430",
         "DEMO_STAFF_ACTOR_ID": "01973261-954a-5019-8e9e-24a699abea7b",
-        "WEB_ORIGIN": "http://127.0.0.1:3009,http://localhost:3009,http://localhost:3000,http://127.0.0.1:3000",
+        "WEB_ORIGIN": portal_origin
+        or "http://127.0.0.1:3009,http://localhost:3009,http://localhost:3000,http://127.0.0.1:3000",
         "BROWSER_AUTH_REQUIRED": "false",
         "ASSISTANT_TRACE_DEBUG_ENABLED": "true",
         "OPENAI_MODEL": "gpt-5.6-luna",
@@ -59,6 +69,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--database-url", required=True)
     parser.add_argument("--port", type=int, default=45609)
+    parser.add_argument(
+        "--portal-origin", help="Explicit loopback origin for an isolated portal"
+    )
     provider = parser.add_mutually_exclusive_group()
     provider.add_argument("--enable-openai", dest="enable_openai", action="store_true")
     provider.add_argument(
@@ -67,7 +80,11 @@ if __name__ == "__main__":
     parser.set_defaults(enable_openai=True)
     args = parser.parse_args()
     try:
-        settings = runtime_settings(args.database_url, enable_openai=args.enable_openai)
+        settings = runtime_settings(
+            args.database_url,
+            enable_openai=args.enable_openai,
+            portal_origin=args.portal_origin,
+        )
     except ValueError as error:
         parser.error(str(error))
     print(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import mimetypes
 import secrets
@@ -27,9 +28,9 @@ from engine import (
 UI = ROOT.parent / "portals/tools/university-explorer"
 
 
-def serve(world=DEFAULT_OUTPUT, port=4310):
+def serve(world=DEFAULT_OUTPUT, port=4310, database_url=None):
     world = Path(world).resolve()
-    if not (world / "university.sqlite").exists():
+    if not database_url and not (world / "university.sqlite").exists():
         raise SystemExit("Build the world first: python3 tools/university/build.py")
 
     class Handler(BaseHTTPRequestHandler):
@@ -37,7 +38,7 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
             pass
 
         def json(self, data, status=200):
-            raw = json.dumps(data, ensure_ascii=False).encode()
+            raw = json.dumps(data, ensure_ascii=False, default=str).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
@@ -47,6 +48,15 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
             self.wfile.write(raw)
 
         def database(self, writable=False):
+            if database_url:
+                if writable or self.headers.get("X-University-Sandbox"):
+                    raise Rejected(
+                        "Sandbox operations are unavailable in PostgreSQL live mode"
+                    )
+                from live import LiveDatabase
+
+                return LiveDatabase(database_url)
+
             sandbox = self.headers.get("X-University-Sandbox")
             if sandbox:
                 if len(sandbox) != 24 or any(
@@ -93,6 +103,46 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
                 self.wfile.write(raw)
                 return
             try:
+                if path == "/api/mode":
+                    return self.json(
+                        {
+                            "mode": "live" if database_url else "evaluation",
+                            "source": "PostgreSQL"
+                            if database_url
+                            else "SQLite evaluation fixture",
+                        }
+                    )
+                if database_url and path in {"/api/scenarios", "/api/sandboxes"}:
+                    return self.json(
+                        {
+                            "error": "Evaluation-only capability; use a separate evaluation server"
+                        },
+                        403,
+                    )
+                if database_url and path in {
+                    "/api/financial-plan",
+                    "/api/work-board",
+                    "/api/campus-life",
+                    "/api/student-profile",
+                    "/api/staff-profile",
+                }:
+                    from live import projection
+
+                    return self.json(
+                        asyncio.run(
+                            projection(
+                                database_url,
+                                path.removeprefix("/api/"),
+                                q.get(
+                                    "student_id", "ac2fa509-b4e3-402d-900b-ffb8440fc430"
+                                ),
+                                q.get(
+                                    "actor_id", "01973261-954a-5019-8e9e-24a699abea7b"
+                                ),
+                                int(q.get("offset", "0")),
+                            )
+                        )
+                    )
                 with self.database() as db:
                     if path == "/api/overview":
                         data = dict(
@@ -138,7 +188,22 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
                                     "SELECT count(*) FROM housing WHERE status='assigned' AND ends_at IS NULL"
                                 ).fetchone()[0],
                             ),
-                            manifest=json.loads((world / "manifest.json").read_text()),
+                            manifest=(
+                                {
+                                    "mode": "live",
+                                    "source": "PostgreSQL canonical runtime",
+                                    "validation_errors": [],
+                                    "seed": "See import provenance",
+                                    "sources": [],
+                                    "source_hashes": {},
+                                    "counts": {},
+                                    "scenarios": 0,
+                                    "version": "PostgreSQL live",
+                                    "clock": CLOCK,
+                                }
+                                if database_url
+                                else json.loads((world / "manifest.json").read_text())
+                            ),
                         )
                     elif path == "/api/students":
                         clauses = ["1=1"]
@@ -174,6 +239,21 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
                     elif path.startswith("/api/students/"):
                         sid = path.split("/")[3]
                         data = evidence(db, sid, q.get("role", "staff"))
+                        if database_url:
+                            from live import projection
+
+                            canonical = asyncio.run(
+                                projection(
+                                    database_url,
+                                    "student-overview",
+                                    sid,
+                                    q.get(
+                                        "actor_id",
+                                        "01973261-954a-5019-8e9e-24a699abea7b",
+                                    ),
+                                )
+                            )
+                            data["student"] = canonical["student"]
                         data["timeline"] = timeline(
                             db,
                             sid,
@@ -286,6 +366,13 @@ def serve(world=DEFAULT_OUTPUT, port=4310):
                 raise
 
         def do_POST(self):
+            if database_url:
+                return self.json(
+                    {
+                        "error": "Atlas live mode is read-only; use canonical product commands"
+                    },
+                    403,
+                )
             # Local browser mutations must originate from this explorer. This is not an authentication service.
             origin = self.headers.get("Origin")
             if origin and origin not in (
@@ -345,5 +432,9 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--world", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument("--port", type=int, default=4310)
+    p.add_argument(
+        "--database-url",
+        help="Explicit loopback PostgreSQL DB; disables all sandbox/oracle routes",
+    )
     a = p.parse_args()
-    serve(a.world, a.port)
+    serve(a.world, a.port, a.database_url)
