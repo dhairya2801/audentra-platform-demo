@@ -352,6 +352,20 @@ def _clarify_loop_continuation(
         return None
     question = str(last_assistant.get("content") or "")
 
+    if question.startswith("Which task should I update?"):
+        for item in reversed(history):
+            if str(item.get("role")) != "user":
+                continue
+            prior = parse_staff_action(str(item.get("content") or ""), task_board=True)
+            if prior is not None and prior.action == "operations.work_item.update":
+                return (
+                    SemanticActionRequest(
+                        prior.action, dict(prior.fields), 0.9, source="continuation"
+                    ),
+                    None,
+                    False,
+                )
+        return None
     if _CLARIFY_BLOCKER_SENTINEL in question:
         fields: JsonDict = {"status": "blocked", "nextStep": text[:200]}
         return (
@@ -1018,6 +1032,29 @@ class PostgresPlatformService:
             )
 
         auth = self._auth(call)
+        if operation == "staff.demo_task_write":
+            from .demo_task_board_commands import DemoTaskBoardCommands
+
+            return await DemoTaskBoardCommands(self.repository.staff).write(
+                auth,
+                self._path(call, "workItemId"),
+                dict(call.payload),
+                call.request_id,
+                call.idempotency_key,
+            )
+        if operation == "staff.demo_document_review":
+            return await self.repository.staff.review_document(
+                auth,
+                self._path(call, "documentId"),
+                call.payload,
+                call.request_id,
+                call.idempotency_key,
+                demo_only=True,
+            )
+        if operation == "staff.demo_task_board":
+            from .demo_task_board_repository import DemoTaskBoardProjection
+
+            return await DemoTaskBoardProjection(self.repository.staff).read(auth)
         if operation == "staff.work_board":
             from .work_board_repository import WorkBoardProjection
 
@@ -2358,9 +2395,13 @@ class PostgresPlatformService:
                 "Your document record was saved, but the original could not be stored yet. "
                 "Please retry this upload.",
             ) from error
-        await self.repository.portal.claim_student_document_processing(
-            auth, str(reserved["id"]), request_id=call.request_id
+        attached = await self.repository.portal.attach_demo_document(
+            auth, str(reserved["id"]), call.request_id
         )
+        if not attached:
+            await self.repository.portal.claim_student_document_processing(
+                auth, str(reserved["id"]), request_id=call.request_id
+            )
         return await self.repository.portal.get_student_document(auth, str(reserved["id"]))
 
     async def _upload_staff_portal_media(self, auth: AuthContext, call: ServiceCall) -> JsonDict:
@@ -3651,7 +3692,13 @@ class PostgresPlatformService:
             )
         return self.repository.staff_assistant
 
-    def _staff_assistant_host(self, auth: AuthContext) -> StaffAssistantToolHost:
+    def _staff_assistant_host(
+        self,
+        auth: AuthContext,
+        *,
+        board: Any = None,
+        task_board_context: Mapping[str, Any] | None = None,
+    ) -> StaffAssistantToolHost:
         """Primitive live reads for the staff assistant, per request.
 
         Every primitive is a pure, tenant-scoped read. Student-scoped
@@ -3662,9 +3709,12 @@ class PostgresPlatformService:
         nothing here writes.
         """
 
+        from .task_board_assistant import TaskBoardAssistant
+
         portal = self.repository.portal
         staff = self.repository.staff
         assistant = self._staff_assistant_repo()
+        board = board or TaskBoardAssistant(staff, auth)
 
         def student_auth(student_id: str) -> AuthContext:
             # This is an internal, read-only projection after the staff tenant
@@ -3691,10 +3741,16 @@ class PostgresPlatformService:
 
         return StaffAssistantToolHost(
             {
-                "search_students": lambda **kwargs: assistant.search_students(auth, **kwargs),
+                "search_students": (
+                    board.search_students
+                    if task_board_context is not None
+                    else lambda **kwargs: assistant.search_students(auth, **kwargs)
+                ),
                 "search_students_fuzzy": (
-                    lambda query, limit=5: assistant.search_students_fuzzy(
-                        auth, query=query, limit=limit
+                    lambda query, limit=5: (
+                        board.search_students(query=query, limit=limit)
+                        if task_board_context is not None
+                        else assistant.search_students_fuzzy(auth, query=query, limit=limit)
                     )
                 ),
                 "student_by_external_ref": student_by_external_ref,
@@ -3758,6 +3814,8 @@ class PostgresPlatformService:
                         auth, parse_action_center_query(query), group_by=group_by, limit=limit
                     )
                 ),
+                "task_board": board.read,
+                "task_board_task": board.task,
                 "work_item_by_key": lambda key: staff.find_work_item_by_key(auth, key),
                 # The Staff Portal's own briefing composer — Edward reads the
                 # same briefing the staff member can already see, rather than
@@ -3782,6 +3840,7 @@ class PostgresPlatformService:
                 **self._university_staff_primitives(auth),
             },
             staff_member_id=auth.actor_id,
+            task_board_context=task_board_context,
         )
 
     def _staff_knowledge_primitives(self, auth: AuthContext) -> dict[str, Any]:
@@ -3958,7 +4017,9 @@ class PostgresPlatformService:
         # question Edward itself just asked, then the model — the same order
         # the student path uses, and for the same reason.
         if injection_reason is None:
-            semantic_action = parse_staff_action(message)
+            semantic_action = parse_staff_action(
+                message, task_board=isinstance(payload.get("pageContext"), Mapping)
+            )
             if semantic_action is None and conversation_id is not None:
                 staff_conversation_state = await self._edward_actions().conversation_actions(
                     auth, str(conversation_id)
@@ -4017,6 +4078,15 @@ class PostgresPlatformService:
                 await self._record_assistant_trace(trace)
                 return replay
 
+        from .task_board_assistant import TaskBoardAssistant
+
+        board = TaskBoardAssistant(self.repository.staff, auth)
+        raw_page_context = payload.get("pageContext")
+        task_board_context = (
+            await board.page_context(dict(raw_page_context))
+            if isinstance(raw_page_context, Mapping)
+            else None
+        )
         guarded = guarded_staff_response(message)
         conversation_state = staff_conversation_state
         if (
@@ -4089,7 +4159,9 @@ class PostgresPlatformService:
                 )
                 trace.history_source = "server"
             pipeline = StaffAssistantPipeline(
-                self._staff_assistant_host(auth),
+                self._staff_assistant_host(
+                    auth, board=board, task_board_context=task_board_context
+                ),
                 # A recognised write request is resolved by the deterministic
                 # classifier and Action Gateway. Running model planning here
                 # would add cost and latency to a result that is discarded,
@@ -4223,7 +4295,17 @@ class PostgresPlatformService:
                     # Milos still get the question.
                     action_student_id = await self._single_caseload_name(auth, message)
                 work_item_key = normalized.work_item_key
-                if work_item_key is None and re.search(
+                task_candidates: list[JsonDict] = []
+                if (
+                    task_board_context is not None
+                    and semantic_action.action == "operations.work_item.update"
+                ):
+                    work_item_key, task_candidates = await board.reference(
+                        message,
+                        history,
+                        _mapping(task_board_context.get("selectedTask")).get("key"),
+                    )
+                elif work_item_key is None and re.search(
                     r"\b(?:that|this|it|previous)\b", message, re.I
                 ):
                     work_item_key = _recent_work_item_key(history)
@@ -4231,9 +4313,11 @@ class PostgresPlatformService:
                         work_item_key = await self._edward_actions().recent_work_item_key(
                             auth, str(conversation_id)
                         )
-                if work_item_key is None and clarify_forced_work_item_key is not None:
-                    # The answer to "what is it waiting on?" rarely repeats the
-                    # key; the question already bound it.
+                if (
+                    work_item_key is None
+                    and not task_candidates
+                    and clarify_forced_work_item_key is not None
+                ):
                     work_item_key = clarify_forced_work_item_key
                 # Capability is checked before anything is clarified: an
                 # adviser without the bulk permission cannot be helped by
@@ -4269,6 +4353,15 @@ class PostgresPlatformService:
                         ),
                     )
                 )
+                if clarify is not None and task_candidates:
+                    choices = "; ".join(
+                        f"{card['key']} — {card['title']} ({card['student']['name']})"
+                        for card in task_candidates[:8]
+                    )
+                    question = "Which task should I update? " + choices
+                    clarify.update(
+                        {"message": question, "blocks": [{"type": "text", "text": question}]}
+                    )
                 if (
                     semantic_action.action
                     in {"operations.follow_up.create", "communications.email.prepare"}
@@ -4280,7 +4373,9 @@ class PostgresPlatformService:
                     trace.action_proposed = semantic_action.action
                     trace.action_policy_result = "clarify"
                     semantic_action = None
-                elif clarify is not None and _pipeline_already_asked(result):
+                elif (
+                    clarify is not None and not task_candidates and _pipeline_already_asked(result)
+                ):
                     # The read pipeline already asked a better question than a
                     # generic one — an ambiguous name deserves the candidate
                     # list it produced, not "which student?" with no options.
@@ -4302,6 +4397,8 @@ class PostgresPlatformService:
                 try:
                     if semantic_action is None:
                         raise _ActionClarified
+                    if task_board_context is not None and work_item_key is not None:
+                        await board.task(work_item_key)
                     intent = await self._edward_actions().propose_staff(
                         auth,
                         semantic_action,

@@ -16,10 +16,14 @@ API and Atlas are loopback development tools. They are not a deployment authenti
 To start the API in this clone, using the already-created integration database:
 
 ```bash
-PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_runtime.py \
+BROWSER_AUTH_REQUIRED=true PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_demo_excellence.py \
   --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_vnext \
   --port 45619
 ```
+
+For manual portal testing, `BROWSER_AUTH_REQUIRED=true` requires a chosen demo
+session and keeps sign-out on the sign-in screen. Omit it only for harnesses
+that intentionally use development identity headers without browser sessions.
 
 To start Atlas live:
 
@@ -83,3 +87,114 @@ With the same separate API/Atlas test services on 45629/4329, run `node tools/un
 The restored legacy banks run in separate current-schema test databases. See [legacy evaluation results and commands](legacy-evaluation.md) for the read-only source captures, strict fixture import, passing write banks and remaining read limitations. No source database is used by an evaluation API.
 
 This branch has not been pushed or deployed. See the workspace report for readiness limits and the proposed test.audentra.ai rollout sequence.
+
+## Camila / Ada task board (step 1)
+
+Apply migrations, including `0077_staff_demo_board_cards.sql`, then run once:
+
+```bash
+PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/seed_camila_task_board.py \
+  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_vnext
+```
+
+The restricted `run_demo_excellence.py` launcher now exposes only Ada
+(`SYN-000061`) and Camila (`AU-55ff7e408818`). Camila manages Ada plus her
+existing nine students. The seed creates 64 stable, student-linked work items
+and membership records without replacing prior university work. Re-running
+preserves edits. Historical adviser assignments are ended, not deleted; both
+public and imported-university assignment views are kept consistent.
+
+`GET /v1/staff/demo-task-board` reads the authenticated staff member's configured
+cards and current student identities. It does not execute document, parsing,
+messaging, payment or workflow simulations. Those remain in the copied UI for
+this step. The membership table has tenant RLS and validates work/staff links.
+
+The isolated PostgreSQL regression requires a migrated disposable database whose
+name begins with `audentra_university_test_camila`:
+
+```bash
+AUDENTRA_CAMILA_TEST_DATABASE_URL=postgresql://dhairya2801@127.0.0.1:55591/audentra_university_test_camila_step1 \
+  PYTHONPATH=apps/api/src apps/api/.venv/bin/pytest apps/api/tests/test_demo_task_board.py -q
+```
+
+It creates its own small roster, verifies seed replay, preserved adviser history,
+identity rereads, and staff/student/tenant isolation. It never uses the interactive
+demo database. Frontend validation is `node tools/university-explorer/camila-demo-identities.mjs`
+from the portal clone.
+
+### Camila demo: original document uploads
+
+Apply `0078_staff_demo_documents.sql` and restart the restricted demo API after the
+step-1 setup. A successfully stored upload now fills the assigned student's
+available document slot, or adds a card when no slot remains. Submissions linked
+to the same requirement reuse its card and retain original versions. Registration,
+review-pending state, audit and durable invalidation commit together; storage
+failure creates no task attachment. No parser job or extraction evidence is
+created for this configured demo board. Unconfigured students retain the normal
+processing path.
+
+`GET /v1/staff/demo-task-board` includes ordered `documents` metadata and the real
+work-item creation timestamp. Originals use the existing authenticated staff
+content endpoint. `staff_demo_document` retains document/card membership; canonical
+`staff_work_item_link` rows prevent the normal worker/lazy reconciler from producing
+duplicates for older submissions.
+
+The existing isolated `test_demo_task_board.py` now also exercises upload routing
+in a transaction that rolls back its added requirements/documents. The portal's
+`tools/university-explorer/camila-demo-uploads.mjs` must run against an explicitly
+provisioned disposable API/database/portal (`CAMILA_UPLOAD_TESTS=1`, `PORTAL_BASE`).
+Do not point it at the interactive demo. See the portal changelog
+`2026-09-14-camila-demo-uploads.md` for frontend asset preparation and validation.
+
+Ada's initial accepted documents alone do not provide a pending checklist upload.
+After the board setup, run the guarded, repeat-safe scenario addition:
+
+```sh
+PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/seed_ada_upload_request.py \
+  --database-url postgresql://USER@127.0.0.1:PORT/audentra_university_vnext
+```
+
+It adds **Upload updated transcript** (`ada_updated_transcript`) only to Ada's
+journey, using a separate definition that is not the default for other students.
+It retains the shared published definition, all prior requirement states and all
+accepted originals. It does not add a 65th staff card during setup. Rerunning the
+seed after a submission preserves that submission. The pending step appears in
+Profile → Documents and at `/enrollment/requirements/ada-updated-transcript`.
+The original category remains unclassified (`other`) until parsing is implemented.
+
+### Camila's connected task board
+
+Migration `0079_staff_initiated_conversations.sql` distinguishes staff-origin conversations
+without fabricating an initial student message. Existing participant history and the five-day
+retention policy remain canonical. The demo activity endpoint is
+`POST /v1/staff/demo-task-board/{workItemId}/activity` (`message` or private `note`);
+manual decisions use `POST /v1/staff/demo-task-board/documents/{documentId}/decision`.
+Both require idempotency keys and expected work-item versions. Membership, active staff and
+primary-adviser assignment are checked inside the write transaction. Uploads, decisions and
+participant replies share a student lock; replies to terminal demo cards reuse their membership.
+
+After the identity seed and Ada's upload-request seed, run the guarded local data fixture:
+
+```sh
+PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/seed_camila_connected_board.py --database-url "$CAMILA_DEMO_DATABASE_URL"
+```
+
+The fixture preserves pre-existing documents and completed evidence, clones journey definitions
+without publishing them as defaults, links pending document requirements to specific cards,
+stores demonstration PDFs in configured object storage, and uses canonical review/conversation
+writes. Normal dependency reconciliation may unlock eligible steps when a seeded review is
+accepted. The completion marker and stable upload/message keys make retries resumable and
+repeat runs preserve subsequent user activity. The fixture never starts document parsing.
+
+For isolated integration validation set `AUDENTRA_CAMILA_CONNECTED_TEST_DATABASE_URL` to a
+populated `audentra_university_test_camila*` database and run `test_demo_connected_board.py`.
+`test_demo_connected_contracts.py` verifies strict inputs without database services. Browser
+handoff tests live in the portals repository. Never target these mutation suites at the
+interactive demo database. The complete unconfigured API suite currently passes its executed
+tests but fails the existing 67% global coverage gate; isolated suites are also run explicitly.
+
+## Task Board and Edward
+
+The board now passes its validated open-task context to the existing floating assistant.
+See [Task Board → Edward integration](task-board-edward.md) for canonical reads, guarded task edits,
+conversation tests, and the remaining parser/workflow boundaries.

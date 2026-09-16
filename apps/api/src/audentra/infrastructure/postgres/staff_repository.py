@@ -5575,6 +5575,7 @@ class PostgresStaffRepository:
         review: Mapping[str, object],
         request_id: str,
         idempotency_key: str | None = None,
+        demo_only: bool = False,
     ) -> dict[str, object]:
         self._require_staff(auth)
         work_item_id = str(_read(review, "workItemId", "work_item_id"))
@@ -5600,6 +5601,7 @@ class PostgresStaffRepository:
                 "A rejection reason can be used only when changes are requested",
             )
         normalized_request = {
+            "demoOnly": demo_only,
             "documentId": document_id,
             "workItemId": work_item_id,
             "expectedWorkItemVersion": expected_version,
@@ -5622,8 +5624,18 @@ class PostgresStaffRepository:
                 if decision == "rejected"
                 else None
             )
+            if demo_only:
+                from .demo_task_board_commands import lock_demo_card
+
+                await lock_demo_card(connection, auth, work_item_id)
             work_item = await self._lock_work_item(connection, auth, work_item_id)
             if work_item["source_type"] != "document" or str(work_item["source_id"]) != document_id:
+                if demo_only and work_item["source_type"] == "document":
+                    raise ConflictError(
+                        "DOCUMENT_SUPERSEDED",
+                        "A newer document was uploaded. "
+                        "Close this dialog and review the latest original.",
+                    )
                 raise NotFoundError(
                     "STAFF_WORK_ITEM_NOT_FOUND",
                     "The document review work item was not found",
@@ -5899,6 +5911,11 @@ class PostgresStaffRepository:
                     FROM {self._table("document_record")} AS document
                     WHERE document.tenant_id = :tenant_id
                       AND document.status IN ('needs_review', 'under_review')
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {self._table("staff_work_item_link")} AS link
+                        WHERE link.tenant_id=document.tenant_id AND link.entity_type='document'
+                          AND link.entity_id=document.id AND link.relationship='document_submission'
+                      )
                       AND NOT EXISTS (
                         SELECT 1
                         FROM {self._table("staff_work_item")} AS item

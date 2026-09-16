@@ -804,10 +804,12 @@ def test_delegate_ferpa_projection_is_read_only_and_specialized_submission_is_re
     assert not any(call.name == "submit_student_requirement_response" for call in rig.portal.calls)
 
 
-def test_document_upload_persists_original_before_claiming_processing() -> None:
+@pytest.mark.parametrize("demo_attached", [False, True])
+def test_document_upload_persists_original_before_claiming_processing(demo_attached: bool) -> None:
     rig = _rig()
     rig.portal.responses.update(
         {
+            "attach_demo_document": demo_attached,
             "reserve_student_document_upload": {"id": "document-1"},
             "get_student_document_content_reference": {
                 "storageKey": "tenant/student/document-1.pdf",
@@ -837,6 +839,13 @@ def test_document_upload_persists_original_before_claiming_processing() -> None:
     assert metadata["sizeBytes"] == len(upload.content)
     assert reserved.args[-1] == "requirement-1"
     assert rig.storage.objects["tenant/student/document-1.pdf"] == upload.content
+    attached = next(call for call in rig.portal.calls if call.name == "attach_demo_document")
+    assert attached.args[:2] == (AUTH, "document-1")
+    if demo_attached:
+        assert not any(
+            call.name == "claim_student_document_processing" for call in rig.portal.calls
+        )
+        return
     claim = next(
         call for call in rig.portal.calls if call.name == "claim_student_document_processing"
     )
@@ -850,6 +859,7 @@ def test_document_upload_maps_storage_failures_without_claiming(
     rig = _rig()
     rig.portal.responses.update(
         {
+            "attach_demo_document": False,
             "reserve_student_document_upload": {"id": "document-1"},
             "get_student_document_content_reference": {
                 "storageKey": "tenant/student/document-1.pdf"
@@ -875,6 +885,7 @@ def test_document_upload_maps_storage_failures_without_claiming(
         "DOCUMENT_STORAGE_UNAVAILABLE",
     )
     assert not any(call.name == "claim_student_document_processing" for call in rig.portal.calls)
+    assert not any(call.name == "attach_demo_document" for call in rig.portal.calls)
 
 
 def test_document_content_returns_bounded_binary_contract() -> None:

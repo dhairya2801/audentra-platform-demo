@@ -890,3 +890,68 @@ STAFF_TOOL_INFORMATION_CLASS = {
     "getUniversityWorkBoard": "operational_state",
 }
 STAFF_RECEIPT_SOURCES = {**STAFF_RECEIPT_SOURCES, "getUniversityWorkBoard": "university"}
+
+
+# The signed-in person's displayed board is distinct from the institution-wide queue.
+STAFF_TOOL_NAMES = (*STAFF_TOOL_NAMES, "getTaskBoard", "getTaskBoardTask")
+STAFF_TOOL_DESCRIPTIONS = {
+    **STAFF_TOOL_DESCRIPTIONS,
+    "getTaskBoard": (
+        "Read the signed-in staff member's actual Task Board, including curated membership "
+        "when configured. Full matching counts plus a bounded page of canonical tasks and "
+        "student identities; priority, due dates and status are real records. Filter by "
+        "project, student name or task title/key (search), priority, status, or due window. "
+        "Omit studentId for the whole board; it is already scoped to the signed-in staff. "
+        "studentId is only for a verified student handle, never me or a staff handle. "
+        "this_week means Monday through Sunday in the board timezone, not the next 7 days. "
+        "Use counts for totals; page through results before claiming an exhaustive list. "
+        "Read getTaskBoardTask for documents, conversations, activity and related tasks."
+    ),
+    "getTaskBoardTask": (
+        "Read one task on the signed-in staff member's board by its canonical task key. "
+        "Includes actual student identity, priority, deadline, next step, linked original "
+        "document metadata and decisions, requirements, messages, staff notes, activity, "
+        "canonical work context and other tasks for this student. Overview is bounded; "
+        "use section=documents/activity/messages and offset/limit for more detail. "
+        "Parser/preview values "
+        "are not evidence. The result binds student:<task key> for further student reads. "
+        "First search getTaskBoard when the task is ambiguous; never choose arbitrarily."
+    ),
+}
+STAFF_TOOL_ARGUMENTS = {
+    **STAFF_TOOL_ARGUMENTS,
+    "getTaskBoard": {
+        "studentId": {"kind": "uuid", "optional": True},
+        **{
+            k: v
+            for k, v in STAFF_TOOL_ARGUMENTS["getUniversityWorkBoard"].items()
+            if k != "assignee"
+        },
+        "due": {
+            "kind": "enum",
+            "values": ("all", "overdue", "today", "this_week", "seven_days"),
+            "optional": True,
+        },
+        "limit": {"kind": "int", "minimum": 1, "maximum": 30, "optional": True},
+    },
+    "getTaskBoardTask": {
+        "key": {"kind": "text", "max_length": 40},
+        "section": {
+            "kind": "enum",
+            "values": ("overview", "documents", "activity", "messages"),
+            "optional": True,
+        },
+        "offset": {"kind": "int", "minimum": 0, "maximum": 100000, "optional": True},
+        "limit": {"kind": "int", "minimum": 1, "maximum": 20, "optional": True},
+    },
+}
+STAFF_TOOL_INFORMATION_CLASS = {
+    **STAFF_TOOL_INFORMATION_CLASS,
+    "getTaskBoard": "operational_state",
+    "getTaskBoardTask": "operational_state",
+}
+STAFF_RECEIPT_SOURCES = {
+    **STAFF_RECEIPT_SOURCES,
+    "getTaskBoard": "task_board",
+    "getTaskBoardTask": "task_board_task",
+}

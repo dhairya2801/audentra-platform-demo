@@ -88,6 +88,15 @@ class DocumentReviewProjector:
             if str(document["status"]) not in _REVIEWABLE_STATUSES:
                 return
 
+            linked = await connection.execute(
+                text("""SELECT 1 FROM public.staff_work_item_link
+                    WHERE tenant_id=:tenant_id AND entity_type='document'
+                      AND entity_id=:document_id AND relationship='document_submission' LIMIT 1"""),
+                {"tenant_id": event.tenant_id, "document_id": document_id},
+            )
+            if linked.first() is not None:
+                return
+
             component, priority = _document_route(str(document["category"]))
             task_title, task_description = document_review_task_copy(
                 document["student_name"],

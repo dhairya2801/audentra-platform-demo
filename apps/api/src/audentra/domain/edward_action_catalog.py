@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Literal
 
 ActionName = Literal[
@@ -44,7 +46,7 @@ ActionName = Literal[
 
 ActorKind = Literal["student", "staff"]
 
-FieldKind = Literal["text", "enum", "phone", "day", "flag"]
+FieldKind = Literal["text", "enum", "phone", "day", "task_day", "flag"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,12 +234,16 @@ ACTIONS: tuple[ActionDefinition, ...] = (
             ActionField("priority", "enum", "the new operational priority", values=_PRIORITIES),
             ActionField(
                 "dueOn",
-                "day",
-                "the new due day, only when a deadline change is requested",
-                values=_DAYS,
+                "task_day",
+                "new task deadline: an explicit YYYY-MM-DD date or today, tomorrow, "
+                "a weekday name or next_week. Never infer an unstated year. "
+                "Only when a deadline change is requested",
             ),
             ActionField(
-                "followUp", "day", "the day to come back to it, if one was named", values=_DAYS
+                "followUp",
+                "task_day",
+                "the day to come back: explicit YYYY-MM-DD, today, tomorrow, "
+                "a weekday name or next_week; never infer an unstated year",
             ),
             ActionField(
                 "nextStep",
@@ -817,6 +823,14 @@ def coerce_fields(action: ActionName, raw: Mapping[str, Any]) -> dict[str, Any]:
             continue
         text = str(value).strip()
         if not text or len(text) > spec.max_length:
+            continue
+        if spec.kind == "task_day":
+            lowered = text.lower().replace(" ", "_")
+            if lowered in (*_DAYS, "saturday", "sunday"):
+                cleaned[spec.name] = lowered
+            elif re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", text):
+                with suppress(ValueError):
+                    cleaned[spec.name] = date.fromisoformat(text).isoformat()
             continue
         if spec.kind == "enum" or spec.kind == "day":
             lowered = text.lower().replace(" ", "_")

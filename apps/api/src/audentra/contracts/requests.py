@@ -720,8 +720,34 @@ class CreateAssistantConversationRequest(StrictRequest):
     page_context: AssistantPageContextRequest
 
 
+class StaffTaskBoardContextRequest(StrictRequest):
+    """Navigation hints only. The server revalidates membership and task identity."""
+
+    surface: Literal["task_board"]
+    project: (
+        Literal[
+            "fa-docs",
+            "fa-outreach",
+            "fa-payments",
+            "en-docs",
+            "en-outreach",
+            "en-requests",
+            "cl-housing",
+        ]
+        | None
+    ) = None
+    work_item_key: (
+        Annotated[
+            StrictStr, StringConstraints(min_length=1, max_length=40, pattern=r"^[A-Za-z]+-[0-9]+$")
+        ]
+        | None
+    ) = None
+
+
 class AskStaffEdwardRequest(StrictRequest):
     """One server-identified, durable staff assistant turn."""
+
+    page_context: StaffTaskBoardContextRequest | None = None
 
     message: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2_000)]
     conversation_id: UUID | None = None
@@ -1081,6 +1107,25 @@ class ReviewStaffDocumentRequest(StrictRequest):
     notify_student: StrictBool
     reason_code: Annotated[StrictStr, StringConstraints(min_length=1, max_length=80)] | None = None
     internal_note: Annotated[StrictStr, StringConstraints(max_length=1000)] | None = None
+
+
+class DemoTaskWriteRequest(StrictRequest):
+    kind: Literal["message", "note"]
+    expected_version: StrictInt = Field(ge=1)
+    body: Annotated[
+        StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
+    ]
+    start_new_conversation: StrictBool = False
+
+
+class DemoDocumentReviewRequest(ReviewStaffDocumentRequest):
+    original_reviewed: StrictBool
+
+    @model_validator(mode="after")
+    def _requires_original_review(self) -> "DemoDocumentReviewRequest":
+        if not self.original_reviewed:
+            raise ValueError("Review the original document before recording a decision")
+        return self
 
 
 StaffManagedConfigurationKind = Literal["journeys", "campus_life", "academics"]

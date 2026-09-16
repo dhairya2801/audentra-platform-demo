@@ -372,6 +372,13 @@ class StaffAssistantPipeline:
             and not request.action_is_supported
         ):
             resolution_classification = None
+        selected_task = (self._host.task_board_context or {}).get("selectedTask") or {}
+        if selected_task and not has_explicit_entity(request):
+            # Only the ordinary referent rules may inherit this canonical student;
+            # a board-wide question still has no student scope.
+            context_student_id = (selected_task.get("student") or {}).get(
+                "id"
+            ) or context_student_id
         resolution = await self._resolve_student_referent(
             request, resolution_classification, context_student_id, execution, trace, entities
         )
@@ -806,6 +813,31 @@ class StaffAssistantPipeline:
         timeout = self._tool_timeout_seconds
         moment = self._now()
         discovered: dict[str, JsonDict] = {}
+        student_board: Mapping[str, Any] | None = None
+        if (
+            host.task_board_context is not None
+            and resolution.student_id
+            and host.supports("task_board")
+        ):
+            # Resolve task ambiguity against this student's complete board index,
+            # not whichever project a model happened to search first.
+            board_context = await execute_staff_tool_reads(
+                [
+                    PlannedToolCall(
+                        tool="getTaskBoard",
+                        arguments={"studentId": resolution.student_id, "limit": 30},
+                    )
+                ],
+                host,
+                timeout_seconds=timeout,
+                now=moment,
+                receipt_offset=len(execution.receipts),
+            )
+            _merge_execution(execution, board_context)
+            if trace is not None:
+                _trace_round(trace, board_context, "board-context")
+            value = board_context.reads.get("getTaskBoard", {}).get("data")
+            student_board = value if isinstance(value, Mapping) else None
 
         async def executor(calls: Sequence[LoopCall]) -> None:
             planned: list[tuple[LoopCall, PlannedToolCall]] = []
@@ -818,16 +850,26 @@ class StaffAssistantPipeline:
                 planned.append((call, bound))
             if not planned:
                 return
-            round_result = await execute_staff_tool_reads(
-                [bound for _, bound in planned],
-                host,
-                timeout_seconds=timeout,
-                now=moment,
-                receipt_offset=len(execution.receipts),
+            # Board comparisons can request several pages/tasks through one tool.
+            # Keep their results separate rather than sharing the last keyed read.
+            batches = (
+                [[entry] for entry in planned]
+                if any(bound.tool in {"getTaskBoard", "getTaskBoardTask"} for _, bound in planned)
+                else [planned]
             )
-            _merge_execution(execution, round_result)
-            rejected = {item["tool"]: item for item in round_result.rejected_arguments}
-            for call, bound in planned:
+            results: list[tuple[LoopCall, PlannedToolCall, StaffToolExecution]] = []
+            for batch in batches:
+                round_result = await execute_staff_tool_reads(
+                    [bound for _, bound in batch],
+                    host,
+                    timeout_seconds=timeout,
+                    now=moment,
+                    receipt_offset=len(execution.receipts),
+                )
+                _merge_execution(execution, round_result)
+                results.extend((call, bound, round_result) for call, bound in batch)
+            for call, bound, round_result in results:
+                rejected = {item["tool"]: item for item in round_result.rejected_arguments}
                 read = round_result.reads.get(bound.tool)
                 if read is None:
                     call.status = "rejected"
@@ -838,6 +880,34 @@ class StaffAssistantPipeline:
                 call.reason = read.get("reason")
                 call.result = read.get("data")
                 call.duration_ms = read.get("durationMs")
+                if (
+                    bound.tool == "getTaskBoardTask"
+                    and call.status == "available"
+                    and isinstance(call.result, Mapping)
+                ):
+                    student = call.result.get("student") or {}
+                    task = call.result.get("task") or {}
+                    if student.get("id") and task.get("key"):
+                        handle = f"student:{task['key']}"
+                        handles[handle] = str(student["id"])
+                        call.result = {**call.result, "studentHandle": handle}
+                        # A single task read can carry its student into follow-ups.
+                        # Multiple different students deliberately clear that default.
+                        discovered[handle] = {
+                            "id": str(student["id"]),
+                            "name": str(student.get("name") or ""),
+                        }
+                        students = {
+                            entry["id"]
+                            for key, entry in discovered.items()
+                            if key.startswith("student:")
+                        }
+                        if len(students) == 1 and not resolution.student_id:
+                            handles["student"] = str(student["id"])
+                            discovered["student"] = discovered[handle]
+                        elif len(students) > 1:
+                            handles.pop("student", None)
+                            discovered.pop("student", None)
                 # A canonical roster search that found exactly one student
                 # binds the `student` handle for the rest of the turn — the
                 # identifier still comes from the search result, never from
@@ -885,6 +955,28 @@ class StaffAssistantPipeline:
             "getStudentDocuments",
             "getStudentEngagementSignals",
         }
+        # On the Task Board, generic queue tools would silently read a different
+        # work population (especially for curated boards). Keep student/policy
+        # context, but require board tools for operational work and its counts.
+        other_work_surfaces = (
+            {
+                "getStaffWorkQueue",
+                "getMorningBriefing",
+                "getWorkItemDetail",
+                "summarizeWorkQueue",
+                "searchWorkQueue",
+                "getUniversityWorkBoard",
+                "getStudentsNeedingAttention",
+                "getComponentSummary",
+                "getStaffProfile",
+                "getStaffCaseload",
+                "getStaffTeam",
+                "compareStaff",
+                "getUniversityOperations",
+            }
+            if self._host.task_board_context is not None
+            else set()
+        )
         tools = [
             LoopTool(
                 name=name,
@@ -899,11 +991,53 @@ class StaffAssistantPipeline:
             for name in STAFF_TOOL_NAMES
             if (self._host.supports("university_record") or name not in university_only)
             and (not self._host.supports("university_record") or name not in legacy_student_facts)
+            and name not in other_work_surfaces
         ]
+        signed_in = (
+            f"Signed-in staff member: {identity.name}, {identity.title}, {identity.component}. "
+            "Read getTaskBoard for this board's current population and counts."
+            if identity is not None and self._host.task_board_context is not None
+            else identity.describe()
+            if identity is not None
+            else None
+        )
         context: JsonDict = {
             "university": UNIVERSITY_CONTEXT if self._host.supports("university_record") else None,
+            "taskBoardPage": self._host.task_board_context,
+            "resolvedStudentBoard": student_board,
+            "personalTaskBoard": (
+                "For the user's own Task Board use getTaskBoard and getTaskBoardTask. "
+                "These read the same assigned card membership as the UI. Institution-wide "
+                "work queues and staff profile aggregates can include different tasks; do not "
+                "substitute their counts. Read current data each turn. The selected page task "
+                "is a hint for 'this task'; explicit references win, and broad questions still "
+                "cover the whole board unless the user asks about this project. History can "
+                "identify a task by its title/student/key; search the board and ask a short "
+                "clarification with actual candidate titles/keys when more than one fits. "
+                "resolvedStudentBoard is the student's current task index across all projects; "
+                "use its workType, documentCount and projectName to identify all plausible "
+                "candidates before narrowing an ambiguous task. Financial-aid document review "
+                "is also document review. Check page.hasMore before treating it as complete. "
+                "If several fit a singular task reference, ask which task before recommending one. "
+                "Do not choose the first match. Document tasks can be in both en-docs and "
+                "fa-docs; first search all projects for an unspecified document task. Compare "
+                "matchingProjectCounts before treating a filtered search as unique. "
+                "Include task keys when discussing specific "
+                "tasks so follow-ups can refer to them. Compare priorities, overdue dates, "
+                "next steps and linked evidence to explain recommendations. Do not invent "
+                "deadlines or treat simulated workflow/parser/payment values as facts. "
+                "For a student message draft, read the task's actual conversation and document "
+                "state first; current canonical decisions override obsolete requests in older "
+                "messages. Never request another upload for an accepted document/completed "
+                "requirement on the basis of older correspondence. Distinguish internal staff "
+                "notes from student-visible messages. "
+                "Draft only, never claim delivery. Additional student record reads can use "
+                "student:<task key> only after getTaskBoardTask has verified that task."
+                if self._host.supports("task_board")
+                else None
+            ),
             "workBoard": (
-                "For task/card/project questions prefer getUniversityWorkBoard. "
+                "For institution-wide task/card/project questions use getUniversityWorkBoard. "
                 "Use assignee=me only when the user asks about their own work. "
                 "Financial Aid projects are fa-docs, fa-outreach and fa-payments; "
                 "document review spans fa-docs and en-docs, not a component named "
@@ -912,13 +1046,15 @@ class StaffAssistantPipeline:
                 "Do not substitute global overdue counts for filtered counts. "
                 "Refer to the operational surface as Task Board."
                 if self._host.supports("university_record")
+                and self._host.task_board_context is None
                 else None
             ),
             "resolvedWorkItem": (
                 {
                     "key": request.reference_token,
                     "meaning": "This token resolved to canonical staff work, not a student ID. "
-                    "Read getUniversityWorkBoard with search equal to this key for its "
+                    "Read getTaskBoardTask with this key for your assigned task, or "
+                    "getUniversityWorkBoard for institution-wide work, to verify its "
                     "priority, operational status, student, owner and due date.",
                 }
                 if resolution.treat_as_work_item
@@ -932,9 +1068,13 @@ class StaffAssistantPipeline:
                 else "Answer the staff member's current question."
             ),
             "today": moment.date().isoformat(),
-            "signedIn": identity.describe() if identity is not None else None,
+            "signedIn": signed_in,
             "comparisonLimit": (
-                "This path can verify one selected student's record per turn. If asked to "
+                "Task comparisons may read multiple getTaskBoardTask results and use their "
+                "verified student:<task key> handles for relevant student context. Do not "
+                "carry a single student referent after comparing different students."
+                if self._host.supports("task_board")
+                else "This path can verify one selected student's record per turn. If asked to "
                 "compare multiple students, explain that limitation and offer to review each "
                 "case separately. Never ask the user for internal handles or to repeat IDs "
                 "already supplied; handles are an executor detail, not something users provide."
@@ -965,8 +1105,20 @@ class StaffAssistantPipeline:
                 else None
             ),
         }
+        # Resolve an explicit page deictic before planning. Otherwise an older
+        # conversational task can override the card the person is pointing at.
+        # Bare "it" still follows conversational ambiguity rules.
+        selected = (host.task_board_context or {}).get("selectedTask") or {}
+        page_question = request.text
+        if selected.get("key") and not request.reference_token:
+            page_question = re.sub(
+                r"\bthis (?:task|card)\b",
+                lambda _: f"task {selected['key']}",
+                page_question,
+                flags=re.IGNORECASE,
+            )
         result: ReadLoopResult = await run_read_loop(
-            question=request.text,
+            question=page_question,
             history=request.history,
             context=context,
             tools=tools,
@@ -1002,8 +1154,10 @@ class StaffAssistantPipeline:
         verdict = None
         if result.answer:
             evidence = list(result.evidence_texts)
-            if identity is not None:
-                evidence.append(identity.describe())
+            if signed_in is not None:
+                evidence.append(signed_in)
+            if student_board is not None:
+                evidence.append(json.dumps(student_board, default=str))
             verdict = guard_staff_grounded_answer(answer=result.answer, evidence_texts=evidence)
         accepted = verdict is not None and verdict.accepted
         guard_label = (
@@ -1070,10 +1224,17 @@ class StaffAssistantPipeline:
             (entry for entry in reversed(result.model_calls) if entry.get("model")), None
         )
         usage_total = _sum_usage(result.model_calls)
-        queue_referent = _queue_head_student_id(resolved, state)
+        board_read = any(call.tool in {"getTaskBoard", "getTaskBoardTask"} for call in result.calls)
+        queue_referent = None if board_read else _queue_head_student_id(resolved, state)
         found = discovered.get("student")
         student_id = resolution.student_id or (found["id"] if found else None)
         student_name = resolution.student_name or (found["name"] if found else None)
+        multiple_task_students = (
+            len({entry["id"] for key, entry in discovered.items() if key.startswith("student:")})
+            > 1
+        )
+        if multiple_task_students:
+            student_id = student_name = queue_referent = None
         if trace is not None:
             trace.classification = _classification_dict(resolved)
             trace.tool_selection_source = "model_loop"
@@ -1091,8 +1252,16 @@ class StaffAssistantPipeline:
                 [
                     {
                         "type": "draft",
-                        "channel": "sms" if "sms" in request.text.lower() else "email",
-                        "subject": "Your university update",
+                        "channel": "portal"
+                        if self._host.task_board_context and "portal" in request.text.lower()
+                        else "sms"
+                        if "sms" in request.text.lower()
+                        else "email",
+                        **(
+                            {}
+                            if self._host.task_board_context and "portal" in request.text.lower()
+                            else {"subject": "Your university update"}
+                        ),
                         "body": verdict.answer,
                         "fallbackText": verdict.answer,
                         "disclaimer": "Draft only. Review before sharing; nothing has been sent.",
@@ -1116,7 +1285,9 @@ class StaffAssistantPipeline:
             resolved_student_id=student_id,
             resolved_student_name=student_name,
             referent_action=(
-                "set"
+                "clear"
+                if multiple_task_students
+                else "set"
                 if (student_id or queue_referent)
                 else referent_action(resolved_student_id=None, request_type=resolved.request_type)
             ),
@@ -1167,6 +1338,17 @@ class StaffAssistantPipeline:
                     return None
                 arguments[name] = str(found["id"])
                 continue
+            if (
+                call.tool == "getTaskBoard"
+                and name == "studentId"
+                and not (str(value) == "student" or str(value).startswith("student:"))
+            ):
+                call.status = "rejected"
+                call.reason = (
+                    "studentId requires a verified student handle, not a staff handle. "
+                    "Omit studentId to read your board; it is already scoped to you."
+                )
+                return None
             resolved_id = handles.get(str(value))
             if resolved_id is None:
                 call.status, call.reason = "rejected", f"unbound handle {value}"

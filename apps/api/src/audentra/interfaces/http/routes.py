@@ -40,6 +40,8 @@ from audentra.contracts.requests import (
     CreateStudentInquiryMessageRequest,
     DecideStudentExperienceUpdateRequest,
     DeferStudentExperienceUpdatesRequest,
+    DemoDocumentReviewRequest,
+    DemoTaskWriteRequest,
     DraftStaffManagedConfigurationRequest,
     EdwardFeedbackRequest,
     FerpaLinkCommandRequest,
@@ -3068,6 +3070,17 @@ async def get_work_board(
     )
 
 
+@router.get("/v1/staff/demo-task-board", response_model=None)
+async def get_demo_task_board(
+    request: Request,
+    auth: AuthDependency,
+    service: ServiceDependency,
+) -> object:
+    return await _dispatch(
+        service=service, operation="staff.demo_task_board", request=request, auth=auth
+    )
+
+
 @router.post("/v1/student/financial-plan/simulate", response_model=None)
 async def simulate_financial_plan(
     request: Request,
@@ -3090,4 +3103,46 @@ async def document_review_options(
 ) -> object:
     return await _dispatch(
         service=service, operation="staff.document_review_options", request=request, auth=auth
+    )
+
+
+@router.post("/v1/staff/demo-task-board/{id}/activity", status_code=201, response_model=None)
+async def write_demo_task_activity(
+    work_id: Annotated[UUID, Path(alias="id")],
+    body: DemoTaskWriteRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.demo_task_write",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"workItemId": _uuid(work_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post(
+    "/v1/staff/demo-task-board/documents/{id}/decision", status_code=201, response_model=None
+)
+async def review_demo_document(
+    document_id: Annotated[UUID, Path(alias="id")],
+    body: DemoDocumentReviewRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.demo_document_review",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"documentId": _uuid(document_id)},
+        idempotency_key=idempotency_key,
     )

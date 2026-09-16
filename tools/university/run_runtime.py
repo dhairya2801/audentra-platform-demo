@@ -55,7 +55,7 @@ def runtime_settings(
         "DEMO_STAFF_ACTOR_ID": "01973261-954a-5019-8e9e-24a699abea7b",
         "WEB_ORIGIN": portal_origin
         or "http://127.0.0.1:3009,http://localhost:3009,http://localhost:3000,http://127.0.0.1:3000",
-        "BROWSER_AUTH_REQUIRED": "false",
+        "BROWSER_AUTH_REQUIRED": values.get("BROWSER_AUTH_REQUIRED", "false"),
         "ASSISTANT_TRACE_DEBUG_ENABLED": "true",
         "OPENAI_MODEL": "gpt-5.6-luna",
         "EDWARD_READ_PLANNER": "model",

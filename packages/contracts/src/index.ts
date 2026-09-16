@@ -3411,7 +3411,7 @@ export interface EdwardFeedbackListResponse {
 export interface StaffAssistantDraftBlock {
   type: "draft";
   fallbackText: string;
-  channel: "email" | "sms";
+  channel: "email" | "sms" | "portal";
   subject?: string;
   body: string;
   disclaimer: string;
@@ -3419,7 +3419,15 @@ export interface StaffAssistantDraftBlock {
 
 export type StaffAssistantResponseBlock = AssistantResponseBlock | StaffAssistantDraftBlock;
 
+export interface StaffTaskBoardContext {
+  surface: "task_board";
+  project?: "fa-docs" | "fa-outreach" | "fa-payments" | "en-docs" | "en-outreach" | "en-requests" | "cl-housing";
+  /** Navigation hint only; membership and identity are validated on the server. */
+  workItemKey?: string;
+}
+
 export interface AskStaffEdwardInput {
+  pageContext?: StaffTaskBoardContext;
   message: string;
   /** Omit for a stateless turn or when `clientMessageId` should create the conversation. */
   conversationId?: string;
@@ -4130,4 +4138,42 @@ export interface FinancialPlan {
 export interface StaffWorkBoardQuery extends Pick<StaffActionCenterQuery,
   "search" | "assignee" | "priority" | "component" | "sort"> {
   quick?: "all" | "mine" | "exceptions" | "overdue";
+}
+
+/** Backend identities and work links for the progressively connected demo board.
+ * Original documents, conversations and activity are canonical; parser and other workflows remain previews.
+ */
+export interface StaffDemoTaskBoard {
+  scenarioVersion: string;
+  staff: { id: string; name: string; title: string | null; component: string };
+  cards: Array<{
+    id: string; key: string; title: string; templateKey: string; board: string; version: number;
+    createdAt: string;
+    priority: StaffWorkItemPriority; dueAt: string | null; status: StaffWorkItemStatus;
+    description: string; nextStep: string | null; followUpAt: string | null;
+    updatedAt: string; workType: string;
+    documents: Array<{
+      id: string; fileName: string; mimeType: string; sizeBytes: number; category: string;
+      uploadedAt: string; requirementId: string | null; contentPath: string;
+      status: string; decisions: Array<{id: string; decision: string; note: string; reviewerName: string; decidedAt: string}>;
+    }>;
+    activity: Array<{id: string; actor: string; actorType: string; action: string; message: string; createdAt: string}>;
+    requirements: Array<{id: string; title: string; status: string; version: number; code: string}>;
+    conversations: Array<{id: string; version: number; status: string; expiresAt: string; expired: boolean;
+      messages: Array<{id: string; direction: "student" | "staff"; authorName: string; body: string; createdAt: string}>}>;
+    student: {
+      id: string; externalRef: string; name: string; preferredName: string;
+      program: string; classYear: number; admitTerm: string | null; email: string | null;
+    };
+  }>;
+  total: number;
+  studentCount: number;
+}
+
+
+export interface DemoTaskWriteInput {
+  kind: "message" | "note";
+  expectedVersion: number;
+  body: string;
+  startNewConversation?: boolean;
 }

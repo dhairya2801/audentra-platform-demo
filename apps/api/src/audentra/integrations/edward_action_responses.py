@@ -75,8 +75,8 @@ def _answer(message: str, *, code: str) -> JsonDict:
 # ---------------------------------------------------------------------------
 
 _WORK_ITEM_FIELDS = (
-    "I can change a work item's status, move it to you, set a follow-up date, or "
-    "record the next step."
+    "I can change a task's priority, due date or status, move it to you, "
+    "set a follow-up date, or record the next step."
 )
 
 
@@ -125,8 +125,7 @@ def clarification(
 
     if action == "operations.work_item.update" and not fields:
         return _answer(
-            f"{_WORK_ITEM_FIELDS} Which of those did you want? Priority and escalation "
-            "are set on the item itself in the Action Center.",
+            f"{_WORK_ITEM_FIELDS} Which field should I update, and what should it be?",
             code="clarify_field",
         )
 

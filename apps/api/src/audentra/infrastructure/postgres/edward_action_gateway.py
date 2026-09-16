@@ -13,9 +13,10 @@ import logging
 import re
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import asdict
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Protocol, cast
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -734,7 +735,7 @@ class EdwardActionGateway:
             changes.append(
                 {"field": "priority", "before": item.get("priority"), "after": resolved["priority"]}
             )
-        due_on = _due_at(request.fields.get("dueOn"), self._clock())
+        due_on = _task_due_at(request.fields.get("dueOn"), self._clock())
         if due_on:
             resolved["dueAt"] = due_on.isoformat()
             changes.append(
@@ -767,7 +768,7 @@ class EdwardActionGateway:
                         "after": request.fields["status"],
                     }
                 )
-        follow_up = _due_at(request.fields.get("followUp"), self._clock())
+        follow_up = _task_due_at(request.fields.get("followUp"), self._clock())
         if follow_up:
             resolved["followUpAt"] = follow_up.isoformat()
             changes.append(
@@ -2046,6 +2047,31 @@ def _due_at(value: Any, now: datetime) -> datetime | None:
     if due <= now:
         due += timedelta(days=1)
     return due
+
+
+def _task_due_at(value: Any, now: datetime) -> datetime | None:
+    """Task Board deadlines use the same local calendar as the board UI/read tools."""
+    if not value:
+        return None
+    local = now.astimezone(ZoneInfo("America/New_York"))
+    day = local.date()
+    weekdays = {**_WEEKDAY_INDEX, "saturday": 5, "sunday": 6}
+    if value == "today":
+        pass
+    elif value == "tomorrow":
+        day += timedelta(days=1)
+    elif value == "next_week":
+        day += timedelta(days=7 - day.weekday())
+    elif value in weekdays:
+        day += timedelta(days=(weekdays[str(value)] - day.weekday()) % 7 or 7)
+    else:
+        try:
+            day = date.fromisoformat(str(value))
+        except ValueError as error:
+            raise BadRequestError(
+                "INVALID_TASK_DATE", "Use an explicit date or a named day"
+            ) from error
+    return datetime.combine(day, time(17), tzinfo=local.tzinfo)
 
 
 def _same_instant(left: Any, right: Any) -> bool:

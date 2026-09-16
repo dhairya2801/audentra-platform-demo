@@ -1445,6 +1445,13 @@ class PostgresPortalRepository:
             handler,
         )
 
+    async def attach_demo_document(
+        self, auth: AuthContext, document_id: str, request_id: str
+    ) -> bool:
+        from .demo_document_repository import attach_demo_document
+
+        return await attach_demo_document(self, auth, document_id, request_id)
+
     async def claim_student_document_processing(
         self,
         auth: AuthContext,
@@ -4669,7 +4676,7 @@ class PostgresPortalRepository:
         )
         inquiry_rows = await self._all(
             """
-            SELECT id, topic_code, subject, message, status, priority,
+            SELECT id, topic_code, subject, message, initiator_type, status, priority,
                    assignee_id, requirement_id, version, created_at, updated_at,
                    last_message_at, expires_at
             FROM student_inquiry
@@ -4691,6 +4698,7 @@ class PostgresPortalRepository:
                         inquiry_id=str(row["id"]),
                         initial_body=str(row["message"]),
                         initial_created_at=row["created_at"],
+                        initiator_type=str(row.get("initiator_type", "student")),
                     ),
                 }
                 for row in inquiry_rows
@@ -4781,7 +4789,8 @@ class PostgresPortalRepository:
                     text(
                         """
                         SELECT inquiry.id, inquiry.topic_code, inquiry.subject,
-                               inquiry.message, inquiry.status, inquiry.priority,
+                               inquiry.message, inquiry.initiator_type, inquiry.status,
+                               inquiry.priority,
                                inquiry.assignee_id, inquiry.requirement_id,
                                inquiry.version, inquiry.created_at, inquiry.updated_at,
                                item.id AS work_item_id
@@ -4820,6 +4829,7 @@ class PostgresPortalRepository:
                         inquiry_id=str(active["id"]),
                         initial_body=str(active["message"]),
                         initial_created_at=active["created_at"],
+                        initiator_type=str(active.get("initiator_type", "student")),
                     )
                     return response
 
@@ -5166,11 +5176,15 @@ class PostgresPortalRepository:
         body = str(payload["body"]).strip()
 
         async def handler(connection: AsyncConnection) -> JsonDict:
+            from .demo_task_board_commands import lock_demo_student
+
+            await lock_demo_student(connection, auth.tenant_id, auth.student_id)
             inquiry_result = await connection.execute(
                 text(
                     """
                     SELECT inquiry.id, inquiry.topic_code, inquiry.subject,
-                           inquiry.message, inquiry.status, inquiry.priority,
+                           inquiry.message, inquiry.initiator_type, inquiry.status,
+                           inquiry.priority,
                            inquiry.assignee_id, inquiry.requirement_id,
                            inquiry.status_before_help, inquiry.version,
                            inquiry.created_at, inquiry.updated_at,
@@ -5268,7 +5282,7 @@ class PostgresPortalRepository:
                         version=version+1, updated_at=NOW()
                     WHERE tenant_id=:tenant_id AND student_id=:student_id
                       AND id=:inquiry_id
-                    RETURNING id, topic_code, subject, message, status, priority,
+                    RETURNING id, topic_code, subject, message, initiator_type, status, priority,
                               assignee_id, requirement_id, version, created_at, updated_at,
                               last_message_at, expires_at
                     """
@@ -5301,7 +5315,10 @@ class PostgresPortalRepository:
             work_result = await connection.execute(
                 text(
                     """
-                    SELECT id, key, status, assignee_id, version
+                    SELECT id, key, status, assignee_id, version,
+                      EXISTS(SELECT 1 FROM staff_demo_board_card c WHERE
+                      c.tenant_id=staff_work_item.tenant_id
+                        AND c.work_item_id=staff_work_item.id) AS is_demo
                     FROM staff_work_item
                     WHERE tenant_id=:tenant_id
                       AND (
@@ -5322,10 +5339,10 @@ class PostgresPortalRepository:
                 {"tenant_id": auth.tenant_id, "inquiry_id": inquiry_id},
             )
             existing_work = work_result.mappings().first()
-            terminal = existing_work is None or str(existing_work["status"]) in {
-                "done",
-                "cancelled",
-            }
+            terminal = existing_work is None or (
+                not existing_work.get("is_demo")
+                and str(existing_work["status"]) in {"done", "cancelled"}
+            )
             if terminal:
                 work_item_id = str(uuid4())
                 await connection.execute(
@@ -5671,6 +5688,7 @@ class PostgresPortalRepository:
                 inquiry_id=inquiry_id,
                 initial_body=str(updated["message"]),
                 initial_created_at=updated["created_at"],
+                initiator_type=str(updated.get("initiator_type", "student")),
             )
             return response
 
@@ -5697,6 +5715,7 @@ class PostgresPortalRepository:
         inquiry_id: str,
         initial_body: str,
         initial_created_at: object,
+        initiator_type: str = "student",
     ) -> list[JsonDict]:
         staff_result = await connection.execute(
             text(
@@ -5746,6 +5765,8 @@ class PostgresPortalRepository:
                 "createdAt": _iso(initial_created_at),
             }
         ]
+        if initiator_type == "staff":
+            messages = []
         messages.extend(
             {
                 "id": str(row["id"]),
@@ -5779,6 +5800,7 @@ class PostgresPortalRepository:
         inquiry_id: str,
         initial_body: str,
         initial_created_at: object,
+        initiator_type: str = "student",
     ) -> list[JsonDict]:
         """Return the canonical support thread, including staff-only notes.
 
@@ -5836,6 +5858,8 @@ class PostgresPortalRepository:
                 "createdAt": _iso(initial_created_at),
             }
         ]
+        if initiator_type == "staff":
+            messages = []
         messages.extend(
             {
                 "id": str(row["id"]),
@@ -5923,7 +5947,7 @@ class PostgresPortalRepository:
             result = await connection.execute(
                 text(
                     """
-                    SELECT id, student_id, message, status, version, created_at,
+                    SELECT id, student_id, message, initiator_type, status, version, created_at,
                            last_message_at, expires_at, archived_at
                     FROM student_inquiry
                     WHERE tenant_id=:tenant_id AND id=:inquiry_id
@@ -5953,6 +5977,7 @@ class PostgresPortalRepository:
                     inquiry_id=str(inquiry["id"]),
                     initial_body=str(inquiry["message"]),
                     initial_created_at=inquiry["created_at"],
+                    initiator_type=str(inquiry.get("initiator_type", "student")),
                 ),
             }
 

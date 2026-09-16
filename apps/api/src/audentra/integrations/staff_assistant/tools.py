@@ -73,10 +73,12 @@ class StaffAssistantToolHost:
         primitives: Mapping[str, PrimitiveRead],
         *,
         staff_member_id: str | None = None,
+        task_board_context: Mapping[str, Any] | None = None,
     ) -> None:
         self._primitives = dict(primitives)
         self._cache: dict[tuple[str, str], Mapping[str, Any]] = {}
         self.staff_member_id = staff_member_id
+        self.task_board_context = task_board_context
 
     def supports(self, primitive: str) -> bool:
         return primitive in self._primitives
@@ -1606,3 +1608,22 @@ async def _university_work_board(
 
 
 _TOOL_IMPLEMENTATIONS = {**_TOOL_IMPLEMENTATIONS, "getUniversityWorkBoard": _university_work_board}
+
+
+async def _task_board(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    return dict(await _primitive(host, "task_board", **dict(args)))
+
+
+async def _task_board_task(
+    host: StaffAssistantToolHost, args: Mapping[str, Any], now: datetime
+) -> JsonDict:
+    return dict(await _primitive(host, "task_board_task", **dict(args)))
+
+
+_TOOL_IMPLEMENTATIONS = {
+    **_TOOL_IMPLEMENTATIONS,
+    "getTaskBoard": _task_board,
+    "getTaskBoardTask": _task_board_task,
+}

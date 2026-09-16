@@ -1,0 +1,645 @@
+{
+  "sourceCommit": "d4569a9924b60491618c2fdf6d6630caa870f339",
+  "cards": [
+    {
+      "key": "ENR-184",
+      "board": "en-docs",
+      "title": "Review final high school transcript",
+      "type": "document",
+      "status": "exceptions",
+      "priority": "high",
+      "studentSlot": 0,
+      "position": 0
+    },
+    {
+      "key": "ENR-201",
+      "board": "en-docs",
+      "title": "Verify transfer credits & course equivalency",
+      "type": "document",
+      "status": "exceptions",
+      "priority": "urgent",
+      "studentSlot": 1,
+      "position": 1
+    },
+    {
+      "key": "ENR-198",
+      "board": "en-docs",
+      "title": "Confirm name on residency evidence",
+      "type": "document",
+      "status": "exceptions",
+      "priority": "high",
+      "studentSlot": 2,
+      "position": 2
+    },
+    {
+      "key": "ENR-213",
+      "board": "en-docs",
+      "title": "Request final high school transcript",
+      "type": "document",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 3,
+      "position": 3
+    },
+    {
+      "key": "ENR-215",
+      "board": "en-docs",
+      "title": "Collect official transfer transcript",
+      "type": "document",
+      "status": "requested",
+      "priority": "high",
+      "studentSlot": 4,
+      "position": 4
+    },
+    {
+      "key": "ENR-218",
+      "board": "en-docs",
+      "title": "Request proof of residency",
+      "type": "document",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 5,
+      "position": 5
+    },
+    {
+      "key": "ENR-219",
+      "board": "en-docs",
+      "title": "Collect graduation certificate",
+      "type": "document",
+      "status": "requested",
+      "priority": "low",
+      "studentSlot": 6,
+      "position": 6
+    },
+    {
+      "key": "ENR-209",
+      "board": "en-docs",
+      "title": "Extract final transcript fields",
+      "type": "document",
+      "status": "processing",
+      "priority": "medium",
+      "studentSlot": 7,
+      "position": 7
+    },
+    {
+      "key": "ENR-211",
+      "board": "en-docs",
+      "title": "Recheck corrected final transcript",
+      "type": "document",
+      "status": "resubmitted",
+      "priority": "high",
+      "studentSlot": 8,
+      "position": 8
+    },
+    {
+      "key": "ENR-216",
+      "board": "en-docs",
+      "title": "Parse official transfer record",
+      "type": "document",
+      "status": "processing",
+      "priority": "medium",
+      "studentSlot": 9,
+      "position": 9
+    },
+    {
+      "key": "ENR-190",
+      "board": "en-docs",
+      "title": "Review final high school transcript",
+      "type": "document",
+      "status": "clean",
+      "priority": "medium",
+      "studentSlot": 0,
+      "position": 10
+    },
+    {
+      "key": "ENR-192",
+      "board": "en-docs",
+      "title": "Verify graduation certificate",
+      "type": "document",
+      "status": "clean",
+      "priority": "medium",
+      "studentSlot": 1,
+      "position": 11
+    },
+    {
+      "key": "ENR-195",
+      "board": "en-docs",
+      "title": "Review official transfer transcript",
+      "type": "document",
+      "status": "clean",
+      "priority": "low",
+      "studentSlot": 2,
+      "position": 12
+    },
+    {
+      "key": "ENR-203",
+      "board": "en-docs",
+      "title": "Confirm residency documentation",
+      "type": "document",
+      "status": "clean",
+      "priority": "low",
+      "studentSlot": 3,
+      "position": 13
+    },
+    {
+      "key": "ENR-172",
+      "board": "en-docs",
+      "title": "Replace incomplete transcript scan",
+      "type": "document",
+      "status": "correction",
+      "priority": "high",
+      "studentSlot": 4,
+      "position": 14
+    },
+    {
+      "key": "ENR-177",
+      "board": "en-docs",
+      "title": "Provide legible graduation certificate",
+      "type": "document",
+      "status": "correction",
+      "priority": "medium",
+      "studentSlot": 5,
+      "position": 15
+    },
+    {
+      "key": "ENR-165",
+      "board": "en-docs",
+      "title": "Approve final high school transcript",
+      "type": "document",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 6,
+      "position": 16
+    },
+    {
+      "key": "ENR-168",
+      "board": "en-docs",
+      "title": "Verify official transfer record",
+      "type": "document",
+      "status": "completed",
+      "priority": "medium",
+      "studentSlot": 7,
+      "position": 17
+    },
+    {
+      "key": "ENR-169",
+      "board": "en-docs",
+      "title": "Confirm graduation certificate",
+      "type": "document",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 8,
+      "position": 18
+    },
+    {
+      "key": "ENR-431",
+      "board": "en-outreach",
+      "title": "Help book an orientation session",
+      "type": "outreach",
+      "status": "responded",
+      "priority": "high",
+      "studentSlot": 9,
+      "position": 19
+    },
+    {
+      "key": "ENR-452",
+      "board": "en-outreach",
+      "title": "Deposit paid, orientation not booked",
+      "type": "outreach",
+      "status": "identified",
+      "priority": "medium",
+      "studentSlot": 0,
+      "position": 20
+    },
+    {
+      "key": "ENR-418",
+      "board": "en-outreach",
+      "title": "Follow up on missing transcript",
+      "type": "outreach",
+      "status": "drafting",
+      "priority": "high",
+      "studentSlot": 1,
+      "position": 21
+    },
+    {
+      "key": "ENR-476",
+      "board": "en-outreach",
+      "title": "Welcome first-generation students",
+      "type": "outreach",
+      "status": "drafting",
+      "priority": "low",
+      "studentSlot": 2,
+      "position": 22
+    },
+    {
+      "key": "ENR-437",
+      "board": "en-outreach",
+      "title": "Review transfer-credit guidance",
+      "type": "outreach",
+      "status": "approval",
+      "priority": "medium",
+      "studentSlot": 3,
+      "position": 23
+    },
+    {
+      "key": "ENR-429",
+      "board": "en-outreach",
+      "title": "Confirm placement test availability",
+      "type": "outreach",
+      "status": "waiting",
+      "priority": "high",
+      "studentSlot": 4,
+      "position": 24
+    },
+    {
+      "key": "ENR-460",
+      "board": "en-outreach",
+      "title": "Follow up before enrollment deadline",
+      "type": "outreach",
+      "status": "waiting",
+      "priority": "urgent",
+      "studentSlot": 5,
+      "position": 25
+    },
+    {
+      "key": "ENR-388",
+      "board": "en-outreach",
+      "title": "Confirm orientation booking",
+      "type": "outreach",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 6,
+      "position": 26
+    },
+    {
+      "key": "ENR-088",
+      "board": "en-requests",
+      "title": "Change major before orientation",
+      "type": "request",
+      "status": "reviewing",
+      "priority": "high",
+      "studentSlot": 7,
+      "position": 27
+    },
+    {
+      "key": "ENR-091",
+      "board": "en-requests",
+      "title": "Defer enrollment to spring",
+      "type": "request",
+      "status": "received",
+      "priority": "high",
+      "studentSlot": 8,
+      "position": 28
+    },
+    {
+      "key": "ENR-084",
+      "board": "en-requests",
+      "title": "Update preferred name on record",
+      "type": "request",
+      "status": "received",
+      "priority": "medium",
+      "studentSlot": 9,
+      "position": 29
+    },
+    {
+      "key": "ENR-077",
+      "board": "en-requests",
+      "title": "Assess transfer-credit eligibility",
+      "type": "request",
+      "status": "reviewing",
+      "priority": "medium",
+      "studentSlot": 0,
+      "position": 30
+    },
+    {
+      "key": "ENR-083",
+      "board": "en-requests",
+      "title": "Confirm spring start date",
+      "type": "request",
+      "status": "waiting",
+      "priority": "medium",
+      "studentSlot": 1,
+      "position": 31
+    },
+    {
+      "key": "ENR-079",
+      "board": "en-requests",
+      "title": "Review exceptional deferral request",
+      "type": "request",
+      "status": "escalated",
+      "priority": "urgent",
+      "studentSlot": 2,
+      "position": 32
+    },
+    {
+      "key": "ENR-072",
+      "board": "en-requests",
+      "title": "Correct name on enrollment record",
+      "type": "request",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 3,
+      "position": 33
+    },
+    {
+      "key": "FIN-312",
+      "board": "fa-payments",
+      "title": "Reconcile fall tuition installment",
+      "type": "payment",
+      "status": "balance",
+      "priority": "high",
+      "studentSlot": 4,
+      "position": 34
+    },
+    {
+      "key": "FIN-310",
+      "board": "fa-payments",
+      "title": "Collect enrollment deposit",
+      "type": "payment",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 5,
+      "position": 35
+    },
+    {
+      "key": "FIN-318",
+      "board": "fa-payments",
+      "title": "Collect fall housing deposit",
+      "type": "payment",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 6,
+      "position": 36
+    },
+    {
+      "key": "FIN-298",
+      "board": "fa-payments",
+      "title": "Confirm tuition ACH settlement",
+      "type": "payment",
+      "status": "processing",
+      "priority": "high",
+      "studentSlot": 7,
+      "position": 37
+    },
+    {
+      "key": "FIN-286",
+      "board": "fa-payments",
+      "title": "Track monthly tuition installment",
+      "type": "payment",
+      "status": "balance",
+      "priority": "medium",
+      "studentSlot": 8,
+      "position": 38
+    },
+    {
+      "key": "FIN-271",
+      "board": "fa-payments",
+      "title": "Resolve declined enrollment deposit",
+      "type": "payment",
+      "status": "exception",
+      "priority": "urgent",
+      "studentSlot": 9,
+      "position": 39
+    },
+    {
+      "key": "FIN-264",
+      "board": "fa-payments",
+      "title": "Reconcile housing overpayment refund",
+      "type": "payment",
+      "status": "exception",
+      "priority": "medium",
+      "studentSlot": 0,
+      "position": 40
+    },
+    {
+      "key": "FIN-240",
+      "board": "fa-payments",
+      "title": "Confirm full tuition settlement",
+      "type": "payment",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 1,
+      "position": 41
+    },
+    {
+      "key": "HOU-030",
+      "board": "cl-housing",
+      "title": "Coordinate an accessible room assignment",
+      "type": "request",
+      "status": "reviewing",
+      "priority": "high",
+      "studentSlot": 2,
+      "position": 42
+    },
+    {
+      "key": "HOU-035",
+      "board": "cl-housing",
+      "title": "Review late housing application",
+      "type": "request",
+      "status": "received",
+      "priority": "medium",
+      "studentSlot": 3,
+      "position": 43
+    },
+    {
+      "key": "HOU-027",
+      "board": "cl-housing",
+      "title": "Confirm roommate preferences",
+      "type": "request",
+      "status": "waiting",
+      "priority": "low",
+      "studentSlot": 4,
+      "position": 44
+    },
+    {
+      "key": "HOU-028",
+      "board": "cl-housing",
+      "title": "Coordinate early arrival accommodation",
+      "type": "request",
+      "status": "escalated",
+      "priority": "high",
+      "studentSlot": 5,
+      "position": 45
+    },
+    {
+      "key": "HOU-022",
+      "board": "cl-housing",
+      "title": "Confirm requested room swap",
+      "type": "request",
+      "status": "completed",
+      "priority": "low",
+      "studentSlot": 6,
+      "position": 46
+    },
+    {
+      "key": "FIN-151",
+      "board": "fa-docs",
+      "title": "Verify household income statement",
+      "type": "document",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 7,
+      "position": 47
+    },
+    {
+      "key": "FIN-152",
+      "board": "fa-docs",
+      "title": "Review signed award acceptance",
+      "type": "document",
+      "status": "processing",
+      "priority": "medium",
+      "studentSlot": 8,
+      "position": 48
+    },
+    {
+      "key": "FIN-153",
+      "board": "fa-docs",
+      "title": "Validate identity verification",
+      "type": "document",
+      "status": "clean",
+      "priority": "medium",
+      "studentSlot": 9,
+      "position": 49
+    },
+    {
+      "key": "FIN-154",
+      "board": "fa-docs",
+      "title": "Verify household income statement",
+      "type": "document",
+      "status": "exceptions",
+      "priority": "high",
+      "studentSlot": 0,
+      "position": 50
+    },
+    {
+      "key": "FIN-155",
+      "board": "fa-docs",
+      "title": "Review signed award acceptance",
+      "type": "document",
+      "status": "correction",
+      "priority": "medium",
+      "studentSlot": 1,
+      "position": 51
+    },
+    {
+      "key": "FIN-156",
+      "board": "fa-docs",
+      "title": "Validate identity verification",
+      "type": "document",
+      "status": "completed",
+      "priority": "medium",
+      "studentSlot": 2,
+      "position": 52
+    },
+    {
+      "key": "FIN-157",
+      "board": "fa-docs",
+      "title": "Verify household income statement",
+      "type": "document",
+      "status": "clean",
+      "priority": "medium",
+      "studentSlot": 3,
+      "position": 53
+    },
+    {
+      "key": "FIN-158",
+      "board": "fa-docs",
+      "title": "Review signed award acceptance",
+      "type": "document",
+      "status": "requested",
+      "priority": "medium",
+      "studentSlot": 4,
+      "position": 54
+    },
+    {
+      "key": "FIN-159",
+      "board": "fa-docs",
+      "title": "Validate identity verification",
+      "type": "document",
+      "status": "completed",
+      "priority": "medium",
+      "studentSlot": 5,
+      "position": 55
+    },
+    {
+      "key": "FIN-120",
+      "board": "fa-outreach",
+      "title": "Explain the financial aid offer",
+      "type": "outreach",
+      "status": "identified",
+      "priority": "medium",
+      "studentSlot": 6,
+      "position": 56
+    },
+    {
+      "key": "FIN-121",
+      "board": "fa-outreach",
+      "title": "Follow up on award acceptance",
+      "type": "outreach",
+      "status": "drafting",
+      "priority": "medium",
+      "studentSlot": 7,
+      "position": 57
+    },
+    {
+      "key": "FIN-122",
+      "board": "fa-outreach",
+      "title": "Help complete verification",
+      "type": "outreach",
+      "status": "approval",
+      "priority": "medium",
+      "studentSlot": 8,
+      "position": 58
+    },
+    {
+      "key": "FIN-123",
+      "board": "fa-outreach",
+      "title": "Arrange a payment-plan conversation",
+      "type": "outreach",
+      "status": "waiting",
+      "priority": "medium",
+      "studentSlot": 9,
+      "position": 59
+    },
+    {
+      "key": "FIN-124",
+      "board": "fa-outreach",
+      "title": "Explain the financial aid offer",
+      "type": "outreach",
+      "status": "responded",
+      "priority": "high",
+      "studentSlot": 0,
+      "position": 60
+    },
+    {
+      "key": "FIN-125",
+      "board": "fa-outreach",
+      "title": "Follow up on award acceptance",
+      "type": "outreach",
+      "status": "waiting",
+      "priority": "medium",
+      "studentSlot": 1,
+      "position": 61
+    },
+    {
+      "key": "FIN-126",
+      "board": "fa-outreach",
+      "title": "Help complete verification",
+      "type": "outreach",
+      "status": "completed",
+      "priority": "medium",
+      "studentSlot": 2,
+      "position": 62
+    },
+    {
+      "key": "FIN-127",
+      "board": "fa-outreach",
+      "title": "Arrange a payment-plan conversation",
+      "type": "outreach",
+      "status": "identified",
+      "priority": "medium",
+      "studentSlot": 3,
+      "position": 63
+    }
+  ]
+}

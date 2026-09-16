@@ -57,6 +57,7 @@ from audentra.domain.edward_action_catalog import (
     ActionName,
     ActorKind,
     actions_for,
+    asks_edward_to_act,
     boundary_for,
     coerce_fields,
 )
@@ -614,7 +615,7 @@ def _read_only_lead_in(message: str) -> bool:
     return bool(_READ_LEAD_IN.match(message)) and not _HAS_CREATE_VERB.search(message)
 
 
-def parse_staff_action(text: str) -> SemanticActionRequest | None:
+def parse_staff_action(text: str, *, task_board: bool = False) -> SemanticActionRequest | None:
     """Tier 0 for a staff member acting inside their own authority."""
 
     message = text.strip()
@@ -627,6 +628,17 @@ def parse_staff_action(text: str) -> SemanticActionRequest | None:
         return None
     # A mixed turn matches its patterns only against the non-question part.
     message = actionable_text(message)
+    if (
+        task_board
+        and not asks_edward_to_act(message)
+        and (
+            _read_only_lead_in(message)
+            or re.match(r"^\s*(?:compare|explain|describe|review|analyse|analyze)\b", message, re.I)
+        )
+    ):
+        # A comparison can contain a task key and prose after a colon. That
+        # prose describes requested context; it is not a new next-step value.
+        return None
     if _PREPARE_EMAIL.search(message) and not re.search(
         r"\b(?:don[\u2019']t|do not|never|not to)\s+(?:send|prepare|queue|stage|ready)\b",
         message,
@@ -661,6 +673,19 @@ def parse_staff_action(text: str) -> SemanticActionRequest | None:
         return SemanticActionRequest(
             "operations.work_item.update", _work_update_fields(message), 0.94
         )
+    if task_board:
+        fields = _work_update_fields(message)
+        # Priority extraction already requires an explicit change verb. It also
+        # covers board verbs such as 'lower' that the general delegation gate
+        # does not use for other domains.
+        if fields and (
+            asks_edward_to_act(message)
+            or (
+                "priority" in fields
+                and re.match(r"^\s*(?:lower|bump|reduce|decrease)\b", message, re.I)
+            )
+        ):
+            return SemanticActionRequest("operations.work_item.update", fields, 0.95)
     return None
 
 
@@ -763,6 +788,13 @@ _STATUS_PHRASES: tuple[tuple[str, str], ...] = (
 
 def _work_update_fields(text: str) -> JsonDict:
     fields: JsonDict = {}
+    explicit_next_step = re.search(
+        r"\bnext (?:step|action)\s*(?:to|as|is|:)\s*:?\s*(.{1,200})", text, re.I
+    )
+    if explicit_next_step:
+        fields["nextStep"] = explicit_next_step.group(1).strip("\"' .!?")
+        # A date or 'follow up' inside the note is note text, not another edit.
+        text = text[: explicit_next_step.start()]
     priority = re.search(
         r"\b(?:to|as|make\s+it|set\s+it|priority(?:\s+to)?)\s+(urgent|high|medium|low)\b",
         text,
@@ -776,7 +808,11 @@ def _work_update_fields(text: str) -> JsonDict:
         if re.search(phrase, text, re.I):
             fields["status"] = status
             break
-    due = _named_day(text)
+    dates = re.findall(r"\b[0-9]{4}-[0-9]{2}-[0-9]{2}\b", text)
+    due = dates[0] if len(dates) == 1 else _named_day(text)
+    if due is None:
+        weekend = re.search(r"\b(saturday|sunday)\b", text, re.I)
+        due = weekend.group(1).lower() if weekend else None
     if due:
         fields["dueOn" if re.search(r"\b(?:due|deadline)\b", text, re.I) else "followUp"] = due
     reason = _next_step_phrase(text)
