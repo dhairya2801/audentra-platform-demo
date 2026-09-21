@@ -197,6 +197,15 @@ def create_production_app(settings: RuntimeSettings | None = None) -> FastAPI:
 
     runtime_settings = settings or RuntimeSettings.from_environment()
 
+    async def restart_runtime() -> None:
+        resources = await build_api_runtime(runtime_settings)
+        app.state.runtime_resources = resources
+        app.state.platform_service = resources.service
+        app.state.browser_auth_service = resources.auth_service
+        app.state.oidc_auth_service = resources.oidc_auth_service
+        app.state.staff_email_service = resources.staff_email_service
+        app.state.voice_session_service = resources.voice_service
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         runtime_settings.assert_api_deployable()
@@ -216,7 +225,7 @@ def create_production_app(settings: RuntimeSettings | None = None) -> FastAPI:
             app.state.oidc_auth_service = UnavailableOidcAuthService()
             app.state.staff_email_service = None
             app.state.voice_session_service = UnavailableVoiceSessionService()
-            await resources.close()
+            await app.state.runtime_resources.close()
 
     app = create_app(
         service=UnavailablePlatformService(),
@@ -225,4 +234,7 @@ def create_production_app(settings: RuntimeSettings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.runtime_settings = runtime_settings
+    from .demo_reset import install_demo_reset
+
+    install_demo_reset(app, runtime_settings, restart_runtime)
     return app

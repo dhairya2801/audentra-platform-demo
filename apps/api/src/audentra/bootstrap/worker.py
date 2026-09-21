@@ -55,6 +55,8 @@ class WorkerRuntimeResources:
 
 
 async def build_worker_runtime(settings: RuntimeSettings) -> WorkerRuntimeResources:
+    if settings.demo_reset_template:
+        raise ValueError("Resettable demos run the API only; do not start an outbox worker")
     database_options = replace(settings.database, application_name="audentra-worker")
     engine = create_database_engine(settings.database_url, database_options)
     http_client = httpx.AsyncClient(

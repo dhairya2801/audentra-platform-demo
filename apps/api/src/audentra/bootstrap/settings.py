@@ -103,6 +103,7 @@ class RuntimeSettings:
     onboarding_template_dir: Path
     assistant_trace_debug_enabled: bool = False
     ferpa_delegate_link_secret: str = LOCAL_FERPA_DELEGATE_LINK_SECRET
+    demo_reset_template: str = ""
     oidc: OidcSettings | None = None
 
     @classmethod
@@ -273,6 +274,7 @@ class RuntimeSettings:
                 "DEMO_STAFF_ACTOR_ID", "00000000-0000-7000-8000-000000000901"
             ),
             demo_personas=demo_personas,
+            demo_reset_template=values.get("DEMO_RESET_TEMPLATE", "").strip(),
             oidc_tenant_id=oidc_tenant_id,
             object_storage=_object_storage_settings(
                 values,

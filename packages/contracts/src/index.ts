@@ -4182,3 +4182,8 @@ export interface DemoTaskWriteInput {
   body: string;
   startNewConversation?: boolean;
 }
+
+/** Explicit reset of an opt-in, disposable shared demo. */
+export interface DemoResetStatus { enabled: boolean; }
+export interface DemoResetInput { confirmation: "RESET DEMO"; }
+export interface DemoResetResult { reset: true; }
