@@ -198,3 +198,8 @@ tests but fails the existing 67% global coverage gate; isolated suites are also 
 The board now passes its validated open-task context to the existing floating assistant.
 See [Task Board → Edward integration](task-board-edward.md) for canonical reads, guarded task edits,
 conversation tests, and the remaining parser/workflow boundaries.
+
+## Ada’s My Financials
+
+See [demo financials](demo-financials.md) for the financial fixture, reference-portal UI,
+backend/mock boundary, Edward changes, and verification results.

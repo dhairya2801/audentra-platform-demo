@@ -4109,6 +4109,8 @@ export interface FinancialPlan {
   student: Record<string, unknown>;
   termId: string;
   basis: "posted_ledger";
+  actionGuidance: Record<string, string>;
+  exceptions: Record<string, unknown>[];
   currency: "USD";
   account: {
     postedBalanceCents: number; postedChargesCents: number; postedAidCents: number;
@@ -4118,7 +4120,10 @@ export interface FinancialPlan {
   };
   aid: {totalsScope: string; awards: Record<string, unknown>[]; disbursements: Record<string, unknown>[];
     offeredAnnualCents: number; acceptedAnnualCents: number; anticipatedTermCents: number;
-    loanTerms: Record<string, unknown>[]};
+    loanTerms: Record<string, unknown>[]; termAwards: Record<string, unknown>[];
+    termSummary: {offeredGiftCents: number; acceptedGiftCents: number; offeredLoanCents: number;
+      acceptedLoanCents: number; offeredGrossCents: number; acceptedGrossCents: number;
+      acceptedNetCents: number; pendingDecisionCents: number; pendingDecisionCount: number}};
   ledger: Record<string, unknown>[]; payments: Record<string, unknown>[];
   holds: Record<string, unknown>[]; requirements: Record<string, unknown>[];
   serviceProgress: Record<string, unknown>[]; catalog: Record<string, unknown>[];
@@ -4127,7 +4132,7 @@ export interface FinancialPlan {
   planning: {version: number; inputs: Record<string, number>; updatedAt: string | null;
     provenance: "student_entered"; scope: "term"; living: Record<string, unknown>[];
     income: Record<string, unknown>[]; livingTotalCents: number; incomeTotalCents: number;
-    estimatedCushionCents: number; estimatedAccountGapAfterAnticipatedAidCents: number;
+    estimatedCushionCents: number; roomAndBoardCents: number; catalogComparisons: Record<string, unknown>[]; totalAttendanceEstimateCents: number; estimatedAccountGapAfterAnticipatedAidCents: number;
     scenarios: Record<string, unknown>[]};
   visualization: {charges: Record<string, unknown>[]; postedSources: Record<string, unknown>[]; netPostedSources: Record<string, unknown>[];
     postedCoverage: Record<string, unknown>[]; postedCoverageUnavailableReason: string | null; livingCoverage: Record<string, unknown>[]};

@@ -74,3 +74,17 @@ def test_rebuilds_state_changing_widgets_from_authority() -> None:
             "status": "ready",
         }
     ]
+
+
+def test_financial_product_names_are_not_other_students() -> None:
+    assert (
+        guarded_response("If my offered Need Grant is accepted and disbursed, what remains?")
+        is None
+    )
+    assert guarded_response("Has my Direct Subsidized Loan paid toward my balance?") is None
+    assert guarded_response("Has Maria Alvarez paid her deposit?") is not None
+    assert guarded_response("Show another student's financial aid record") is not None
+
+
+def test_grant_surname_still_requires_own_student_scope() -> None:
+    assert guarded_response("Has Andrew Grant paid his deposit?") is not None

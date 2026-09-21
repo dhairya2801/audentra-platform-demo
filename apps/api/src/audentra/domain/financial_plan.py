@@ -135,6 +135,70 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
     living_total = sum(r["amountCents"] for r in living)
     income_total = sum(r["amountCents"] for r in income)
     terms = {r["id"]: r for r in data.get("terms", [])}
+    gap = max(0, balance - pending_aid)
+    term_awards = [
+        {
+            **row,
+            "fee_cents": row["accepted_cents"] - row["accepted_net_cents"],
+            "estimatedGapIfRemainingGiftAcceptedCents": max(
+                0, gap - (row["offered_cents"] - row["accepted_cents"])
+            )
+            if row["posts_to_account"] and "loan" not in row["source"]
+            else None,
+        }
+        for row in data.get("termAwards", [])
+    ]
+    account_awards = [row for row in term_awards if row["posts_to_account"]]
+    open_awards = [
+        row
+        for row in account_awards
+        if row.get("status") != "declined" and row["offered_cents"] > row["accepted_cents"]
+    ]
+    term_summary = {
+        **{
+            f"{state}{kind}Cents": sum(
+                row[f"{state}_cents"]
+                for row in account_awards
+                if ("loan" in row["source"]) == is_loan
+            )
+            for state in ("offered", "accepted")
+            for kind, is_loan in (("Gift", False), ("Loan", True))
+        },
+        "offeredGrossCents": sum(row["offered_cents"] for row in account_awards),
+        "acceptedGrossCents": sum(row["accepted_cents"] for row in account_awards),
+        "acceptedNetCents": sum(row["accepted_net_cents"] for row in account_awards),
+        "pendingDecisionCents": sum(
+            row["offered_cents"] - row["accepted_cents"] for row in open_awards
+        ),
+        "pendingDecisionCount": len(open_awards),
+    }
+    agreements = [
+        {**row, "totalIncludingFeeCents": row["principal_cents"] + row["fee_cents"]}
+        for row in data.get("paymentAgreements", [])
+    ]
+    room_board = sum(
+        row["amountCents"]
+        for row in costs
+        if any(word in row["label"].lower() for word in ("housing", "room", "meal"))
+    )
+    comparisons = []
+    for rate in data.get("catalog", []):
+        if rate["kind"] not in ("housing", "meal") or rate["period"] != "term":
+            continue
+        words = ("housing", "room") if rate["kind"] == "housing" else ("meal",)
+        matches = [r for r in costs if any(w in r["label"].lower() for w in words)]
+        if matches:
+            current = sum(r["amountCents"] for r in matches)
+            comparisons.append(
+                {
+                    "name": rate["name"],
+                    "kind": rate["kind"],
+                    "currentChargeCents": current,
+                    "alternativeCents": rate["amount_cents"],
+                    "differenceCents": rate["amount_cents"] - current,
+                    "absoluteDifferenceCents": abs(rate["amount_cents"] - current),
+                }
+            )
     return {
         "schemaVersion": 1,
         "domain": "financial_plan",
@@ -143,6 +207,16 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
         "termId": term_id,
         "term": terms.get(term_id),
         "basis": "posted_ledger",
+        "actionGuidance": {
+            "paymentPlanEnrollment": "Contact Student Accounts to enroll. This Financials view "
+            "cannot enroll or sign a payment agreement, even when a general policy mentions "
+            "online enrollment through Financials.",
+            "awardAcceptance": "Contact Financial Aid to accept or decline an offer. "
+            "This Financials view cannot record an award decision.",
+            "payment": "Contact Student Accounts for the institution's payment channel. "
+            "This Financials view cannot submit a payment.",
+            "budget": "Students can save their personal estimates and preview scenarios here.",
+        },
         "advisers": data.get("advisers", []),
         "currency": "USD",
         "account": {
@@ -173,7 +247,20 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
                 r["accepted_cents"] for r in awards if r["posts_to_account"]
             ),
             "anticipatedTermCents": pending_aid,
-            "loanTerms": data.get("loanTerms", []),
+            "loanTerms": [
+                {
+                    **row,
+                    "interestRatePercent": row["interest_basis_points"] / 100
+                    if row.get("interest_basis_points") is not None
+                    else None,
+                    "originationFeePercent": row["fee_basis_points"] / 100
+                    if row.get("fee_basis_points") is not None
+                    else None,
+                }
+                for row in data.get("loanTerms", [])
+            ],
+            "termAwards": term_awards,
+            "termSummary": term_summary,
         },
         "ledger": ledger,
         "payments": payments,
@@ -183,8 +270,9 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
         "catalog": data.get("catalog", []),
         "mealEnrollments": data.get("mealEnrollments", []),
         "insuranceCoverage": data.get("insuranceCoverage", []),
-        "paymentAgreements": data.get("paymentAgreements", []),
+        "paymentAgreements": agreements,
         "installments": data.get("installments", []),
+        "exceptions": data.get("exceptions", []),
         "planning": {
             "version": plan["version"] if plan else 0,
             "inputs": inputs,
@@ -196,6 +284,9 @@ def financial_plan(account: JsonDict, data: JsonDict, term_id: str = "2026FA") -
             "livingTotalCents": living_total,
             "incomeTotalCents": income_total,
             "estimatedCushionCents": income_total - living_total,
+            "roomAndBoardCents": room_board,
+            "catalogComparisons": comparisons,
+            "totalAttendanceEstimateCents": sum(r["amountCents"] for r in costs) + living_total,
             "estimatedAccountGapAfterAnticipatedAidCents": max(0, balance - pending_aid),
             "scenarios": data.get("scenarios", []),
         },

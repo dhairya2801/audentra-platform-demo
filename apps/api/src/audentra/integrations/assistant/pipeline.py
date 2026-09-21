@@ -452,6 +452,7 @@ class AssistantPipeline:
                 evidenceFacts=len(draft.evidence_texts),
             )
             trace.evidence = list(draft.evidence_texts)
+            trace.deterministic_draft = draft.message
 
         stage_started = time.perf_counter()
         # The composer reasons about "this week", "before Friday" and "already
@@ -906,6 +907,11 @@ class AssistantPipeline:
                     ),
                     usage=usage if isinstance(usage, Mapping) else None,
                     detail=detail,
+                    answer=(
+                        result.get("answer")
+                        if isinstance(result, Mapping) and isinstance(result.get("answer"), str)
+                        else None
+                    ),
                 )
 
             try:

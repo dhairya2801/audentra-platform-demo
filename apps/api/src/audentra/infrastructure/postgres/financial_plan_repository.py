@@ -57,7 +57,25 @@ class FinancialPlanService:
                     "SELECT i.* FROM payment_installment i JOIN payment_agreement a ON "
                     "a.id=i.agreement_id WHERE a.student_id=:sid AND a.term_id=:term"
                 ),
-                "loanTerms": "SELECT * FROM loan_terms ORDER BY fund_id",
+                "exceptions": (
+                    "SELECT e.*,o.name AS office_name,s.name AS approver_name "
+                    "FROM exception e JOIN office o ON o.id=e.office_id "
+                    "LEFT JOIN staff s ON s.id=e.approver_id "
+                    "WHERE e.student_id=:sid AND e.term_id=:term "
+                    "AND e.office_id IN ('SA','FA','SHS') ORDER BY e.starts_at"
+                ),
+                "termAwards": (
+                    "SELECT t.*,a.fund_id,a.status,f.name,f.source,f.posts_to_account "
+                    "FROM award_term t JOIN award a ON a.id=t.award_id "
+                    "JOIN fund f ON f.id=a.fund_id "
+                    "WHERE a.student_id=:sid AND t.term_id=:term ORDER BY f.name"
+                ),
+                "loanTerms": (
+                    "SELECT l.* FROM loan_terms l JOIN award a ON a.fund_id=l.fund_id "
+                    "JOIN term t ON t.id=:term WHERE a.student_id=:sid "
+                    "AND l.effective_from<=t.starts_on AND l.effective_until>=t.starts_on "
+                    "ORDER BY l.fund_id"
+                ),
                 "scenarios": (
                     "SELECT * FROM financial_scenario WHERE student_id=:sid AND term_id=:term"
                     " ORDER BY id"
@@ -77,7 +95,7 @@ class FinancialPlanService:
     async def save_inputs(
         self, auth: AuthContext, payload: dict[str, Any], key: str | None, request_id: str
     ) -> dict[str, Any]:
-        if auth.actor_type != "student" or auth.actor_id != auth.student_id:
+        if auth.actor_type != "student":
             raise ApiError(
                 403, "STUDENT_REQUIRED", "Only the student can change personal planning assumptions"
             )
@@ -109,13 +127,22 @@ class FinancialPlanService:
         async with self.university.engine.begin() as c:
             await c.execute(text("SELECT set_config('audentra.tenant_id',:tenant,true)"), params)
             # Serialize first creation as well as subsequent versions and exact-key retries.
-            await c.execute(
+            # Browser sessions identify the person, while legacy demo headers
+            # identify the student. Verify either against the same owned row.
+            owned = await c.scalar(
                 text(
                     "SELECT id FROM public.student WHERE tenant_id=:tenant AND id=CAST(:sid "
-                    "AS uuid) FOR UPDATE"
+                    "AS uuid) AND (person_id=CAST(:actor AS uuid) OR "
+                    "id=CAST(:actor AS uuid)) FOR UPDATE"
                 ),
                 params,
             )
+            if owned is None:
+                raise ApiError(
+                    403,
+                    "STUDENT_REQUIRED",
+                    "Only the student can change personal planning assumptions",
+                )
             receipt = (
                 (
                     await c.execute(

@@ -157,7 +157,15 @@ def guarded_response(message: object) -> dict[str, Any] | None:
         and _SENSITIVE_OPERATION_VERB.search(message)
     )
     reason: str | None = None
-    if _CROSS_STUDENT_ACCESS.search(message) or _NAMED_PERSON_RECORD.search(message):
+    # Award names such as "Need Grant is accepted" are not a person's name.
+    # Mask only financial product noun phrases; retain every actual person ask.
+    identity_text = re.sub(
+        r"\b(?:Need|Merit|Access|Pell|Subsidized|Unsubsidized|Direct|Federal|Institutional)"
+        r"(?:\s+[A-Z][a-z]+){0,3}\s+(?:Grant|Scholarship|Loan)\b",
+        "financial award",
+        message,
+    )
+    if _CROSS_STUDENT_ACCESS.search(message) or _NAMED_PERSON_RECORD.search(identity_text):
         reason = (
             "I can only use the signed-in student\u2019s permission-scoped institution record. "
             "I can\u2019t access or reveal another student\u2019s information."

@@ -95,7 +95,10 @@ def test_pipeline_records_stages_tools_and_deterministic_response() -> None:
 
 
 def test_pipeline_records_accepted_model_rewrite_with_usage() -> None:
+    received: dict[str, Any] = {}
+
     async def composer(**_kwargs: Any) -> dict[str, Any]:
+        received.update(_kwargs)
         return {
             "answer": "Your final transcript is the one item left to send.",
             "provider": "openai",
@@ -116,6 +119,10 @@ def test_pipeline_records_accepted_model_rewrite_with_usage() -> None:
     assert call["usage"]["totalTokens"] == 120
     assert payload["responseSource"] == "model_prose"
     assert payload["provider"] == "openai"
+    assert payload["deterministicDraft"]["text"] == sanitize_trace_value(received["draft_answer"])
+    assert payload["deterministicDraft"]["characters"] == len(received["draft_answer"])
+    assert call["answer"]["text"] == "Your final transcript is the one item left to send."
+    assert call["answer"]["truncated"] is False
 
 
 def test_pipeline_records_guard_rejection_reason() -> None:
@@ -131,6 +138,7 @@ def test_pipeline_records_guard_rejection_reason() -> None:
     call = payload["modelCalls"][0]
     assert call["outcome"] == "guard_rejected"
     assert call["detail"] == "ungrounded_date"
+    assert call["answer"]["text"] == "Everything is due on 2031-01-31."
     assert payload["responseSource"] == "deterministic"
     assert any(code.startswith("written_answer_rejected:") for code in payload["failureCodes"])
 
@@ -345,3 +353,26 @@ async def test_dev_tools_endpoint_serves_both_catalogues(debug_client: AsyncClie
 
     forbidden = await debug_client.get("/internal/assistant/dev/tools")
     assert forbidden.status_code == 403
+
+
+def test_answer_snapshots_report_truncation_and_missing_drafts() -> None:
+    trace = AssistantTurnTrace(trace_id="bounded-text")
+    assert trace.to_dict()["deterministicDraft"] is None
+    trace.deterministic_draft = "x" * 700
+    trace.final_message = "y" * 700
+    trace.add_model_call(
+        operation="assistant_composer",
+        attempt=1,
+        duration_ms=1,
+        outcome="guard_rejected",
+        answer="z" * 700,
+    )
+    payload = trace.to_dict()
+    assert payload["deterministicDraft"] == {
+        "text": "x" * 600 + "…",
+        "characters": 700,
+        "truncated": True,
+    }
+    assert payload["modelCalls"][0]["answer"]["truncated"] is True
+    assert len(payload["modelCalls"][0]["answer"]["text"]) == 601
+    assert payload["finalMessageTruncated"] is True

@@ -94,6 +94,16 @@ def sanitize_trace_value(value: Any, *, depth: int = 0) -> Any:
     return sanitize_trace_value(str(value), depth=depth)
 
 
+def trace_text_snapshot(text: str) -> JsonDict:
+    """Bound visible answer text and make truncation explicit for Lab comparisons."""
+
+    return {
+        "text": sanitize_trace_value(text),
+        "characters": len(text),
+        "truncated": len(text) > MAX_TRACE_STRING_CHARACTERS,
+    }
+
+
 @dataclass
 class AssistantTurnTrace:
     """Everything observable about one Edward turn, in execution order."""
@@ -156,6 +166,7 @@ class AssistantTurnTrace:
     # Already student-safe by construction (they are rendered into answers);
     # bounded here for the trace. Never chain-of-thought.
     evidence: list[str] = field(default_factory=list)
+    deterministic_draft: str | None = None
     provider: str | None = None
     model: str | None = None
     usage: JsonDict | None = None
@@ -278,6 +289,7 @@ class AssistantTurnTrace:
         model: str | None = None,
         usage: Mapping[str, Any] | None = None,
         detail: str | None = None,
+        answer: str | None = None,
     ) -> None:
         entry: JsonDict = {
             "operation": operation,
@@ -293,6 +305,8 @@ class AssistantTurnTrace:
             entry["usage"] = dict(usage)
         if detail is not None:
             entry["detail"] = detail
+        if answer is not None:
+            entry["answer"] = trace_text_snapshot(answer)
         self.model_calls.append(entry)
 
     def finalize(self) -> None:
@@ -329,6 +343,11 @@ class AssistantTurnTrace:
             "identity": self.identity,
             "entities": self.entities,
             "evidence": [sanitize_trace_value(line) for line in self.evidence[:48]],
+            "deterministicDraft": (
+                trace_text_snapshot(self.deterministic_draft)
+                if self.deterministic_draft is not None
+                else None
+            ),
             "modelCalls": list(self.model_calls),
             "modelIterations": len(self.model_calls),
             "provider": self.provider,
@@ -350,6 +369,7 @@ class AssistantTurnTrace:
             "actionExecutionResult": self.action_execution_result,
             "actionLatencyMs": self.action_latency_ms,
             "finalMessage": sanitize_trace_value(self.final_message),
+            "finalMessageTruncated": len(self.final_message) > MAX_TRACE_STRING_CHARACTERS,
             "responseBlocks": sanitize_trace_value(self.response_blocks),
             "userMessageId": self.user_message_id,
             "assistantMessageId": self.assistant_message_id,

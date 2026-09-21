@@ -92,6 +92,7 @@ TABLES = (
     "payment_agreement",
     "payment_installment",
     "loan_terms",
+    "award_term",
 )
 DOMAINS = (
     "overview",
@@ -511,6 +512,23 @@ class PostgresUniversityRepository:
                     "posted balance. Term charges are not annual COA."
                 )
                 result["refundSettlementStatus"] = "not_recorded"
+                result["balanceAfterAnticipatedAid"] = [
+                    {
+                        "term_id": row["term_id"],
+                        "postedBalanceCents": row["balance_cents"],
+                        "anticipatedAidCents": anticipated,
+                        "estimatedRemainingCents": max(0, row["balance_cents"] - anticipated),
+                    }
+                    for row in result["balances"]
+                    for anticipated in [
+                        sum(
+                            d["amount_cents"]
+                            for d in result["disbursements"]
+                            if d["term_id"] == row["term_id"]
+                            and d["status"] in ("scheduled", "held")
+                        )
+                    ]
+                ]
             elif domain == "relationships":
                 result["assignments"] = await read(
                     "SELECT a.*,s.name,s.email,s.office_id,s.status,o.name AS "

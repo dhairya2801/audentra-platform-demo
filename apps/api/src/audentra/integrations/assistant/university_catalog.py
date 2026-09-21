@@ -4,10 +4,13 @@ UNIVERSITY_TOOLS = {
     "getUniversityFinancialPlan": (
         "financial_plan",
         "Read the shared Financial Plan: posted account facts, annual offers and accepted aid, "
-        "term disbursements, payment lifecycle, published housing and meal rates, insurance "
+        "explicit term award offers, acceptance, fees and decision deadlines, term disbursements, "
+        "payment lifecycle, published housing and meal rates, insurance "
         "coverage, actual installment agreements, and student-entered term budget assumptions. "
         "Savings are estimates, hypothetical housing is not an assignment, "
-        "and credit is not a settled refund.",
+        "and credit is not a settled refund. Use this for all financial planning, offer decisions, "
+        "installment totals, cost comparisons and what-if grant questions; derived arithmetic "
+        "is included so answers can quote verified calculations.",
     ),
     "getUniversityOverview": (
         "overview",
@@ -36,7 +39,8 @@ UNIVERSITY_TOOLS = {
             " annual accepted awards versus term disbursements, employment "
             "awards, SAP, financial-aid requirements, office review stages and actual holds. "
             "Pending money is never posted "
-            "money."
+            "money. For term award amounts, acceptance deadlines, installment proposals "
+            "and personal budget details, also read getUniversityFinancialPlan."
         ),
     ),
     "getUniversityRelationships": (
@@ -89,6 +93,12 @@ UNIVERSITY_CONTEXT = (
     "completion, or certify graduation from unresolved curriculum distributions. "
     "An empty serviceProgress list does not mean financial aid is complete; inspect "
     "financialAidRequirements and distinguish student submissions from office review. "
+    "For financial breakdowns give each requested category and amount, not just their total. "
+    "Attendance costs are charges plus living expenses; enrollment deposits and family "
+    "payments are credits, never costs. The Financials view saves budget estimates and "
+    "previews scenarios; it does not accept awards, take payments or enroll payment plans. "
+    "Direct those actions to Financial Aid or Student Accounts even if a general policy "
+    "mentions online enrollment. A proposed agreement is not signed or enrolled. "
     "Financial-plan annual offered/accepted totals exclude employment authorization: "
     "list employment separately, never as part of those totals. PaymentsByTermAndStatus "
     "and paymentStates are aggregates; a truncated payment list is not a complete history. "

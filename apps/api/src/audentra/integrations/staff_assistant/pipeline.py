@@ -692,6 +692,7 @@ class StaffAssistantPipeline:
                 evidenceFacts=len(draft.evidence_texts),
             )
             trace.evidence = list(draft.evidence_texts)
+            trace.deterministic_draft = draft.message
 
         stage_started = time.perf_counter()
         # The follow-up preamble (the previous question and answer) exists so a
@@ -2106,6 +2107,7 @@ class StaffAssistantPipeline:
                 model=result.get("model") if isinstance(result.get("model"), str) else None,
                 usage=usage if isinstance(usage, Mapping) else None,
                 detail=None if verdict.accepted else verdict.reason_code,
+                answer=str(result["answer"]),
             )
         if verdict.accepted:
             answer_text = verdict.answer

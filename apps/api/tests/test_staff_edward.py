@@ -534,6 +534,7 @@ async def test_trace_records_staff_turn_with_tool_arguments() -> None:
     assert blocker_call["arguments"]["studentId"] == DEMO_IDS["student_id"]
     assert blocker_call["validation"] == "accepted"
     assert trace["evidence"]
+    assert trace["deterministicDraft"]["text"]
 
 
 @pytest.mark.anyio
@@ -977,3 +978,38 @@ def test_the_follow_up_preamble_does_not_cross_a_scope_switch() -> None:
     continued = normalize_staff_request("What's blocking her?", history=history)
     assert "Your previous answer" in continued.resolved_text
     assert scope_of("student_blockers") is STUDENT_SCOPE
+
+
+@pytest.mark.anyio
+async def test_staff_rewrite_trace_keeps_model_text_before_server_restoration() -> None:
+    from audentra.integrations.assistant.trace import AssistantTurnTrace
+    from audentra.integrations.staff_assistant.classify import StaffClassification
+    from audentra.integrations.staff_assistant.compose import ComposedStaffAnswer
+    from audentra.integrations.staff_assistant.pipeline import StaffAssistantPipeline
+    from audentra.integrations.staff_assistant.tools import StaffAssistantToolHost
+
+    async def composer(**_kwargs: Any) -> dict[str, Any]:
+        return {"answer": "Alex has accepted the offer.", "provider": "test"}
+
+    draft = ComposedStaffAnswer(
+        message="Alex is studying Computer Science and has accepted the offer.",
+        evidence_texts=["Alex has accepted the offer.", "Alex studies Computer Science."],
+        required_phrases=[("Computer Science", "Alex studies Computer Science.")],
+    )
+    trace = AssistantTurnTrace(trace_id="staff-rewrite-text")
+    result = await StaffAssistantPipeline(
+        StaffAssistantToolHost({}),
+        model_composer=composer,
+    )._maybe_rewrite(
+        StaffClassification("student_overview", 1),
+        "Tell me about Alex",
+        draft,
+        [],
+        trace,
+    )
+    assert "Computer Science" in result[0]
+    call = trace.to_dict()["modelCalls"][0]
+    assert call["operation"] == "staff_assistant_composer"
+    assert call["outcome"] == "accepted"
+    assert call["answer"]["text"] == "Alex has accepted the offer."
+    assert call["answer"]["text"] != result[0]

@@ -738,29 +738,11 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
             for card in value.get("cards", [])
         ]
     if isinstance(value, Mapping) and value.get("domain") == "financial_plan":
-        value = {
-            key: value[key]
-            for key in (
-                "domain",
-                "student",
-                "snapshotAt",
-                "termId",
-                "term",
-                "currency",
-                "account",
-                "aid",
-                "planning",
-                "catalog",
-                "mealEnrollments",
-                "insuranceCoverage",
-                "paymentAgreements",
-                "installments",
-                "requirements",
-                "serviceProgress",
-                "boundaries",
-            )
-            if key in value
-        }
+        value = _financial_evidence(value)
+        # A complete financial package needs its offers AND term states. Keep a
+        # bounded domain-specific budget rather than silently losing late awards.
+        if limit == MAX_RESULT_CHARACTERS:
+            limit = 18_000
     value = humanize_money(value)
     if (
         isinstance(value, Mapping)
@@ -801,6 +783,112 @@ def bound_result(value: Any, *, limit: int = MAX_RESULT_CHARACTERS) -> Any:
     if len(encoded) > limit:
         return {"truncated": True, "preview": encoded[:limit]}
     return trimmed
+
+
+def _financial_evidence(value: Mapping[str, Any]) -> JsonDict:
+    """Remove duplicate finance envelopes before bounding; retain every lifecycle."""
+
+    def pick(row: Mapping[str, Any], *keys: str) -> JsonDict:
+        return {key: row[key] for key in keys if key in row}
+
+    aid = value.get("aid", {})
+    annual = {r["id"]: r for r in aid.get("awards", [])}
+    allocations = aid.get("termAwards", [])
+    awards = [
+        {
+            **pick(
+                row,
+                "name",
+                "fund_id",
+                "source",
+                "status",
+                "posts_to_account",
+                "offered_cents",
+                "accepted_cents",
+                "accepted_net_cents",
+                "fee_cents",
+                "decision_due_at",
+                "estimatedGapIfRemainingGiftAcceptedCents",
+                "note",
+            ),
+            "annualOfferedCents": annual.get(row["award_id"], {}).get("offered_cents"),
+            "annualAcceptedCents": annual.get(row["award_id"], {}).get("accepted_cents"),
+        }
+        for row in allocations
+    ]
+    return {
+        **pick(
+            value,
+            "domain",
+            "snapshotAt",
+            "termId",
+            "currency",
+            "account",
+            "requirements",
+            "serviceProgress",
+            "boundaries",
+            "advisers",
+            "actionGuidance",
+            "exceptions",
+        ),
+        "student": pick(value.get("student", {}), "name", "preferred_name"),
+        "term": pick(value.get("term") or {}, "name", "starts_on", "ends_on"),
+        "aid": {
+            **pick(
+                aid,
+                "totalsScope",
+                "offeredAnnualCents",
+                "acceptedAnnualCents",
+                "anticipatedTermCents",
+                "termSummary",
+            ),
+            "termAwards": awards,
+            "annualAwardsWithoutTermAllocation": [
+                pick(
+                    row,
+                    "name",
+                    "source",
+                    "status",
+                    "posts_to_account",
+                    "offered_cents",
+                    "accepted_cents",
+                )
+                for row in annual.values()
+                if row["id"] not in {a["award_id"] for a in allocations}
+            ],
+            "disbursements": [
+                pick(r, "name", "amount_cents", "status", "scheduled_at", "posted_at", "reason")
+                for r in aid.get("disbursements", [])
+            ],
+            "loanTerms": aid.get("loanTerms", []),
+        },
+        "ledger": [
+            pick(r, "description", "kind", "amount_cents", "posted_at", "due_at")
+            for r in value.get("ledger", [])
+        ],
+        "payments": [
+            pick(r, "amount_cents", "status", "method", "submitted_at", "settled_at")
+            for r in value.get("payments", [])
+        ],
+        "planning": {
+            k: v
+            for k, v in value.get("planning", {}).items()
+            if k not in {"living", "income", "scenarios"}
+        },
+        "catalog": [
+            pick(r, "id", "name", "kind", "amount_cents", "period", "eligibility")
+            for r in value.get("catalog", [])
+        ],
+        "mealEnrollments": value.get("mealEnrollments", []),
+        "insuranceCoverage": value.get("insuranceCoverage", []),
+        "paymentAgreements": [
+            pick(r, "status", "principal_cents", "fee_cents", "totalIncludingFeeCents", "signed_at")
+            for r in value.get("paymentAgreements", [])
+        ],
+        "installments": [
+            pick(r, "amount_cents", "due_at", "payment_id") for r in value.get("installments", [])
+        ],
+    }
 
 
 def _compact_university(value: Any) -> Any:

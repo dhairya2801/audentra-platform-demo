@@ -145,3 +145,58 @@ def test_reversal_and_refund_postings_change_balance_without_claiming_settlement
 def test_planning_rejects_unknown_or_non_integer_money(value: object) -> None:
     with pytest.raises(ValueError):
         validate_inputs(value)
+
+
+def test_term_awards_keep_principal_fees_and_hypothetical_gift_separate() -> None:
+    facts = account()
+    facts["ledger"] = facts["ledger"][:1]
+    facts["disbursements"] = []
+    result = financial_plan(
+        facts,
+        {
+            "termAwards": [
+                {
+                    "award_id": "gift",
+                    "offered_cents": 30000,
+                    "accepted_cents": 0,
+                    "accepted_net_cents": 0,
+                    "posts_to_account": 1,
+                    "source": "institutional",
+                },
+                {
+                    "award_id": "loan",
+                    "offered_cents": 175000,
+                    "accepted_cents": 175000,
+                    "accepted_net_cents": 173145,
+                    "posts_to_account": 1,
+                    "source": "federal_loan",
+                },
+                {
+                    "award_id": "work",
+                    "offered_cents": 150000,
+                    "accepted_cents": 150000,
+                    "accepted_net_cents": 150000,
+                    "posts_to_account": 0,
+                    "source": "employment",
+                },
+            ],
+            "paymentAgreements": [{"principal_cents": 100001, "fee_cents": 4500}],
+        },
+    )
+    gift, loan, _ = result["aid"]["termAwards"]
+    assert gift["estimatedGapIfRemainingGiftAcceptedCents"] == 70001
+    assert loan["fee_cents"] == 1855
+    assert loan["estimatedGapIfRemainingGiftAcceptedCents"] is None
+    assert result["aid"]["termSummary"] == {
+        "offeredGiftCents": 30000,
+        "acceptedGiftCents": 0,
+        "offeredLoanCents": 175000,
+        "acceptedLoanCents": 175000,
+        "offeredGrossCents": 205000,
+        "acceptedGrossCents": 175000,
+        "acceptedNetCents": 173145,
+        "pendingDecisionCents": 30000,
+        "pendingDecisionCount": 1,
+    }
+    assert result["account"]["postedBalanceCents"] == 100001
+    assert result["paymentAgreements"][0]["totalIncludingFeeCents"] == 104501
