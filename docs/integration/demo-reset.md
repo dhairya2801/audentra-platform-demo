@@ -118,3 +118,10 @@ isolated reset API. It checks four cards, card and header points, one-time form
 rewards, upload → Camila review → student completion, cancellation, explicit
 reset, invalidated sessions, and restored tasks/points/documents. No working
 localhost or hosted demo data is mutated by the browser test.
+
+The VM uses `infra/preview-vm/demo-reset.override.yaml` together with the existing
+`compose.yaml`. Set `DEMO_DATABASE_NAME` and `DEMO_STORAGE_BUCKET` in its protected
+deployment environment. After restoring the matching baseline and originals,
+stop the old worker and start only `postgres minio api caddy`. The generic
+`deploy-platform.sh` is for the original seeded preview and must not be used for
+this frozen-baseline profile, since it runs the generic seed and worker.
