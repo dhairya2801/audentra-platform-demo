@@ -34,13 +34,13 @@ class BudgetClient(CompletionClient):
     """
 
     async def complete(self, body, transport, context=None):
-        if body.get("model") != "gpt-5.6-luna" or transport.provider != "openai":
-            raise RuntimeError("Evaluation permits only OpenAI GPT-5.6 Luna")
+        if body.get("model") != "gpt-6-luna" or transport.provider != "openai":
+            raise RuntimeError("Evaluation permits only OpenAI GPT-6 Luna")
         ledger = OUT / "spend.json"
         entries = json.loads(ledger.read_text()) if ledger.exists() else []
         reserve = (
-            (len(json.dumps(body).encode()) + 4096) * 0.2
-            + int(body.get("max_completion_tokens", body.get("max_tokens", 4096))) * 1.2
+            (len(json.dumps(body).encode()) + 4096) * 0.1
+            + int(body.get("max_completion_tokens", body.get("max_tokens", 4096))) * 0.5
         ) / 1_000_000
         if sum(e["usd"] for e in entries) + reserve > 4.5:
             raise RuntimeError("Evaluation spend ceiling reached; no request sent")
@@ -55,7 +55,7 @@ class BudgetClient(CompletionClient):
         usage = result.get("usage", {})
         if "prompt_tokens" in usage and "completion_tokens" in usage:
             entry.update(
-                usd=(usage["prompt_tokens"] * 0.2 + usage["completion_tokens"] * 1.2)
+                usd=(usage["prompt_tokens"] * 0.1 + usage["completion_tokens"] * 0.5)
                 / 1_000_000,
                 reserved=False,
                 usage=usage,
@@ -74,7 +74,7 @@ async def run(args):
         {
             "DATABASE_URL": args.database_url,
             "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
-            "OPENAI_MODEL": "gpt-5.6-luna",
+            "OPENAI_MODEL": "gpt-6-luna",
             "AI_CHAT_PROVIDER": "openai",
             "ASSISTANT_TRACE_DEBUG_ENABLED": "true",
             "EDWARD_READ_PLANNER": "model",

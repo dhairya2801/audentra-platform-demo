@@ -26,7 +26,7 @@ def _settings(*, enable_openai: bool = True, key: str = "") -> RuntimeSettings:
 def test_default_runtime_enables_the_configured_openai_provider() -> None:
     settings = _settings(key="unit-test-placeholder")
     assert settings.ai.openai_api_key == "unit-test-placeholder"
-    assert settings.ai.openai_model == "gpt-5.6-luna"
+    assert settings.ai.openai_model == "gpt-6-luna"
     assert not settings.ai.openrouter_api_key
 
 

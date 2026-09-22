@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import httpx
+import pytest
 
 from audentra.domain.edward_action_catalog import actions_for
 from audentra.domain.edward_action_recognizer import (
@@ -146,16 +147,20 @@ def test_classic_chat_models_keep_temperature_and_max_tokens() -> None:
         assert "max_completion_tokens" not in body and "reasoning_effort" not in body
 
 
-def test_reasoning_models_get_family_specific_parameters() -> None:
+@pytest.mark.parametrize("model", ["gpt-5.6-luna", "gpt-6-luna"])
+def test_reasoning_models_get_family_specific_parameters(model: str) -> None:
     settings = GatewaySettings(
         openai_api_key="k",
-        openai_model="gpt-5.6-luna",
+        openai_model=model,
         reasoning_effort="low",
         reasoning_effort_overrides="edward_action_recognizer=none, assistant_composer=medium",
     )
     bodies = _run_all_operations(settings)
     by_operation = {body["response_format"]["json_schema"]["name"]: body for body in bodies}
     for body in bodies:
+        assert body["model"] == model
+        assert body["response_format"]["type"] == "json_schema"
+        _assert_strict(body["response_format"]["json_schema"]["schema"])
         assert "temperature" not in body and "max_tokens" not in body
         assert isinstance(body["max_completion_tokens"], int)
         assert body["reasoning_effort"] in {"none", "low", "medium", "high", "xhigh"}
@@ -166,6 +171,13 @@ def test_reasoning_models_get_family_specific_parameters() -> None:
     # an effort above "none" widens the budget instead of truncating the JSON.
     assert by_operation["student_assistant_tool_plan"]["max_completion_tokens"] > 520
     assert by_operation["edward_action_request"]["max_completion_tokens"] == 220
+
+
+def test_gpt_6_luna_defaults_to_no_reasoning_for_edward() -> None:
+    for body in _run_all_operations(GatewaySettings(openai_api_key="k", openai_model="gpt-6-luna")):
+        assert body["reasoning_effort"] == "none"
+        assert "temperature" not in body and "max_tokens" not in body
+        assert body["response_format"]["type"] == "json_schema"
 
 
 def test_unknown_effort_values_fall_back_to_none() -> None:

@@ -1243,7 +1243,7 @@ class StudentAIGateway:
     def _generation_parameters(self, runtime: RuntimeConfig) -> dict[str, Any]:
         """Sampling/limit parameters shaped for the model family.
 
-        The gpt-5.x reasoning family rejects `max_tokens` (it wants
+        The gpt-5/6 reasoning families reject `max_tokens` (they want
         `max_completion_tokens`) and any `temperature` other than the default,
         and it accepts `reasoning_effort`. Older chat models keep the classic
         pair. The output budget for a reasoning model is widened when the
@@ -2044,6 +2044,7 @@ _STRICT_JSON_SCHEMA_MODELS = frozenset(
         "gpt-4o-mini",
         "gpt-5.6-luna",
         "gpt-5.6-luna-pro",
+        "gpt-6-luna",
     }
 )
 
@@ -2057,7 +2058,16 @@ _REASONING_HEADROOM_TOKENS: Mapping[str, int] = {
     "high": 8_000,
     "xhigh": 12_000,
 }
-_REASONING_MODEL_PREFIXES = ("gpt-5", "openai/gpt-5", "o1", "o3", "o4", "openai/o1", "openai/o3")
+_REASONING_MODEL_PREFIXES = (
+    "gpt-5",
+    "gpt-6",
+    "openai/gpt-5",
+    "o1",
+    "o3",
+    "o4",
+    "openai/o1",
+    "openai/o3",
+)
 
 
 def _is_reasoning_model(model: str) -> bool:

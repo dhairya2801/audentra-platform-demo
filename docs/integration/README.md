@@ -11,7 +11,7 @@ The integration created its own PostgreSQL 17 cluster at `artifacts/integration/
 - API: `http://127.0.0.1:45619`.
 - Atlas live: `http://127.0.0.1:4321`.
 
-API and Atlas are loopback development tools. They are not a deployment authentication configuration. The API starts no worker, uses GPT-5.6 Luna with the bounded model read planner, and requires `OPENAI_API_KEY` in its environment. Credentials stay outside Git. Interactive Edward calls incur provider usage separately from the evaluation harness.
+API and Atlas are loopback development tools. They are not a deployment authentication configuration. The API starts no worker, uses GPT-6 Luna with the bounded model read planner, and requires `OPENAI_API_KEY` in its environment. Credentials stay outside Git. Interactive Edward calls incur provider usage separately from the evaluation harness.
 
 To start the API in this clone, using the already-created integration database:
 

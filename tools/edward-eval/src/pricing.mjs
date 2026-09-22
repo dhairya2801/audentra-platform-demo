@@ -7,9 +7,10 @@
  * pricing table produced their cost figures.
  */
 
-export const PRICING_VERSION = "2026-09-02";
+export const PRICING_VERSION = "2026-09-22";
 
 export const MODEL_PRICING = Object.freeze({
+  "gpt-6-luna": { input: 0.1 / 1_000_000, output: 0.5 / 1_000_000 },
   "gpt-4o-mini": { input: 0.15 / 1_000_000, output: 0.6 / 1_000_000 },
   // The API echoes dated snapshot ids for the same model and price.
   "gpt-4o-mini-2024-07-18": { input: 0.15 / 1_000_000, output: 0.6 / 1_000_000 },

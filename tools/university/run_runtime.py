@@ -57,7 +57,7 @@ def runtime_settings(
         or "http://127.0.0.1:3009,http://localhost:3009,http://localhost:3000,http://127.0.0.1:3000",
         "BROWSER_AUTH_REQUIRED": values.get("BROWSER_AUTH_REQUIRED", "false"),
         "ASSISTANT_TRACE_DEBUG_ENABLED": "true",
-        "OPENAI_MODEL": "gpt-5.6-luna",
+        "OPENAI_MODEL": "gpt-6-luna",
         "EDWARD_READ_PLANNER": "model",
         "OPENROUTER_API_KEY": "",
         "OPENAI_API_KEY": key if enable_openai else "",
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     except ValueError as error:
         parser.error(str(error))
     print(
-        "Edward: OpenAI GPT-5.6 Luna enabled"
+        "Edward: OpenAI GPT-6 Luna enabled"
         if args.enable_openai
         else "Edward: explicitly offline; university chat unavailable",
         flush=True,

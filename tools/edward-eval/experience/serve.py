@@ -50,8 +50,8 @@ def update(entry=None, *, settle=None):
 
 
 async def metered_complete(self, body, transport, context=None):
-    if transport.provider != "openai" or body.get("model") != "gpt-5.6-luna":
-        raise RuntimeError("This evaluation prices only OpenAI GPT-5.6 Luna")
+    if transport.provider != "openai" or body.get("model") != "gpt-6-luna":
+        raise RuntimeError("This evaluation prices only OpenAI GPT-6 Luna")
     # UTF-8 bytes conservatively bound text tokens; headroom covers schema framing.
     # Uncertain/failed requests retain their reservation. Cached tokens are charged
     # at full input price, so the reported spend is a conservative upper estimate.
@@ -61,8 +61,8 @@ async def metered_complete(self, body, transport, context=None):
         "operation": context.runtime.operation if context else None,
         "model": body["model"],
         "usd": (
-            (len(json.dumps(body).encode()) + 4096) * 0.2
-            + int(body.get("max_completion_tokens", body.get("max_tokens", 4096))) * 1.2
+            (len(json.dumps(body).encode()) + 4096) * 0.1
+            + int(body.get("max_completion_tokens", body.get("max_tokens", 4096))) * 0.5
         )
         / 1e6,
         "reserved": True,
@@ -76,7 +76,7 @@ async def metered_complete(self, body, transport, context=None):
                 "id": entry["id"],
                 "usage": usage,
                 "reserved": False,
-                "usd": (usage["prompt_tokens"] * 0.2 + usage["completion_tokens"] * 1.2)
+                "usd": (usage["prompt_tokens"] * 0.1 + usage["completion_tokens"] * 0.5)
                 / 1e6,
             }
         )
