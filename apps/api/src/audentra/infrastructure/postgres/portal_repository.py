@@ -3713,7 +3713,7 @@ class PostgresPortalRepository:
         if row is None:
             raise NotFoundError("STUDENT_PROFILE_NOT_FOUND", "The student profile was not found")
         result = _map_profile(row)
-        if self.university is not None and self.university.is_enabled(auth):
+        if self.university is not None and await self.university.has_student(auth):
             world = await self.university.record(auth)
             result["email"] = world["student"]["email"]
         return result
@@ -3817,7 +3817,7 @@ class PostgresPortalRepository:
         from audentra.domain.university_projection import academics
 
         university = self.university
-        if university is not None and university.is_enabled(auth):
+        if university is not None and await university.has_student(auth):
             return academics(await university.record(auth, "academics"))
         selected = await self._one(
             """
@@ -4039,7 +4039,7 @@ class PostgresPortalRepository:
         from audentra.domain.university_projection import financials
 
         university = self.university
-        if university is not None and university.is_enabled(auth):
+        if university is not None and await university.has_student(auth):
             return financials(
                 await university.record(auth, "account"), await university.record(auth, "documents")
             )

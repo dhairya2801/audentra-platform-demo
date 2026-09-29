@@ -193,7 +193,7 @@ async def _edward(
 ) -> dict[str, Mapping[str, Any]]:
     # Reaching into the private host is deliberate: the production wiring is
     # exactly what this suite exists to exercise.
-    host = service._assistant_host(auth)
+    host = await service._assistant_host(auth)
     execution = await execute_tool_reads(list(tools), host, timeout_seconds=20.0)
     for tool in tools:
         read = execution.reads[tool]

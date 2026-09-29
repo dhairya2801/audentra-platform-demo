@@ -101,7 +101,7 @@ async def _edward(service: PostgresPlatformService, *tools: str) -> dict[str, Ma
 
     # Reaching into the private host is deliberate: the production wiring
     # is exactly what this suite exists to exercise.
-    host = service._assistant_host(AUTH)
+    host = await service._assistant_host(AUTH)
     execution = await execute_tool_reads(list(tools), host, timeout_seconds=15.0)
     for tool in tools:
         read = execution.reads[tool]
@@ -331,7 +331,7 @@ def test_every_tool_reads_successfully_on_the_production_path() -> None:
     from audentra.integrations.assistant.tools import _TOOL_IMPLEMENTATIONS
 
     async def scenario(service: PostgresPlatformService) -> None:
-        host = service._assistant_host(AUTH)
+        host = await service._assistant_host(AUTH)
         execution = await execute_tool_reads(
             list(_TOOL_IMPLEMENTATIONS), host, timeout_seconds=20.0
         )

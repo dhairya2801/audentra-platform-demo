@@ -35,6 +35,9 @@ from audentra.infrastructure.seeding.relational import reset_relational_data
 _STUDENT_SESSION_LIFETIME = timedelta(days=7)
 _STAFF_SESSION_LIFETIME = timedelta(hours=8)
 _DELEGATE_SESSION_LIFETIME = timedelta(hours=12)
+# Self-service signup is development/preview-only. New offers need their own
+# response window, rather than the historical seed student's deadline.
+_DEVELOPMENT_OFFER_WINDOW_DAYS = 30
 _MAXIMUM_SESSIONS = 5
 _PASSWORD_N = 2**14
 _PASSWORD_R = 8
@@ -322,7 +325,8 @@ class PostgresDevelopmentAuth:
                         JOIN academic_term term ON term.id=offer.academic_term_id
                           AND term.tenant_id=offer.tenant_id
                         WHERE offer.tenant_id=:tenant_id
-                        ORDER BY offer.created_at
+                        ORDER BY (offer.response_deadline >= CURRENT_DATE) DESC,
+                                 term.starts_on DESC, offer.created_at DESC, offer.id
                         LIMIT 1
                         """
                     ),
@@ -1240,6 +1244,7 @@ class PostgresDevelopmentAuth:
             "academic_term_id": template["academic_term_id"],
             "campus_id": template["campus_id"],
             "response_deadline": template["response_deadline"],
+            "response_window_days": _DEVELOPMENT_OFFER_WINDOW_DAYS,
             "deposit_amount_cents": template["deposit_amount_cents"],
             "class_year": template["class_year"],
             "financial_academic_year": template["financial_academic_year"],
@@ -1260,7 +1265,9 @@ class PostgresDevelopmentAuth:
               response_deadline, deposit_amount_cents, status, version
             ) VALUES (
               :offer_id, :tenant_id, :student_id, :program_id, :academic_term_id,
-              :campus_id, :response_deadline, :deposit_amount_cents, 'offered', 1
+              :campus_id, GREATEST(CAST(:response_deadline AS date),
+                CURRENT_DATE + CAST(:response_window_days AS integer)),
+              :deposit_amount_cents, 'offered', 1
             )
             """,
             """

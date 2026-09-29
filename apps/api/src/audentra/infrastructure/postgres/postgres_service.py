@@ -2823,7 +2823,7 @@ class PostgresPlatformService:
         )
         return await self.repository.portal.get_student_document(auth, document_id)
 
-    def _assistant_host(self, auth: AuthContext) -> AssistantToolHost:
+    async def _assistant_host(self, auth: AuthContext) -> AssistantToolHost:
         """Primitive live reads for the assistant pipeline, per request.
 
         Every primitive is the same repository read the portal page uses, so
@@ -2884,7 +2884,10 @@ class PostgresPlatformService:
                 auth, knowledge, query
             )
         university = self.repository.university
-        if university is not None and university.is_enabled(auth):
+        # A university import is tenant-wide, but a new credential account may
+        # exist only in the canonical portal tables. Bind Edward to that
+        # student's actual record, not to an absent imported dossier.
+        if university is not None and await university.has_student(auth):
             primitives["university_record"] = lambda **kwargs: university.record(auth, **kwargs)
             primitives["institution_knowledge"] = lambda query: university.policies(auth, query)
         return AssistantToolHost(cast(Any, primitives))
@@ -3254,7 +3257,7 @@ class PostgresPlatformService:
                         # classifier cannot place goes to the read loop rather
                         # than to the broad safe fallback.
                         read_pipeline = AssistantPipeline(
-                            self._assistant_host(auth),
+                            await self._assistant_host(auth),
                             model_composer=model_hook(
                                 execution.mode, self._assistant_composer(auth, request_id)
                             ),
@@ -3327,7 +3330,7 @@ class PostgresPlatformService:
             university = self.repository.university
             if (
                 university is not None
-                and university.is_enabled(auth)
+                and await university.has_student(auth)
                 and re.search(r"\bholds?\b", message, re.I)
             ):
                 account = await university.record(auth, "account")
@@ -3381,8 +3384,9 @@ class PostgresPlatformService:
                 client_history = payload.get("history", [])
                 history = client_history if isinstance(client_history, list) else []
                 trace.history_source = "client_fallback" if history else "none"
+            host = await self._assistant_host(auth)
             pipeline = AssistantPipeline(
-                self._assistant_host(auth),
+                host,
                 model_composer=model_hook(
                     execution.mode, self._assistant_composer(auth, request_id)
                 ),
@@ -3390,7 +3394,9 @@ class PostgresPlatformService:
                 read_loop_step=model_hook(
                     execution.mode, self._read_loop_step(auth, request_id, "student")
                 ),
-                **self._read_loop_settings(execution, auth),
+                **self._read_loop_settings(
+                    execution, auth, university_context=host.supports("university_record")
+                ),
             )
             result = await pipeline.execute(
                 message=message,
@@ -3628,14 +3634,23 @@ class PostgresPlatformService:
         return run
 
     def _read_loop_settings(
-        self, execution: ResolvedAssistantExecutionMode, auth: AuthContext | None = None
+        self,
+        execution: ResolvedAssistantExecutionMode,
+        auth: AuthContext | None = None,
+        *,
+        university_context: bool = True,
     ) -> dict[str, Any]:
         """Planner mode and round budget for one turn: the Lab header wins,
         else the deployment default from the gateway settings."""
 
         planner = execution.read_planner
         university = self.repository.university
-        if auth is not None and university is not None and university.is_enabled(auth):
+        if (
+            university_context
+            and auth is not None
+            and university is not None
+            and university.is_enabled(auth)
+        ):
             return {
                 "read_planner": planner.value if planner is not None else "model",
                 "read_loop_max_rounds": 4,

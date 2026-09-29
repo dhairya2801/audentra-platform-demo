@@ -186,6 +186,29 @@ class PostgresUniversityRepository:
     def is_enabled(self, auth: AuthContext) -> bool:
         return auth.tenant_id in self.tenant_ids and not auth.is_delegate
 
+    async def has_student(self, auth: AuthContext) -> bool:
+        """Portal and assistant reads use imported data only for its own students.
+
+        A tenant can also have newly registered students whose canonical record
+        exists only in public tables. Do not borrow a demo student's dossier.
+        """
+        if not self.is_enabled(auth):
+            return False
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                text("SELECT set_config('audentra.tenant_id',:tenant,true)"),
+                {"tenant": auth.tenant_id},
+            )
+            return bool(
+                await connection.scalar(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM university.student "
+                        "WHERE tenant_id=:tenant AND id=:student)"
+                    ),
+                    {"tenant": auth.tenant_id, "student": auth.student_id},
+                )
+            )
+
     async def enabled(self, auth: AuthContext) -> bool:
         async with self.engine.begin() as c:
             await c.execute(
