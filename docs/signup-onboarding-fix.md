@@ -86,3 +86,17 @@ Two tests pass: fresh signup + onboarding + actual Edward tool reads + separatio
 Browser evidence: Ada and Camila sign-in passed; a fresh fictional account completed real onboarding and repeat sign-in in the full demo copy. With explicit user consent, three actual OpenAI responses matched that fictional student's name/email, remaining steps and housing/emergency-contact answers. Ada/Camila records were not sent to the provider. No raw provider responses are exported; boolean/provider metadata and screenshots live in the sibling portal's ignored `artifacts/ui-refresh/signup-edward/`.
 
 The frontend Edward interface, shared styling, tool definitions and prompts remain unchanged. Changes remain in the two review worktrees; no merge or deployment occurred.
+
+## September 29 authorized deployment
+
+Runtime commit `fbbceeb7e0e4064be0834fb3450e1d541d871d51` is deployed and healthy.
+The public site passed fictional Morgan Test signup, all onboarding steps,
+signing, pay-later, portal entry with actual requirements, and repeat sign-in.
+The saved state contains two completed, five ready and two blocked requirements.
+With the user's explicit consent, three real OpenAI answers correctly used only
+that fictional account's saved identity, pending steps and housing/contact data.
+Ada and Camila's UI sign-ins and all 22 original Task Board document reads pass.
+Only the API service was recreated; existing database and storage were preserved.
+The sibling portal's local `docs/ui-refresh/deployment.md` retains the detailed
+release evidence and rollback procedure. Publishing additional infrastructure
+details was rejected by automatic approval review; those notes remain local.
