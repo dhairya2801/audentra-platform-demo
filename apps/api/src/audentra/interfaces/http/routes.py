@@ -2891,6 +2891,13 @@ async def search_staff_students(
     query: Annotated[str | None, Query(max_length=120)] = None,
     student_id: Annotated[str | None, Query(alias="studentId", max_length=64)] = None,
     limit: Annotated[str | None, Query(max_length=6)] = None,
+    offset: Annotated[str | None, Query(pattern=r"^[0-9]{1,9}$")] = None,
+    sort: Annotated[str | None, Query(max_length=20)] = None,
+    program: Annotated[str | None, Query(max_length=200)] = None,
+    stage: Annotated[str | None, Query(max_length=20)] = None,
+    risk: Annotated[str | None, Query(max_length=20)] = None,
+    view: Annotated[str | None, Query(max_length=20)] = None,
+    featured_student_id: Annotated[UUID | None, Query(alias="featuredStudentId")] = None,
 ) -> object:
     """One bounded page of the tenant roster, searched server-side (max 200)."""
 
@@ -2901,7 +2908,18 @@ async def search_staff_students(
         auth=auth,
         query_params={
             key: value
-            for key, value in {"query": query, "studentId": student_id, "limit": limit}.items()
+            for key, value in {
+                "query": query,
+                "studentId": student_id,
+                "limit": limit,
+                "offset": offset,
+                "sort": sort,
+                "program": program,
+                "stage": stage,
+                "risk": risk,
+                "view": view,
+                "featuredStudentId": str(featured_student_id) if featured_student_id else None,
+            }.items()
             if value is not None
         },
     )

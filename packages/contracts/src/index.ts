@@ -2504,22 +2504,41 @@ export interface StaffPersonalActionCenter {
 
 /** GET /v1/staff/students — the tenant roster, searched server-side. */
 export interface StaffStudentSearchQuery {
-  /** Matches name, preferred name, external reference, email and program. */
+  /** Matches name, preferred name, external reference and program across the tenant. */
   query?: string;
-  /** Exactly one student, regardless of `query`. */
   studentId?: string;
   /** 1–200, default 50. */
   limit?: number;
+  offset?: number;
+  sort?: "recommended" | "name" | "readiness" | "risk";
+  program?: string;
+  stage?: string;
+  /** Illustrative UI bands only; never an institutional risk assessment. */
+  risk?: string;
+  view?: "all" | "risk" | "blocked" | "inactive";
+  /** Display preference for recommended ordering; does not change roster membership. */
+  featuredStudentId?: string;
 }
 
 export interface StaffStudentSearch {
   items: StaffStudentOperation[];
-  /** Students matching the query across the whole tenant. */
+  /** Matches across the whole tenant, after filters and before paging. */
   total: number;
-  /** Every student in the tenant, regardless of the query. */
   cohortTotal: number;
   query: string;
   limit: number;
+  /** Server-clamped offset, including when a refresh removes the last page. */
+  offset?: number;
+  summary?: {
+    students: number;
+    completedTasks: number;
+    totalTasks: number;
+    highRisk: number;
+    blockedStudents: number;
+    blockingSteps: number;
+    inactiveStudents: number;
+  };
+  facets?: { programs: string[]; stages: string[] };
   generatedAt: string;
 }
 

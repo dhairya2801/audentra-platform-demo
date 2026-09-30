@@ -45,6 +45,7 @@ from audentra.domain.outreach_drafts import project_outreach_draft
 from audentra.infrastructure.postgres.journey_routing import (
     reconcile_student_journey_routes,
 )
+from audentra.infrastructure.postgres.student_directory import directory_query
 from audentra.infrastructure.postgres.university_repository import PostgresUniversityRepository
 
 _MISSING = object()
@@ -1963,24 +1964,47 @@ class PostgresStaffRepository:
         query: str | None,
         student_id: str | None,
         limit: int,
+        offset: int = 0,
+        sort: str = "recommended",
+        program: str = "",
+        stage: str = "",
+        risk: str = "",
+        view: str = "all",
+        featured_student_id: str | None = None,
     ) -> dict[str, object]:
-        """One bounded page of the tenant roster, matched server-side.
-
-        The same projection the workspace cohort uses, so a search result and
-        a cohort row never disagree about a student.
-        """
-
+        """Filter and page one canonical tenant roster; never a browser-sized subset."""
         self._require_staff(auth)
         normalized_query = " ".join((query or "").split())[:ROSTER_SEARCH_MAX_LENGTH]
         bounded_limit = max(1, min(int(limit), ROSTER_SEARCH_MAX_LIMIT))
+        params: dict[str, object] = {
+            "tenant_id": _uuid(auth.tenant_id),
+            "viewer_id": _uuid(auth.actor_id),
+            "now": self._clock(),
+            "limit": bounded_limit,
+            "offset": max(0, int(offset)),
+            "program_filter": program,
+            "stage_filter": stage,
+            "risk_filter": risk,
+            "featured_student_id": _uuid(featured_student_id) if featured_student_id else None,
+        }
+        if student_id:
+            params["student_id"] = _uuid(student_id)
+        if normalized_query:
+            params["pattern"] = f"%{_escape_like(normalized_query)}%"
+        sql = directory_query(
+            self._student_roster_sql(
+                by_student=bool(student_id),
+                by_query=bool(normalized_query),
+                paged=False,
+            ),
+            sort=sort,
+            view=view,
+            risk=risk,
+            stage=stage,
+        )
         async with self._engine.connect() as connection:
-            rows = await self._roster_rows(
-                connection,
-                auth,
-                query=normalized_query or None,
-                student_id=student_id,
-                limit=bounded_limit,
-            )
+            result = await connection.execute(text(sql), params)
+            rows = list(result.mappings().all())
             cohort_result = await connection.execute(
                 text(
                     f"SELECT COUNT(*) AS total FROM {self._table('student')} "
@@ -1989,14 +2013,21 @@ class PostgresStaffRepository:
                 {"tenant_id": _uuid(auth.tenant_id)},
             )
             cohort_total = int(cohort_result.mappings().one()["total"])
-        items = [self._map_student_operation(dict(row), auth.actor_id) for row in rows]
-        total = _database_integer(rows[0]["match_count"], "student.match_count") if rows else 0
+        metadata = rows[0]
+        items = [
+            self._map_student_operation(dict(row), auth.actor_id)
+            for row in rows
+            if row["id"] is not None
+        ]
         return {
             "items": items,
-            "total": total,
+            "total": int(metadata["total_matches"]),
             "cohortTotal": cohort_total,
             "query": normalized_query,
             "limit": bounded_limit,
+            "offset": int(metadata["page_offset"]),
+            "summary": metadata["directory_summary"],
+            "facets": metadata["directory_facets"],
             "generatedAt": _iso_timestamp(self._clock()),
         }
 
@@ -6050,7 +6081,9 @@ class PostgresStaffRepository:
             WHERE student.tenant_id = :tenant_id AND student.id = :student_id
         """
 
-    def _student_roster_sql(self, *, by_student: bool = False, by_query: bool = False) -> str:
+    def _student_roster_sql(
+        self, *, by_student: bool = False, by_query: bool = False, paged: bool = True
+    ) -> str:
         student = self._table("student")
         person = self._table("person")
         profile = self._table("student_profile")
@@ -6083,7 +6116,7 @@ class PostgresStaffRepository:
                 )"""
             )
         where = "\n              AND ".join(filters)
-        return f"""
+        sql = f"""
             SELECT student.id, student.external_ref, person.first_name, person.last_name,
               COALESCE(profile.preferred_name, person.preferred_name, person.first_name)
                 AS preferred_name,
@@ -6223,9 +6256,8 @@ class PostgresStaffRepository:
               LIMIT 1
             ) AS next_work ON true
             WHERE {where}
-            ORDER BY last_activity_at DESC, student.id
-            LIMIT :limit
         """
+        return sql + (" ORDER BY last_activity_at DESC, student.id LIMIT :limit" if paged else "")
 
     def _map_student_operation(
         self,

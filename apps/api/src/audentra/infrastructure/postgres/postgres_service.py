@@ -1675,6 +1675,13 @@ class PostgresPlatformService:
                 query=call.query_params.get("query") or None,
                 student_id=call.query_params.get("studentId") or None,
                 limit=_integer(call.query_params.get("limit")) or 50,
+                offset=_integer(call.query_params.get("offset")) or 0,
+                sort=call.query_params.get("sort") or "recommended",
+                program=call.query_params.get("program") or "",
+                stage=call.query_params.get("stage") or "",
+                risk=call.query_params.get("risk") or "",
+                view=call.query_params.get("view") or "all",
+                featured_student_id=call.query_params.get("featuredStudentId") or None,
             )
         if operation == "staff.get_me":
             return await self._advising().get_staff_me(auth)

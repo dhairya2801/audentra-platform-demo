@@ -1050,9 +1050,16 @@ def test_student_search_matches_the_whole_tenant_server_side() -> None:
             "viewer_id": UUID(STAFF_ID),
             "now": NOW,
             "limit": 25,
+            "offset": 0,
+            "program_filter": "",
+            "stage_filter": "",
+            "risk_filter": "",
+            "featured_student_id": None,
             "pattern": "%Riv\\_era%",
         }
-        return FakeResult([_roster_row(match_count=7)])
+        return FakeResult(
+            [_roster_row(total_matches=7, page_offset=0, directory_summary={}, directory_facets={})]
+        )
 
     connection = FakeConnection(handler)
     repository = PostgresStaffRepository(
@@ -1076,7 +1083,17 @@ def test_student_search_refuses_non_staff_and_clamps_the_limit() -> None:
             return FakeResult([{"total": 0}])
         assert values["limit"] == 200
         assert "student.id = :student_id" in sql
-        return FakeResult([])
+        return FakeResult(
+            [
+                {
+                    "id": None,
+                    "total_matches": 0,
+                    "page_offset": 0,
+                    "directory_summary": {},
+                    "directory_facets": {},
+                }
+            ]
+        )
 
     connection = FakeConnection(handler)
     repository = PostgresStaffRepository(
@@ -1099,6 +1116,9 @@ def test_student_search_refuses_non_staff_and_clamps_the_limit() -> None:
         "cohortTotal": 0,
         "query": "",
         "limit": 200,
+        "offset": 0,
+        "summary": {},
+        "facets": {},
         "generatedAt": "2026-07-24T12:00:00.000Z",
     }
 
