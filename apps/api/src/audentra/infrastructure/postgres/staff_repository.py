@@ -1024,6 +1024,42 @@ class PostgresStaffRepository:
             **({"timezone": str(row["timezone"])} if row.get("timezone") else {}),
         }
 
+    async def get_navigation(self, auth: AuthContext) -> dict[str, object]:
+        """Authenticate and count navigation badges without loading records or content."""
+        self._require_staff(auth)
+        now = self._clock()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        params = {
+            "tenant_id": _uuid(auth.tenant_id),
+            "viewer_id": _uuid(auth.actor_id),
+            "now": now,
+            "stale_before": now - STALE_AFTER,
+            "day_start": day_start,
+            "day_end": day_start + timedelta(days=1),
+        }
+        async with self._engine.connect() as connection:
+            member_result = await connection.execute(text(self._board_staff_sql()), params)
+            member = next(
+                (dict(row) for row in member_result.mappings() if str(row["id"]) == auth.actor_id),
+                None,
+            )
+            if member is None:
+                raise NotFoundError("STAFF_IDENTITY_NOT_PROVISIONED", "Staff profile unavailable")
+            scopes = await connection.execute(text(self._board_scope_counts_sql()), params)
+            inquiries = await connection.execute(
+                text(f"""
+                SELECT count(*) FROM {self._table("student_inquiry")}
+                WHERE tenant_id = :tenant_id AND status = 'new'
+                  AND archived_at IS NULL AND expires_at > :now
+            """),
+                params,
+            )
+        return {
+            "currentStaff": self._map_board_member(member),
+            "actionCenter": {"scopes": self._map_scope_counts(dict(scopes.mappings().one()))},
+            "newInquiries": inquiries.scalar_one(),
+        }
+
     async def get_managed_content(self, auth: AuthContext) -> dict[str, object]:
         """Read durable staff-only content used by the workspace editors."""
 
@@ -2002,7 +2038,11 @@ class PostgresStaffRepository:
             risk=risk,
             stage=stage,
         )
-        async with self._engine.connect() as connection:
+        async with self._engine.begin() as connection:
+            # EXPLAIN on the 3,000-student fixture spent 114 ms compiling 170 JIT
+            # functions for a ~350 ms read. This interactive query benefits from
+            # interpretation; SET LOCAL does not affect other pooled requests.
+            await connection.execute(text("SET LOCAL jit = off"))
             result = await connection.execute(text(sql), params)
             rows = list(result.mappings().all())
             cohort_result = await connection.execute(

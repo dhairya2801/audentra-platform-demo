@@ -1942,10 +1942,17 @@ async def create_student_inquiry_message(
 
 @router.get("/v1/staff/workspace", status_code=200, response_model=None)
 async def get_staff_workspace(
-    request: Request, service: ServiceDependency, auth: AuthDependency
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    projection: Literal["full", "navigation"] = "full",
 ) -> object:
     return await _dispatch(
-        service=service, request=request, operation="staff.get_workspace", auth=auth
+        service=service,
+        request=request,
+        operation="staff.get_workspace",
+        auth=auth,
+        query_params={"projection": projection},
     )
 
 

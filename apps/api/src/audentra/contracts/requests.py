@@ -744,10 +744,33 @@ class StaffTaskBoardContextRequest(StrictRequest):
     ) = None
 
 
+class StaffBrewCohortContextRequest(StrictRequest):
+    key: Annotated[StrictStr, StringConstraints(max_length=120)]
+    label: Annotated[StrictStr, StringConstraints(max_length=300)]
+    filter: dict[str, str | int | bool]
+    clauses: Annotated[
+        list[Annotated[StrictStr, StringConstraints(max_length=300)]], Field(max_length=20)
+    ]
+    question: Annotated[StrictStr, StringConstraints(max_length=1000)]
+
+
+class StaffBrewContextRequest(StrictRequest):
+    """Untrusted navigation scope, never evidence or a resolved identity."""
+
+    surface: Literal["morning_brew"]
+    source_id: Annotated[StrictStr, StringConstraints(max_length=300)]
+    topic: Annotated[StrictStr, StringConstraints(max_length=120)]
+    label: Annotated[StrictStr, StringConstraints(max_length=300)]
+    data_origin: Literal["demo"]
+    displayed_as_of: Annotated[StrictStr, StringConstraints(max_length=80)]
+    cohort: StaffBrewCohortContextRequest | None = None
+
+
 class AskStaffEdwardRequest(StrictRequest):
     """One server-identified, durable staff assistant turn."""
 
-    page_context: StaffTaskBoardContextRequest | None = None
+    page_context: StaffTaskBoardContextRequest | StaffBrewContextRequest | None = None
+    history_after: UUID | None = None
 
     message: Annotated[StrictStr, StringConstraints(min_length=1, max_length=2_000)]
     conversation_id: UUID | None = None

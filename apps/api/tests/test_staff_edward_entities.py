@@ -260,3 +260,28 @@ def test_identity_from_profile_reads_role_and_caseload() -> None:
     assert identity is not None
     assert identity.is_manager and not identity.is_adviser
     assert "Leandro Hartigan" in identity.describe() and "10 direct report" in identity.describe()
+
+
+@pytest.mark.parametrize(
+    "label", ["Morning Brew", "Task Board", "Action Center", "Student Accounts"]
+)
+@pytest.mark.parametrize(
+    "question",
+    [
+        "Which students have an open financial aid verification, and what is each waiting on?",
+        "Which deposited students have not registered for orientation?",
+    ],
+)
+def test_navigation_prefix_is_not_a_student_in_either_resolution_path(
+    label: str, question: str
+) -> None:
+    request = normalize_staff_request(
+        f"This question comes from the {label} demo. Its displayed figures are not institutional "
+        f"evidence. Answer using canonical university records only.\n\n{question}"
+    )
+    assert request.candidate_student_name is None
+    assert all(
+        mention.text != label
+        for mention in extract_mentions(request.text)
+        if mention.kind_hint == "person"
+    )

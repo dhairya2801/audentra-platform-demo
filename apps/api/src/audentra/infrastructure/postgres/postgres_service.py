@@ -1629,6 +1629,8 @@ class PostgresPlatformService:
                 call.request_id,
             )
         if operation == "staff.get_workspace":
+            if call.query_params.get("projection") == "navigation":
+                return await staff.get_navigation(auth)
             configurations = await self._managed_configurations(auth)
             # The workspace carries the first page of open work plus the
             # board-wide counts; the task board queries further pages and
@@ -3720,6 +3722,7 @@ class PostgresPlatformService:
         *,
         board: Any = None,
         task_board_context: Mapping[str, Any] | None = None,
+        brew_context: Mapping[str, Any] | None = None,
     ) -> StaffAssistantToolHost:
         """Primitive live reads for the staff assistant, per request.
 
@@ -3863,6 +3866,7 @@ class PostgresPlatformService:
             },
             staff_member_id=auth.actor_id,
             task_board_context=task_board_context,
+            brew_context=brew_context,
         )
 
     def _staff_knowledge_primitives(self, auth: AuthContext) -> dict[str, Any]:
@@ -4026,6 +4030,17 @@ class PostgresPlatformService:
         repo = self._staff_assistant_repo()
         message = str(payload.get("message", ""))
         conversation_id = payload.get("conversationId")
+        history_after = str(payload["historyAfter"]) if payload.get("historyAfter") else None
+        raw_page_context = payload.get("pageContext")
+        brew_context = (
+            dict(raw_page_context)
+            if isinstance(raw_page_context, Mapping)
+            and raw_page_context.get("surface") == "morning_brew"
+            else None
+        )
+        fresh_scope = history_after is not None and history_after == str(
+            payload.get("clientMessageId")
+        )
         client_message_id = payload.get("clientMessageId")
         injection_reason = untrusted_action_framing(message)
         staff_capabilities = await self._edward_actions().capabilities_for(auth)
@@ -4040,22 +4055,26 @@ class PostgresPlatformService:
         # the student path uses, and for the same reason.
         if injection_reason is None:
             semantic_action = parse_staff_action(
-                message, task_board=isinstance(payload.get("pageContext"), Mapping)
+                message,
+                task_board=isinstance(raw_page_context, Mapping)
+                and raw_page_context.get("surface") == "task_board",
             )
-            if semantic_action is None and conversation_id is not None:
+            if semantic_action is None and conversation_id is not None and not fresh_scope:
                 staff_conversation_state = await self._edward_actions().conversation_actions(
-                    auth, str(conversation_id)
+                    auth, str(conversation_id), history_after=history_after
                 )
                 semantic_action, staff_inherited_student_id = _continued_action(
                     message, staff_conversation_state, actor="staff"
                 )
-            if semantic_action is None and conversation_id is not None:
+            if semantic_action is None and conversation_id is not None and not fresh_scope:
                 # "What is it waiting on?" → "the registrar hasn't sent the
                 # file". The reply to Edward's own clarifying question names
                 # neither an action nor a target; both are in the question it
                 # answers. Without this the reply fell into the read plane and
                 # the exchange dead-ended one step from done.
-                recent_for_clarify = await repo.get_recent_history(auth, str(conversation_id))
+                recent_for_clarify = await repo.get_recent_history(
+                    auth, str(conversation_id), history_after=history_after
+                )
                 continuation = _clarify_loop_continuation(
                     message, list(recent_for_clarify.get("history", []))
                 )
@@ -4107,6 +4126,7 @@ class PostgresPlatformService:
         task_board_context = (
             await board.page_context(dict(raw_page_context))
             if isinstance(raw_page_context, Mapping)
+            and raw_page_context.get("surface") == "task_board"
             else None
         )
         guarded = guarded_staff_response(message)
@@ -4117,10 +4137,12 @@ class PostgresPlatformService:
             and conversation_id is not None
         ):
             conversation_state = await self._edward_actions().conversation_actions(
-                auth, str(conversation_id)
+                auth, str(conversation_id), history_after=history_after
             )
         inherited_student_id = staff_inherited_student_id
-        action_recall = self._action_conversation_response(message, conversation_state)
+        action_recall = (
+            None if fresh_scope else self._action_conversation_response(message, conversation_state)
+        )
         if (
             guarded is None
             and injection_reason is not None
@@ -4172,7 +4194,9 @@ class PostgresPlatformService:
             history: Sequence[Mapping[str, Any]] = []
             context_student_id: str | None = None
             if conversation_id is not None:
-                recent = await repo.get_recent_history(auth, str(conversation_id))
+                recent = await repo.get_recent_history(
+                    auth, str(conversation_id), history_after=history_after
+                )
                 history = list(recent.get("history", []))
                 context_student_id = recent.get("activeStudentId")
                 raw_prior_cohort = recent.get("activeCohortFilter")
@@ -4182,7 +4206,10 @@ class PostgresPlatformService:
                 trace.history_source = "server"
             pipeline = StaffAssistantPipeline(
                 self._staff_assistant_host(
-                    auth, board=board, task_board_context=task_board_context
+                    auth,
+                    board=board,
+                    task_board_context=task_board_context,
+                    brew_context=brew_context,
                 ),
                 # A recognised write request is resolved by the deterministic
                 # classifier and Action Gateway. Running model planning here
@@ -4521,14 +4548,16 @@ class PostgresPlatformService:
                 },
                 referenced_student_id=resolved_student_id,
                 request_id=request_id,
-                referent_action=referent_action,
+                referent_action="clear"
+                if fresh_scope and referent_action == "keep"
+                else referent_action,
                 active_student_id=active_student_id,
                 active_cohort_filter=active_cohort_filter,
                 cohort_action=(
                     "set"
                     if active_cohort_filter
                     else "clear"
-                    if resolved_student_id is not None
+                    if resolved_student_id is not None or fresh_scope
                     else "keep"
                 ),
             )

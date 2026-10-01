@@ -184,7 +184,12 @@ class EdwardActionGateway:
         return str(value) if value else None
 
     async def conversation_actions(
-        self, auth: AuthContext, conversation_id: str, *, limit: int = 6
+        self,
+        auth: AuthContext,
+        conversation_id: str,
+        *,
+        limit: int = 6,
+        history_after: str | None = None,
     ) -> JsonDict:
         """This actor's recent action intents and receipts in one conversation.
 
@@ -223,6 +228,22 @@ class EdwardActionGateway:
                                 WHERE intent.tenant_id=:tenant_id
                                   AND {actor_column}=:actor_id
                                   AND {conversation_column}=:conversation_id
+                                  AND (CAST(:history_after AS text) IS NULL OR EXISTS (
+                                    SELECT 1 FROM staff_assistant_message message
+                                    WHERE message.tenant_id=:tenant_id
+                                      AND message.staff_member_id=:actor_id
+                                      AND message.conversation_id=:conversation_id
+                                      AND message.action_intents @> jsonb_build_array(
+                                        jsonb_build_object('id', intent.id::text))
+                                      AND message.created_at >= (
+                                        SELECT anchor.created_at FROM staff_assistant_message anchor
+                                        WHERE anchor.tenant_id=:tenant_id
+                                          AND anchor.staff_member_id=:actor_id
+                                          AND anchor.conversation_id=:conversation_id
+                                          AND anchor.client_message_id=:history_after
+                                          AND anchor.role='user' LIMIT 1
+                                      )
+                                  ))
                                 ORDER BY intent.created_at DESC
                                 LIMIT :limit"""  # noqa: S608 -- both columns are literals above
                         ),
@@ -237,6 +258,7 @@ class EdwardActionGateway:
                             ),
                             "conversation_id": UUID(conversation_id),
                             "limit": max(1, min(limit, 20)),
+                            "history_after": history_after,
                         },
                     )
                 )

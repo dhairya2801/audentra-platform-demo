@@ -713,3 +713,48 @@ def test_cohort_execution_aborts_on_drift_then_executes_one_validated_population
         assert batch_rows == expected_count
 
     _run(scenario)
+
+
+def test_card_scope_excludes_old_pending_actions_but_retains_new_actions() -> None:
+    async def scenario(
+        engine: Any, gateway: EdwardActionGateway, portal: PostgresPortalRepository
+    ) -> None:
+        auth = _staff()
+        repository = gateway._staff_assistant
+        conversation = await repository.create_conversation(auth)
+        conversation_id = str(conversation["id"])
+        request = parse_staff_action("Create a follow-up for Alex, assign it to me.")
+        assert request is not None
+        ids = []
+        for anchor in ("old-scope", "new-scope"):
+            intent = await gateway.propose_staff(
+                auth,
+                request,
+                conversation_id=conversation_id,
+                trace_id=anchor,
+                resolved_student_id=HARVARD_STUDENT_ID,
+            )
+            ids.append(intent["id"])
+            await repository.append_exchange(
+                auth,
+                conversation_id=conversation_id,
+                user_message={"content": "Create a follow-up", "clientMessageId": anchor},
+                assistant_message={
+                    "content": "Review this action",
+                    "provider": "guided",
+                    "actionIntents": [intent],
+                },
+                referenced_student_id=HARVARD_STUDENT_ID,
+                request_id=anchor,
+            )
+        all_actions = await gateway.conversation_actions(auth, conversation_id)
+        scoped = await gateway.conversation_actions(
+            auth, conversation_id, history_after="new-scope"
+        )
+        absent = await gateway.conversation_actions(auth, conversation_id, history_after="not-sent")
+        assert len(all_actions["pending"]) == 2
+        assert len(scoped["pending"]) == 1
+        assert scoped["pending"][0]["intentId"] == ids[1]
+        assert absent["pending"] == []
+
+    _run(scenario)

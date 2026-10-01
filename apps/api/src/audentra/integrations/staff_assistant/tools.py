@@ -74,11 +74,13 @@ class StaffAssistantToolHost:
         *,
         staff_member_id: str | None = None,
         task_board_context: Mapping[str, Any] | None = None,
+        brew_context: Mapping[str, Any] | None = None,
     ) -> None:
         self._primitives = dict(primitives)
         self._cache: dict[tuple[str, str], Mapping[str, Any]] = {}
         self.staff_member_id = staff_member_id
         self.task_board_context = task_board_context
+        self.brew_context = brew_context
 
     def supports(self, primitive: str) -> bool:
         return primitive in self._primitives

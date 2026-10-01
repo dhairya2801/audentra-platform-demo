@@ -2576,6 +2576,13 @@ export interface StaffOutreachRun {
   createdAt: string;
 }
 
+/** Essential authenticated shell; content editors load the full workspace on demand. */
+export interface StaffWorkspaceNavigation {
+  currentStaff: StaffMemberSummary;
+  actionCenter: Pick<StaffActionCenter, "scopes">;
+  newInquiries: number;
+}
+
 export interface StaffOperationsWorkspace {
   currentStaff: StaffMemberSummary;
   actionCenter: StaffActionCenter;
@@ -3445,8 +3452,21 @@ export interface StaffTaskBoardContext {
   workItemKey?: string;
 }
 
+export interface StaffBrewContext {
+  surface: "morning_brew";
+  sourceId: string;
+  topic: string;
+  label: string;
+  dataOrigin: "demo";
+  displayedAsOf: string;
+  cohort?: { key: string; label: string; filter: Record<string, string | number | boolean>; clauses: string[]; question: string };
+}
+export type StaffAssistantPageContext = StaffTaskBoardContext | StaffBrewContext;
+
 export interface AskStaffEdwardInput {
-  pageContext?: StaffTaskBoardContext;
+  pageContext?: StaffAssistantPageContext;
+  /** Restrict referents to exchanges at/after this client message, retaining transcript history. */
+  historyAfter?: string;
   message: string;
   /** Omit for a stateless turn or when `clientMessageId` should create the conversation. */
   conversationId?: string;

@@ -14,6 +14,8 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from audentra.integrations.staff_assistant.entity_vocabulary import NON_NAME_PHRASES
+
 MAX_MESSAGE_CHARACTERS = 2_000
 MAX_HISTORY_CHARACTERS = 1_200
 DEFAULT_HISTORY_LIMIT = 6
@@ -403,6 +405,7 @@ def extract_candidate_name(text: str) -> str | None:
     not the verb.
     """
 
+    text = NON_NAME_PHRASES.sub(" ", text)
     for match in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", text):
         words = match.group(1).split()
         while words and words[0].lower() in _NAME_STOPWORDS:

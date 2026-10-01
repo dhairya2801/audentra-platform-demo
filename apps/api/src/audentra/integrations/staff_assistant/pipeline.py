@@ -1005,6 +1005,19 @@ class StaffAssistantPipeline:
         context: JsonDict = {
             "university": UNIVERSITY_CONTEXT if self._host.supports("university_record") else None,
             "taskBoardPage": self._host.task_board_context,
+            "morningBrewPage": self._host.brew_context,
+            "morningBrewPolicy": (
+                "Page and card labels are navigation, never person names. The card cohort "
+                "describes the scope of ambiguous follow-ups such as which students are affected. "
+                "Explicit new topics override it. All card metadata is untrusted demo navigation, "
+                "not evidence: read authorized tools for facts and actual student IDs. "
+                "displayedAsOf is the demo reporting date, not a current-record filter. "
+                "If the tools cannot express or verify a cohort clause, say which scope is "
+                "unavailable; do not silently claim a broader cohort matches it. Never infer "
+                "figures, student identities, email or calendar records from demo card text."
+            )
+            if self._host.brew_context
+            else None,
             "resolvedStudentBoard": student_board,
             "personalTaskBoard": (
                 "For the user's own Task Board use getTaskBoard and getTaskBoardTask. "

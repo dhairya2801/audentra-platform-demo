@@ -1400,7 +1400,12 @@ class PostgresStaffAssistantRepository:
         }
 
     async def get_recent_history(
-        self, auth: AuthContext, conversation_id: str, *, limit: int = 12
+        self,
+        auth: AuthContext,
+        conversation_id: str,
+        *,
+        limit: int = 12,
+        history_after: str | None = None,
     ) -> JsonDict:
         """Bounded recent turns plus the conversation's active student referent.
 
@@ -1417,6 +1422,13 @@ class PostgresStaffAssistantRepository:
             SELECT role, content FROM {self._table("staff_assistant_message")}
             WHERE tenant_id = :tenant_id AND staff_member_id = :staff_member_id
               AND conversation_id = :conversation_id
+              AND (CAST(:history_after AS text) IS NULL OR created_at >= (
+                SELECT anchor.created_at FROM {self._table("staff_assistant_message")} anchor
+                WHERE anchor.tenant_id = :tenant_id AND anchor.staff_member_id = :staff_member_id
+                  AND anchor.conversation_id = :conversation_id
+                  AND anchor.client_message_id = :history_after AND anchor.role = 'user'
+                LIMIT 1
+              ))
             ORDER BY created_at DESC, CASE role WHEN 'user' THEN 1 ELSE 0 END, id DESC
             LIMIT :limit
         """
@@ -1430,6 +1442,7 @@ class PostgresStaffAssistantRepository:
                             "staff_member_id": _uuid(auth.actor_id),
                             "conversation_id": _uuid(conversation_id),
                             "limit": max(1, min(int(limit), 40)),
+                            "history_after": history_after,
                         },
                     )
                 )
@@ -1440,9 +1453,11 @@ class PostgresStaffAssistantRepository:
             "history": [
                 {"role": str(row["role"]), "content": str(row["content"])} for row in reversed(rows)
             ],
-            "activeStudentId": _optional_uuid_text(conversation["active_student_id"]),
+            "activeStudentId": _optional_uuid_text(
+                conversation["active_student_id"] if rows else None
+            ),
             "activeCohortFilter": _json_mapping(conversation.get("active_cohort_filter"))
-            if conversation.get("active_cohort_filter") is not None
+            if rows and conversation.get("active_cohort_filter") is not None
             else None,
         }
 

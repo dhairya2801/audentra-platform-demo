@@ -138,7 +138,8 @@ def test_page_context_cannot_supply_identity_or_arbitrary_surface() -> None:
             "pageContext": {"surface": "task_board", "project": "en-docs", "workItemKey": "ENR-1"},
         }
     )
-    assert valid.page_context and valid.page_context.work_item_key == "ENR-1"
+    assert valid.page_context and valid.page_context.surface == "task_board"
+    assert valid.page_context.work_item_key == "ENR-1"
     for extra in (
         {"studentId": _STUDENT},
         {"staffId": _ME},

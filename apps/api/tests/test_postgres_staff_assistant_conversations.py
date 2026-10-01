@@ -238,3 +238,34 @@ def test_valid_referent_is_durable_and_available_to_follow_ups() -> None:
         }
 
     _run(scenario)
+
+
+def test_card_scope_boundary_retains_transcript_but_excludes_old_referents() -> None:
+    async def scenario(engine: Any, repository: PostgresStaffAssistantRepository) -> None:
+        first = await _append(repository, client_message_id="old-student")
+        conversation_id = str(first["conversationId"])
+        empty = await repository.get_recent_history(
+            HARVARD_STAFF, conversation_id, history_after="new-card"
+        )
+        assert empty["history"] == []
+        assert empty["activeStudentId"] is None
+        assert empty["activeCohortFilter"] is None
+        await _append(
+            repository,
+            conversation_id=conversation_id,
+            client_message_id="new-card",
+            user_content="Which students are affected?",
+        )
+        scoped = await repository.get_recent_history(
+            HARVARD_STAFF, conversation_id, history_after="new-card"
+        )
+        assert len(scoped["history"]) == 2
+        assert scoped["history"][0]["content"] == "Which students are affected?"
+        transcript = await repository.get_conversation_messages(HARVARD_STAFF, conversation_id)
+        assert len(transcript["messages"]) == 4
+        foreign = await repository.get_recent_history(
+            HARVARD_OTHER_STAFF, conversation_id, history_after="new-card"
+        )
+        assert foreign["history"] == []
+
+    _run(scenario)

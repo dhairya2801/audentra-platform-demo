@@ -1041,6 +1041,8 @@ def test_roster_attention_is_counted_from_canonical_rows_never_scored() -> None:
 
 def test_student_search_matches_the_whole_tenant_server_side() -> None:
     def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        if sql == "SET LOCAL jit = off":
+            return FakeResult([])
         if "COUNT(*) AS total FROM public.student" in sql:
             assert values == {"tenant_id": UUID(TENANT_ID)}
             return FakeResult([{"total": 2577}])
@@ -1079,6 +1081,8 @@ def test_student_search_matches_the_whole_tenant_server_side() -> None:
 
 def test_student_search_refuses_non_staff_and_clamps_the_limit() -> None:
     def handler(sql: str, values: dict[str, object]) -> FakeResult:
+        if sql == "SET LOCAL jit = off":
+            return FakeResult([])
         if "COUNT(*) AS total FROM public.student" in sql:
             return FakeResult([{"total": 0}])
         assert values["limit"] == 200
