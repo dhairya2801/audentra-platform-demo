@@ -77,6 +77,29 @@ _ATTENTION_LABELS = {
 }
 
 
+def _staff_document_links(documents: Mapping[str, Any]) -> dict[str, object]:
+    """Project staff-authenticated links without changing the student's snapshot.
+
+    The shared student reader intentionally emits student-session URLs. Staff
+    records and review responses must use the staff authorization boundary,
+    regardless of whether the browser also happens to hold a student cookie.
+    """
+    return {
+        **documents,
+        "items": [
+            {
+                **item,
+                **(
+                    {"contentUrl": f"/v1/staff/documents/{item['id']}/content"}
+                    if item.get("contentUrl")
+                    else {}
+                ),
+            }
+            for item in documents.get("items", [])
+        ],
+    }
+
+
 def _plural(count: int, label: str) -> str:
     return f"{count} {label}{'' if count == 1 else 's'}"
 
@@ -1980,7 +2003,7 @@ class PostgresStaffRepository:
             "onboarding": dict(onboarding),
             "profile": dict(profile),
             "requirements": dict(requirements),
-            "documents": dict(documents),
+            "documents": _staff_document_links(documents),
         }
 
     async def get_student_roster(self, auth: AuthContext) -> list[dict[str, object]]:
@@ -2688,11 +2711,17 @@ class PostgresStaffRepository:
             result = await connection.execute(
                 text(
                     f"""
-                    SELECT storage_key, file_name, mime_type
-                    FROM {self._table("document_record")}
-                    WHERE tenant_id = :tenant_id AND id = :document_id
-                      AND storage_key IS NOT NULL
-                    LIMIT 1
+                    SELECT storage_key, file_name, mime_type FROM (
+                      SELECT storage_key, file_name, mime_type, 1 AS priority
+                      FROM {self._table("document_record")}
+                      WHERE tenant_id = :tenant_id AND id = :document_id
+                        AND storage_key IS NOT NULL
+                      UNION ALL
+                      SELECT storage_key, file_name, mime_type, 2 AS priority
+                      FROM {self._table("student_signed_document")}
+                      WHERE tenant_id = :tenant_id AND id = :document_id
+                        AND template_code <> 'ferpa_release'
+                    ) reference ORDER BY priority LIMIT 1
                     """
                 ),
                 {
@@ -5947,7 +5976,7 @@ class PostgresStaffRepository:
         current_work_item = await self._require_work_item(auth, work_item_id)
         student = cast(Mapping[str, object], current_work_item["student"])
         student_auth = replace(auth, student_id=str(student["id"]))
-        documents = dict(await self._reader.get_student_documents(student_auth))
+        documents = _staff_document_links(await self._reader.get_student_documents(student_auth))
         document_items = documents.get("items")
         if not isinstance(document_items, list):
             document_items = []

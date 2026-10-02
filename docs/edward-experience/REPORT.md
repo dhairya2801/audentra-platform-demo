@@ -350,7 +350,7 @@ The existing importer is not a reset command.
 For the exact local evaluation environment, from `platform`:
 
 ```bash
-export EDWARD_EXPERIENCE_DATABASE_URL=postgresql://dhairya2801@127.0.0.1:55487/audentra_university_edward_final
+export EDWARD_EXPERIENCE_DATABASE_URL=postgresql://YOUR_USER@127.0.0.1:55487/audentra_university_edward_final
 # OPENAI_API_KEY must already be in the environment; never paste it into files.
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/edward-eval/experience/serve.py
 ```

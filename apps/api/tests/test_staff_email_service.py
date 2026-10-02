@@ -1130,11 +1130,11 @@ async def test_federated_auth_repository_provisions_an_allowlisted_staff_member(
         provider="google",
         provider_subject="immutable-subject",
         provider_tenant="harvard.edu",
-        email="sait.yucekaya@vekend.com",
-        display_name="Sait Yucekaya",
+        email="staff.member@example.com",
+        display_name="Example Staff",
     )
 
-    assert session.name == "Sait Yucekaya"
+    assert session.name == "Example Staff"
     assert session.component == "Admissions"
     assert any("FROM staff_sso_provisioning_grant" in query for query in engine.connection.queries)
     assert any("INSERT INTO staff_member" in query for query in engine.connection.queries)
@@ -1150,7 +1150,7 @@ async def test_federated_auth_repository_provisions_an_allowlisted_staff_member(
             provider="google",
             provider_subject="another-subject",
             provider_tenant="harvard.edu",
-            email="another@vekend.com",
+            email="another@example.com",
             display_name="Another User",
         )
 

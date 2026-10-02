@@ -456,11 +456,11 @@ Portals gates above were therefore run as CI does, with that flag off, giving
 **Worktrees**
 
 ```
-/home/dhairya2801/Dhairya/projects/Audentra-platform              002f43b [main]
-/home/dhairya2801/Dhairya/projects/Audentra-platform.integration  a062592 [feat/edward-parity-integration-v2]
+/path/to/projects/Audentra-platform              002f43b [main]
+/path/to/projects/Audentra-platform.integration  a062592 [feat/edward-parity-integration-v2]
 
-/home/dhairya2801/Dhairya/projects/Audentra-portals               ada7575 [main]
-/home/dhairya2801/Dhairya/projects/Audentra-portals.integration   7f97e6c [feat/edward-integration]
+/path/to/projects/Audentra-portals               ada7575 [main]
+/path/to/projects/Audentra-portals.integration   7f97e6c [feat/edward-integration]
 ```
 
 **Worktrees removed** (plain `git worktree remove`, no `--force`, after proving

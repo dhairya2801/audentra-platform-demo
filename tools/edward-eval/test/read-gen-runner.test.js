@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {createServer} from "node:http";
 import {spawn} from "node:child_process";
-import {mkdtempSync, readFileSync, writeFileSync, rmSync} from "node:fs";
+import {mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync} from "node:fs";
 import {join} from "node:path";
 import {fileURLToPath} from "node:url";
 
 test("expired question templates produce a reported skip without sending a model request", async () => {
   const root=fileURLToPath(new URL("../../../",import.meta.url));
+  mkdirSync(join(root,"artifacts"),{recursive:true});
   const scratch=mkdtempSync(join(root,"artifacts/read-gen-runner-"));
   const batch="runner-skip-"+process.pid;
   const output=join(root,"artifacts/runs",batch);

@@ -168,7 +168,7 @@ From `platform`, after migrating and seeding the two isolated test databases:
 ```bash
 npm run lint
 npm run typecheck
-AUDENTRA_TEST_DATABASE_URL=postgresql://dhairya2801@127.0.0.1:55487/audentra_edward_integration AUDENTRA_UNIVERSITY_TEST_DATABASE_URL=postgresql://dhairya2801@127.0.0.1:55487/audentra_university_test_edward OPENAI_API_KEY= OPENROUTER_API_KEY= npm test
+AUDENTRA_TEST_DATABASE_URL=postgresql://YOUR_USER@127.0.0.1:55487/audentra_edward_integration AUDENTRA_UNIVERSITY_TEST_DATABASE_URL=postgresql://YOUR_USER@127.0.0.1:55487/audentra_university_test_edward OPENAI_API_KEY= OPENROUTER_API_KEY= npm test
 ```
 
 From `portals`:

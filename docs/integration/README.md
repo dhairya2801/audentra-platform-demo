@@ -17,7 +17,7 @@ To start the API in this clone, using the already-created integration database:
 
 ```bash
 BROWSER_AUTH_REQUIRED=true PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_demo_excellence.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_vnext \
+  --database-url postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_vnext \
   --port 45619
 ```
 
@@ -29,7 +29,7 @@ To start Atlas live:
 
 ```bash
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/server.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_vnext \
+  --database-url postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_vnext \
   --port 4321
 ```
 
@@ -76,7 +76,7 @@ The document browser regression requires a **separate disposable imported test d
 
 ```bash
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/prepare_document_review_fixture.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_test_vnext_rebuild \
+  --database-url postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_test_vnext_rebuild \
   --output ../portals/artifacts/integration/document-review-fixture.json
 ```
 
@@ -94,7 +94,7 @@ Apply migrations, including `0077_staff_demo_board_cards.sql`, then run once:
 
 ```bash
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/seed_camila_task_board.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_vnext
+  --database-url postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_vnext
 ```
 
 The restricted `run_demo_excellence.py` launcher now exposes only Ada
@@ -113,7 +113,7 @@ The isolated PostgreSQL regression requires a migrated disposable database whose
 name begins with `audentra_university_test_camila`:
 
 ```bash
-AUDENTRA_CAMILA_TEST_DATABASE_URL=postgresql://dhairya2801@127.0.0.1:55591/audentra_university_test_camila_step1 \
+AUDENTRA_CAMILA_TEST_DATABASE_URL=postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_test_camila_step1 \
   PYTHONPATH=apps/api/src apps/api/.venv/bin/pytest apps/api/tests/test_demo_task_board.py -q
 ```
 

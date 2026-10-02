@@ -6,7 +6,7 @@ The new workspace combines the exact synthetic architectural baseline with inten
 
 ## 1. Exact provenance and isolation
 
-Workspace: `/home/dhairya2801/Dhairya/projects/worktrees/audentra-vnext`.
+Workspace: `/path/to/projects/worktrees/audentra-vnext`.
 
 | Source | Branch | Exact HEAD | Use |
 |---|---|---|---|

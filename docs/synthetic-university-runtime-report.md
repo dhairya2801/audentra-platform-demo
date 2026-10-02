@@ -259,7 +259,7 @@ artifacts/university-runtime/pg17/bin/pg_ctl \
   -l artifacts/university-runtime/postgres17.log \
   -o "-h 127.0.0.1 -p 55487 -k ''" start
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_runtime.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55487/audentra_university_v3
+  --database-url postgresql://YOUR_USER@127.0.0.1:55487/audentra_university_v3
 ```
 
 For tests, use a migrated empty `audentra_university_integration` DB for inherited integration suites and an independently imported `audentra_university_test` DB for v3 tests:

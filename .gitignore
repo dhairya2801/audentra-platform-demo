@@ -32,3 +32,15 @@ htmlcov/
 artifacts/
 
 /artifacts/integration/
+
+# Handoff: local secrets, sessions and verification evidence.
+.env*
+!.env.example
+!.env.*.example
+!**/.env.example
+!**/.env.*.example
+/artifacts/
+*.pem
+*.key
+*storage-state*.json
+*storageState*.json

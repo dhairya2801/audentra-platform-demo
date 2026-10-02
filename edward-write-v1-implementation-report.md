@@ -499,8 +499,8 @@ Untracked `.ua/` directories pre-existed in both worktrees and were not read, mo
 ### Worktree locations
 
 ```bash
-BACKEND=/home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform
-FRONTEND=/home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/portals
+BACKEND=/path/to/projects/worktrees/edward-write-v1/platform
+FRONTEND=/path/to/projects/worktrees/edward-write-v1/portals
 ```
 
 ### Start the full local stack
@@ -508,7 +508,7 @@ FRONTEND=/home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/portals
 From the backend worktree:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform
+cd /path/to/projects/worktrees/edward-write-v1/platform
 uv sync --directory apps/api --locked --all-groups
 npm ci
 docker compose --env-file infra/.env.example -f infra/compose.yaml up --build
@@ -523,7 +523,7 @@ curl http://localhost:4000/health/ready
 For direct processes instead, create a populated `.env` from `.env.example`, then:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform
+cd /path/to/projects/worktrees/edward-write-v1/platform
 set -a; source .env; set +a
 npm run db:migrate
 npm run db:seed
@@ -533,7 +533,7 @@ npm run dev:api
 Run the worker separately if testing outbox consumers:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform
+cd /path/to/projects/worktrees/edward-write-v1/platform
 set -a; source .env; set +a
 npm run dev:worker
 ```
@@ -541,7 +541,7 @@ npm run dev:worker
 Start the frontend:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/portals
+cd /path/to/projects/worktrees/edward-write-v1/portals
 npm ci
 cp .env.example .env.local
 npm run dev
@@ -573,7 +573,7 @@ Staff:
 Backend static and deterministic tests:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform/apps/api
+cd /path/to/projects/worktrees/edward-write-v1/platform/apps/api
 RUFF_CACHE_DIR=/tmp/edward-v1-ruff .venv/bin/ruff check src tests
 MYPY_CACHE_DIR=/tmp/edward-v1-mypy .venv/bin/mypy src
 env -u OPENAI_API_KEY -u OPENROUTER_API_KEY .venv/bin/pytest -q -m 'not postgres'
@@ -582,7 +582,7 @@ env -u OPENAI_API_KEY -u OPENROUTER_API_KEY .venv/bin/pytest -q -m 'not postgres
 PostgreSQL action and full integration tests, using a disposable database:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform/apps/api
+cd /path/to/projects/worktrees/edward-write-v1/platform/apps/api
 export AUDENTRA_TEST_DATABASE_URL='postgresql+asyncpg://USER:PASSWORD@127.0.0.1:PORT/DB'
 export TEST_DATABASE_URL="$AUDENTRA_TEST_DATABASE_URL"
 .venv/bin/pytest -q tests/test_edward_actions_v1.py tests/test_edward_actions_postgres.py
@@ -592,7 +592,7 @@ export TEST_DATABASE_URL="$AUDENTRA_TEST_DATABASE_URL"
 Frontend:
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/portals
+cd /path/to/projects/worktrees/edward-write-v1/portals
 npm run lint
 npm run typecheck
 npm test
@@ -601,7 +601,7 @@ npm test
 Live read-plane mode comparison (requires a provider key and incurs model cost):
 
 ```bash
-cd /home/dhairya2801/Dhairya/projects/worktrees/edward-write-v1/platform
+cd /path/to/projects/worktrees/edward-write-v1/platform
 OPENAI_MODEL=gpt-4o-mini node tools/edward-eval/compare-modes.mjs \
   --batch your-edward-write-v1-check
 ```

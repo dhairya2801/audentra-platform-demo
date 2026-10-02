@@ -114,12 +114,7 @@ async def execute_action(self, auth, row, request_id):
 EdwardActionGateway._execute = execute_action
 inject_reads(AssistantToolHost)
 inject_reads(StaffAssistantToolHost)
-settings = runtime_settings(
-    os.environ.get(
-        "EDWARD_EXPERIENCE_DATABASE_URL",
-        "postgresql://dhairya2801@127.0.0.1:55487/audentra_university_edward_experience",
-    )
-)
+settings = runtime_settings(os.environ["EDWARD_EXPERIENCE_DATABASE_URL"])
 if __name__ == "__main__":
     app = create_production_app(settings)
 

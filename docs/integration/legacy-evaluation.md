@@ -18,7 +18,7 @@ Start only one paid evaluation process at a time. `run_evaluation_runtime.py` us
 
 ```bash
 PYTHONPATH=apps/api/src apps/api/.venv/bin/python tools/university/run_evaluation_runtime.py \
-  --database-url postgresql://dhairya2801@127.0.0.1:55591/audentra_university_test_vnext_legacy_current \
+  --database-url postgresql://YOUR_USER@127.0.0.1:55591/audentra_university_test_vnext_legacy_current \
   --port 45639
 ```
 
