@@ -118,3 +118,51 @@ error/retry passed. Student sign-in, core routes, HTTPS redirects, secure cookie
 readiness and allowed/denied CORS passed. WebKit launch is blocked on this host by
 missing `libavif.so.13`. External SSO, paid model calls, external delivery and
 payment capture are not certified by these checks.
+
+
+## Completed rollout and remaining limits
+
+Deployed frontend application commit `99660488e2203815151a900244546dac19fdd24d`
+(Vercel `dpl_3YTiHJp2ory98JcoJC3Bvw4XYPMm`) and backend application commit
+`9b56c08a7bb452f673795e08b2754efa0dcb1ae1`. Later handoff commits only update these
+notes. Both remote default branches remain unchanged; neither history was
+force-pushed. The API image was built from the committed archive on the VM.
+
+Before switching, rendered Compose configuration and every effective API
+environment value matched the old deployment except the image tag. Afterward,
+health passed; database, MinIO and Caddy container IDs and the shared secret file
+were unchanged. No migration, seed, database reset or worker startup ran on the
+VM. The server-only Vercel API proxy was configured in protected project settings
+and removed from tracked `vercel.json`; the new deployment successfully proxies
+HTTPS API traffic.
+
+Rollback: previous backend release/image is `84f6860b86a6c1faf9ec46198c7e84e92c5bf0e9`;
+use its protected release environment with the Compose command above and restore
+`current`. The VM also retains `/opt/audentra-platform/handoff-2oct-rollback.json`.
+Previous Vercel production deployment: `dpl_BqHSx5ge62uUMdqz7DpuwCe7K96h`
+(application commit `cf092ddebaecdf3c853fed38a9145854b1c433e2`). Re-promote it in
+Vercel for frontend rollback; it retains the former build configuration.
+
+A fresh local synthetic setup completed successfully. Local Chrome desktop/mobile
+protected-document journeys and fresh signup → onboarding/signatures → sign-in
+resume passed. A local student UI upload automatically appeared on the open staff
+board; original PDF pages and downloaded bytes matched the uploaded file. These
+writing checks used only the isolated local database and storage, with no model
+calls or external delivery.
+
+The live staff document projection previously supplied student-session links
+(8/8 sampled reads failed); it now supplies staff-session links. Three originals
+in that sample load. Five older records reference absent `synthetic/` storage
+objects: verified object-storage HEAD requests return 404, and the original local
+bucket has no matching originals. Their UI correctly reports unavailable/retry.
+Recovery requires the original files or an appropriate backup; no replacement
+student evidence was fabricated. This is a data-recovery limitation, not a claim
+that every stored document is readable.
+
+Post-deployment Chrome desktop/mobile checks passed actual staff UI sign-in,
+Task Board filtering/reload/error recovery, protected PDF/image previews,
+Student 360 navigation, document-switch races, session expiry/re-login and
+anonymous/student-only access denial. Student UI sign-in, authenticated core
+routes, readiness, credentialed CORS and rejection of foreign origins passed
+again on the new production frontend/backend. No live upload, signup, payment,
+external SSO or paid model call was performed during this handoff.
