@@ -25,6 +25,7 @@ from audentra.contracts.requests import (
     CompleteStudentOnboardingRequest,
     ConfirmEdwardActionRequest,
     ConfirmStudentDocumentExtractionRequest,
+    CorrectDocumentExtractionRequest,
     CreateAssistantConversationRequest,
     CreateAssistantVoiceSessionRequest,
     CreateDepositPaymentRequest,
@@ -278,7 +279,11 @@ async def _read_document_upload(request: Request) -> FileUpload:
         if mime_type not in ALLOWED_DOCUMENT_MIME_TYPES:
             raise ApiError(415, "UNSUPPORTED_FILE_TYPE", "Use a PDF, JPEG, or PNG document")
         content = await file_part.read(MAXIMUM_DOCUMENT_BYTES + 1)
-        if len(content) < 1 or len(content) > MAXIMUM_DOCUMENT_BYTES:
+        if not content:
+            raise BadRequestError(
+                "DOCUMENT_EMPTY", "This file is empty. Choose a complete document."
+            )
+        if len(content) > MAXIMUM_DOCUMENT_BYTES:
             raise ApiError(
                 413,
                 "DOCUMENT_TOO_LARGE",
@@ -3168,6 +3173,108 @@ async def review_demo_document(
         operation="staff.demo_document_review",
         auth=auth,
         payload=body.public_payload(),
+        path_params={"documentId": _uuid(document_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.get("/v1/staff/morning-brew/team-settings", response_model=None)
+async def get_brew_team_settings(
+    request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service, request=request, operation="staff.brew_settings", auth=auth
+    )
+
+
+@router.put("/v1/staff/morning-brew/team-settings", response_model=None)
+async def update_brew_team_settings(
+    body: dict[str, Any], request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.update_brew_settings",
+        auth=auth,
+        payload=body,
+    )
+
+
+@router.post("/v1/staff/morning-brew/prep-feedback", response_model=None)
+async def submit_brew_prep_feedback(
+    body: dict[str, Any], request: Request, service: ServiceDependency, auth: AuthDependency
+) -> object:
+    return await _dispatch(
+        service=service, request=request, operation="staff.brew_feedback", auth=auth, payload=body
+    )
+
+
+@router.get("/v1/staff/morning-brew/news", response_model=None)
+async def get_brew_news(
+    request: Request, service: ServiceDependency, auth: AuthDependency, refresh: bool = False
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.brew_news",
+        auth=auth,
+        query_params={"refresh": str(refresh).lower()},
+    )
+
+
+@router.post("/v1/staff/documents/{id}/extraction", response_model=None)
+async def correct_document_extraction(
+    document_id: Annotated[UUID, Path(alias="id")],
+    body: CorrectDocumentExtractionRequest,
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.correct_document_extraction",
+        auth=auth,
+        payload=body.public_payload(),
+        path_params={"documentId": _uuid(document_id)},
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/v1/staff/students/{id}/documents/upload", response_model=None)
+async def upload_staff_student_document(
+    student_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    upload = await _read_document_upload(request)
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.upload_student_document",
+        path_params={"studentId": _uuid(student_id)},
+        auth=auth,
+        upload=upload,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/v1/staff/documents/{id}/retry-extraction", response_model=None)
+async def retry_staff_document(
+    document_id: Annotated[UUID, Path(alias="id")],
+    request: Request,
+    service: ServiceDependency,
+    auth: AuthDependency,
+    idempotency_key: IdempotencyDependency,
+) -> object:
+    return await _dispatch(
+        service=service,
+        request=request,
+        operation="staff.retry_document_extraction",
+        auth=auth,
         path_params={"documentId": _uuid(document_id)},
         idempotency_key=idempotency_key,
     )

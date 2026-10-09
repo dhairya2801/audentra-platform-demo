@@ -41,7 +41,8 @@ class DemoTaskBoardProjection:
                     assigned.assignee_id AS staff_member_id,
                     assigned.id AS work_item_id, assigned.key AS template_key,
                     NULL::text AS preview_template_key, {project_sql} AS board_id,
-                    assigned.created_at AS position, 'canonical'::text AS scenario_version
+                    assigned.created_at AS position, NULL::timestamptz AS archived_at,
+                    'canonical'::text AS scenario_version
                     FROM public.staff_work_item assigned
                     WHERE assigned.tenant_id=CAST(:tenant AS uuid)
                     AND assigned.assignee_id=CAST(:actor AS uuid))"""  # noqa: S608 — code-owned SQL
@@ -59,6 +60,19 @@ class DemoTaskBoardProjection:
             )
             if member is None:
                 raise ApiError(403, "STAFF_REQUIRED", "An active staff profile is required")
+            assignees = (
+                (
+                    await connection.execute(
+                        text("""
+                SELECT id,display_name FROM staff_member WHERE tenant_id=CAST(:tenant AS uuid)
+                  AND active AND component=:component ORDER BY display_name
+            """),
+                        {**params, "component": member["component"]},
+                    )
+                )
+                .mappings()
+                .all()
+            )
             rows = (
                 (
                     await connection.execute(
@@ -70,7 +84,7 @@ class DemoTaskBoardProjection:
                         conversations.entries AS conversations,
                         w.id,w.key,w.title,w.version,w.student_id,w.created_at,
                         w.priority,w.due_at,w.status,w.description,w.next_step,w.follow_up_at,
-                        w.updated_at,w.work_type,
+                        w.updated_at,w.work_type,w.assignee_id,
                         s.external_ref,p.first_name,p.last_name,s.class_year,
                         COALESCE(NULLIF(profile.preferred_name,''),p.first_name) AS preferred_name,
                         COALESCE(onboarding.payload->>'universityProgramName',
@@ -78,7 +92,11 @@ class DemoTaskBoardProjection:
                         u.email,u.admit_term
                     FROM {membership_sql} c
                     JOIN public.staff_work_item w ON w.id=c.work_item_id
-                      AND w.tenant_id=c.tenant_id AND w.assignee_id=c.staff_member_id
+                      AND w.tenant_id=c.tenant_id
+                      AND EXISTS(SELECT 1 FROM staff_member viewer
+                      WHERE viewer.id=c.staff_member_id
+                      AND viewer.tenant_id=w.tenant_id AND viewer.active
+                      AND (w.assignee_id=viewer.id OR w.component=viewer.component))
                     JOIN public.student s ON s.id=w.student_id AND s.tenant_id=w.tenant_id
                     JOIN public.person p ON p.id=s.person_id AND p.tenant_id=s.tenant_id
                     LEFT JOIN public.student_profile profile ON profile.student_id=s.id
@@ -97,7 +115,8 @@ class DemoTaskBoardProjection:
                       SELECT jsonb_agg(jsonb_build_object(
                         'id',d.id,'fileName',d.file_name,'mimeType',d.mime_type,
                         'sizeBytes',d.size_bytes,'category',d.category,'uploadedAt',b.received_at,
-                        'requirementId',d.requirement_id,'status',d.status,
+                        'requirementId',d.requirement_id,'status',d.status,'extraction',d.extraction,
+                        'updatedAt',d.updated_at,
                         'decisions',(SELECT COALESCE(jsonb_agg(jsonb_build_object(
                           'id',r.id,'decision',r.decision,'note',r.student_message,
                           'reviewerName',r.reviewer_display_name,'decidedAt',r.decided_at)
@@ -108,7 +127,7 @@ class DemoTaskBoardProjection:
                       FROM staff_demo_document b JOIN document_record d
                         ON d.id=b.document_id AND d.tenant_id=b.tenant_id
                       WHERE b.work_item_id=w.id AND b.tenant_id=w.tenant_id
-                        AND d.student_id=w.student_id
+                        AND d.student_id=w.student_id AND d.superseded_at IS NULL
                     ) document ON true
                     LEFT JOIN LATERAL (
                       SELECT jsonb_agg(jsonb_build_object('id',l.id,'actor',l.actor_name,
@@ -119,7 +138,10 @@ class DemoTaskBoardProjection:
                     LEFT JOIN LATERAL (
                       SELECT jsonb_agg(jsonb_build_object('id',r.id,'title',d.title,'status',
                       r.status,
-                        'version',r.version,'code',d.code) ORDER BY r.created_at,r.id) AS entries
+                        'version',r.version,'code',d.code,'dueAt',r.due_at,
+                        'category',d.input_config->>'document_category')
+                        ORDER BY r.created_at,r.id)
+                        AS entries
                       FROM staff_work_item_link l JOIN student_requirement r
                         ON r.id=l.entity_id AND r.tenant_id=l.tenant_id AND EXISTS(SELECT 1
                         FROM enrollment_journey j WHERE j.id=r.journey_id
@@ -160,7 +182,7 @@ class DemoTaskBoardProjection:
                       WHERE l.tenant_id=w.tenant_id AND l.work_item_id=w.id AND
                       l.entity_type='inquiry'
                     ) conversations ON true
-                    WHERE c.tenant_id=CAST(:tenant AS uuid)
+                    WHERE c.archived_at IS NULL AND c.tenant_id=CAST(:tenant AS uuid)
                       AND c.staff_member_id=CAST(:actor AS uuid)
                       AND (:fallback OR EXISTS (SELECT 1 FROM public.student_staff_assignment a
                         WHERE a.tenant_id=s.tenant_id AND a.student_id=s.id
@@ -179,6 +201,15 @@ class DemoTaskBoardProjection:
             )
         cards = []
         for row in rows:
+            from audentra.domain.document_evidence import review_checks
+
+            documents = row["documents"] or []
+            for document in documents:
+                document["checks"] = review_checks(
+                    document.get("extraction") or {},
+                    document["category"],
+                    f"{row['first_name']} {row['last_name']}",
+                )
             cards.append(
                 {
                     "id": str(row["id"]),
@@ -195,6 +226,7 @@ class DemoTaskBoardProjection:
                     "followUpAt": row["follow_up_at"].isoformat() if row["follow_up_at"] else None,
                     "updatedAt": row["updated_at"].isoformat(),
                     "workType": row["work_type"],
+                    "assigneeId": str(row["assignee_id"]) if row["assignee_id"] else None,
                     "createdAt": row["created_at"].isoformat(),
                     "documents": row["documents"] or [],
                     "activity": row["activity"] or [],
@@ -220,6 +252,7 @@ class DemoTaskBoardProjection:
                 "title": member["title"],
                 "component": member["component"],
             },
+            "assignees": [{"id": str(m["id"]), "name": m["display_name"]} for m in assignees],
             "cards": cards,
             "total": len(cards),
             "studentCount": len({card["student"]["id"] for card in cards}),

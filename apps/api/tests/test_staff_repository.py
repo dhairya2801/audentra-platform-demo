@@ -77,6 +77,20 @@ FakeHandler = Callable[[str, dict[str, object]], FakeResult]
 
 
 class FakeConnection:
+    async def scalar(
+        self, statement: object, parameters: Mapping[str, object] | None = None
+    ) -> object | None:
+        sql = str(statement)
+        # These command tests model an authorized member. Access-denial coverage
+        # uses a real PostgreSQL scenario in tools/conference/verify.py.
+        if (
+            "SELECT 1 FROM staff_work_item w JOIN staff_member m" in sql
+            or "SELECT 1 FROM document_record d JOIN staff_member m" in sql
+        ):
+            return 1
+        result = await self.execute(statement, parameters)
+        return result.scalar_one_or_none()
+
     def __init__(self, handler: FakeHandler) -> None:
         self.handler = handler
         self.executions: list[tuple[str, dict[str, object]]] = []
@@ -1190,6 +1204,7 @@ def test_work_item_update_locks_versions_and_writes_log_audit_and_outbox_atomica
                         "id": UUID(WORK_ITEM_ID),
                         "student_id": UUID(STUDENT_ID),
                         "status": "todo",
+                        "work_type": "follow_up",
                         "priority": "medium",
                         "due_at": None,
                         "assignee_id": UUID(STAFF_ID),
@@ -1391,6 +1406,7 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
                         "escalated": False,
                         "version": 1,
                         "source_type": "document",
+                        "work_type": "document_review",
                         "source_id": UUID(DOCUMENT_ID),
                     }
                 ]
@@ -1404,6 +1420,8 @@ def test_document_acceptance_refreshes_dependencies_and_commits_all_side_effects
                         "requirement_id": UUID(REQUIREMENT_ID),
                         "file_name": "transcript.pdf",
                         "status": "needs_review",
+                        "extraction": None,
+                        "category": "transcript",
                     }
                 ]
             )

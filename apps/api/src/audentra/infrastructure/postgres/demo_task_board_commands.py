@@ -31,6 +31,9 @@ async def lock_demo_card(
 ) -> dict[str, Any]:
     if auth.actor_type != "staff":
         raise ApiError(403, "STAFF_REQUIRED", "Staff access required")
+    from .document_access import require_work_access
+
+    await require_work_access(connection, auth, work)
     params = {"tenant": auth.tenant_id, "staff": auth.actor_id, "work": work}
     await connection.execute(text("SELECT set_config('audentra.tenant_id',:tenant,true)"), params)
     student = await connection.scalar(
@@ -38,7 +41,7 @@ async def lock_demo_card(
         SELECT w.student_id FROM staff_demo_board_card c JOIN staff_work_item w
           ON w.id=c.work_item_id AND w.tenant_id=c.tenant_id
         WHERE c.tenant_id=CAST(:tenant AS uuid) AND c.staff_member_id=CAST(:staff AS uuid)
-          AND w.assignee_id=c.staff_member_id AND w.id=CAST(:work AS uuid)
+          AND w.id=CAST(:work AS uuid)
     """),
         params,
     )
@@ -56,7 +59,7 @@ async def lock_demo_card(
           IS NULL
         JOIN staff_member s ON s.id=a.staff_member_id AND s.tenant_id=a.tenant_id AND s.active
         WHERE c.tenant_id=CAST(:tenant AS uuid) AND c.staff_member_id=CAST(:staff AS uuid)
-          AND w.assignee_id=c.staff_member_id AND w.id=CAST(:work AS uuid)
+          AND w.id=CAST(:work AS uuid)
         FOR UPDATE OF w FOR SHARE OF a,s
     """),
                 params,

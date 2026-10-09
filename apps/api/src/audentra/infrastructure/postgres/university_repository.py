@@ -665,6 +665,51 @@ class PostgresUniversityRepository:
                 """),
                     {"tenant": auth.tenant_id, "student": auth.student_id},
                 )
+                canonical = await c.execute(
+                    text("""
+                    SELECT r.id::text AS id, def.title, def.code, r.status,
+                      cfg.expected_type AS category,
+                      CASE WHEN r.status='ready' THEN 'Pending upload'
+                        WHEN r.status IN ('in_progress','under_review') THEN 'Received; staff
+                    approval not yet recorded'
+                        WHEN r.status='completed' THEN 'Completed by institutional review'
+                        ELSE r.status END AS meaning,
+                      d.id::text AS active_document_id, d.status AS document_status,
+                      d.extraction->>'status' AS parsing_status,
+                      d.extraction->'validation'->>'outcome' AS validation_outcome
+                    FROM public.demo_document_requirement cfg
+                    JOIN public.student_requirement r ON r.id=cfg.requirement_id AND
+                    r.tenant_id=cfg.tenant_id
+                    JOIN public.requirement_definition_version def ON
+                    def.id=r.requirement_definition_version_id
+                    LEFT JOIN LATERAL (SELECT doc.* FROM public.document_record doc
+                      WHERE doc.tenant_id=cfg.tenant_id AND doc.student_id=cfg.student_id
+                        AND doc.requirement_id=r.id AND doc.superseded_at IS NULL
+                      ORDER BY doc.created_at DESC LIMIT 1) d ON true
+                    WHERE cfg.tenant_id=CAST(:tenant AS uuid) AND cfg.student_id=CAST(:student
+                    AS uuid)
+                    ORDER BY def.display_order
+                """),
+                    {"tenant": auth.tenant_id, "student": auth.student_id},
+                )
+                current = [dict(row) for row in canonical.mappings()]
+                if current:
+                    result["documents"] = current
+                    result["asOf"] = datetime.now(UTC).isoformat()
+                    result["documentCounts"] = {
+                        "total": len(current),
+                        "pendingUpload": sum(r["status"] == "ready" for r in current),
+                        "awaitingReview": sum(
+                            r["status"] in {"in_progress", "under_review"} for r in current
+                        ),
+                        "completed": sum(r["status"] == "completed" for r in current),
+                    }
+                    result["revisions"] = []
+                    result["documentStateSemantics"] = (
+                        "Current canonical requirement status overrides historical "
+                        "document decisions. ready means pending. Parsing never implies "
+                        "approval."
+                    )
                 result["reviewDecisionSemantics"] = (
                     "staff_review records an official decision on one submission. "
                     "legacy_backfill is a prior portal status snapshot without an original "

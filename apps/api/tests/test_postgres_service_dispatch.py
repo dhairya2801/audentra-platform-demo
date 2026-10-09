@@ -841,11 +841,6 @@ def test_document_upload_persists_original_before_claiming_processing(demo_attac
     assert rig.storage.objects["tenant/student/document-1.pdf"] == upload.content
     attached = next(call for call in rig.portal.calls if call.name == "attach_demo_document")
     assert attached.args[:2] == (AUTH, "document-1")
-    if demo_attached:
-        assert not any(
-            call.name == "claim_student_document_processing" for call in rig.portal.calls
-        )
-        return
     claim = next(
         call for call in rig.portal.calls if call.name == "claim_student_document_processing"
     )
@@ -1044,6 +1039,7 @@ def test_retry_extraction_is_idempotent_for_non_retryable_state() -> None:
 
 def test_internal_extraction_retries_transient_ai_and_enriches_transcript() -> None:
     rig = _rig()
+    rig.portal.responses["is_connected_document"] = False
     document = {
         "id": "document-1",
         "status": "processing",
@@ -1089,7 +1085,7 @@ def test_internal_extraction_retries_transient_ai_and_enriches_transcript() -> N
     assert any(call.name == "evaluate_course_exemptions" for call in rig.ai.calls)
 
 
-def test_internal_extraction_redacts_financial_aid_details_before_persistence() -> None:
+def test_internal_extraction_preserves_financial_aid_evidence_for_authorized_review() -> None:
     rig = _rig()
     rig.portal.responses.update(
         {
@@ -1133,11 +1129,9 @@ def test_internal_extraction_redacts_financial_aid_details_before_persistence() 
         ),
     )
 
-    assert result["studentName"] is None
-    assert result["institutionName"] is None
-    assert result["fields"] == []
-    assert result["courses"] == []
-    assert result["visualRegions"] == []
+    assert result["studentName"] == "Alex Morgan"
+    assert result["institutionName"] == "Aster"
+    assert result["fields"] == [{"name": "income", "value": "secret"}]
 
 
 def test_generic_document_is_locally_matched_to_authenticated_missing_requirement() -> None:

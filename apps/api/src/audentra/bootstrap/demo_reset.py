@@ -6,7 +6,6 @@ never opts in by default. No per-user databases or automatic login resets.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -135,48 +134,14 @@ async def restore_demo_database(
 def install_demo_reset(
     app: FastAPI, settings: RuntimeSettings, restart_runtime: Callable[[], Awaitable[None]]
 ) -> None:
-    enabled = bool(settings.demo_reset_template)
-    if enabled:
-        reset_database_names(settings)
-    app.state.demo_resetting = False
-    app.state.demo_active_writes = 0
-    lock = asyncio.Lock()
+    # The visible demo control no longer restores a database or revokes sessions.
+    enabled = (
+        settings.environment in {"development", "preview", "test"}
+        and settings.auth_mode == "demo"
+        and settings.demo_personas.restricted
+    )
 
-    if enabled:
-
-        @app.middleware("http")
-        async def maintenance(request: Request, call_next):  # type: ignore[no-untyped-def]
-            if app.state.demo_resetting and request.url.path != RESET_PATH:
-                return JSONResponse(
-                    {"error": {"message": "The demo is resetting. Please sign in again shortly."}},
-                    status_code=503,
-                )
-            writing = (
-                request.method not in {"GET", "HEAD", "OPTIONS"} and request.url.path != RESET_PATH
-            )
-            if writing:
-                app.state.demo_active_writes += 1
-            try:
-                return await call_next(request)
-            finally:
-                if writing:
-                    app.state.demo_active_writes -= 1
-
-    @app.get(RESET_PATH)
-    async def status(auth: AuthContext = Depends(get_auth_context)) -> dict[str, bool]:  # noqa: B008
-        return {
-            "enabled": enabled
-            and auth.actor_type == "staff"
-            and auth.authentication_method == "demo"
-            and auth.tenant_id == settings.demo_tenant_id
-        }
-
-    @app.post(RESET_PATH)
-    async def reset(
-        request: Request,
-        body: dict[str, str],
-        auth: AuthContext = Depends(get_auth_context),  # noqa: B008
-    ) -> JSONResponse:
+    def authorize(auth: AuthContext) -> None:
         if not enabled:
             raise ApiError(404, "NOT_FOUND", "Not found")
         if (
@@ -185,47 +150,36 @@ def install_demo_reset(
             or auth.tenant_id != settings.demo_tenant_id
         ):
             raise ApiError(403, "DEMO_RESET_FORBIDDEN", "Sign in as a demo staff member to reset")
+
+    @app.get(RESET_PATH)
+    async def status(auth: AuthContext = Depends(get_auth_context)) -> dict[str, bool]:  # noqa: B008
+        return {
+            "enabled": bool(
+                enabled
+                and auth.actor_type == "staff"
+                and auth.authentication_method == "demo"
+                and auth.tenant_id == settings.demo_tenant_id
+            )
+        }
+
+    @app.post(RESET_PATH)
+    async def reset(
+        request: Request,
+        body: dict[str, str],
+        auth: AuthContext = Depends(get_auth_context),  # noqa: B008
+    ) -> JSONResponse:
+        authorize(auth)
         if request.headers.get("origin") not in settings.web_origins:
             raise ApiError(403, "DEMO_RESET_ORIGIN", "Reset from the demo portal")
         if body != {"confirmation": "RESET DEMO"}:
             raise ApiError(400, "DEMO_RESET_CONFIRMATION", "Confirm the demo reset")
-        if lock.locked():
-            raise ApiError(409, "DEMO_RESET_BUSY", "A demo reset is already running")
-        if app.state.demo_active_writes:
-            raise ApiError(409, "DEMO_DATABASE_BUSY", "Wait for the current demo action to finish")
-        async with lock:
-            app.state.demo_resetting = True
-            try:
-                task = asyncio.create_task(
-                    restore_demo_database(
-                        settings, app.state.runtime_resources.close, restart_runtime
-                    )
-                )
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    # Finish recovery even if the operator closes the browser tab.
-                    await task
-                    raise
-            except ApiError:
-                raise
-            except Exception as error:
-                # Database errors can contain connection details; don't return them.
-                logger.error("Demo reset failed (%s)", type(error).__name__)
-                raise ApiError(
-                    503,
-                    "DEMO_RESET_FAILED",
-                    "Reset failed. Ask the demo operator to check the service.",
-                ) from None
-            finally:
-                app.state.demo_resetting = False
-        response = JSONResponse({"reset": True})
-        for cookie in (
-            "vv_staff_session",
-            "vv_session",
-            "vv_demo_session",
-            "vv_demo_student",
-            "vv_delegate_session",
-        ):
-            response.delete_cookie(cookie, path="/")
-        return response
+        from audentra.infrastructure.postgres.demo_document_reset import reset_documents
+        from audentra.infrastructure.postgres.portal_repository import PostgresPortalRepository
+
+        result = await reset_documents(
+            PostgresPortalRepository(app.state.runtime_resources.engine),
+            auth,
+            settings.demo_personas.default_student_ref or "",
+            request.headers.get("x-request-id", "demo-document-reset"),
+        )
+        return JSONResponse(result)

@@ -1042,6 +1042,17 @@ class PostgresPlatformService:
                 call.request_id,
                 call.idempotency_key,
             )
+        if operation == "staff.correct_document_extraction":
+            from .document_corrections import correct_extraction
+
+            return await correct_extraction(
+                self.repository.staff,
+                auth,
+                self._path(call, "documentId"),
+                dict(call.payload),
+                call.request_id,
+                call.idempotency_key,
+            )
         if operation == "staff.demo_document_review":
             return await self.repository.staff.review_document(
                 auth,
@@ -1092,6 +1103,8 @@ class PostgresPlatformService:
                 raise ApiError(403, "STAFF_REQUIRED", "Staff access required")
             if operation == "staff.university":
                 return await university.operations(auth)
+            if operation == "staff.student_university":
+                await self.repository.staff.require_student_access(auth, self._path(call, "id"))
             bound = (
                 replace(auth, student_id=self._path(call, "id"))
                 if operation == "staff.student_university"
@@ -1645,17 +1658,18 @@ class PostgresPlatformService:
                     ),
                 ),
             )
+            cohort = await staff.get_student_roster(auth)
+            selected_student = str(cohort[0]["id"]) if cohort else None
+            student = (
+                await staff.get_student_record(auth, selected_student) if selected_student else {}
+            )
             (
-                student,
                 campus_life,
                 inquiries,
-                cohort,
                 managed_content,
             ) = await asyncio.gather(
-                staff.get_student_record(auth, auth.student_id),
                 portal.get_campus_life(auth),
                 portal.list_staff_help_requests(auth),
-                staff.get_student_roster(auth),
                 staff.get_managed_content(auth),
             )
             return compose_staff_workspace(
@@ -1702,6 +1716,22 @@ class PostgresPlatformService:
             return await self._advising().update_staff_appointment(
                 auth, self._path(call, "appointmentId", "id"), payload, call.request_id
             )
+        if operation in {
+            "staff.brew_settings",
+            "staff.update_brew_settings",
+            "staff.brew_feedback",
+            "staff.brew_news",
+        }:
+            from .brew_experience import BrewExperienceService
+
+            experience = BrewExperienceService(self.repository.portal.engine)
+            if operation == "staff.update_brew_settings":
+                return await experience.update_settings(auth, payload, call.request_id)
+            if operation == "staff.brew_feedback":
+                return await experience.feedback(auth, payload, call.request_id)
+            if operation == "staff.brew_news":
+                return await experience.news(auth, call.query_params.get("refresh") == "true")
+            return await experience.settings(auth)
         if operation == "staff.get_morning_brew":
             brew = self.repository.morning_brew
             if brew is None:
@@ -1930,6 +1960,43 @@ class PostgresPlatformService:
                 call.request_id,
                 call.idempotency_key,
             )
+        if operation in {"staff.upload_student_document", "staff.retry_document_extraction"}:
+            from .document_access import require_document_access, require_student_access
+
+            async with self.repository.portal.engine.connect() as connection:
+                if operation == "staff.upload_student_document":
+                    student_id = self._path(call, "studentId")
+                    await require_student_access(connection, auth, student_id)
+                else:
+                    document_id = self._path(call, "documentId")
+                    await require_document_access(connection, auth, document_id)
+                    student_id = str(
+                        await connection.scalar(
+                            text(
+                                "SELECT student_id FROM document_record WHERE tenant_id=:tenant "
+                                "AND id=:id"
+                            ),
+                            {"tenant": auth.tenant_id, "id": document_id},
+                        )
+                    )
+            subject = replace(auth, student_id=student_id)
+            if operation == "staff.upload_student_document":
+                result = await self._upload_document(replace(subject, actor_type="student"), call)
+            else:
+                result = await self._retry_document_extraction(
+                    subject, document_id, {}, self._key(call.idempotency_key), call.request_id
+                )
+            async with self.repository.portal.engine.begin() as connection:
+                await self.repository.portal._insert_audit(
+                    connection,
+                    auth,
+                    operation,
+                    "document_record",
+                    str(result["id"]),
+                    call.request_id,
+                    {"studentId": student_id},
+                )
+            return result
         if operation == "staff.get_document_content":
             return await self._get_staff_document_content(
                 auth,
@@ -2404,13 +2471,12 @@ class PostgresPlatformService:
                 "Your document record was saved, but the original could not be stored yet. "
                 "Please retry this upload.",
             ) from error
-        attached = await self.repository.portal.attach_demo_document(
+        await self.repository.portal.attach_demo_document(
             auth, str(reserved["id"]), call.request_id
         )
-        if not attached:
-            await self.repository.portal.claim_student_document_processing(
-                auth, str(reserved["id"]), request_id=call.request_id
-            )
+        await self.repository.portal.claim_student_document_processing(
+            auth, str(reserved["id"]), request_id=call.request_id
+        )
         return await self.repository.portal.get_student_document(auth, str(reserved["id"]))
 
     async def _upload_staff_portal_media(self, auth: AuthContext, call: ServiceCall) -> JsonDict:
@@ -2675,6 +2741,12 @@ class PostgresPlatformService:
                 "Document extraction retry does not accept a request body",
             )
         current = await self.repository.portal.get_student_document(auth, document_id)
+        if (
+            isinstance(current.get("extraction"), dict)
+            and current["extraction"].get("status") == "pending_staff"
+            and auth.actor_type != "staff"
+        ):
+            raise ApiError(403, "STAFF_PARSING_REQUIRED", "Staff will start document parsing")
         if not can_retry_extraction(current.get("extraction")):
             return current
         await self.repository.portal.claim_student_document_processing(
@@ -2702,7 +2774,14 @@ class PostgresPlatformService:
                 auth, document_id, cache_control="private, no-store"
             )
             expected_type = document_type_for_category(str(document["category"]))
+            connected_review = await self.repository.portal.is_connected_document(auth, document_id)
+            extraction_options = (
+                {"classification_only": True}
+                if (connected_review and not current_extraction.get("staffParsingRequested"))
+                else {}
+            )
             extraction = await self._extract_with_single_retry(
+                **extraction_options,
                 file_name=binary.file_name,
                 mime_type=binary.media_type,
                 content=binary.data,
@@ -2712,7 +2791,12 @@ class PostgresPlatformService:
                 document_id=document_id,
                 request_id=request_id,
             )
-            if extraction.get("status") == "completed" and extraction.get("courses"):
+            connected_review = await self.repository.portal.is_connected_document(auth, document_id)
+            if (
+                not connected_review
+                and extraction.get("status") == "completed"
+                and extraction.get("courses")
+            ):
                 try:
                     courses = cast(list[Mapping[str, Any]], extraction["courses"])
                     context = await self.repository.portal.get_course_exemption_context(
@@ -2735,7 +2819,11 @@ class PostgresPlatformService:
                     )
                     if not classify_extraction_failure(error).retryable:
                         raise
-            if expected_type == "immunization" and extraction.get("status") == "completed":
+            if (
+                not connected_review
+                and expected_type == "immunization"
+                and extraction.get("status") == "completed"
+            ):
                 policy = await self.repository.portal.get_immunization_policy_context(auth)
                 if policy is not None:
                     try:
@@ -2753,7 +2841,11 @@ class PostgresPlatformService:
                         extraction.setdefault("warnings", []).append(
                             "Immunization compliance is awaiting staff review."
                         )
-            if document["category"] == "financial_aid" and extraction.get("status") == "completed":
+            if (
+                document["category"] == "financial_aid"
+                and document.get("processingMode") == "classification_only"
+                and extraction.get("status") == "completed"
+            ):
                 extraction.update(
                     {
                         "studentName": None,
@@ -2827,6 +2919,7 @@ class PostgresPlatformService:
         if document.get("status") != "uploaded" or document.get("extraction"):
             return document
         await self._get_document_content(auth, document_id, cache_control="private, no-store")
+        await self.repository.portal.attach_demo_document(auth, document_id, request_id)
         await self.repository.portal.claim_student_document_processing(
             auth, document_id, request_id=request_id
         )

@@ -997,7 +997,14 @@ export type StudentDocumentExtractionFailureCode =
   | "unknown";
 
 export interface StudentDocumentExtraction {
+  classification?: {documentType: string; documentSubtype: string; readability: string; summary: string};
+  requiresStaffReview?: boolean;
+  staffCorrected?: boolean;
+  pageCount?: number;
+  renderedPageNumbers?: number[];
+  validation?: { outcome: "matched" | "wrong_type" | "unreadable" | "unrecognized" | "incomplete" | "failed"; message: string; missingFields: string[] };
   status:
+    | "pending_staff"
     | "pending_configuration"
     | "processing"
     | "completed"
@@ -1021,7 +1028,7 @@ export interface StudentDocumentExtraction {
   contextMatches?: StudentDocumentContextMatch[];
   warnings: string[];
   model: string | null;
-  provider: "openrouter" | "groq" | "local";
+  provider: "openrouter" | "openai" | "groq" | "local";
   processingStartedAt?: string;
   processingDeadlineAt?: string;
   processedAt: string | null;
@@ -1049,6 +1056,7 @@ export interface StudentDocumentReviewDecision {
 }
 
 export interface StudentDocument {
+  updatedAt?: string;
   id: string;
   requirementId?: string;
   fileName: string;
@@ -3452,12 +3460,14 @@ export interface StaffTaskBoardContext {
   workItemKey?: string;
 }
 
+export interface StaffBrewDisplayedPulse { metric: string; value: string; target: string | null; period: string; comparison: string | null; forecast: string | null; definition: string; topics: string[] }
 export interface StaffBrewContext {
   surface: "morning_brew";
   sourceId: string;
   topic: string;
   label: string;
   dataOrigin: "demo";
+  displayedPulse?: StaffBrewDisplayedPulse;
   displayedAsOf: string;
   cohort?: { key: string; label: string; filter: Record<string, string | number | boolean>; clauses: string[]; question: string };
 }
@@ -4199,6 +4209,8 @@ export interface StaffDemoTaskBoard {
     documents: Array<{
       id: string; fileName: string; mimeType: string; sizeBytes: number; category: string;
       uploadedAt: string; requirementId: string | null; contentPath: string;
+      updatedAt?: string; extraction?: StudentDocumentExtraction;
+      checks?: Array<{key: string; label: string; status: string; detail: string}>;
       status: string; decisions: Array<{id: string; decision: string; note: string; reviewerName: string; decidedAt: string}>;
     }>;
     activity: Array<{id: string; actor: string; actorType: string; action: string; message: string; createdAt: string}>;
@@ -4226,3 +4238,14 @@ export interface DemoTaskWriteInput {
 export interface DemoResetStatus { enabled: boolean; }
 export interface DemoResetInput { confirmation: "RESET DEMO"; }
 export interface DemoResetResult { reset: true; }
+
+/** Morning Brew: team policy is independent of a person's browser preferences. */
+export interface StaffBrewTeamSettings { team: string; canManage: boolean; intelligenceEnabled: boolean; version: number }
+export interface StaffBrewNewsArticle { id: string; title: string; url: string; source: string; publishedAt: string; summary: string; imageUrl: string | null }
+export interface StaffBrewNewsFeed { articles: StaffBrewNewsArticle[]; state: 'fresh' | 'stale' | 'empty' | 'error'; fetchedAt: string | null; checkedAt: string; cached: boolean; refreshAfterSeconds: number; message: string | null }
+export interface StaffBrewPrepFeedback { id: string; subjectId: string; snapshotAt: string; dataOrigin: 'demo'; rating: 'up' | 'down'; reasons: string[]; comment: string }
+
+export interface CorrectStaffDocumentExtractionInput {
+  decisions?: Record<string, {action: "accept" | "correction" | "undo"; note: string}>;
+  workItemId: string; expectedWorkItemVersion: number; values: Record<string, string>; note: string;
+}

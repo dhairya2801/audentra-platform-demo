@@ -1042,7 +1042,7 @@ class PostgresStaffAssistantRepository:
               UNION ALL
               SELECT communication.occurred_at, 'communication',
                      CONCAT(communication.direction, ' ', communication.channel,
-                            ' (', communication.delivery_status, ')'),
+                            ' ', communication.delivery_status, ''),
                      LEFT(COALESCE(communication.subject, communication.body_excerpt, ''), 200)
               FROM {communication} AS communication
               WHERE communication.tenant_id = :tenant_id

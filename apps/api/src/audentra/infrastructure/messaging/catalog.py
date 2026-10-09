@@ -42,6 +42,8 @@ ALL_EMITTED_EVENT_NAMES = frozenset(
         "enrollment.journey_created.v1",
         "payment.deposit_succeeded.v1",
         "staff.configuration_published.v1",
+        "morning_brew.team_setting_updated.v1",
+        "morning_brew.prep_feedback_recorded.v1",
         "staff.action_rule_created.v1",
         "staff.action_rule_updated.v1",
         "staff.ai_refresh_requested.v1",
@@ -82,6 +84,8 @@ ALL_EMITTED_EVENT_NAMES = frozenset(
 EXPLICITLY_ADDED_IGNORED_EVENTS = frozenset(
     {
         "staff.configuration_published.v1",
+        "morning_brew.team_setting_updated.v1",
+        "morning_brew.prep_feedback_recorded.v1",
         "staff.action_rule_created.v1",
         "staff.action_rule_updated.v1",
         "staff.ai_refresh_requested.v1",

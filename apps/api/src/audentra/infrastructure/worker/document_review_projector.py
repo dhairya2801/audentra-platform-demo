@@ -76,7 +76,8 @@ class DocumentReviewProjector:
                     LEFT JOIN public.student_profile AS profile
                       ON profile.student_id = student.id
                      AND profile.tenant_id = student.tenant_id
-                    WHERE document.tenant_id = :tenant_id AND document.id = :document_id
+                    WHERE document.tenant_id = :tenant_id AND document.id = :document_id AND
+                    document.superseded_at IS NULL
                     FOR SHARE OF document
                     """
                 ),
@@ -84,7 +85,7 @@ class DocumentReviewProjector:
             )
             document = document_result.mappings().first()
             if document is None:
-                raise RuntimeError(f"Document {document_id} is missing for {event.event_name}")
+                return
             if str(document["status"]) not in _REVIEWABLE_STATUSES:
                 return
 

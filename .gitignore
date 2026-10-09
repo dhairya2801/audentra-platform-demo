@@ -44,3 +44,7 @@ artifacts/
 *.key
 *storage-state*.json
 *storageState*.json
+
+# Local dependency symlinks for isolated worktrees.
+node_modules
+.venv

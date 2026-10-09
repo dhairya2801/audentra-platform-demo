@@ -22,6 +22,7 @@ WITH candidates AS (
   SELECT id
   FROM {table}
   WHERE published_at IS NULL
+    AND (:filter_events = false OR event_name = ANY(:event_names))
     AND next_attempt_at <= NOW()
     AND attempts < :max_attempts
     AND (
@@ -50,6 +51,7 @@ class OutboxRepositoryConfig:
     base_retry_ms: int = 1_000
     max_retry_ms: int = 300_000
     schema: str = "public"
+    event_names: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.worker_id.strip() or len(self.worker_id) > 128:
@@ -164,6 +166,8 @@ class OutboxRepository:
                 text(CLAIM_SQL_TEMPLATE.format(table=self._table)),
                 {
                     "worker_id": self._config.worker_id,
+                    "filter_events": bool(self._config.event_names),
+                    "event_names": list(self._config.event_names),
                     "lease_seconds": self._config.lease_seconds,
                     "batch_size": self._config.batch_size,
                     "max_attempts": self._config.max_attempts,

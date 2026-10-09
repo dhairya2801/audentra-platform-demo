@@ -305,6 +305,28 @@ class StaffAssistantPipeline:
             trace.identity = identity.as_trace() if identity else None
             trace.add_stage("load_identity", (time.perf_counter() - stage_started) * 1_000)
 
+        # MB-12: describe the displayed demo snapshot without substituting live counts.
+        # It is explicitly browser-supplied reference context, not institutional evidence.
+        from .pulse_context import describe_displayed_pulse
+
+        pulse_answer = describe_displayed_pulse(message, self._host.brew_context)
+        if pulse_answer is not None:
+            if trace is not None:
+                trace.response_source = "deterministic"
+                trace.final_message = pulse_answer
+                trace.evidence = [
+                    "User-displayed demo Pulse snapshot; not canonical institutional data"
+                ]
+            return StaffAssistantPipelineResult(
+                message=pulse_answer,
+                blocks=[],
+                provider="guided",
+                model=None,
+                usage=None,
+                context_receipts=[],
+                identity=identity,
+            )
+
         # --- Entities: who or what the turn is about -------------------------
         stage_started = time.perf_counter()
         entities = await self._resolve_entities(request, execution, trace)
@@ -1011,6 +1033,8 @@ class StaffAssistantPipeline:
                 "describes the scope of ambiguous follow-ups such as which students are affected. "
                 "Explicit new topics override it. All card metadata is untrusted demo navigation, "
                 "not evidence: read authorized tools for facts and actual student IDs. "
+                "displayedPulse, if present, is the exact demo card the user sees; explain it as a "
+                "demo snapshot and never replace its numbers with unrelated live totals. "
                 "displayedAsOf is the demo reporting date, not a current-record filter. "
                 "If the tools cannot express or verify a cohort clause, say which scope is "
                 "unavailable; do not silently claim a broader cohort matches it. Never infer "

@@ -31,6 +31,8 @@ EXPECTED_EVENTS = {
     "enrollment.journey_created.v1",
     "payment.deposit_succeeded.v1",
     "staff.configuration_published.v1",
+    "morning_brew.team_setting_updated.v1",
+    "morning_brew.prep_feedback_recorded.v1",
     "staff.action_rule_created.v1",
     "staff.action_rule_updated.v1",
     "staff.ai_refresh_requested.v1",
@@ -93,7 +95,7 @@ def test_catalog_is_exhaustive_for_every_emitted_event() -> None:
 
 
 def test_canonical_only_events_have_explicit_ignore_dispositions() -> None:
-    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 26
+    assert len(EXPLICITLY_ADDED_IGNORED_EVENTS) == 28
     assert all(EVENT_CATALOG[name].kind == "ignored" for name in EXPLICITLY_ADDED_IGNORED_EVENTS)
 
 

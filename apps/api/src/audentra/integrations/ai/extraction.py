@@ -41,6 +41,10 @@ _ALLOWED_LEGACY_IDENTITY_FIELD_KEYS = frozenset(
 )
 _ALLOWED_IDENTITY_FIELD_KEYS = frozenset(
     {
+        "document_subtype",
+        "issuing_country",
+        "passport_number",
+        "issue_date",
         "address",
         "birth_date",
         "city",
@@ -297,13 +301,12 @@ def normalize_extraction(
         field_value = _safe_text(field.get("value"), "", 500)
         if document_type == "identity":
             key = _canonical_metadata_key(key)
-            if (
-                key not in _ALLOWED_IDENTITY_FIELD_KEYS
-                or _is_sensitive_identity_key(key)
-                or _is_sensitive_identity_key(label)
+            if key not in _ALLOWED_IDENTITY_FIELD_KEYS or (
+                key != "passport_number"
+                and (_is_sensitive_identity_key(key) or _is_sensitive_identity_key(label))
             ):
                 continue
-            field_value = _redact_identity(field_value)
+            field_value = field_value if key == "passport_number" else _redact_identity(field_value)
         fields.append(
             {
                 "key": key,

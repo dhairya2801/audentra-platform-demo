@@ -9,7 +9,7 @@ from sqlalchemy import text
 
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError
-from audentra.domain.documents import bounded_document_label
+from audentra.domain.documents import document_review_label
 
 if TYPE_CHECKING:
     from .portal_repository import PostgresPortalRepository
@@ -70,6 +70,8 @@ async def attach_demo_document(
             .mappings()
             .first()
         )
+        if doc is not None and doc["superseded_at"] is not None:
+            return False
         if doc is None:
             raise ApiError(404, "DOCUMENT_NOT_FOUND", "Document not found")
         if (
@@ -101,8 +103,9 @@ async def attach_demo_document(
                 JOIN staff_work_item w ON w.id=c.work_item_id AND w.tenant_id=c.tenant_id
                 JOIN staff_work_item_link l ON l.work_item_id=w.id AND l.tenant_id=w.tenant_id
                 WHERE c.tenant_id=CAST(:tenant AS uuid) AND c.staff_member_id=CAST(:staff AS uuid)
-                  AND w.assignee_id=c.staff_member_id AND w.student_id=CAST(:student AS uuid)
+                  AND w.student_id=CAST(:student AS uuid)
                   AND l.entity_type='requirement' AND l.entity_id=CAST(:requirement AS uuid)
+                  AND w.work_type='document_review'
                 ORDER BY c.position LIMIT 1
             """),
                 params,
@@ -116,21 +119,21 @@ async def attach_demo_document(
                 JOIN staff_demo_document b ON b.work_item_id=w.id AND b.tenant_id=w.tenant_id
                 JOIN document_record d ON d.id=b.document_id AND d.tenant_id=b.tenant_id
                 WHERE c.tenant_id=CAST(:tenant AS uuid) AND c.staff_member_id=CAST(:staff AS uuid)
-                  AND w.assignee_id=c.staff_member_id AND w.student_id=CAST(:student AS uuid)
+                  AND w.student_id=CAST(:student AS uuid)
                   AND d.requirement_id=CAST(:requirement AS uuid)
                 ORDER BY b.received_at DESC LIMIT 1
             """),
                     params,
                 )
             ).scalar_one_or_none()
-        if work is None:
+        if work is None and not doc["requirement_id"]:
             work = (
                 await connection.execute(
                     text("""
                 SELECT c.work_item_id FROM staff_demo_board_card c
                 JOIN staff_work_item w ON w.id=c.work_item_id AND w.tenant_id=c.tenant_id
                 WHERE c.tenant_id=CAST(:tenant AS uuid) AND c.staff_member_id=CAST(:staff AS uuid)
-                  AND w.assignee_id=c.staff_member_id AND w.student_id=CAST(:student AS uuid)
+                  AND w.student_id=CAST(:student AS uuid)
                   AND c.board_id=:board AND w.source_id IS NULL
                   AND NOT EXISTS(SELECT 1 FROM staff_work_item_link l WHERE l.tenant_id=w.tenant_id
                     AND l.work_item_id=w.id AND l.entity_type='requirement')
@@ -144,7 +147,7 @@ async def attach_demo_document(
         params.update(
             {
                 "work": str(work or uuid4()),
-                "title": bounded_document_label(doc["file_name"], prefix="Review "),
+                "title": "Review " + document_review_label(doc["category"]).lower(),
                 "component": "Financial Aid" if board == "fa-docs" else "Enrollment",
             }
         )
@@ -155,7 +158,7 @@ async def attach_demo_document(
                 INSERT INTO staff_work_item(id,tenant_id,student_id,key,title,description,
                   status,priority,work_type,action_type,component,assignee_id)
                 VALUES(CAST(:work AS uuid),CAST(:tenant AS uuid),CAST(:student AS uuid),:key,
-                  :title,'Original uploaded; parsing remains simulated; awaiting staff review.',
+                  :title,'Original stored; extraction queued. Staff approval required.',
                   'todo','medium','document_review','document_review',
                   :component,CAST(:staff AS uuid))
             """),
@@ -179,7 +182,7 @@ async def attach_demo_document(
               source_id=CAST(:document AS uuid),
               status='todo',completed_at=NULL,cancelled_at=NULL,terminal_reason=NULL,
               version=version+1,updated_at=now(),due_at=now()+interval '2 days',
-              description='Original uploaded; parsing remains simulated; awaiting staff review.'
+              description='Original stored; extraction queued. Staff approval required.'
             WHERE id=CAST(:work AS uuid) AND tenant_id=CAST(:tenant AS uuid)
         """),
             params,
@@ -207,8 +210,18 @@ async def attach_demo_document(
                     {**params, "id": str(uuid4()), "entity": entity, "identifier": identifier},
                 )
         await connection.execute(
+            text(
+                "UPDATE staff_demo_board_card SET archived_at=NULL WHERE "
+                "tenant_id=CAST(:tenant AS uuid) AND work_item_id=CAST(:work AS "
+                "uuid)"
+            ),
+            params,
+        )
+        await connection.execute(
             text("""
-            UPDATE document_record SET status='under_review',processing_mode='manual_review',
+            UPDATE document_record SET processing_mode=CASE
+                WHEN category IN ('transcript','identity','health','financial_aid') THEN 'agentic'
+                ELSE processing_mode END,
               updated_at=now()
             WHERE tenant_id=CAST(:tenant AS uuid) AND id=CAST(:document AS uuid)
         """),
@@ -216,7 +229,7 @@ async def attach_demo_document(
         )
         await connection.execute(
             text("""
-            UPDATE student_requirement SET status='under_review',progress_percent=80,
+            UPDATE student_requirement SET status='in_progress',progress_percent=60,
               version=version+1,updated_at=now()
             WHERE tenant_id=CAST(:tenant AS uuid) AND id=CAST(:requirement AS uuid)
               AND status NOT IN ('completed','waived','not_applicable')

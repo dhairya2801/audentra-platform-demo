@@ -300,6 +300,9 @@ class RuntimeSettings:
                 read_loop_max_rounds=_bounded_int(
                     values, ("EDWARD_READ_LOOP_MAX_ROUNDS",), 3, 1, 6
                 ),
+                document_provider=values.get("DOCUMENT_PROVIDER", "openrouter"),
+                openai_document_api_key=values.get("OPENAI_DOCUMENT_API_KEY", "").strip(),
+                openai_document_model=values.get("OPENAI_DOCUMENT_MODEL", "gpt-4.1-mini"),
                 openrouter_document_model=values.get(
                     "OPENROUTER_DOCUMENT_MODEL", "qwen/qwen3.7-flash"
                 ).strip()

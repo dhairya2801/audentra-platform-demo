@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from audentra.core.auth import AuthContext
 from audentra.core.errors import ApiError, BadRequestError, ConflictError, NotFoundError
 from audentra.domain.document_review import public_review_decision as _map_document_review
-from audentra.domain.documents import bounded_document_label
+from audentra.domain.documents import bounded_document_label, document_type_for_category
 from audentra.domain.onboarding import (
     ABOUT_YOU_REQUIRED_FIELDS,
     ONBOARDING_STEPS,
@@ -160,7 +160,7 @@ _ONBOARDING_SCREEN_DEFAULTS: dict[str, tuple[str, str, str]] = {
 }
 DOCUMENT_SELECT = """
 id, requirement_id, file_name, mime_type, size_bytes, category,
-processing_mode, status, storage_key, sha256, extraction, created_at
+processing_mode, status, storage_key, sha256, extraction, created_at, updated_at
 """
 
 
@@ -700,7 +700,8 @@ def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
         or _interaction_type_for_submission(str(row["submission_type"])),
         "inputConfig": _mapping(row.get("input_config") or {}),
         "order": int(row.get("display_order") or 0),
-        "documentCategory": DOCUMENT_CATEGORIES.get(code),
+        "documentCategory": DOCUMENT_CATEGORIES.get(code)
+        or _mapping(row.get("input_config") or {}).get("document_category"),
         "responsibleOffice": row["responsible_office"],
         "dependencyCodes": _list(row["depends_on_codes"]),
     }
@@ -743,6 +744,7 @@ def _map_document(
         "processingMode": row["processing_mode"],
         "status": row["status"],
         "createdAt": _iso(row["created_at"]),
+        "updatedAt": _iso(row.get("updated_at", row["created_at"])),
     }
     if row.get("requirement_id"):
         item["requirementId"] = str(row["requirement_id"])
@@ -1452,6 +1454,19 @@ class PostgresPortalRepository:
 
         return await attach_demo_document(self, auth, document_id, request_id)
 
+    async def is_connected_document(self, auth: AuthContext, document_id: str) -> bool:
+        async with self.engine.connect() as connection:
+            return bool(
+                await connection.scalar(
+                    text("""
+                SELECT 1 FROM staff_demo_document b JOIN document_record d
+                ON d.id=b.document_id AND d.tenant_id=b.tenant_id
+                WHERE d.tenant_id=:tenant AND d.student_id=:student AND d.id=:document
+            """),
+                    {"tenant": auth.tenant_id, "student": auth.student_id, "document": document_id},
+                )
+            )
+
     async def claim_student_document_processing(
         self,
         auth: AuthContext,
@@ -1480,6 +1495,7 @@ class PostgresPortalRepository:
             "verifiedAt": None,
         }
         if retry:
+            processing["staffParsingRequested"] = True
             if not retry_idempotency_key:
                 raise BadRequestError(
                     "IDEMPOTENCY_KEY_REQUIRED", "The Idempotency-Key header is required"
@@ -1523,7 +1539,7 @@ class PostgresPortalRepository:
                         WHERE tenant_id=:tenant_id AND student_id=:student_id
                           AND id=:document_id AND status IN ('uploaded','needs_review')
                           AND extraction IS NOT NULL AND (
-                            extraction->>'status'='pending_configuration' OR (
+                            extraction->>'status' IN ('pending_configuration','pending_staff') OR (
                               extraction->>'status'='failed'
                               AND COALESCE(extraction->'retryable','true'::jsonb)<>'false'::jsonb
                             )
@@ -1771,8 +1787,48 @@ class PostgresPortalRepository:
         retry_idempotency_key: str | None = None,
     ) -> JsonDict:
         async with self.engine.begin() as connection:
+            from .demo_task_board_commands import lock_demo_student
+
+            await lock_demo_student(connection, auth.tenant_id, auth.student_id)
+            # A late result for a superseded original is retained on that original only.
+            current = (
+                (
+                    await connection.execute(
+                        text("""
+                SELECT d.*, w.source_id AS latest_document FROM document_record d
+                LEFT JOIN staff_demo_document b ON b.document_id=d.id AND b.tenant_id=d.tenant_id
+                LEFT JOIN staff_work_item w ON w.id=b.work_item_id AND w.tenant_id=b.tenant_id
+                WHERE d.tenant_id=:tenant AND d.student_id=:student AND d.id=:document
+                FOR UPDATE OF d
+            """),
+                        {
+                            "tenant": auth.tenant_id,
+                            "student": auth.student_id,
+                            "document": document_id,
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if current is None:
+                raise NotFoundError("DOCUMENT_NOT_FOUND", "The original no longer exists")
+            if current["status"] != "processing":
+                return _map_document(dict(current))
+            if current["latest_document"] and str(current["latest_document"]) != document_id:
+                await connection.execute(
+                    text(
+                        "UPDATE document_record SET extraction=CAST(:value AS jsonb), "
+                        "status='needs_review' WHERE id=:id AND tenant_id=:tenant"
+                    ),
+                    {"value": _json(dict(extraction)), "id": document_id, "tenant": auth.tenant_id},
+                )
+                return _map_document(
+                    {**current, "extraction": dict(extraction), "status": "needs_review"}
+                )
             extraction_data = dict(extraction)
-            completed = extraction_data.get("status") == "completed"
+            extraction_data["requiresStaffReview"] = bool(current["latest_document"])
+            completed = extraction_data.get("status") in {"completed", "pending_staff"}
             # A failed extraction is still a reviewable stored original. Keep it
             # out of the upload queue and expose an explicit retry/human-review
             # state without deleting or replacing the original object.
@@ -1805,6 +1861,50 @@ class PostgresPortalRepository:
                     "The document processing state changed before completion",
                 )
             updated = dict(row)
+            from audentra.domain.conference_documents import validate_evidence
+
+            expected = await connection.scalar(
+                text(
+                    "SELECT expected_type FROM demo_document_requirement WHERE "
+                    "tenant_id=:tenant AND student_id=:student AND "
+                    "requirement_id=:requirement"
+                ),
+                {
+                    "tenant": auth.tenant_id,
+                    "student": auth.student_id,
+                    "requirement": updated.get("requirement_id"),
+                },
+            )
+            validation = validate_evidence(
+                extraction_data, str(expected or document_type_for_category(updated["category"]))
+            )
+            extraction_data["validation"] = validation
+            updated["extraction"] = extraction_data
+            await connection.execute(
+                text(
+                    "UPDATE document_record SET extraction=CAST(:extraction AS jsonb) "
+                    "WHERE tenant_id=:tenant AND id=:id"
+                ),
+                {"extraction": _json(extraction_data), "tenant": auth.tenant_id, "id": document_id},
+            )
+            if validation["outcome"] in {"wrong_type", "unreadable", "unrecognized"}:
+                await connection.execute(
+                    text(
+                        "UPDATE document_record SET status='rejected' WHERE "
+                        "tenant_id=:tenant AND id=:id"
+                    ),
+                    {"tenant": auth.tenant_id, "id": document_id},
+                )
+                updated["status"] = "rejected"
+                await connection.execute(
+                    text(
+                        "UPDATE student_requirement SET status='ready', "
+                        "progress_percent=0, version=version+1, updated_at=now() WHERE "
+                        "tenant_id=:tenant AND id=:id AND status NOT IN "
+                        "('completed','waived')"
+                    ),
+                    {"tenant": auth.tenant_id, "id": updated.get("requirement_id")},
+                )
             classification_matches = (
                 not updated.get("requirement_id")
                 or self._category_for_document_type(str(extraction_data.get("documentType")))
@@ -1812,7 +1912,11 @@ class PostgresPortalRepository:
             )
             linked_requirement: Mapping[str, Any] | None = None
             candidate_requirement_ids: list[str] = []
-            if updated.get("requirement_id") and (not completed or classification_matches):
+            if (
+                updated.get("requirement_id")
+                and validation["outcome"] not in {"wrong_type", "unreadable", "unrecognized"}
+                and (not completed or classification_matches)
+            ):
                 candidate_requirement_ids.append(str(updated["requirement_id"]))
             if completed and not updated.get("requirement_id"):
                 candidate_requirement_ids.extend(
@@ -1876,7 +1980,11 @@ class PostgresPortalRepository:
                 )
                 has_active_help = active_help_result.mappings().first() is not None
                 requirement_status = (
-                    "under_review" if completed or not has_active_help else "help_requested"
+                    "under_review"
+                    if completed
+                    else "help_requested"
+                    if has_active_help
+                    else "in_progress"
                 )
                 requirement_update = await connection.execute(
                     text(
@@ -1962,7 +2070,9 @@ class PostgresPortalRepository:
                         ),
                     )
             automatic_transcript = (
-                updated["category"] == "transcript"
+                not expected
+                and updated["category"] == "transcript"
+                and not current["latest_document"]
                 and completed
                 and classification_matches
                 and extraction_data.get("documentType") == "transcript"
@@ -2025,7 +2135,12 @@ class PostgresPortalRepository:
                 )
             recovered_help_count = 0
             recovered_review_count = 0
-            if completed and classification_matches and linked_requirement is not None:
+            if (
+                completed
+                and classification_matches
+                and linked_requirement is not None
+                and not current["latest_document"]
+            ):
                 recovered = await self._resolve_requirement_help_after_success(
                     connection,
                     auth=auth,
@@ -2035,19 +2150,40 @@ class PostgresPortalRepository:
                 )
                 recovered_help_count = int(recovered["helpRequestsResolved"])
                 recovered_review_count = int(recovered["reviewItemsResolved"])
-            work_item_result = await self._ensure_document_review_work_item(
-                connection,
-                auth,
-                updated,
-                parse_failure=not completed,
-                failure_code=(
-                    str(extraction_data.get("failureCode"))
-                    if extraction_data.get("failureCode") is not None
-                    else None
-                ),
-                request_id=request_id,
-            )
-            work_item_created = bool(work_item_result["created"])
+            if current["latest_document"]:
+                await connection.execute(
+                    text("""
+                    UPDATE staff_work_item SET title=:title,
+                      description=:description, blocker_code=:blocker,
+                      blocker_detail=:detail, version=version+1,updated_at=now()
+                    WHERE tenant_id=:tenant AND source_type='document' AND source_id=:document
+                """),
+                    {
+                        "title": "Review " + document_type_for_category(str(updated["category"])),
+                        "description": "Review original and extraction. Staff approval required.",
+                        "blocker": None if completed else "document_parse_failure",
+                        "detail": None
+                        if completed
+                        else "Parsing failed; retry or request a replacement.",
+                        "tenant": auth.tenant_id,
+                        "document": document_id,
+                    },
+                )
+                work_item_created = False
+            else:
+                work_item_result = await self._ensure_document_review_work_item(
+                    connection,
+                    auth,
+                    updated,
+                    parse_failure=not completed,
+                    failure_code=(
+                        str(extraction_data.get("failureCode"))
+                        if extraction_data.get("failureCode") is not None
+                        else None
+                    ),
+                    request_id=request_id,
+                )
+                work_item_created = bool(work_item_result["created"])
             await self._insert_audit(
                 connection,
                 auth,
@@ -2092,6 +2228,14 @@ class PostgresPortalRepository:
                     "helpRequestsAutoResolved": recovered_help_count,
                     "parseReviewItemsAutoResolved": recovered_review_count,
                 },
+            )
+            await self._insert_student_realtime_event(
+                connection,
+                auth=auth,
+                event_type="student.requirements.updated",
+                resource_type="document",
+                resource_id=document_id,
+                payload={"invalidate": ["documents", "requirements", "bootstrap"]},
             )
             document = _map_document(updated)
             if retry_idempotency_key:
@@ -2193,6 +2337,10 @@ class PostgresPortalRepository:
                 raise NotFoundError("STUDENT_DOCUMENT_NOT_FOUND", "The document was not found")
             current = dict(row)
             extraction = _mapping(current.get("extraction"))
+            if extraction.get("requiresStaffReview"):
+                raise ConflictError(
+                    "STAFF_REVIEW_REQUIRED", "Your document is awaiting a staff decision"
+                )
             if extraction.get("status") != "completed":
                 raise ConflictError(
                     "DOCUMENT_EXTRACTION_NOT_READY",
@@ -2960,7 +3108,7 @@ class PostgresPortalRepository:
         uploads = await self._all(
             f"""
             SELECT {DOCUMENT_SELECT} FROM document_record
-            WHERE tenant_id=:tenant_id AND student_id=:student_id
+            WHERE tenant_id=:tenant_id AND student_id=:student_id AND superseded_at IS NULL
             ORDER BY created_at DESC, id
             """,
             {"tenant_id": auth.tenant_id, "student_id": auth.student_id},
@@ -3343,6 +3491,9 @@ class PostgresPortalRepository:
         requirement_id: str | None = None,
     ) -> JsonDict:
         async def handler(connection: AsyncConnection) -> JsonDict:
+            from .demo_task_board_commands import lock_demo_student
+
+            await lock_demo_student(connection, auth.tenant_id, auth.student_id)
             category = str(document["category"])
             if requirement_id:
                 # Student rows retain their historical evidence definition after a
@@ -3351,7 +3502,7 @@ class PostgresPortalRepository:
                 result = await connection.execute(
                     text(
                         """
-                        SELECT current_definition.code, sr.status
+                        SELECT current_definition.code, current_definition.input_config, sr.status
                         FROM student_requirement sr
                         JOIN enrollment_journey j
                           ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
@@ -3386,13 +3537,51 @@ class PostgresPortalRepository:
                         "DOCUMENT_REQUIREMENT_NOT_FOUND",
                         "The document requirement was not found",
                     )
+                if requirement["status"] in {"completed", "waived", "not_applicable"}:
+                    raise ConflictError(
+                        "REQUIREMENT_CLOSED", "This requirement is already satisfied"
+                    )
                 if requirement["status"] == "blocked":
                     raise ConflictError(
                         "DOCUMENT_REQUIREMENT_BLOCKED",
                         "Complete the prerequisite enrollment tasks before uploading "
                         "this document.",
                     )
-                category = DOCUMENT_CATEGORIES.get(str(requirement["code"]), category)
+                category = (
+                    DOCUMENT_CATEGORIES.get(str(requirement["code"]))
+                    or _mapping(requirement["input_config"]).get("document_category")
+                    or category
+                )
+            if requirement_id:
+                latest = (
+                    (
+                        await connection.execute(
+                            text(f"""
+                    SELECT {DOCUMENT_SELECT} FROM document_record
+                    WHERE tenant_id=:tenant AND student_id=:student AND requirement_id=:requirement
+                      AND superseded_at IS NULL
+                    ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE
+                """),
+                            {
+                                "tenant": auth.tenant_id,
+                                "student": auth.student_id,
+                                "requirement": requirement_id,
+                            },
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if (
+                    latest
+                    and latest["sha256"] == document["sha256"]
+                    and latest["status"] != "rejected"
+                ):
+                    return _map_document(dict(latest))
+                if latest and latest["status"] in {"uploaded", "processing"}:
+                    raise ConflictError(
+                        "DOCUMENT_PROCESSING", "Wait for this upload to finish before replacing it"
+                    )
             document_id = str(uuid4())
             extension = {
                 "application/pdf": ".pdf",

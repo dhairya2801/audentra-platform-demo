@@ -754,6 +754,19 @@ class StaffBrewCohortContextRequest(StrictRequest):
     question: Annotated[StrictStr, StringConstraints(max_length=1000)]
 
 
+class StaffBrewDisplayedPulseRequest(StrictRequest):
+    metric: Annotated[StrictStr, StringConstraints(max_length=160)]
+    value: Annotated[StrictStr, StringConstraints(max_length=80)]
+    target: Annotated[StrictStr, StringConstraints(max_length=80)] | None
+    period: Annotated[StrictStr, StringConstraints(max_length=200)]
+    comparison: Annotated[StrictStr, StringConstraints(max_length=300)] | None
+    forecast: Annotated[StrictStr, StringConstraints(max_length=200)] | None
+    definition: Annotated[StrictStr, StringConstraints(max_length=2000)]
+    topics: Annotated[
+        list[Annotated[StrictStr, StringConstraints(max_length=120)]], Field(max_length=10)
+    ]
+
+
 class StaffBrewContextRequest(StrictRequest):
     """Untrusted navigation scope, never evidence or a resolved identity."""
 
@@ -762,6 +775,7 @@ class StaffBrewContextRequest(StrictRequest):
     topic: Annotated[StrictStr, StringConstraints(max_length=120)]
     label: Annotated[StrictStr, StringConstraints(max_length=300)]
     data_origin: Literal["demo"]
+    displayed_pulse: StaffBrewDisplayedPulseRequest | None = None
     displayed_as_of: Annotated[StrictStr, StringConstraints(max_length=80)]
     cohort: StaffBrewCohortContextRequest | None = None
 
@@ -1139,6 +1153,23 @@ class DemoTaskWriteRequest(StrictRequest):
         StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)
     ]
     start_new_conversation: StrictBool = False
+
+
+class ExtractionFieldDecisionRequest(StrictRequest):
+    action: Literal["accept", "correction", "undo"]
+    note: Annotated[StrictStr, StringConstraints(max_length=500)] = ""
+
+
+class CorrectDocumentExtractionRequest(StrictRequest):
+    decisions: dict[str, ExtractionFieldDecisionRequest] = Field(
+        default_factory=dict, max_length=28
+    )
+    work_item_id: UUID
+    expected_work_item_version: StrictInt = Field(ge=1)
+    values: dict[str, Annotated[StrictStr, StringConstraints(max_length=500)]] = Field(
+        max_length=28
+    )
+    note: Annotated[StrictStr, StringConstraints(min_length=3, max_length=500)]
 
 
 class DemoDocumentReviewRequest(ReviewStaffDocumentRequest):

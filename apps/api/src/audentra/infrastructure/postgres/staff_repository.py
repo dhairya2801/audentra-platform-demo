@@ -585,6 +585,9 @@ class PostgresStaffRepository:
         now = self._clock()
         tenant_id = _uuid(auth.tenant_id)
         async with self._engine.connect() as connection:
+            from .document_access import require_work_access
+
+            await require_work_access(connection, auth, work_item_id)
             result = await connection.execute(
                 text(
                     self._board_items_sql(
@@ -631,7 +634,13 @@ class PostgresStaffRepository:
     def _board_filters(
         self, auth: AuthContext, query: ActionCenterQuery, now: datetime
     ) -> tuple[str, dict[str, object]]:
-        clauses = ["item.tenant_id = :tenant_id", "item.status = ANY(:statuses)"]
+        clauses = [
+            "item.tenant_id = :tenant_id",
+            "item.status = ANY(:statuses)",
+            "EXISTS (SELECT 1 FROM staff_member viewer WHERE viewer.tenant_id=item.tenant_id "
+            "AND viewer.id=:viewer_id AND viewer.active "
+            "AND (item.assignee_id=viewer.id OR item.component=viewer.component))",
+        ]
         params: dict[str, object] = {
             "statuses": list(query.statuses),
             "now": now,
@@ -835,6 +844,9 @@ class PostgresStaffRepository:
                 AND assignment.ended_at IS NULL
             ) AS viewer_caseload ON true
             WHERE {where}
+              AND EXISTS(SELECT 1 FROM staff_member viewer WHERE viewer.tenant_id=item.tenant_id
+                AND viewer.id=:viewer_id AND viewer.active
+                AND (item.assignee_id=viewer.id OR item.component=viewer.component))
             ORDER BY {order}
             {page}
         """
@@ -1977,12 +1989,19 @@ class PostgresStaffRepository:
             next_cursor = _database_integer(events[-1]["cursor"], "staff_realtime_event.cursor")
         return {"events": events, "cursor": next_cursor}
 
+    async def require_student_access(self, auth: AuthContext, student_id: str) -> None:
+        from .document_access import require_student_access
+
+        async with self._engine.connect() as connection:
+            await require_student_access(connection, auth, student_id)
+
     async def get_student_record(
         self,
         auth: AuthContext,
         student_id: str,
     ) -> dict[str, object]:
         self._require_staff(auth)
+        await self.require_student_access(auth, student_id)
         student_auth = replace(auth, student_id=student_id)
         onboarding_task = self._reader.get_student_onboarding(student_auth)
         profile_task = self._reader.get_student_profile(student_auth)
@@ -1996,6 +2015,29 @@ class PostgresStaffRepository:
             documents_task,
             summary_task,
         )
+        # A caseload grant permits the enrollment record, not every sensitive original.
+        async with self._engine.connect() as connection:
+            permitted = await connection.execute(
+                text("""
+                SELECT d.id FROM document_record d WHERE d.tenant_id=:tenant
+                  AND d.student_id=:student
+                  AND EXISTS(SELECT 1 FROM staff_work_item w JOIN staff_member m
+                    ON m.tenant_id=w.tenant_id AND m.id=:actor AND m.active
+                    WHERE w.tenant_id=d.tenant_id AND w.student_id=d.student_id
+                      AND (w.assignee_id=m.id OR w.component=m.component)
+                      AND (w.source_id=d.id OR EXISTS(SELECT 1 FROM staff_work_item_link l
+                        WHERE l.tenant_id=w.tenant_id AND l.work_item_id=w.id
+                          AND l.entity_type='document' AND l.entity_id=d.id)))
+            """),
+                {"tenant": auth.tenant_id, "student": student_id, "actor": auth.actor_id},
+            )
+            allowed_ids = {str(row[0]) for row in permitted}
+        visible_documents = [
+            d
+            for d in cast(list[dict[str, Any]], documents.get("items", []))
+            if d.get("id") in allowed_ids
+        ]
+        documents = {**documents, "items": visible_documents, "total": len(visible_documents)}
         if summary is None:
             raise NotFoundError("STAFF_STUDENT_NOT_FOUND", "The student was not found")
         return {
@@ -2288,14 +2330,25 @@ class PostgresStaffRepository:
             document_result = await connection.execute(
                 text(
                     f"""
-                    SELECT id, file_name, mime_type, size_bytes, category,
-                           processing_mode, status, extraction, created_at
-                    FROM {self._table("document_record")}
-                    WHERE tenant_id = :tenant_id AND student_id = :student_id
+                    SELECT d.id, d.file_name, d.mime_type, d.size_bytes, d.category,
+                           d.processing_mode, d.status, d.extraction, d.created_at
+                    FROM {self._table("document_record")} d
+                    WHERE d.tenant_id = :tenant_id AND d.student_id = :student_id
+                      AND EXISTS (SELECT 1 FROM staff_work_item w JOIN staff_member m
+                        ON m.tenant_id=w.tenant_id AND m.id=:viewer_id AND m.active
+                        WHERE w.tenant_id=d.tenant_id AND w.student_id=d.student_id
+                        AND (w.assignee_id=m.id OR w.component=m.component)
+                        AND (w.source_id=d.id OR EXISTS (SELECT 1 FROM staff_work_item_link l
+                          WHERE l.tenant_id=w.tenant_id AND l.work_item_id=w.id
+                            AND l.entity_type='document' AND l.entity_id=d.id)))
                     ORDER BY created_at DESC, id DESC
                     """
                 ),
-                {"tenant_id": _uuid(auth.tenant_id), "student_id": _uuid(student_id)},
+                {
+                    "tenant_id": _uuid(auth.tenant_id),
+                    "student_id": _uuid(student_id),
+                    "viewer_id": _uuid(auth.actor_id),
+                },
             )
             await connection.execute(
                 text("SELECT set_config('audentra.tenant_id', :tenant, true)"),
@@ -2708,6 +2761,9 @@ class PostgresStaffRepository:
     ) -> dict[str, object]:
         self._require_staff(auth)
         async with self._engine.connect() as connection:
+            from .document_access import require_document_access
+
+            await require_document_access(connection, auth, document_id)
             result = await connection.execute(
                 text(
                     f"""
@@ -4579,14 +4635,20 @@ class PostgresStaffRepository:
                         "FOLLOW_UP_TIME_INVALID",
                         "Choose a follow-up time in the future",
                     )
-            if next_status == "blocked" and (
-                next_blocker_code is None or next_blocker_detail is None
+            if (
+                next_status != str(current["status"])
+                and next_status == "blocked"
+                and (next_blocker_code is None or next_blocker_detail is None)
             ):
                 raise BadRequestError(
                     "BLOCKER_DETAILS_REQUIRED",
                     "Blocked work requires a blocker code and explanation",
                 )
-            if next_status == "done" and (next_outcome is None or next_resolution is None):
+            if (
+                next_status != str(current["status"])
+                and next_status == "done"
+                and (next_outcome is None or next_resolution is None)
+            ):
                 raise BadRequestError(
                     "OUTCOME_REQUIRED",
                     "Completed work requires an outcome and resolution",
@@ -4606,11 +4668,16 @@ class PostgresStaffRepository:
                         WHERE tenant_id = :tenant_id
                           AND id = :assignee_id
                           AND active = true
+                          AND (:document_review=false OR id=:actor_id OR component IN (
+                            SELECT component FROM staff_member WHERE tenant_id=:tenant_id
+                              AND id=:actor_id))
                         """
                     ),
                     {
                         "tenant_id": _uuid(auth.tenant_id),
                         "assignee_id": _uuid(str(next_assignee)),
+                        "document_review": current["work_type"] == "document_review",
+                        "actor_id": _uuid(auth.actor_id),
                     },
                 )
                 if assignee.mappings().first() is None:
@@ -5728,7 +5795,14 @@ class PostgresStaffRepository:
                 from .demo_task_board_commands import lock_demo_card
 
                 await lock_demo_card(connection, auth, work_item_id)
+            from .document_access import require_document_access
+
+            await require_document_access(connection, auth, document_id)
             work_item = await self._lock_work_item(connection, auth, work_item_id)
+            if work_item["work_type"] != "document_review":
+                raise ConflictError(
+                    "DOCUMENT_REVIEW_TASK_REQUIRED", "Use the formal document review task"
+                )
             if work_item["source_type"] != "document" or str(work_item["source_id"]) != document_id:
                 if demo_only and work_item["source_type"] == "document":
                     raise ConflictError(
@@ -5751,7 +5825,7 @@ class PostgresStaffRepository:
             document_result = await connection.execute(
                 text(
                     f"""
-                    SELECT id, student_id, requirement_id, file_name, status
+                    SELECT id, student_id, requirement_id, file_name, status, extraction, category
                     FROM {self._table("document_record")}
                     WHERE tenant_id=:tenant_id AND id=:document_id
                     FOR UPDATE
@@ -5765,11 +5839,42 @@ class PostgresStaffRepository:
             document = document_result.mappings().first()
             if document is None:
                 raise NotFoundError("STAFF_DOCUMENT_NOT_FOUND", "The document was not found")
+            newer = await connection.scalar(
+                text("""
+                SELECT 1 FROM document_record newer JOIN document_record original
+                  ON newer.tenant_id=original.tenant_id AND newer.student_id=original.student_id
+                    AND newer.requirement_id=original.requirement_id
+                WHERE original.tenant_id=:tenant AND original.id=:document
+                  AND (newer.created_at,newer.id)>(original.created_at,original.id) LIMIT 1
+            """),
+                {"tenant": auth.tenant_id, "document": document_id},
+            )
+            if newer:
+                raise ConflictError("DOCUMENT_SUPERSEDED", "Review the latest submitted evidence")
             if document["status"] not in {"needs_review", "under_review"}:
                 raise ConflictError(
                     "DOCUMENT_REVIEW_ALREADY_DECIDED",
                     "This document already has an official staff decision",
                 )
+            if decision == "accepted" and document["extraction"] is not None:
+                from audentra.domain.document_evidence import review_checks
+
+                student_name = await connection.scalar(
+                    text("""
+                    SELECT p.first_name || ' ' || p.last_name FROM student s
+                    JOIN person p ON p.id=s.person_id AND p.tenant_id=s.tenant_id
+                    WHERE s.id=:student AND s.tenant_id=:tenant
+                """),
+                    {"student": document["student_id"], "tenant": _uuid(auth.tenant_id)},
+                )
+                checks = review_checks(
+                    document["extraction"], str(document["category"]), str(student_name)
+                )
+                if any(check["status"] != "pass" for check in checks):
+                    raise ConflictError(
+                        "DOCUMENT_CHECKS_UNRESOLVED",
+                        "Resolve checks or request corrected evidence before approval",
+                    )
             await connection.execute(
                 text(
                     f"""
@@ -5828,7 +5933,10 @@ class PostgresStaffRepository:
                 text(
                     f"""
                     UPDATE {self._table("staff_work_item")}
-                    SET status='done', version=version+1, updated_at=NOW()
+                    SET status=:review_status,
+                      completed_at=CASE WHEN CAST(:review_status AS varchar)='done'
+                        THEN now() ELSE NULL END,
+                      version=version+1, updated_at=NOW()
                     WHERE tenant_id=:tenant_id AND id=:work_item_id
                       AND version=:expected_version
                     RETURNING version
@@ -5838,6 +5946,7 @@ class PostgresStaffRepository:
                     "tenant_id": _uuid(auth.tenant_id),
                     "work_item_id": _uuid(work_item_id),
                     "expected_version": expected_version,
+                    "review_status": "done" if decision == "accepted" else "blocked",
                 },
             )
             item_row = item_update.mappings().first()
@@ -6168,7 +6277,18 @@ class PostgresStaffRepository:
         assignment = self._table("student_staff_assignment")
         member = self._table("staff_member")
         open_statuses = ", ".join(f"'{status}'" for status in OPEN_WORK_STATUSES)
-        filters = ["student.tenant_id = :tenant_id"]
+        filters = [
+            "student.tenant_id = :tenant_id",
+            """EXISTS (
+            SELECT 1 FROM staff_member viewer WHERE viewer.tenant_id=student.tenant_id
+              AND viewer.id=:viewer_id AND viewer.active AND (
+                EXISTS(SELECT 1 FROM student_staff_assignment a
+                  WHERE a.tenant_id=viewer.tenant_id AND a.student_id=student.id
+                    AND a.staff_member_id=viewer.id AND a.ended_at IS NULL)
+                OR EXISTS(SELECT 1 FROM staff_work_item w WHERE w.tenant_id=viewer.tenant_id
+                  AND w.student_id=student.id
+                  AND (w.assignee_id=viewer.id OR w.component=viewer.component))))""",
+        ]
         if by_student:
             filters.append("student.id = :student_id")
         if by_query:
@@ -6212,7 +6332,14 @@ class PostgresStaffRepository:
               GREATEST(
                 student.updated_at,
                 COALESCE(profile.updated_at, student.updated_at),
-                COALESCE(onboarding.updated_at, student.updated_at)
+                COALESCE(onboarding.updated_at, student.updated_at),
+                COALESCE((SELECT max(r.updated_at) FROM student_requirement r
+                  JOIN enrollment_journey j ON j.id=r.journey_id AND j.tenant_id=r.tenant_id
+                  WHERE r.tenant_id=student.tenant_id
+                    AND j.student_id=student.id),student.updated_at),
+                COALESCE((SELECT max(w.updated_at) FROM staff_work_item w
+                  WHERE w.tenant_id=student.tenant_id
+                    AND w.student_id=student.id),student.updated_at)
               ) AS last_activity_at,
               next_work.id AS work_item_id,
               next_work.title AS work_title,
@@ -6607,6 +6734,9 @@ class PostgresStaffRepository:
         auth: AuthContext,
         work_item_id: str,
     ) -> dict[str, object]:
+        from .document_access import require_work_access
+
+        await require_work_access(connection, auth, work_item_id)
         result = await connection.execute(
             text(
                 f"""

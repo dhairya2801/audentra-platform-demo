@@ -181,6 +181,10 @@ class FakeConnection:
         self.handler = handler
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
+    async def scalar(self, statement: object, parameters: Mapping[str, Any] | None = None) -> Any:
+        result = await self.execute(statement, parameters)
+        return result.first_scalar()
+
     async def execute(
         self, statement: object, parameters: Mapping[str, Any] | None = None
     ) -> FakeResult:
@@ -668,8 +672,8 @@ def test_document_upload_authorizes_against_current_published_definition() -> No
     def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         if "SELECT request_hash, response_body" in sql:
             return []
-        if "SELECT current_definition.code, sr.status" in sql:
-            return [{"code": "official_transcript", "status": "ready"}]
+        if "SELECT current_definition.code, current_definition.input_config, sr.status" in sql:
+            return [{"code": "official_transcript", "input_config": {}, "status": "ready"}]
         if "INSERT INTO document_record" in sql:
             return [
                 {
@@ -714,7 +718,7 @@ def test_document_upload_authorizes_against_current_published_definition() -> No
     requirement_sql, requirement_parameters = next(
         (sql, parameters)
         for sql, parameters in engine.connection.calls
-        if "SELECT current_definition.code, sr.status" in sql
+        if "SELECT current_definition.code, current_definition.input_config, sr.status" in sql
     )
     assert "evidence_definition.id=sr.requirement_definition_version_id" in requirement_sql
     assert "current_link.journey_definition_version_id" in requirement_sql
@@ -754,6 +758,8 @@ def test_sufficient_document_match_enters_review_without_completing_or_rewarding
 
     def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         nonlocal work_item_insertions
+        if "SELECT d.*, w.source_id AS latest_document" in sql:
+            return [{"status": "processing", "latest_document": None}]
         if "UPDATE document_record SET status=:status" in sql:
             return [document_row(parameters)]
         if "SELECT sr.id, sr.status, rdv.code, rdv.title" in sql:
@@ -853,6 +859,8 @@ def test_failed_document_extraction_queues_human_review_and_realtime_notificatio
     document_id = "20000000-0000-7000-8000-000000000032"
 
     def handler(sql: str, parameters: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        if "SELECT d.*, w.source_id AS latest_document" in sql:
+            return [{"status": "processing", "latest_document": None}]
         if "UPDATE document_record SET status=:status" in sql:
             return [
                 {

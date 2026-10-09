@@ -60,9 +60,11 @@ def test_reset_route_authorization_confirmation_and_disabled_localhost(
         app = create_production_app(settings)
         auth = AuthContext(settings.demo_tenant_id, "student", "staff", "staff")
         app.dependency_overrides[get_auth_context] = lambda: auth
-        app.state.runtime_resources = SimpleNamespace(close=AsyncMock())
-        restore = AsyncMock()
-        monkeypatch.setattr(demo_reset, "restore_demo_database", restore)
+        app.state.runtime_resources = SimpleNamespace(close=AsyncMock(), engine=object())
+        restore = AsyncMock(return_value={"reset": True, "requirementsReset": 9, "cardsRemoved": 3})
+        monkeypatch.setattr(
+            "audentra.infrastructure.postgres.demo_document_reset.reset_documents", restore
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://portal.test"
         ) as client:
@@ -83,18 +85,12 @@ def test_reset_route_authorization_confirmation_and_disabled_localhost(
             assert (
                 await client.post(demo_reset.RESET_PATH, json={}, headers=headers)
             ).status_code == 400
-            app.state.demo_active_writes = 1
-            assert (
-                await client.post(demo_reset.RESET_PATH, json=body, headers=headers)
-            ).status_code == 409
-            app.state.demo_active_writes = 0
-            restore.assert_not_called()
             response = await client.post(demo_reset.RESET_PATH, json=body, headers=headers)
             assert response.status_code == 200
-            assert response.json() == {"reset": True}
-            assert "vv_staff_session" in response.headers["set-cookie"]
+            assert response.json()["requirementsReset"] == 9
+            assert "set-cookie" not in response.headers
             restore.assert_awaited_once()
-        local = create_production_app(replace(settings, demo_reset_template=""))
+        local = create_production_app(replace(settings, environment="production"))
         local.dependency_overrides[get_auth_context] = lambda: auth
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=local), base_url="http://portal.test"

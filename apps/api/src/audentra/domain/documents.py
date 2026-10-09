@@ -6,6 +6,7 @@ import hashlib
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from audentra.core.errors import ApiError, BadRequestError
 
@@ -120,7 +121,9 @@ def validate_document_upload(file_name: str, mime_type: str, category: str, cont
         raise ApiError(415, "UNSUPPORTED_DOCUMENT_TYPE", "Use a PDF, JPEG, or PNG document")
     if category not in ALLOWED_DOCUMENT_CATEGORIES:
         raise BadRequestError("INVALID_DOCUMENT_CATEGORY", "Choose a valid document category")
-    if not content or len(content) > MAXIMUM_DOCUMENT_BYTES:
+    if not content:
+        raise BadRequestError("DOCUMENT_EMPTY", "This file is empty. Choose a complete document.")
+    if len(content) > MAXIMUM_DOCUMENT_BYTES:
         raise ApiError(413, "DOCUMENT_TOO_LARGE", "Documents must be no larger than 10 MB")
     valid = (
         (mime_type == "application/pdf" and content.startswith(b"%PDF-"))
@@ -151,12 +154,20 @@ def document_type_for_category(category: str) -> str:
 def can_retry_extraction(extraction: object) -> bool:
     if not isinstance(extraction, dict):
         return False
-    return extraction.get("status") == "pending_configuration" or (
+    return extraction.get("status") in {"pending_configuration", "pending_staff"} or (
         extraction.get("status") == "failed" and extraction.get("retryable") is not False
     )
 
 
 def classify_extraction_failure(error: BaseException) -> ExtractionFailure:
+    if getattr(error, "code", None) in {"PDF_INVALID", "PDF_ENCRYPTED", "IMAGE_INVALID"}:
+        return ExtractionFailure(
+            "unsupported_capability",
+            False,
+            False,
+            "This file is unreadable or password protected. Your original is saved; "
+            "please upload a clear, unlocked PDF, JPEG, or PNG.",
+        )
     detail = f"{type(error).__name__} {error}".lower()
     provider_status = getattr(error, "status", None)
     if isinstance(provider_status, int) and provider_status in {400, 401, 403, 404, 415, 422}:
@@ -261,7 +272,7 @@ def failed_extraction(file_name: str, category: str, error: BaseException) -> di
         "warnings": [failure.warning],
         "model": None,
         "provider": "local",
-        "processedAt": "2026-07-24T12:00:00.000Z",
+        "processedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "verifiedAt": None,
         "failureCode": failure.code,
         "retryable": failure.retryable,
