@@ -705,6 +705,18 @@ def _map_requirement(row: Mapping[str, Any]) -> JsonDict:
         "responsibleOffice": row["responsible_office"],
         "dependencyCodes": _list(row["depends_on_codes"]),
     }
+    # Demo shortcuts belong to the explicitly mapped student requirement, never
+    # to the shared institutional definition used by other students.
+    if row.get("demo_document_filename"):
+        kind = str(row.get("demo_document_type") or "other")
+        category = {"passport": "identity", "immunization": "health"}.get(kind, kind)
+        item["documentCategory"] = category
+        item["inputConfig"] = {
+            **item["inputConfig"],
+            "document_category": category,
+            "staff_review_only": True,
+            "demoDocumentFilename": row["demo_document_filename"],
+        }
     points = int(row.get("reward_points") or 0)
     if points > 0:
         item["reward"] = {"points": points, "earned": row.get("reward_earned") is True}
@@ -2488,6 +2500,8 @@ class PostgresPortalRepository:
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
                    rdv.flow_kind, rdv.interaction_type, rdv.input_config,
                    rdv.priority, rdv.display_order,
+                   demo.expected_type AS demo_document_type,
+                   demo.fixture_name AS demo_document_filename,
                    submitted_response.id AS response_id,
                    submitted_response.interaction_type AS response_interaction_type,
                    submitted_response.response_data,
@@ -2497,6 +2511,9 @@ class PostgresPortalRepository:
             FROM student_requirement sr
             JOIN enrollment_journey j
               ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
+            LEFT JOIN demo_document_requirement demo
+              ON demo.tenant_id=sr.tenant_id AND demo.student_id=j.student_id
+             AND demo.requirement_id=sr.id
             JOIN requirement_definition_version evidence_definition
               ON evidence_definition.id=sr.requirement_definition_version_id
              AND evidence_definition.tenant_id=sr.tenant_id
@@ -2549,6 +2566,8 @@ class PostgresPortalRepository:
                    rdv.submission_type, rdv.responsible_office, rdv.depends_on_codes,
                    rdv.flow_kind, rdv.interaction_type, rdv.input_config,
                    rdv.priority, rdv.display_order,
+                   demo.expected_type AS demo_document_type,
+                   demo.fixture_name AS demo_document_filename,
                    submitted_response.id AS response_id,
                    submitted_response.interaction_type AS response_interaction_type,
                    submitted_response.response_data,
@@ -2558,6 +2577,9 @@ class PostgresPortalRepository:
             FROM student_requirement sr
             JOIN enrollment_journey j
               ON j.id=sr.journey_id AND j.tenant_id=sr.tenant_id
+            LEFT JOIN demo_document_requirement demo
+              ON demo.tenant_id=sr.tenant_id AND demo.student_id=j.student_id
+             AND demo.requirement_id=sr.id
             JOIN requirement_definition_version evidence_definition
               ON evidence_definition.id=sr.requirement_definition_version_id
              AND evidence_definition.tenant_id=sr.tenant_id

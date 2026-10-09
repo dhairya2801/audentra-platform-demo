@@ -62,3 +62,31 @@ def test_failure_uses_current_time_and_is_not_success() -> None:
     assert value["status"] == "failed"
     assert value["retryable"] is True
     assert str(value["processedAt"]).startswith(datetime.now(UTC).date().isoformat())
+
+
+def test_demo_shortcut_is_requirement_scoped_and_never_mutates_shared_input_config() -> None:
+    from audentra.infrastructure.postgres.portal_repository import _map_requirement
+
+    shared = {"document_category": "transcript", "institutionalNote": "Keep this"}
+    row = {
+        "id": "r1",
+        "journey_id": "j1",
+        "code": "official_transcript",
+        "title": "Transcript",
+        "description": "Upload",
+        "status": "ready",
+        "blocking": False,
+        "progress_percent": 0,
+        "submission_type": "document",
+        "input_config": shared,
+        "responsible_office": "Enrollment",
+        "depends_on_codes": [],
+    }
+    ordinary = _map_requirement(row)
+    configured = _map_requirement(
+        {**row, "demo_document_type": "transcript", "demo_document_filename": "transcript.pdf"}
+    )
+    assert configured["inputConfig"]["demoDocumentFilename"] == "transcript.pdf"
+    assert configured["inputConfig"]["institutionalNote"] == "Keep this"
+    assert "demoDocumentFilename" not in ordinary["inputConfig"]
+    assert "demoDocumentFilename" not in shared

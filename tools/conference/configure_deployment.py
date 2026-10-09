@@ -10,7 +10,6 @@ from uuid import UUID, uuid5, NAMESPACE_URL
 import asyncpg
 
 
-
 T = UUID("00000000-0000-7000-8000-000000000003")
 S = UUID("3bedfe91-6802-4937-893b-72cb7779ecfa")
 KINDS = {
@@ -33,13 +32,43 @@ async def main():
     db = await asyncpg.connect(e["DATABASE_URL"])
     async with db.transaction():
         assert (
-            await db.fetchval("SELECT external_ref FROM student WHERE id=$1 AND tenant_id=$2", S, T)
+            await db.fetchval(
+                "SELECT external_ref FROM student WHERE id=$1 AND tenant_id=$2", S, T
+            )
             == "SYN-000061"
         )
         j = await db.fetchrow(
             "SELECT * FROM enrollment_journey WHERE student_id=$1 AND tenant_id=$2 ORDER BY created_at DESC LIMIT 1",
             S,
             T,
+        )
+        # Keep the demo-only passport off every other student's shared journey.
+        private_definition = uuid5(
+            NAMESPACE_URL, "audentra-conference-oct9:ada:journey"
+        )
+        await db.execute(
+            """INSERT INTO journey_definition_version
+            (id,tenant_id,code,version,active,onboarding_required)
+            SELECT $1,tenant_id,'ada_document_demo',1,0,onboarding_required
+            FROM journey_definition_version WHERE id=$2 AND tenant_id=$3
+            ON CONFLICT(id) DO NOTHING""",
+            private_definition,
+            j["journey_definition_version_id"],
+            T,
+        )
+        await db.execute(
+            """INSERT INTO journey_requirement_definition
+            SELECT $1,requirement_definition_version_id FROM journey_requirement_definition
+            WHERE journey_definition_version_id=$2 ON CONFLICT DO NOTHING""",
+            private_definition,
+            j["journey_definition_version_id"],
+        )
+        await db.execute(
+            "UPDATE enrollment_journey SET journey_definition_version_id=$1 WHERE id=$2 AND tenant_id=$3 AND student_id=$4",
+            private_definition,
+            j["id"],
+            T,
+            S,
         )
         code = "ada_passport"
         definition = uuid5(NAMESPACE_URL, "audentra-conference-oct8:passport:def")
@@ -53,7 +82,7 @@ async def main():
         )
         await db.execute(
             "INSERT INTO journey_requirement_definition VALUES($1,$2) ON CONFLICT DO NOTHING",
-            j["journey_definition_version_id"],
+            private_definition,
             definition,
         )
         await db.execute(
@@ -73,7 +102,9 @@ async def main():
             )
             if not row:
                 raise ValueError("Missing canonical requirement " + code)
-            category = {"passport": "identity", "immunization": "health"}.get(kind, kind)
+            category = {"passport": "identity", "immunization": "health"}.get(
+                kind, kind
+            )
             file = {
                 "identity": "passport",
                 "financial_aid": "financial-aid",
@@ -87,17 +118,6 @@ async def main():
                 kind,
                 file,
             )
-            await db.execute(
-                "UPDATE requirement_definition_version SET input_config=input_config || $2::jsonb WHERE id=$1",
-                row["requirement_definition_version_id"],
-                json.dumps(
-                    {
-                        "document_category": category,
-                        "staff_review_only": True,
-                        "demoDocumentFilename": file,
-                    }
-                ),
-            )
             manifest.append(
                 {
                     "id": str(row["id"]),
@@ -108,7 +128,9 @@ async def main():
                 }
             )
     await db.close()
-    print("Configured 9 demo requirement mappings; existing submissions and statuses preserved.")
+    print(
+        "Configured 9 demo requirement mappings; existing submissions and statuses preserved."
+    )
 
 
 if __name__ == "__main__":
