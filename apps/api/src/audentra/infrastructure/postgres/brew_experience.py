@@ -107,8 +107,7 @@ VALUES(:id,:tenant,'staff',:actor,:name,'staff_member',:actor,
             text("""INSERT INTO
 outbox_event(id,tenant_id,event_name,aggregate_type,aggregate_id,aggregate_version,
 occurred_at,actor_type,actor_id,correlation_id,causation_id,payload,created_at)
-VALUES(:id,:tenant,:name,'staff_member',:actor,:version,now(),'staff',:actor,:request,:request,C
-                    AST(:body
+VALUES(:id,:tenant,:name,'staff_member',:actor,:version,now(),'staff',:actor,:request,:request,CAST(:body
 AS jsonb),now())"""),
             params,
         )
@@ -166,8 +165,7 @@ AS jsonb),now())"""),
 staff_brew_team_setting(tenant_id,component,intelligence_enabled,version,updated_by)
 VALUES(:tenant,:team,:enabled,1,:actor) ON CONFLICT(tenant_id,component) DO
 UPDATE SET
-intelligence_enabled=:enabled,version=staff_brew_team_setting.version+1,updated_by=:actor,update
-                    d_at=now()"""),
+intelligence_enabled=:enabled,version=staff_brew_team_setting.version+1,updated_by=:actor,updated_at=now()"""),
                 params,
             )
             await self.event(
